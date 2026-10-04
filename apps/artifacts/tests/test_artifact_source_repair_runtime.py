@@ -115,7 +115,7 @@ async def test_source_repair_preserves_active_load_and_post_does_not_dispatch(
 
     # No ThreadJob or WorkspaceDataRecovery exists to hide a classifier error.
     defer = AsyncMock(return_value=SimpleNamespace(id=1701))
-    with patch("apps.artifacts.views.adefer_recover_workspace_data", new=defer):
+    with patch("apps.artifacts.services.recovery.adefer_recover_workspace_data", new=defer):
         status_response = await setup.client.get(_recovery_url(setup.artifact))
         post_response = await setup.client.post(_recovery_url(setup.artifact))
         for response in (post_response, status_response):
@@ -175,7 +175,7 @@ async def test_partial_publication_missing_source_dispatches_materialization(
     expected = "materialization" if view_failure == "no_active_sources" else "view_rebuild"
     assert other_state["recovery_action"] == expected
     defer = AsyncMock(return_value=SimpleNamespace(id=1702))
-    with patch("apps.artifacts.views.adefer_recover_workspace_data", new=defer):
+    with patch("apps.artifacts.services.recovery.adefer_recover_workspace_data", new=defer):
         response = await setup.client.post(_recovery_url(setup.artifact))
     assert response.status_code == 202
     defer.assert_awaited_once()
@@ -333,7 +333,7 @@ async def test_older_ready_surface_cannot_hide_current_explicit_missing_view(
             "apps.semantic.services.query_readiness.workspace_query_surface",
             new=AsyncMock(return_value=full_surface),
         ),
-        patch("apps.artifacts.views.adefer_recover_workspace_data", new=defer),
+        patch("apps.artifacts.services.recovery.adefer_recover_workspace_data", new=defer),
         patch("apps.artifacts.services.query_batch.run_semantic_query", new=AsyncMock()) as query,
     ):
         state = (await setup.client.get(_recovery_url(setup.artifact))).json()

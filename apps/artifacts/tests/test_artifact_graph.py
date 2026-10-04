@@ -1369,7 +1369,7 @@ def test_read_member_get_of_manifest_less_story_writes_nothing(workspace, member
     with (
         patch("apps.artifacts.services.query_batch.run_semantic_query", side_effect=execute),
         patch(
-            "apps.artifacts.views._current_artifact_data_state",
+            "apps.artifacts.views.current_artifact_data_state",
             new=AsyncMock(return_value={"queryable": True, "status": "ready"}),
         ),
         CaptureQueriesContext(connection) as captured,
@@ -1511,7 +1511,7 @@ def test_stored_story_with_a_wrong_typed_enum_value_still_reads(
     with (
         patch("apps.artifacts.services.query_batch.run_semantic_query", side_effect=execute),
         patch(
-            "apps.artifacts.views._current_artifact_data_state",
+            "apps.artifacts.views.current_artifact_data_state",
             new=AsyncMock(return_value={"queryable": True, "status": "ready"}),
         ),
     ):
@@ -1531,7 +1531,7 @@ def test_recovery_post_persists_the_missing_manifest(workspace, member_user):
     client.force_login(member_user)
 
     with patch(
-        "apps.artifacts.views._current_artifact_data_state",
+        "apps.artifacts.services.recovery.current_artifact_data_state",
         new=AsyncMock(return_value={"status": "ready", "queryable": True}),
     ):
         response = client.post(f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/recovery/")
@@ -1556,11 +1556,11 @@ def test_recovery_post_survives_a_delete_racing_the_backfill(workspace, member_u
 
     with (
         patch(
-            "apps.artifacts.views.backfill_missing_semantic_query_manifest",
+            "apps.artifacts.services.recovery.backfill_missing_semantic_query_manifest",
             new=delete_then_backfill,
         ),
         patch(
-            "apps.artifacts.views._current_artifact_data_state",
+            "apps.artifacts.services.recovery.current_artifact_data_state",
             new=AsyncMock(return_value={"status": "ready", "queryable": True}),
         ),
     ):

@@ -172,7 +172,7 @@ async def test_active_physical_and_semantic_surfaces_are_ready(recovery_setup):
 @pytest.mark.asyncio
 async def test_post_dispatches_one_durable_workspace_recovery(recovery_setup):
     defer = AsyncMock(return_value=SimpleNamespace(id=812))
-    with patch("apps.artifacts.views.adefer_recover_workspace_data", new=defer):
+    with patch("apps.artifacts.services.recovery.adefer_recover_workspace_data", new=defer):
         first = await recovery_setup.client.post(recovery_setup.url, data={})
         second = await recovery_setup.client.post(recovery_setup.url, data={})
 
@@ -232,7 +232,7 @@ async def test_active_chat_materialization_prevents_duplicate_artifact_recovery(
     )
     defer = AsyncMock()
 
-    with patch("apps.artifacts.views.adefer_recover_workspace_data", new=defer):
+    with patch("apps.artifacts.services.recovery.adefer_recover_workspace_data", new=defer):
         response = await recovery_setup.client.post(recovery_setup.url, data={})
 
     assert response.status_code == 200

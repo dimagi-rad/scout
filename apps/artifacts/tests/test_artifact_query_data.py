@@ -294,7 +294,7 @@ async def test_narrative_only_story_does_not_claim_a_query_date_context(
 def query_surface_ready():
     """These query execution tests isolate result handling from recovery state."""
     with patch(
-        "apps.artifacts.views.artifact_data_state",
+        "apps.artifacts.services.recovery.artifact_data_state",
         new=AsyncMock(
             return_value={
                 "status": "ready",
@@ -728,7 +728,10 @@ async def test_inspector_rejects_a_body_that_is_not_a_json_object(
         await live_artifact.asave(update_fields=["semantic_queries"])
     data_state = {"status": "stale", "queryable": artifact_state != "not_ready", "message": "x"}
     with (
-        patch("apps.artifacts.views.artifact_data_state", new=AsyncMock(return_value=data_state)),
+        patch(
+            "apps.artifacts.services.recovery.artifact_data_state",
+            new=AsyncMock(return_value=data_state),
+        ),
         patch("apps.artifacts.services.query_batch.run_semantic_query", new=AsyncMock()) as run,
     ):
         response = await member_client.post(

@@ -9,13 +9,10 @@ import hashlib
 import json
 import logging
 import secrets
-from datetime import datetime
 from typing import Any
 
-from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.cache import cache
-from django.db import IntegrityError
 from django.db.models import Q
 from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
@@ -26,24 +23,23 @@ from apps.artifacts.services.query_batch import (
     execute_artifact_plan,
     plan_artifact_queries,
 )
+from apps.artifacts.services.recovery import (
+    DISPATCH_FAILED_ERROR,
+    Admission,
+    admit_artifact_recovery,
+    current_artifact_data_state,
+)
 from apps.common.capacity import CapacityExhausted
 from apps.common.http import parse_json_object
 from apps.common.utils import creator_display_name
 from apps.semantic.services.date_context import DateContextError, date_context
 from apps.users.decorators import LoginRequiredJsonMixin
-from apps.workspaces.models import WorkspaceDataRecovery, WorkspaceRole
-from apps.workspaces.services.data_recovery import artifact_data_state
-from apps.workspaces.services.reconciliation import (
-    STALE_JOB_THRESHOLD,
-    reconcile_workspace_data_recovery,
-)
-from apps.workspaces.task_dispatch import adefer_recover_workspace_data
+from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
 
 from .models import Artifact, ArtifactSemanticQuery, ArtifactType
 from .services.export import ArtifactExporter
 from .services.graph_manifest import (
-    backfill_missing_semantic_query_manifest,
     build_artifact_semantic_query_manifest,
     derive_missing_semantic_query_manifest,
     manifest_entry_summary,
@@ -95,26 +91,6 @@ def _artifact_query_cache_key(
     )
     digest = hashlib.md5(payload.encode(), usedforsecurity=False).hexdigest()[:12]
     return f"artifact_qdata:{artifact.id}:{artifact.version}:{digest}"
-
-
-async def _current_artifact_data_state(artifact: Artifact) -> dict[str, Any]:
-    """Reconcile a stranded background job before reporting artifact state."""
-    active_recovery = await (
-        WorkspaceDataRecovery.objects.select_related("workspace")
-        .filter(
-            workspace=artifact.workspace,
-            state__in=list(WorkspaceDataRecovery.ACTIVE_STATES),
-        )
-        .order_by("-created_at")
-        .afirst()
-    )
-    if active_recovery is not None:
-        age = datetime.now(active_recovery.created_at.tzinfo) - active_recovery.created_at
-        await reconcile_workspace_data_recovery(
-            active_recovery,
-            check_stalled=age >= STALE_JOB_THRESHOLD,
-        )
-    return await artifact_data_state(artifact)
 
 
 # Must match the sandbox attribute on the iframe in ArtifactCanvas.tsx. The CSP
@@ -881,7 +857,7 @@ class ArtifactQueryDataView(View):
 
         data_state = {}
         if artifact.semantic_queries:
-            data_state = await _current_artifact_data_state(artifact)
+            data_state = await current_artifact_data_state(artifact)
             if not data_state["queryable"]:
                 return JsonResponse(
                     {
@@ -991,7 +967,7 @@ class ArtifactDataRecoveryView(View):
         _user, artifact, err = await self._resolve(request, workspace_id, artifact_id)
         if err:
             return err
-        return JsonResponse(await _current_artifact_data_state(artifact))
+        return JsonResponse(await current_artifact_data_state(artifact))
 
     async def post(self, request: HttpRequest, workspace_id, artifact_id) -> JsonResponse:
         user, artifact, err = await self._resolve(
@@ -1002,63 +978,16 @@ class ArtifactDataRecoveryView(View):
         )
         if err:
             return err
-        # The recovery task re-reads the artifact from the DB, so it needs the
-        # manifest persisted rather than the in-memory copy _resolve derived.
-        await sync_to_async(backfill_missing_semantic_query_manifest, thread_sensitive=True)(
-            artifact
-        )
-
-        state = await _current_artifact_data_state(artifact)
-        if state["status"] in {"ready", "not_required"} and not state.get("recovery_action"):
-            return JsonResponse(state)
-        if state["status"] == "recovering":
-            return JsonResponse(state)
-
-        recovery_type = state.get("recovery_action")
-        if recovery_type not in WorkspaceDataRecovery.RecoveryType.values:
+        admitted = await admit_artifact_recovery(artifact, user)
+        if admitted.admission == Admission.UNRECOVERABLE:
             return JsonResponse(
-                {
-                    "error": state["message"],
-                    "data_recovery": state,
-                },
+                {"error": admitted.state["message"], "data_recovery": admitted.state},
                 status=409,
             )
-
-        try:
-            recovery = await WorkspaceDataRecovery.objects.acreate(
-                workspace=artifact.workspace,
-                requested_by=user,
-                recovery_type=recovery_type,
-                source_type="artifact",
-                source_id=artifact.id,
-            )
-        except IntegrityError:
-            # The partial unique constraint is the cross-process dedupe guard.
-            # If two artifact pages race, bind both to the one active recovery.
-            recovery = await WorkspaceDataRecovery.objects.filter(
-                workspace=artifact.workspace,
-                state__in=list(WorkspaceDataRecovery.ACTIVE_STATES),
-            ).afirst()
-            if recovery is None:
-                logger.exception("Artifact recovery dedupe failed without an active row")
-                return JsonResponse({"error": "Failed to start data recovery"}, status=500)
-            return JsonResponse(await _current_artifact_data_state(artifact))
-
-        try:
-            job = await adefer_recover_workspace_data(recovery_id=str(recovery.id))
-            job_id = getattr(job, "id", job) if not isinstance(job, int) else job
-            await WorkspaceDataRecovery.objects.filter(id=recovery.id).aupdate(
-                procrastinate_job_id=job_id
-            )
-        except Exception as exc:
-            logger.exception("Failed to dispatch artifact data recovery %s", recovery.id)
-            await WorkspaceDataRecovery.objects.filter(id=recovery.id).aupdate(
-                state=WorkspaceDataRecovery.State.FAILED,
-                error=str(exc)[:1000] or "Failed to start data recovery",
-            )
-            return JsonResponse({"error": "Failed to start data recovery"}, status=500)
-
-        return JsonResponse(await _current_artifact_data_state(artifact), status=202)
+        if admitted.admission == Admission.FAILED:
+            return JsonResponse({"error": DISPATCH_FAILED_ERROR}, status=500)
+        status = 202 if admitted.admission == Admission.STARTED else 200
+        return JsonResponse(admitted.state, status=status)
 
 
 class ArtifactSemanticQueryView(LoginRequiredJsonMixin, View):
