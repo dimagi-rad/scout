@@ -77,6 +77,26 @@ def test_remote_params_forced_to_verify_full():
     }
 
 
+@pytest.mark.parametrize(("key", "value"), [("hostaddr", "10.0.0.5"), ("service", "prod")])
+def test_local_name_with_remote_target_is_forced(key, value):
+    assert enforce_db_tls({"host": "localhost", key: value})["sslmode"] == "verify-full"
+    db = {"HOST": "localhost", "OPTIONS": {key: value, "sslmode": "disable"}}
+    assert enforce_django_db_tls(db)["OPTIONS"]["sslmode"] == "verify-full"
+    url = f"postgresql://u@localhost/scout?sslmode=disable&{key}={value}"
+    assert conninfo_to_dict(enforce_db_tls_conninfo(url))["sslmode"] == "verify-full"
+
+
+@pytest.mark.parametrize("var", ["PGHOST", "PGHOSTADDR", "PGSERVICE"])
+def test_empty_host_resolved_remote_by_env_is_forced(monkeypatch, var):
+    monkeypatch.setenv(var, "db.example" if var != "PGHOSTADDR" else "10.0.0.5")
+    assert enforce_db_tls({"host": ""})["sslmode"] == "verify-full"
+
+
+def test_loopback_hostaddr_stays_local():
+    params = {"host": "localhost", "hostaddr": "127.0.0.1"}
+    assert enforce_db_tls(params) is params
+
+
 def test_local_params_unchanged():
     params = {"host": "localhost", "sslmode": "disable"}
     assert enforce_db_tls(params) is params

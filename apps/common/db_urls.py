@@ -75,6 +75,17 @@ def is_local_db_host(host: str | None) -> bool:
     return all(not h or h.startswith("/") or h.lower() in LOCAL_DB_HOSTS for h in hosts)
 
 
+def _is_local_target(host: Any, hostaddr: Any, service: Any) -> bool:
+    # libpq dials hostaddr instead of resolving host, and a service file or the
+    # PG* env vars can supply either, so any of them can point "localhost" remote.
+    host = host or os.environ.get("PGHOST")
+    hostaddr = hostaddr or os.environ.get("PGHOSTADDR")
+    if service or os.environ.get("PGSERVICE"):
+        return False
+    addrs = [a.strip() for a in str(hostaddr or "").split(",")]
+    return is_local_db_host(host) and all(not a or a in {"127.0.0.1", "::1"} for a in addrs)
+
+
 def db_ssl_root_cert() -> str:
     """Path of the CA bundle remote connections verify against; raises if it is unusable."""
     return _validated_root_cert(
@@ -104,7 +115,7 @@ def enforce_db_tls(params: dict[str, Any]) -> dict[str, Any]:
     overwritten, never honoured, so ``?sslmode=disable`` cannot downgrade it.
     Local hosts are returned unchanged.
     """
-    if is_local_db_host(params.get("host")):
+    if _is_local_target(params.get("host"), params.get("hostaddr"), params.get("service")):
         return params
     return {**params, "sslmode": "verify-full", "sslrootcert": db_ssl_root_cert()}
 
@@ -120,9 +131,10 @@ def enforce_db_tls_conninfo(conninfo: str) -> str:
 
 def enforce_django_db_tls(db: dict[str, Any]) -> dict[str, Any]:
     """A Django ``DATABASES`` entry whose OPTIONS carry ``enforce_db_tls`` for a remote HOST."""
-    if is_local_db_host(db.get("HOST")):
+    options = db.get("OPTIONS", {})
+    if _is_local_target(db.get("HOST"), options.get("hostaddr"), options.get("service")):
         return db
-    options = {**db.get("OPTIONS", {}), "sslmode": "verify-full", "sslrootcert": db_ssl_root_cert()}
+    options = {**options, "sslmode": "verify-full", "sslrootcert": db_ssl_root_cert()}
     return {**db, "OPTIONS": options}
 
 
