@@ -427,8 +427,9 @@ async def resolve_ocs_chatbots(
     url: str | None = f"{base_url}/api/experiments/"
     try:
         policy = ProviderURLPolicy(url)
-    except UnsafeProviderURL:
-        raise TenantResolutionError(_OCS_UNSAFE_NEXT) from None
+    except UnsafeProviderURL as error:
+        raise TenantResolutionError(f"OCS_URL is not a safe provider origin: {error}") from error
+    url = policy.base_url
     seen: set[str] = set()
     async with httpx.AsyncClient(timeout=30) as client:
         while url:

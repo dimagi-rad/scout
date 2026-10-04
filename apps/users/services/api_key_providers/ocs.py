@@ -38,8 +38,11 @@ async def _list_experiments(api_key: str) -> list[dict]:
     url: str | None = _experiments_url()
     try:
         policy = ProviderURLPolicy(url)
-    except UnsafeProviderURL:
-        raise CredentialVerificationError(_UNSAFE_NEXT) from None
+    except UnsafeProviderURL as error:
+        raise CredentialVerificationError(
+            f"OCS_URL is not a safe provider origin: {error}"
+        ) from error
+    url = policy.base_url
     seen: set[str] = set()
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
