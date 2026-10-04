@@ -22,6 +22,7 @@ from django.utils import timezone
 from langchain_core.messages import HumanMessage
 from procrastinate.exceptions import AlreadyEnqueued
 
+from apps.agents.llm_request import LLM_TIMEOUT_ERRORS
 from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
 from apps.chat import pending_requests, resume_stream
 from apps.chat.constants import SYSTEM_RESUME_MARKER
@@ -3789,7 +3790,8 @@ async def _resume_claimed_job(
                     langfuse_span.update(output=_final_message_content(result))
                 except Exception:
                     logger.warning("resume: failed to record Langfuse output", exc_info=True)
-    except TimeoutError:
+    # A bounded model request that times out is the same "took too long" to the user.
+    except (TimeoutError, *LLM_TIMEOUT_ERRORS):
         elapsed = time.monotonic() - start
         logger.exception(
             "resume: ainvoke timed out after %.2fs (limit=%ds, tj=%s)",

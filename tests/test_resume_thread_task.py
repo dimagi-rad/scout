@@ -2,7 +2,9 @@ import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from anthropic import APITimeoutError
 from django.conf import settings as dj_settings
 from django.contrib.auth import get_user_model
 from django.test import override_settings
@@ -978,6 +980,47 @@ async def test_agent_timeout_marks_failed_and_persists_message():
 
     msg = (await mock_agent.thread_messages(tj.thread_id))[-1]
     assert isinstance(msg, AIMessage)
+    assert msg.content == RESUME_TIMEOUT_MESSAGE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "timeout_error",
+    [
+        lambda: APITimeoutError(request=httpx.Request("POST", "https://api.anthropic.com")),
+        lambda: httpx.ReadTimeout("stalled", request=httpx.Request("POST", "https://x")),
+    ],
+)
+async def test_model_request_timeout_reports_the_resume_as_timed_out(timeout_error):
+    """LLM_REQUEST_TIMEOUT_S can fire before AGENT_RESUME_TIMEOUT_S; the user
+    must still get the "took too long" copy, not the generic failure."""
+    _, _, _, tj = await _make_thread_job_ready_to_resume(
+        email="model-timeout@b.c",
+        ws_name="W-model-timeout",
+        ext_id="t-model-timeout",
+        schema_name="s_model_timeout",
+        pj_id=10010,
+        tool_call="tc-model-timeout",
+    )
+    mock_agent = FakeAgent(during=AsyncMock(side_effect=timeout_error()))
+
+    with (
+        patch(
+            "apps.workspaces.tasks._build_agent_for_resume",
+            AsyncMock(return_value=mock_agent),
+        ),
+        patch(
+            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            AsyncMock(return_value=mock_agent),
+        ),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["status"] == "agent_timeout"
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.FAILED
+    msg = (await mock_agent.thread_messages(tj.thread_id))[-1]
     assert msg.content == RESUME_TIMEOUT_MESSAGE
 
 
