@@ -5,13 +5,13 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from apps.agents.graph.base import _make_injecting_tool_node
+from apps.agents.graph.nested import _make_nested_tool_node
 from apps.agents.tool_results import (
     FULL_RESULT_BUDGET_BYTES,
     TOOL_RESULT_BUDGET_BYTES,
     compact_tool_message,
     result_budget_bytes,
 )
-from apps.agents.tools import artifact_manager_agent, canvas_manager_agent
 
 ENVELOPE = {"success": True, "data": {"datasets": [{"name": "visits", "label": "Visits é"}]}}
 
@@ -85,9 +85,8 @@ async def test_agent_tool_node_compacts_mcp_results_only():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("module", [canvas_manager_agent, artifact_manager_agent])
-async def test_subagent_tool_nodes_compact_mcp_results(module):
-    node = module._make_nested_tool_node(_base_node([_mcp_message("list_datasets")]))
+async def test_subagent_tool_nodes_compact_mcp_results():
+    node = _make_nested_tool_node(_base_node([_mcp_message("list_datasets")]))
 
     result = await node(_state("list_datasets"))
 

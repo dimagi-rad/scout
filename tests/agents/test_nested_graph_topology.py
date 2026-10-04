@@ -69,7 +69,7 @@ async def test_nested_graph_injects_scope_and_hides_it_from_the_model(
     llm.bind_tools.return_value = bound
 
     with (
-        patch(f"{prefix}.ChatAnthropic", return_value=llm),
+        patch("apps.agents.graph.nested.ChatAnthropic", return_value=llm),
         patch(f"{prefix}.{tools_factory}", return_value=[local_write]),
     ):
         graph = builder(SimpleNamespace(id="ws-1"), None, [list_datasets, unrelated_mcp], None)

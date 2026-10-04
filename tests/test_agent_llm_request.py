@@ -39,7 +39,7 @@ async def _main_agent_kwargs() -> dict:
 def _canvas_kwargs() -> dict:
     prefix = "apps.agents.tools.canvas_manager_agent"
     with (
-        patch(f"{prefix}.ChatAnthropic") as chat,
+        patch("apps.agents.graph.nested.ChatAnthropic") as chat,
         patch(f"{prefix}.create_canvas_tools", return_value=[]),
     ):
         _build_canvas_manager_graph(SimpleNamespace(id="ws-1"), None, [], None)
@@ -49,7 +49,7 @@ def _canvas_kwargs() -> dict:
 def _artifact_kwargs() -> dict:
     prefix = "apps.agents.tools.artifact_manager_agent"
     with (
-        patch(f"{prefix}.ChatAnthropic") as chat,
+        patch("apps.agents.graph.nested.ChatAnthropic") as chat,
         patch(f"{prefix}.create_artifact_graph_tools", return_value=[]),
     ):
         _build_artifact_manager_graph(SimpleNamespace(id="ws-1"), None, [], None)

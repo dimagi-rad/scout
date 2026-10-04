@@ -100,7 +100,7 @@ async def test_main_agent_does_not_run_truncated_tool_call():
 async def test_subagent_does_not_run_truncated_tool_call(prefix, tools_factory, builder):
     calls: list = []
     with (
-        patch(f"{prefix}.ChatAnthropic", return_value=_fake_llm(TRUNCATED, ANSWER)),
+        patch("apps.agents.graph.nested.ChatAnthropic", return_value=_fake_llm(TRUNCATED, ANSWER)),
         patch(f"{prefix}.{tools_factory}", return_value=[_write_tool(calls)]),
     ):
         graph = builder(SimpleNamespace(id="ws-1"), None, [], None)
@@ -150,7 +150,7 @@ async def test_subagent_gives_up_after_repeated_truncation(prefix, tools_factory
     calls: list = []
     llm = _fake_llm(_truncated("call-1"), _truncated("call-2"), ANSWER)
     with (
-        patch(f"{prefix}.ChatAnthropic", return_value=llm),
+        patch("apps.agents.graph.nested.ChatAnthropic", return_value=llm),
         patch(f"{prefix}.{tools_factory}", return_value=[_write_tool(calls)]),
     ):
         graph = builder(SimpleNamespace(id="ws-1"), None, [], None)

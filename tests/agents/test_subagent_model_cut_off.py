@@ -37,7 +37,7 @@ def _fake_llm(response):
 async def test_artifact_manager_reports_cut_off_as_error(response, detail):
     prefix = "apps.agents.tools.artifact_manager_agent"
     with (
-        patch(f"{prefix}.ChatAnthropic", return_value=_fake_llm(response)),
+        patch("apps.agents.graph.nested.ChatAnthropic", return_value=_fake_llm(response)),
         patch(f"{prefix}.create_artifact_graph_tools", return_value=[]),
     ):
         manager = create_artifact_manager_tool(SimpleNamespace(id="ws-1"), None, [])
@@ -55,7 +55,7 @@ async def test_artifact_manager_reports_cut_off_as_error(response, detail):
 async def test_canvas_manager_reports_cut_off_as_error(response, detail):
     prefix = "apps.agents.tools.canvas_manager_agent"
     with (
-        patch(f"{prefix}.ChatAnthropic", return_value=_fake_llm(response)),
+        patch("apps.agents.graph.nested.ChatAnthropic", return_value=_fake_llm(response)),
         patch(f"{prefix}.create_canvas_tools", return_value=[]),
     ):
         manager = create_canvas_manager_tool(SimpleNamespace(id="ws-1"), None, [], "thread")
