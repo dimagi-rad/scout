@@ -505,6 +505,7 @@ async def _fetch_tenant_list(
     auth_error: type[Exception],
     *,
     grant: str = "API",
+    setting: str = "",
     max_pages: int = _MAX_PAGES,
 ) -> list[TenantDescriptor]:
     """Every tenant the credential can see, or a raise; never a partial list.
@@ -539,7 +540,9 @@ async def _fetch_tenant_list(
     except UpstreamUnreachable as error:
         raise error.cause from None
     except UnsafeListingOrigin as error:
-        raise TenantResolutionError(f"{label} is not a safe provider origin: {error}") from None
+        raise TenantResolutionError(
+            f"{setting or label} is not a safe provider origin: {error}"
+        ) from None
     except UnsafeNextURL:
         # Following it would send the token to another origin.
         raise TenantResolutionError(f"{label} pagination left its server") from None
@@ -563,7 +566,13 @@ async def _fetch_all_domains(access_token: str, server: CommCareServer) -> list[
 async def _fetch_ocs_experiments(access_token: str, base_url: str) -> list[TenantDescriptor]:
     request = ocs_listing.list_request(base_url, TenantConnection.OAUTH, access_token)
     return await _fetch_tenant_list(
-        "OCS", "experiments", request, ocs_listing.decode_page, OCSAuthError, grant="team"
+        "OCS",
+        "experiments",
+        request,
+        ocs_listing.decode_page,
+        OCSAuthError,
+        grant="team",
+        setting="OCS_URL",
     )
 
 
@@ -577,5 +586,6 @@ async def _fetch_connect_opportunities(access_token: str) -> list[TenantDescript
         request,
         connect_listing.decode_page,
         ConnectAuthError,
+        setting="CONNECT_API_URL",
         max_pages=1,
     )

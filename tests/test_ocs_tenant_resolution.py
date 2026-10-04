@@ -154,7 +154,6 @@ def _paged_get(pages: dict[str, dict], seen: list[tuple[str, dict]]):
 
         class R:
             status_code = 200
-
             is_success = 200 <= status_code < 300
 
             def raise_for_status(self):
