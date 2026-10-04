@@ -25,7 +25,9 @@ async def test_read_user_cannot_directly_invoke_local_mutation_sinks(
     workspace, read_user, monkeypatch
 ):
     materialize = AsyncMock(return_value={"all_succeeded": True, "tenants": []})
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", materialize)
+    monkeypatch.setattr(
+        "apps.agents.tools.materialization_tool.materialize_workspace_inline", materialize
+    )
 
     artifact_write = _by_name(create_artifact_graph_tools(workspace, read_user))["artifact_write"]
     save_learning = create_save_learning_tool(workspace, read_user)

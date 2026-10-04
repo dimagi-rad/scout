@@ -22,10 +22,10 @@ from apps.workspaces.services.schema_manager import (
     fail_view_schema_if_unbuildable,
 )
 from apps.workspaces.services.tenant_coverage import coverage_entry, parse_coverage
-from apps.workspaces.tasks import (
-    materialize_workspace,
-    rebuild_workspace_view_schema,
-    teardown_view_schema_task,
+from apps.workspaces.task_dispatch import (
+    defer_materialize_workspace,
+    defer_rebuild_workspace_view_schema,
+    defer_teardown_view_schema,
 )
 
 
@@ -72,7 +72,7 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                 WorkspaceViewSchema.objects.filter(workspace=workspace).update(
                     state=SchemaState.PROVISIONING
                 )
-                rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
+                defer_rebuild_workspace_view_schema(workspace_id=str(workspace.id))
             else:
                 # A retired row serves nothing, and the rebuild below skips it
                 # unless it is marked as wanted again.
@@ -84,7 +84,7 @@ def add_workspace_tenant(workspace, tenant, *, actor_id=None) -> tuple[Workspace
                 # it for its whole run, so on a worker with more than one slot a
                 # rebuild dequeued second would wait out the load (or the lock
                 # timeout) before coverage names the missing source.
-                rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
+                defer_rebuild_workspace_view_schema(workspace_id=str(workspace.id))
                 _defer_unserved_load(workspace.id, [tenant.id], actor_id)
 
     return wt, created
@@ -114,7 +114,7 @@ def load_new_workspace(workspace, *, actor_id) -> None:
 def _defer_unserved_load(workspace_id, tenant_ids, actor_id) -> None:
     """Load, as ``actor_id``, whichever of the workspace's sources serve nothing."""
     intent = capture_load_intent(tenant_ids, INTENT_RECONCILE_MISSING)
-    materialize_workspace.defer(
+    defer_materialize_workspace(
         workspace_id=str(workspace_id),
         user_id=str(actor_id),
         load_intent=intent,
@@ -228,7 +228,7 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
             ):
                 vs.state = SchemaState.TEARDOWN
                 vs.save(update_fields=["state"])
-                teardown_view_schema_task.defer(view_schema_id=str(vs.id))
+                defer_teardown_view_schema(view_schema_id=str(vs.id))
         # When nothing is served, views over the removed source stay physically
         # until a load rebuilds them or that source's retirement retry drops them;
         # a FAILED row is never served, so they are unreadable meanwhile.
@@ -236,7 +236,7 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
             WorkspaceViewSchema.objects.filter(workspace=workspace).update(
                 state=SchemaState.PROVISIONING
             )
-            rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
+            defer_rebuild_workspace_view_schema(workspace_id=str(workspace.id))
 
 
 async def touch_workspace_schemas(workspace) -> None:

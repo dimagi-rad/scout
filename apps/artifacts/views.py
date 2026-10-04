@@ -37,7 +37,7 @@ from apps.workspaces.services.reconciliation import (
     STALE_JOB_THRESHOLD,
     reconcile_workspace_data_recovery,
 )
-from apps.workspaces.tasks import recover_workspace_data
+from apps.workspaces.task_dispatch import adefer_recover_workspace_data
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
 
 from .models import Artifact, ArtifactSemanticQuery, ArtifactType
@@ -1045,7 +1045,7 @@ class ArtifactDataRecoveryView(View):
             return JsonResponse(await _current_artifact_data_state(artifact))
 
         try:
-            job = await recover_workspace_data.defer_async(recovery_id=str(recovery.id))
+            job = await adefer_recover_workspace_data(recovery_id=str(recovery.id))
             job_id = getattr(job, "id", job) if not isinstance(job, int) else job
             await WorkspaceDataRecovery.objects.filter(id=recovery.id).aupdate(
                 procrastinate_job_id=job_id

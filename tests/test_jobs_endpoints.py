@@ -1,7 +1,7 @@
 import json
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
@@ -514,8 +514,10 @@ async def test_retry_endpoint_dispatches_new_materialization():
 
     client = AsyncClient()
     await client.alogin(email="retry@b.c", password="x")
-    with patch("apps.workspaces.services.thread_job_dispatch.materialize_workspace") as mock_task:
-        mock_task.defer = MagicMock(return_value=5005)
+    with patch(
+        "apps.workspaces.services.thread_job_dispatch.defer_materialize_workspace",
+        return_value=5005,
+    ):
         resp = await client.post(
             f"/api/workspaces/{ws.id}/materialize/retry/",
             data=json.dumps({"thread_id": str(thread.id), "tool_call_id": "tc-retry"}),
@@ -558,13 +560,13 @@ async def test_retry_endpoint_dedupes_in_flight():
 
     client = AsyncClient()
     await client.alogin(email="dedupe@b.c", password="x")
-    with patch("apps.workspaces.services.thread_job_dispatch.materialize_workspace") as mock_task:
+    with patch("apps.workspaces.services.thread_job_dispatch.defer_materialize_workspace") as defer:
         resp = await client.post(
             f"/api/workspaces/{ws.id}/materialize/retry/",
             data=json.dumps({"thread_id": str(thread.id)}),
             content_type="application/json",
         )
-        mock_task.defer.assert_not_called()
+        defer.assert_not_called()
     body = resp.json()
     assert body["status"] == "already_in_progress"
     assert body["thread_job_id"] == str(existing.id)
@@ -586,8 +588,10 @@ async def test_retry_endpoint_without_a_thread_does_not_wait_for_a_thread_job():
 
     client = AsyncClient()
     await client.alogin(email="nothread@b.c", password="x")
-    with patch("apps.workspaces.api.materialization_views.materialize_workspace") as mock_task:
-        mock_task.defer_async = AsyncMock(return_value=5007)
+    with patch(
+        "apps.workspaces.api.materialization_views.adefer_materialize_workspace",
+        new=AsyncMock(return_value=5007),
+    ) as defer:
         resp = await client.post(
             f"/api/workspaces/{ws.id}/materialize/retry/",
             data=json.dumps({}),
@@ -595,8 +599,8 @@ async def test_retry_endpoint_without_a_thread_does_not_wait_for_a_thread_job():
         )
     assert resp.status_code == 200, resp.content
     assert resp.json() == {"status": "started", "procrastinate_job_id": 5007}
-    mock_task.defer_async.assert_awaited_once()
-    assert mock_task.defer_async.await_args.kwargs["notify_thread"] is False
+    defer.assert_awaited_once()
+    assert defer.await_args.kwargs["notify_thread"] is False
 
 
 @pytest.mark.asyncio
@@ -1069,16 +1073,17 @@ async def test_active_jobs_defers_resume_for_stale_job_whose_procrastinate_job_s
             "apps.workspaces.services.reconciliation._procrastinate_job_status",
             new=AsyncMock(return_value="succeeded"),
         ),
-        patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
+        patch(
+            "apps.workspaces.services.reconciliation.adefer_resume_thread", new_callable=AsyncMock
+        ) as defer_resume,
     ):
-        configure_resume.return_value.defer_async = AsyncMock(return_value=None)
         client = AsyncClient()
         await client.alogin(email="stalesucc@b.c", password="x")
         resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
 
     assert resp.status_code == 200
     body = resp.json()
-    configure_resume.return_value.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
+    defer_resume.assert_awaited_once_with(thread_job_id=str(tj.id))
     assert len(body["jobs"]) == 1
     assert body["jobs"][0]["state"] == "pending"
 

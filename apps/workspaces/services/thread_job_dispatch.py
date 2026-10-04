@@ -11,6 +11,7 @@ from procrastinate.exceptions import AlreadyEnqueued
 from apps.chat.models import ThreadJob
 from apps.users.models import Tenant
 from apps.workspaces.models import WorkspaceDataRecovery
+from apps.workspaces.services.data_recovery import CAPACITY_REFUSED_KEY, CHAT_RECOVERY_SOURCE
 from apps.workspaces.services.load_activity import aunserved_tenant_ids, aworkspace_load_pending
 from apps.workspaces.services.load_generations import (
     INTENT_RECONCILE_MISSING,
@@ -22,12 +23,7 @@ from apps.workspaces.services.query_state import (
     synced_runs,
     workspace_query_surface,
 )
-from apps.workspaces.tasks import (
-    CAPACITY_REFUSED_KEY,
-    CHAT_RECOVERY_SOURCE,
-    materialize_workspace,
-    recover_workspace_data,
-)
+from apps.workspaces.task_dispatch import defer_materialize_workspace, defer_recover_workspace_data
 from mcp_server.pipeline_registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -61,20 +57,14 @@ def adispatch_thread_materialization(
     could finish before the row committed and the resume lookup found nothing,
     leaving the chat waiting on the janitor (#365).
     """
-    options = {}
-    if queueing_lock:
-        options["queueing_lock"] = queueing_lock
-    if start_in_seconds:
-        options["schedule_in"] = {"seconds": start_in_seconds}
-    task = materialize_workspace.configure(**options) if options else materialize_workspace
-    # Omitted when False so existing dispatches' job args stay unchanged.
-    extra = {"only_unserved": True} if only_unserved else {}
     with transaction.atomic():
-        job = task.defer(
+        job = defer_materialize_workspace(
             workspace_id=str(workspace_id),
             user_id=str(user_id) if user_id else "",
             load_intent=load_intent,
-            **extra,
+            only_unserved=only_unserved,
+            queueing_lock=queueing_lock,
+            schedule_in={"seconds": start_in_seconds} if start_in_seconds else None,
         )
         return ThreadJob.objects.create(
             thread_id=thread_id,
@@ -224,7 +214,7 @@ def _adispatch_semantic_rebuild(*, workspace_id, user_id) -> WorkspaceDataRecove
             recovery_type=WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD,
             source_type=CHAT_RECOVERY_SOURCE,
         )
-        job = recover_workspace_data.defer(recovery_id=str(recovery.id))
+        job = defer_recover_workspace_data(recovery_id=str(recovery.id))
         recovery.procrastinate_job_id = getattr(job, "id", job)
         recovery.save(update_fields=["procrastinate_job_id"])
         return recovery

@@ -16,10 +16,16 @@ from apps.common.identifiers import tenant_schema_name
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.access import resolve_workspace_access_ex
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceRole, WorkspaceTenant
+from apps.workspaces.services.load_activity import MATERIALIZATION_STALLED_HEARTBEAT_SECONDS
+from apps.workspaces.task_dispatch import (
+    JOB_RETENTION_HOURS,
+    REFRESH_TENANT_SCHEMA,
+    defer_drop_failed_refresh_schema,
+)
 
 logger = logging.getLogger(__name__)
 
-REFRESH_TASK_NAME = "apps.workspaces.tasks.refresh_tenant_schema"
+REFRESH_TASK_NAME = REFRESH_TENANT_SCHEMA
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "cancelled", "aborted"})
 _LEGACY_ARG_KEYS = frozenset({"schema_id", "membership_id"})
 _CONTEXT_ARG_KEYS = frozenset({"schema_id", "membership_id", "actor_user_id", "workspace_id"})
@@ -406,3 +412,22 @@ def _legacy_candidate_outcome(
         ):
             return _RECOVER, malformed
     return _job_outcome(job, stalled_before)
+
+
+def settle_finished_refresh_candidates(
+    tenant, legacy_jobs: LegacyRefreshJobs
+) -> LegacyRefreshReconciliation:
+    """Reconcile a tenant's refresh candidates and queue a drop for each one settled.
+
+    Call inside a transaction so each settle commits together with its queued drop.
+    """
+    now = timezone.now()
+    result = reconcile_legacy_refresh_candidates(
+        tenant,
+        legacy_jobs,
+        pruned_before=now - timedelta(hours=JOB_RETENTION_HOURS),
+        stalled_before=now - timedelta(seconds=MATERIALIZATION_STALLED_HEARTBEAT_SECONDS),
+    )
+    for settled_id in result.settled_schema_ids:
+        defer_drop_failed_refresh_schema(schema_id=str(settled_id))
+    return result

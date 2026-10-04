@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import psycopg
 import pytest
@@ -23,7 +23,7 @@ from tests.tenant_access import ausable_connection
 
 User = get_user_model()
 DISPATCH = "mcp_server.server.adispatch_thread_materialization"
-QUEUE = "apps.workspaces.services.thread_job_dispatch.materialize_workspace"
+QUEUE = "apps.workspaces.services.thread_job_dispatch.defer_materialize_workspace"
 
 
 async def _grant_manage(workspace, user):
@@ -121,8 +121,7 @@ async def test_run_materialization_returns_started_immediately_and_creates_threa
     await _grant_manage(ws, user)
     thread = await Thread.objects.acreate(workspace=ws, user=user)
 
-    with patch(QUEUE) as mw:
-        mw.defer = MagicMock(return_value=7777)
+    with patch(QUEUE, return_value=7777) as mw:
         result = await run_materialization(
             workspace_id=str(ws.id),
             user_id=str(user.id),
@@ -134,7 +133,7 @@ async def test_run_materialization_returns_started_immediately_and_creates_threa
     assert "thread_job_id" in result["data"]
     assert _THIS_CONVERSATION_RESUMES in result["data"]["message"]
     # Intent is captured before queueing, so an equivalent pending load is joined.
-    assert mw.defer.call_args.kwargs["load_intent"] == {str(tenant.id): 1}
+    assert mw.call_args.kwargs["load_intent"] == {str(tenant.id): 1}
     tj = await ThreadJob.objects.aget(procrastinate_job_id=7777)
     assert tj.thread_id == thread.id
     assert tj.tool_call_id == "tc-xyz"
@@ -256,8 +255,7 @@ async def test_run_materialization_allows_dispatch_from_different_thread_in_same
     # Thread 2 is a different chat — should be allowed to dispatch its own.
     thread2 = await Thread.objects.acreate(workspace=ws, user=user)
 
-    with patch(QUEUE) as mw:
-        mw.defer = MagicMock(return_value=33333)
+    with patch(QUEUE, return_value=33333):
         result = await run_materialization(
             workspace_id=str(ws.id),
             user_id=str(user.id),

@@ -101,11 +101,11 @@ async def test_adding_an_unloaded_source_loads_it_and_republishes_the_views(owne
     queued = MagicMock()
     with (
         patch(
-            "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer",
+            "apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema",
             queued.rebuild,
         ),
         patch(
-            "apps.workspaces.services.workspace_service.materialize_workspace.defer", queued.load
+            "apps.workspaces.services.workspace_service.defer_materialize_workspace", queued.load
         ),
     ):
         resp = await sync_to_async(_add_source)(user, ws, tenants["new"])

@@ -73,10 +73,10 @@ def _entry(tenant):
 def _add_unloaded(workspace, tenant, user):
     with (
         patch(
-            "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+            "apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema"
         ) as rebuild,
         patch(
-            "apps.workspaces.services.workspace_service.materialize_workspace.defer"
+            "apps.workspaces.services.workspace_service.defer_materialize_workspace"
         ) as materialize,
     ):
         add_workspace_tenant(workspace, tenant, actor_id=user.id)
@@ -189,10 +189,10 @@ def test_remove_tenant_dispatches_view_schema_teardown_when_count_drops_to_one(
 
     with (
         patch(
-            "apps.workspaces.services.workspace_service.teardown_view_schema_task.defer"
+            "apps.workspaces.services.workspace_service.defer_teardown_view_schema"
         ) as mock_teardown,
         patch(
-            "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+            "apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema"
         ) as mock_rebuild,
     ):
         remove_workspace_tenant(workspace, wt)
@@ -217,10 +217,10 @@ def test_remove_tenant_no_op_on_tenant_count_above_one(
 
     with (
         patch(
-            "apps.workspaces.services.workspace_service.teardown_view_schema_task.defer"
+            "apps.workspaces.services.workspace_service.defer_teardown_view_schema"
         ) as mock_teardown,
         patch(
-            "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+            "apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema"
         ) as mock_rebuild,
     ):
         remove_workspace_tenant(workspace, wt3)
@@ -326,7 +326,7 @@ def test_removal_that_lost_a_race_is_not_a_last_source_removal(
     WorkspaceTenant.objects.filter(id=stale.id).delete()
 
     with patch(
-        "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+        "apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema"
     ) as mock_rebuild:
         remove_workspace_tenant(workspace, stale)
 
@@ -347,10 +347,10 @@ def test_removal_that_lost_to_a_workspace_delete_reports_the_last_source(workspa
 def _add_and_capture(workspace, tenant, actor_id):
     with (
         patch(
-            "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+            "apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema"
         ) as rebuild,
         patch(
-            "apps.workspaces.services.workspace_service.materialize_workspace.defer"
+            "apps.workspaces.services.workspace_service.defer_materialize_workspace"
         ) as materialize,
     ):
         add_workspace_tenant(workspace, tenant, actor_id=actor_id)
@@ -394,7 +394,7 @@ def test_removing_a_source_when_nothing_is_served_creates_the_failed_row(
     wt3 = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant3)
 
     with patch(
-        "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+        "apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema"
     ) as mock_rebuild:
         remove_workspace_tenant(workspace, wt3)
 
@@ -423,7 +423,7 @@ def test_removing_a_source_behind_a_possible_build_still_rebuilds(
     vs = WorkspaceViewSchema.objects.create(workspace=workspace, schema_name="ws_test", state=state)
 
     with patch(
-        "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+        "apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema"
     ) as mock_rebuild:
         remove_workspace_tenant(workspace, wt3)
 
@@ -501,7 +501,7 @@ def test_removing_a_source_when_nothing_is_served_queues_no_rebuild(
     )
 
     with patch(
-        "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+        "apps.workspaces.services.workspace_service.defer_rebuild_workspace_view_schema"
     ) as mock_rebuild:
         remove_workspace_tenant(workspace, wt3)
 

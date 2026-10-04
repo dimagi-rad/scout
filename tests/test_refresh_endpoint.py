@@ -15,6 +15,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.task_dispatch import defer_refresh_tenant_schema
 from apps.workspaces.tasks import refresh_tenant_schema
 from tests.row_locks import row_locked
 from tests.tenant_access import grant_tenant_access
@@ -41,7 +42,7 @@ def tenant_membership_for_user(db, user, tenant):
 @pytest.mark.django_db
 def test_refresh_returns_202(manage_client, workspace, tenant_membership_for_user):
     with patch(
-        "apps.workspaces.api.views.refresh_tenant_schema.defer",
+        "apps.workspaces.api.views.defer_refresh_tenant_schema",
         return_value=MagicMock(id=438),
     ):
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
@@ -55,7 +56,7 @@ def test_refresh_creates_provisioning_schema(
     manage_client, workspace, tenant, tenant_membership_for_user
 ):
     with patch(
-        "apps.workspaces.api.views.refresh_tenant_schema.defer",
+        "apps.workspaces.api.views.defer_refresh_tenant_schema",
         return_value=MagicMock(id=438),
     ):
         manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
@@ -64,7 +65,7 @@ def test_refresh_creates_provisioning_schema(
 
 @pytest.mark.django_db
 def test_refresh_dispatches_task(manage_client, workspace, tenant_membership_for_user):
-    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as mock_defer:
+    with patch("apps.workspaces.api.views.defer_refresh_tenant_schema") as mock_defer:
         mock_defer.return_value = MagicMock(id=438)
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
     schema_id = resp.data["schema_id"]
@@ -88,7 +89,7 @@ def test_queued_refresh_downgrade_releases_provisioning_guard(
     manage_client, workspace, tenant_membership_for_user
 ):
     job_ids = []
-    original_defer = refresh_tenant_schema.defer
+    original_defer = defer_refresh_tenant_schema
 
     def defer_and_record(**kwargs):
         job = original_defer(**kwargs)
@@ -97,7 +98,7 @@ def test_queued_refresh_downgrade_releases_provisioning_guard(
 
     try:
         with patch(
-            "apps.workspaces.api.views.refresh_tenant_schema.defer", side_effect=defer_and_record
+            "apps.workspaces.api.views.defer_refresh_tenant_schema", side_effect=defer_and_record
         ) as defer:
             accepted = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
         assert accepted.status_code == 202
@@ -120,7 +121,7 @@ def test_queued_refresh_downgrade_releases_provisioning_guard(
             workspace=workspace, user=tenant_membership_for_user.user
         ).update(role=WorkspaceRole.MANAGE)
         with patch(
-            "apps.workspaces.api.views.refresh_tenant_schema.defer", side_effect=defer_and_record
+            "apps.workspaces.api.views.defer_refresh_tenant_schema", side_effect=defer_and_record
         ):
             retry = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
         assert retry.status_code == 202
@@ -154,7 +155,7 @@ def test_refresh_covers_every_source_of_a_multi_source_workspace(
 
     job_ids = iter([501, 502])
     with patch(
-        "apps.workspaces.api.views.refresh_tenant_schema.defer",
+        "apps.workspaces.api.views.defer_refresh_tenant_schema",
         side_effect=lambda **_: MagicMock(id=next(job_ids)),
     ) as defer:
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
@@ -199,7 +200,7 @@ def test_refresh_reports_each_source_that_could_not_start(
     )
 
     with patch(
-        "apps.workspaces.api.views.refresh_tenant_schema.defer", return_value=MagicMock(id=610)
+        "apps.workspaces.api.views.defer_refresh_tenant_schema", return_value=MagicMock(id=610)
     ) as defer:
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
 
@@ -229,7 +230,7 @@ def test_a_refresh_where_no_source_could_start_is_a_conflict(
             load_workspace_id=workspace.id,
         )
 
-    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer:
+    with patch("apps.workspaces.api.views.defer_refresh_tenant_schema") as defer:
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
 
     assert resp.status_code == 409
@@ -249,7 +250,7 @@ def test_partial_refresh_surfaces_recovery_message_and_code(
     with (
         patch("apps.workspaces.api.views.settle_finished_refresh_candidates") as settle,
         patch(
-            "apps.workspaces.api.views.refresh_tenant_schema.defer", return_value=MagicMock(id=710)
+            "apps.workspaces.api.views.defer_refresh_tenant_schema", return_value=MagicMock(id=710)
         ),
     ):
         settle.side_effect = lambda source, jobs: MagicMock(recovery_needed=source.id == blocked.id)
@@ -281,7 +282,7 @@ def test_refresh_reports_each_refused_source(
     with (
         patch("apps.workspaces.api.views.resolve_workspace", return_value=(workspace, None, None)),
         patch("apps.workspaces.api.views.settle_finished_refresh_candidates") as settle,
-        patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer,
+        patch("apps.workspaces.api.views.defer_refresh_tenant_schema") as defer,
     ):
         TenantMembership.objects.filter(user=user, tenant=second).delete()
         if not recovery:
@@ -315,7 +316,7 @@ def test_refresh_does_not_lock_a_source_the_caller_is_not_a_member_of(
     with (
         row_locked(lambda: Tenant.objects.select_for_update().get(id=foreign.id)),
         patch(
-            "apps.workspaces.api.views.refresh_tenant_schema.defer",
+            "apps.workspaces.api.views.defer_refresh_tenant_schema",
             return_value=MagicMock(id=801),
         ),
     ):
@@ -345,7 +346,7 @@ def test_one_source_failing_keeps_the_refreshes_queued_for_the_others(
             raise RuntimeError("queue unavailable")
         return MagicMock(id=802)
 
-    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer", side_effect=defer):
+    with patch("apps.workspaces.api.views.defer_refresh_tenant_schema", side_effect=defer):
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
 
     assert resp.status_code == 202
@@ -364,7 +365,7 @@ def test_a_single_source_error_is_a_server_error(
     manage_client, workspace, tenant, tenant_membership_for_user
 ):
     with patch(
-        "apps.workspaces.api.views.refresh_tenant_schema.defer",
+        "apps.workspaces.api.views.defer_refresh_tenant_schema",
         side_effect=RuntimeError("queue unavailable"),
     ):
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")

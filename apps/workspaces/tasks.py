@@ -73,10 +73,12 @@ from apps.workspaces.services.data_operation import (
     to_thread_fresh_db as _to_thread_fresh_db,
 )
 from apps.workspaces.services.data_recovery import (
-    ROLE_DENIED_MESSAGE as _ROLE_DENIED_MESSAGE,
+    CAPACITY_REFUSED_KEY,
+    CHAT_RECOVERY_SOURCE,
+    recovery_query_surface,
 )
 from apps.workspaces.services.data_recovery import (
-    recovery_query_surface,
+    ROLE_DENIED_MESSAGE as _ROLE_DENIED_MESSAGE,
 )
 from apps.workspaces.services.data_recovery import (
     workspace_recovery_error as _workspace_recovery_error,
@@ -120,7 +122,6 @@ from apps.workspaces.services.query_state import (
     included_tenant_snapshot_state as _included_tenant_snapshot_state,
 )
 from apps.workspaces.services.reconciliation import (
-    MATERIALIZATION_STALLED_HEARTBEAT_SECONDS,
     sweep_stale_materialization_runs,
     sweep_stale_thread_jobs,
     sweep_stale_workspace_data_recoveries,
@@ -129,12 +130,11 @@ from apps.workspaces.services.refresh_requests import (
     DENIED_MEMBERSHIP_MISSING,
     DENIED_ROLE_REQUIRED,
     DENIED_WORKSPACE_UNLINKED,
-    LegacyRefreshJobs,
     LegacyRefreshReconciliation,
     claim_refresh_candidate,
     fail_claimed_refresh_candidate,
     find_legacy_refresh_jobs,
-    reconcile_legacy_refresh_candidates,
+    settle_finished_refresh_candidates,
 )
 from apps.workspaces.services.schema_manager import (
     NoActiveTenantSchema,
@@ -145,6 +145,7 @@ from apps.workspaces.services.schema_manager import (
 )
 from apps.workspaces.services.source_freshness import REQUESTER_CODES, arecord_load_outcomes
 from apps.workspaces.services.tenant_coverage import parse_coverage
+from apps.workspaces.task_dispatch import JOB_RETENTION_HOURS, register_inline_materializer
 from config.procrastinate import app
 from mcp_server.loaders.connect_base import ConnectExportError
 from mcp_server.pipeline_registry import get_registry
@@ -154,10 +155,6 @@ from mcp_server.services.materializer import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Set on a recovery's result when the database refused it at its connection limit:
-# the attempt never ran, so it must not count as the member's one retry.
-CAPACITY_REFUSED_KEY = "capacity_refused"
 
 
 @app.task(pass_context=True)
@@ -1232,6 +1229,9 @@ async def materialize_workspace_blocking(
     return await materialize_workspace_core(workspace_id, user_id, job_id)
 
 
+register_inline_materializer(materialize_workspace_blocking)
+
+
 @app.task(pass_context=True)
 async def materialize_workspace(
     context,
@@ -1931,25 +1931,6 @@ async def drop_failed_refresh_schema(schema_id: str) -> None:
     await _drop_failed_refresh_schema(schema_id)
 
 
-def settle_finished_refresh_candidates(
-    tenant, legacy_jobs: LegacyRefreshJobs
-) -> LegacyRefreshReconciliation:
-    """Reconcile a tenant's refresh candidates and queue a drop for each one settled.
-
-    Call inside a transaction so each settle commits together with its queued drop.
-    """
-    now = timezone.now()
-    result = reconcile_legacy_refresh_candidates(
-        tenant,
-        legacy_jobs,
-        pruned_before=now - timedelta(hours=JOB_RETENTION_HOURS),
-        stalled_before=now - timedelta(seconds=MATERIALIZATION_STALLED_HEARTBEAT_SECONDS),
-    )
-    for settled_id in result.settled_schema_ids:
-        drop_failed_refresh_schema.defer(schema_id=str(settled_id))
-    return result
-
-
 def _reconcile_tenant_refreshes(tenant_id) -> LegacyRefreshReconciliation:
     tenant = Tenant.objects.get(id=tenant_id)
     legacy_jobs = find_legacy_refresh_jobs(tenant)
@@ -2424,7 +2405,6 @@ async def _recover_workspace_data(context, recovery_id: str) -> dict:
         return {"status": "failed", "error": error, "result": result}
 
 
-CHAT_RECOVERY_SOURCE = "chat"
 _CHAT_RECOVERY_NEEDS_RELOAD = (
     "The data model can't be rebuilt from the loaded data: it needs a data refresh first."
 )
@@ -2842,12 +2822,6 @@ async def reconcile_stale_materialization_runs(timestamp: int = 0) -> dict:
     """Fail MaterializationRuns stuck ACTIVE after a hard worker death, then settle
     view schemas whose build will never finish."""
     return await sweep_stale_materialization_runs()
-
-
-# procrastinate_jobs / procrastinate_events grow unbounded otherwise: ~2,000 janitor
-# jobs/day plus every materialization/teardown/rebuild/resume. Keep finalized jobs
-# for a week (forensics + idempotency headroom) then prune (arch #255, 10#0).
-JOB_RETENTION_HOURS = 24 * 7
 
 
 @app.periodic(cron="17 3 * * *")

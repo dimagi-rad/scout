@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from apps.workspaces.models import Workspace
 
 from apps.workspaces.services.tenant_coverage import coverage_warning
+from apps.workspaces.task_dispatch import materialize_workspace_inline
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +60,9 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         if not await aworkspace_write_allowed(user, workspace_id):
             return tool_write_denied()
 
-        # Inline import breaks a verified cycle: graph.base -> this module ->
-        # workspaces.tasks -> graph.base (tasks imports build_agent_graph for the
-        # resume path). Module-level fails with a partially-initialized import.
-        from apps.workspaces.tasks import materialize_workspace_blocking  # noqa: PLC0415 — cycle
-
         # Dedupe-aware: waits for any in-progress materialization on this
         # workspace's tenants rather than starting a parallel run.
-        summary = await materialize_workspace_blocking(workspace_id, user_id, job_id)
+        summary = await materialize_workspace_inline(workspace_id, user_id, job_id)
         # A lost-tenant denial falls through: its per-tenant guidance is the remedy.
         if summary.get("error_code") == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
             return tool_write_denied()

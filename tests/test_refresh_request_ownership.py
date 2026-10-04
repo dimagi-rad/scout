@@ -626,7 +626,9 @@ def manage_client(user):
 @pytest.fixture
 def queued_schema_drops():
     # procrastinate_jobs is unmanaged, so a real defer would outlive the test.
-    with patch("apps.workspaces.tasks.drop_failed_refresh_schema.defer") as drop:
+    with patch(
+        "apps.workspaces.services.refresh_requests.defer_drop_failed_refresh_schema"
+    ) as drop:
         yield drop
 
 
@@ -637,7 +639,7 @@ def _run_refresh(job_id, args):
 
 
 def _post_refresh(client, workspace, *, job_id=987650):
-    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as defer:
+    with patch("apps.workspaces.api.views.defer_refresh_tenant_schema") as defer:
         defer.return_value = MagicMock(id=job_id)
         response = client.post(f"/api/workspaces/{workspace.id}/refresh/")
     return response, defer
@@ -1090,7 +1092,9 @@ def test_periodic_sweep_settles_dead_refresh_without_a_retry(
     candidate, _args, job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
     _run_on_worker(job_id, None)
 
-    with patch("apps.workspaces.tasks.drop_failed_refresh_schema.defer") as drop:
+    with patch(
+        "apps.workspaces.services.refresh_requests.defer_drop_failed_refresh_schema"
+    ) as drop:
         result = async_to_sync(reconcile_refresh_candidates.func)()
 
     candidate.refresh_from_db()

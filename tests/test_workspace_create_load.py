@@ -28,7 +28,7 @@ def t2(db):
 
 @pytest.fixture
 def defer():
-    with patch.object(workspace_service.materialize_workspace, "defer") as mock:
+    with patch.object(workspace_service, "defer_materialize_workspace") as mock:
         yield mock
 
 

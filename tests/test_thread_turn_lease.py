@@ -669,12 +669,12 @@ class TestReconcilerDuringBackoff:
         with (
             patch(f"{reconciliation}._procrastinate_job_status", return_value="succeeded"),
             patch(f"{reconciliation}._resume_in_flight", return_value=True),
-            patch(f"{reconciliation}.app.configure_task") as configure_resume,
+            patch(f"{reconciliation}.adefer_resume_thread", new_callable=AsyncMock) as defer_resume,
         ):
             action = await reconcile_stale_thread_job(tj)
 
         assert action is None
-        configure_resume.assert_not_called()
+        defer_resume.assert_not_called()
 
 
 def test_the_in_flight_lookup_names_the_real_task():

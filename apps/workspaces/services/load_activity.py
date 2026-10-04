@@ -22,20 +22,30 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.status import workspace_schema_status
+from apps.workspaces.task_dispatch import (
+    MATERIALIZE_WORKSPACE,
+    REBUILD_WORKSPACE_SEMANTIC_MODEL,
+    REBUILD_WORKSPACE_VIEW_SCHEMA,
+)
 
-MATERIALIZE_TASK_NAME = "apps.workspaces.tasks.materialize_workspace"
-REBUILD_VIEW_TASK_NAME = "apps.workspaces.tasks.rebuild_workspace_view_schema"
+MATERIALIZE_TASK_NAME = MATERIALIZE_WORKSPACE
+REBUILD_VIEW_TASK_NAME = REBUILD_WORKSPACE_VIEW_SCHEMA
 # A view rebuild queued on its own (a source added to a serving workspace) is a
 # build in flight too, so the status counts it; the chat auto-load does not wait on it.
 _STATUS_TASK_NAMES = (MATERIALIZE_TASK_NAME, REBUILD_VIEW_TASK_NAME)
-REBUILD_SEMANTIC_TASK_NAME = "apps.workspaces.tasks.rebuild_workspace_semantic_model"
+REBUILD_SEMANTIC_TASK_NAME = REBUILD_WORKSPACE_SEMANTIC_MODEL
 # Everything that must finish before a held request can be answered from the data.
 _BUILD_TASK_NAMES = (*_STATUS_TASK_NAMES, REBUILD_SEMANTIC_TASK_NAME)
 _QUEUED_OR_RUNNING = ("todo", "doing", "aborting")
 _STARTED = ("doing", "aborting")
-# Matches MATERIALIZATION_STALLED_HEARTBEAT_SECONDS in reconciliation: a started job whose
-# worker stopped heart-beating is dead and must not hold off every later load.
-_STALLED_AFTER = timedelta(seconds=300)
+# A hard worker death (SIGKILL/OOM/host crash) leaves the procrastinate job 'doing'
+# and its MaterializationRun stuck ACTIVE, and the ThreadJob janitor can't see it
+# (None for a zombie job; /refresh/ runs have no ThreadJob). Detect it via
+# procrastinate's heartbeat stalled-job query and fail the run truthfully (arch #255 03#9).
+MATERIALIZATION_STALLED_HEARTBEAT_SECONDS = 300
+# A started job whose worker stopped heart-beating is dead and must not hold off
+# every later load.
+_STALLED_AFTER = timedelta(seconds=MATERIALIZATION_STALLED_HEARTBEAT_SECONDS)
 
 
 async def aunserved_tenant_ids(workspace_id) -> set:

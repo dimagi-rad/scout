@@ -1885,7 +1885,7 @@ async def test_headless_preflight_failure_preserves_real_core_reason(
         return summary
 
     with (
-        patch("apps.workspaces.tasks.materialize_workspace_blocking", run_core),
+        patch("apps.agents.tools.materialization_tool.materialize_workspace_inline", run_core),
         patch("apps.workspaces.tasks.get_registry", return_value=registry),
         patch("apps.workspaces.tasks.aresolve_credential", AsyncMock(return_value=None)),
     ):
