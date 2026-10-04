@@ -5,7 +5,7 @@ reached only by the Django API and the Procrastinate worker over the Docker
 network. Previously it had *no* caller authentication at all: every tenant-scoped
 tool resolved context purely from the ``workspace_id`` argument, so any
 co-located process, SSRF, or dev port-forward could call tools such as
-``run_materialization`` against any workspace. Isolation was network topology only.
+``query`` against any workspace. Isolation was network topology only.
 
 We add a lightweight shared-secret check as defense-in-depth (not a perimeter):
 every request must carry ``X-Scout-MCP-Secret`` matching ``MCP_SHARED_SECRET``.
