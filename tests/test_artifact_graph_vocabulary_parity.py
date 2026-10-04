@@ -32,7 +32,11 @@ def _balanced(source: str, open_index: int) -> str:
     while i < len(source):
         ch = source[i]
         if ch == '"':
-            i = STRING.match(source, i).end()
+            literal = STRING.match(source, i)
+            assert literal, (
+                f"unterminated string literal while parsing TypeScript near {source[i : i + 40]!r}"
+            )
+            i = literal.end()
             continue
         if ch in pairs:
             stack.append(pairs[ch])
