@@ -203,11 +203,14 @@ def test_trusted_providers_vouch_without_a_claim():
     "alias, cls, extra_data, vouched",
     [
         ("hq_production", "commcare", {"email": " a@b.co "}, True),
-        ("commcare_prod", None, {"email": "a@b.co"}, True),
+        ("commcare_prod", "commcare", {"email": "a@b.co"}, True),
         ("connect_production", "commcare_connect", {"email": "a@b.co"}, True),
         ("ocs_staging", "ocs", {"email": "a@b.co"}, False),
         ("ocs_staging", "ocs", {"email": "a@b.co", "email_verified": True}, True),
         ("chat_prod", "ocs", {"email": "a@b.co"}, False),
+        ("commcare_ocs", "ocs", {"email": "a@b.co"}, False),
+        ("commcare_orphan", None, {"email": "a@b.co"}, False),
+        ("commcare_eu", None, {"email": "a@b.co"}, True),
     ],
 )
 def test_aliased_provider_ids_resolve_to_their_class(alias, cls, extra_data, vouched):
@@ -225,3 +228,27 @@ def test_aliased_provider_ids_resolve_to_their_class(alias, cls, extra_data, vou
 @pytest.mark.parametrize("email", [["a@b.co"], 7, "   "])
 def test_malformed_email_is_not_vouched(email):
     assert verified_social_email("commcare", {"email": email}) is None
+
+
+@pytest.mark.django_db
+def test_alias_claimed_by_apps_of_different_classes_is_untrusted():
+    for cls in ("commcare", "ocs"):
+        SocialApp.objects.create(provider=cls, provider_id="shared", name=cls, client_id=cls)
+
+    assert verified_social_email("shared", {"email": "a@b.co"}) is None
+
+
+@pytest.mark.django_db
+def test_ocs_is_never_blanket_trusted(settings):
+    settings.SOCIALACCOUNT_PROVIDERS = {
+        **settings.SOCIALACCOUNT_PROVIDERS,
+        "ocs": {"VERIFIED_EMAIL": True},
+    }
+
+    assert verified_social_email("ocs", {"email": "a@b.co"}) is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("extra_data", [["a@b.co"], "a@b.co", None])
+def test_non_dict_extra_data_is_not_vouched(extra_data):
+    assert verified_social_email("commcare", extra_data) is None

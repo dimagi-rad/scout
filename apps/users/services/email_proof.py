@@ -9,11 +9,12 @@ verifying, must never count.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount, SocialApp
+from allauth.socialaccount.providers import registry
 from django.conf import settings
-
-from apps.users.services.oauth_scope import canonical_provider
 
 # Providers that report verification per login, through the OIDC ``email_verified``
 # claim, instead of verifying every email they hand out (open-chat-studio#3647).
@@ -30,12 +31,13 @@ def trusted_email_providers() -> set[str]:
     return {pid for pid, cfg in providers.items() if (cfg or {}).get("VERIFIED_EMAIL") is True}
 
 
-def provider_class_ids(provider_ids) -> dict[str, str]:
+def provider_class_ids(provider_ids: Iterable[str]) -> dict[str, str | None]:
     """Map stored ``SocialAccount.provider`` values to provider class ids.
 
     A ``SocialApp`` with a ``provider_id`` (``hq_production``, ``ocs_staging``)
     stores its accounts under that alias, while allauth keys provider settings by
-    the class id. An id no single app claims falls back to its prefix.
+    the class id. An id no app claims resolves only if it is itself a class id, so
+    an orphaned or ambiguous alias maps to None and vouches for nothing.
     """
     provider_ids = set(provider_ids)
     classes: dict[str, set[str]] = {}
@@ -43,14 +45,23 @@ def provider_class_ids(provider_ids) -> dict[str, str]:
         "provider_id", "provider"
     ):
         classes.setdefault(alias, set()).add(cls)
-    return {
-        pid: next(iter(classes[pid])) if len(classes.get(pid, ())) == 1 else canonical_provider(pid)
-        for pid in provider_ids
-    }
+    known = {cls.id for cls in registry.get_class_list()}
+    resolved: dict[str, str | None] = {}
+    for pid in provider_ids:
+        claimed = classes.get(pid)
+        if claimed:
+            resolved[pid] = next(iter(claimed)) if len(claimed) == 1 else None
+        else:
+            resolved[pid] = pid if pid in known else None
+    return resolved
 
 
 def verified_social_email(
-    provider: str, extra_data: dict | None, *, class_id: str | None = None, trusted=None
+    provider: str,
+    extra_data: dict | None,
+    *,
+    class_id: str | None = None,
+    trusted: set[str] | None = None,
 ) -> str | None:
     """The email a provider login asserted, if that provider vouched for it.
 
@@ -59,8 +70,9 @@ def verified_social_email(
     reflects the provider's latest assertion. ``class_id`` and ``trusted`` let a
     caller checking many accounts resolve them once.
     """
-    data = extra_data or {}
-    email = data.get("email")
+    if not isinstance(extra_data, dict):
+        return None
+    email = extra_data.get("email")
     if not isinstance(email, str) or not email.strip():
         return None
     email = email.strip()
@@ -68,9 +80,11 @@ def verified_social_email(
         class_id = provider_class_ids([provider])[provider]
     if trusted is None:
         trusted = trusted_email_providers()
-    if class_id in trusted:
+    # A claim-verified provider is never blanket-trusted, even if a settings edit
+    # gives it VERIFIED_EMAIL again.
+    if class_id in trusted - CLAIM_VERIFIED_PROVIDERS:
         return email
-    if class_id in CLAIM_VERIFIED_PROVIDERS and data.get("email_verified") is True:
+    if class_id in CLAIM_VERIFIED_PROVIDERS and extra_data.get("email_verified") is True:
         return email
     return None
 

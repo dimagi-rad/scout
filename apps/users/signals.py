@@ -183,6 +183,13 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
         logger.warning("Failed to clear the onboarding cache after login", exc_info=True)
 
 
+def _expire_invite(invite):
+    # Conditional, like the awaiting-access move: keep a revoke's audit trail.
+    WorkspaceInvite.objects.filter(pk=invite.pk, status=invite.status).update(
+        status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now()
+    )
+
+
 def resolve_pending_invites_on_login(user):
     """Materialize any live WorkspaceInvite addressed to *user* into a membership.
 
@@ -200,14 +207,14 @@ def resolve_pending_invites_on_login(user):
     ).select_related("workspace")
     for invite in invites:
         if invite.is_expired:
-            # Conditional, like the awaiting-access move below: keep a revoke's audit trail.
-            WorkspaceInvite.objects.filter(pk=invite.pk, status=invite.status).update(
-                status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now()
-            )
+            _expire_invite(invite)
             continue
 
         if accept_invite_if_covered(invite, user) is not None:
             notify_invite_accepted(invite, user)
+        elif invite.is_expired:
+            # Lapsed while waiting for the workspace lock; it is dead, not awaiting access.
+            _expire_invite(invite)
         elif invite.status != WorkspaceInviteStatus.AWAITING_ACCESS:
             # Conditional: a revoke since the read above must not be overwritten (#561 G4).
             moved = WorkspaceInvite.objects.filter(pk=invite.pk, status=invite.status).update(

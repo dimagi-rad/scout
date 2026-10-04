@@ -14,6 +14,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 from django.utils import timezone
 
+from apps.users import signals
 from apps.users.signals import resolve_pending_invites_on_login
 from apps.workspaces.models import (
     WorkspaceInvite,
@@ -143,3 +144,28 @@ def test_invite_banner_lists_only_proven_emails(invitee, workspace, verified, li
     body = client.get("/api/invites/").json()
 
     assert bool(body) is listed
+
+
+@pytest.mark.django_db
+def test_invite_lapsing_before_the_lock_expires_instead_of_awaiting(
+    invitee, workspace, monkeypatch, mocker
+):
+    EmailAddress.objects.create(user=invitee, email=EMAIL, verified=True, primary=True)
+    invite = _manage_invite(workspace)
+    accept = signals.accept_invite_if_covered
+
+    def lapse_then_accept(stale, who):
+        WorkspaceInvite.objects.filter(pk=stale.pk).update(
+            expires_at=timezone.now() - timedelta(seconds=1)
+        )
+        stale.expires_at = timezone.now() - timedelta(seconds=1)
+        return accept(stale, who)
+
+    monkeypatch.setattr(signals, "accept_invite_if_covered", lapse_then_accept)
+    notify = mocker.patch.object(signals, "notify_awaiting_access")
+
+    resolve_pending_invites_on_login(invitee)
+
+    invite.refresh_from_db()
+    assert invite.status == WorkspaceInviteStatus.EXPIRED
+    notify.assert_not_called()
