@@ -99,9 +99,9 @@ def _validated_root_cert(path: str) -> str:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         raise DatabaseTLSConfigError(
-            f"Database CA bundle {path} is unreadable ({exc.strerror}); set "
+            f"Database CA bundle {path} is unreadable ({exc.strerror or exc}); set "
             f"{DB_SSL_ROOT_CERT_ENV} to the RDS CA bundle path."
-        ) from None
+        ) from exc
     if "-----BEGIN CERTIFICATE-----" not in text:
         raise DatabaseTLSConfigError(f"Database CA bundle {path} contains no certificates")
     return path

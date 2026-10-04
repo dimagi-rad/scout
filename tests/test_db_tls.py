@@ -11,6 +11,7 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict
 
 from apps.chat import checkpointer
+from apps.chat.checks import check_checkpointer_shares_default_database
 from apps.common import db_urls
 from apps.common.db_urls import (
     DB_SSL_ROOT_CERT_ENV,
@@ -146,6 +147,14 @@ def test_missing_bundle_fails_for_remote(monkeypatch, tmp_path):
         enforce_django_db_tls({"HOST": "db.example"})
     # A local host never needs the bundle.
     assert enforce_db_tls({"host": "localhost"}) == {"host": "localhost"}
+
+
+def test_checkpointer_check_reports_missing_bundle(monkeypatch, tmp_path):
+    monkeypatch.setenv(DB_SSL_ROOT_CERT_ENV, str(tmp_path / "missing.pem"))
+    monkeypatch.setenv("DATABASE_URL", REMOTE)
+    [error] = check_checkpointer_shares_default_database(None)
+    assert error.id.endswith("002")
+    assert "missing.pem" in error.msg
 
 
 def test_bundle_without_certificates_fails(monkeypatch, tmp_path):
