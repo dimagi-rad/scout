@@ -57,6 +57,8 @@ def pg_connection_identity(url: str) -> dict[str, Any]:
         port = int(parsed.get("port") or DEFAULT_PORT)
     except ValueError:
         raise ValueError(_INVALID) from None
+    # hostaddr/service are dropped, so the connection goes to host; keeping either
+    # relies on enforce_db_tls seeing it, as the conninfo and Django paths do.
     params: dict[str, Any] = {
         "host": parsed.get("host") or DEFAULT_HOST,
         "port": port,

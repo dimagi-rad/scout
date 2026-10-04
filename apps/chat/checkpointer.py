@@ -37,7 +37,7 @@ class CheckpointerPool(CapacityTaggingPool):
 
 def get_database_url() -> str:
     """Resolve the platform Postgres conninfo: ``DATABASE_URL``, else Django's default DB."""
-    # DATABASE_URL first so query-string options (e.g. sslmode) survive; the
+    # DATABASE_URL first so query-string options (e.g. connect_timeout) survive; the
     # DATABASES dict below would drop them.
     database_url = os.environ.get("DATABASE_URL")
     if database_url:

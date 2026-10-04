@@ -4,6 +4,8 @@ Django test settings for Scout data agent platform.
 
 import hashlib
 
+from apps.common.db_urls import enforce_django_db_tls
+
 from .base import *
 from .base import _build_caches
 
@@ -33,14 +35,16 @@ else:
 _checkout_key = hashlib.sha256(str(BASE_DIR).encode()).hexdigest()[:8]
 
 DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": env("TEST_DATABASE_NAME", default=f"scout_test_{_checkout_key}"),
-        "USER": env("DATABASE_USER", default=_defaults["USER"]),
-        "PASSWORD": env("DATABASE_PASSWORD", default=_defaults["PASSWORD"]),
-        "HOST": env("DATABASE_HOST", default=_defaults["HOST"]),
-        "PORT": env("DATABASE_PORT", default=_defaults["PORT"]),
-    }
+    "default": enforce_django_db_tls(
+        {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": env("TEST_DATABASE_NAME", default=f"scout_test_{_checkout_key}"),
+            "USER": env("DATABASE_USER", default=_defaults["USER"]),
+            "PASSWORD": env("DATABASE_PASSWORD", default=_defaults["PASSWORD"]),
+            "HOST": env("DATABASE_HOST", default=_defaults["HOST"]),
+            "PORT": env("DATABASE_PORT", default=_defaults["PORT"]),
+        }
+    )
 }
 
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
