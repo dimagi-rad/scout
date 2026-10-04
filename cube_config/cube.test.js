@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { X509Certificate } = require('node:crypto');
-const { readFileSync } = require('node:fs');
+const { X509Certificate, createHash } = require('node:crypto');
+const { mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
+const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { test } = require('node:test');
 const vm = require('node:vm');
@@ -458,10 +459,24 @@ test('a missing CA bundle fails startup instead of connecting unverified', () =>
   );
 });
 
+test('a CA file without certificates fails startup instead of trusting public roots', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'scout-ca-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const empty = join(dir, 'empty.pem');
+  writeFileSync(empty, '');
+  assert.throws(
+    () => loadConfig(undefined, [], { DATABASE_URL: RDS_URL, SCOUT_DB_SSL_CA_FILE: empty }),
+    /contains no certificates/
+  );
+});
+
 test('the image ships the RDS CA bundle at the default path', () => {
   const dockerfile = readFileSync(join(__dirname, 'Dockerfile'), 'utf8');
   assert.match(dockerfile, /^COPY rds-global-bundle\.pem \/cube\/conf\/rds-global-bundle\.pem$/m);
   assert.match(readFileSync(join(__dirname, 'cube.js'), 'utf8'), /'\/cube\/conf\/rds-global-bundle\.pem'/);
+  // Pinned to https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem;
+  // a refresh must update this digest after checking it against upstream.
+  assert.equal(createHash('sha256').update(readFileSync(BUNDLE)).digest('hex'), 'fe45bbebf92ad3e27a583bbb2ddd1553c521ed4d49af5514dc0a40372ea5395c');
   const pems = readFileSync(BUNDLE, 'utf8').match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g);
   const subjects = pems.map((pem) => new X509Certificate(pem).subject);
   assert.ok(subjects.some((subject) => subject.includes('CN=Amazon RDS us-east-1 Root CA RSA2048 G1')));

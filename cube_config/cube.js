@@ -76,7 +76,15 @@ function sslConfigForUrl(rawUrl) {
   }
   // Read once and fail startup if missing: a remote database must never be
   // reached without verifying its certificate and hostname.
-  dbSslCa ??= readFileSync(process.env.SCOUT_DB_SSL_CA_FILE || DEFAULT_DB_SSL_CA_FILE, 'utf8');
+  if (dbSslCa === null) {
+    const caFile = process.env.SCOUT_DB_SSL_CA_FILE || DEFAULT_DB_SSL_CA_FILE;
+    const ca = readFileSync(caFile, 'utf8');
+    // An empty ca makes Node fall back to its public roots instead of failing.
+    if (!ca.includes('-----BEGIN CERTIFICATE-----')) {
+      throw new Error(`Database CA file ${caFile} contains no certificates`);
+    }
+    dbSslCa = ca;
+  }
   return { ca: dbSslCa, rejectUnauthorized: true };
 }
 
