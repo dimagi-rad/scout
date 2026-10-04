@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
+from django.db import connection
 from django.test import AsyncClient
+from procrastinate.contrib.django.models import ProcrastinateJob
 
 from apps.artifacts.models import Artifact, ArtifactType
 from apps.chat.models import Thread, ThreadJob
@@ -71,6 +73,17 @@ def recovery_setup(db):
         client=client,
         url=f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/recovery/",
     )
+
+
+@pytest.fixture
+def drop_queued_rows(django_db_blocker):
+    # procrastinate_jobs is unmanaged: rows committed by transactional tests outlive them.
+    with django_db_blocker.unblock(), connection.cursor() as cursor:
+        cursor.execute("SELECT COALESCE(MAX(id), 0) FROM procrastinate_jobs")
+        (start,) = cursor.fetchone()
+    yield
+    with django_db_blocker.unblock(), connection.cursor() as cursor:
+        cursor.execute("DELETE FROM procrastinate_jobs WHERE id > %s", [start])
 
 
 @pytest.mark.django_db(transaction=True)
@@ -172,6 +185,36 @@ async def test_post_dispatches_one_durable_workspace_recovery(recovery_setup):
     assert recovery.source_id == recovery_setup.artifact.id
     assert recovery.procrastinate_job_id == 812
     assert recovery.state == WorkspaceDataRecovery.State.PENDING
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_post_queues_the_recovery_task_row_it_records(recovery_setup, drop_queued_rows):
+    response = await recovery_setup.client.post(recovery_setup.url, data={})
+
+    assert response.status_code == 202
+    recovery = await WorkspaceDataRecovery.objects.aget(workspace=recovery_setup.workspace)
+    jobs = [
+        job
+        async for job in ProcrastinateJob.objects.filter(
+            args__contains={"recovery_id": str(recovery.id)}
+        )
+    ]
+    assert [
+        (job.task_name, job.queue_name, job.priority, job.lock, job.queueing_lock, job.args)
+        for job in jobs
+    ] == [
+        (
+            "apps.workspaces.tasks.recover_workspace_data",
+            "default",
+            0,
+            None,
+            None,
+            {"recovery_id": str(recovery.id)},
+        )
+    ]
+    assert jobs[0].scheduled_at is None
+    assert recovery.procrastinate_job_id == jobs[0].id
 
 
 @pytest.mark.django_db(transaction=True)
