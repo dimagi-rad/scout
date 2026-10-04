@@ -1,4 +1,4 @@
-"""The wire request every agent LLM sends: thinking, betas and effort.
+"""The wire request every agent LLM sends: thinking, betas, effort and timeout.
 
 Each site's ChatAnthropic kwargs are captured, then fed to a real ChatAnthropic
 so the assertions run against the payload langchain-anthropic would send.
@@ -9,11 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
+from django.conf import settings
+from django.test import override_settings
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
 from apps.agents.graph.base import build_agent_graph
-from apps.agents.llm_request import THINKING_BINDING_BETA
+from apps.agents.llm_request import THINKING_BINDING_BETA, chat_model_kwargs
 from apps.agents.tools.artifact_manager_agent import _build_artifact_manager_graph
 from apps.agents.tools.canvas_manager_agent import _build_canvas_manager_graph
 
@@ -62,14 +64,17 @@ def site(request) -> str:
 
 
 @pytest_asyncio.fixture
-async def site_payload(site) -> dict:
+async def site_kwargs(site) -> dict:
     if site == "main":
-        kwargs = await _main_agent_kwargs()
-    elif site == "canvas":
-        kwargs = _canvas_kwargs()
-    else:
-        kwargs = _artifact_kwargs()
-    return _payload(kwargs)
+        return await _main_agent_kwargs()
+    if site == "canvas":
+        return _canvas_kwargs()
+    return _artifact_kwargs()
+
+
+@pytest.fixture
+def site_payload(site_kwargs) -> dict:
+    return _payload(site_kwargs)
 
 
 @pytest.mark.asyncio
@@ -94,3 +99,16 @@ async def test_effort_is_explicit_per_site(site, site_payload):
     silently, and run the narrow subagents at low."""
     expected = {"main": "medium", "canvas": "low", "artifact": "low"}[site]
     assert site_payload["output_config"]["effort"] == expected
+
+
+@pytest.mark.asyncio
+async def test_every_site_bounds_each_request(site_kwargs):
+    """langchain-anthropic defaults to timeout=None, which disables the SDK's own
+    cap: one hung connection would then stall the turn with no end."""
+    llm = ChatAnthropic(**site_kwargs, api_key="test-key")
+    assert llm._async_client.timeout == settings.LLM_REQUEST_TIMEOUT_S == 120.0
+
+
+@override_settings(LLM_REQUEST_TIMEOUT_S=42.0)
+def test_request_timeout_follows_the_setting():
+    assert chat_model_kwargs("low")["timeout"] == 42.0

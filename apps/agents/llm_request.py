@@ -2,6 +2,10 @@
 
 from typing import Any, Literal
 
+import httpx
+from anthropic import APITimeoutError
+from django.conf import settings
+
 THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 
 # Set explicitly: Opus 5.5's API default is "medium", but an unset effort
@@ -9,6 +13,10 @@ THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 # well-specified edits and run at "low".
 MAIN_AGENT_EFFORT = "medium"
 SUBAGENT_EFFORT = "low"
+
+# A connect/read timeout before the response starts surfaces as APITimeoutError (after
+# the SDK's retries); one between chunks of an open stream escapes the SDK unwrapped.
+LLM_TIMEOUT_ERRORS = (APITimeoutError, httpx.TimeoutException)
 
 
 def chat_model_kwargs(effort: Literal["low", "medium", "high"]) -> dict[str, Any]:
@@ -23,8 +31,14 @@ def chat_model_kwargs(effort: Literal["low", "medium", "high"]) -> dict[str, Any
     blocks with empty text, which leaves the chat's Thinking card blank. Opus 5.5
     also writes its between-tool-call notes as thinking blocks, so without this
     those notes never reach the user either.
+
+    ``timeout`` because langchain-anthropic passes ``None`` by default, which turns
+    off the SDK's own 600s cap and lets one hung connection stall a turn forever.
+    It is a single float (langchain-anthropic rejects an ``httpx.Timeout``), so it
+    bounds connect and each read alike; a streamed reply resets it on every chunk.
     """
     return {
+        "timeout": settings.LLM_REQUEST_TIMEOUT_S,
         "thinking": {
             "type": "adaptive",
             "display": "summarized",
