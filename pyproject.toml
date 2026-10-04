@@ -121,7 +121,6 @@ timeout = 300
 timeout_method = "thread"
 markers = [
     "smoke: end-to-end smoke tests requiring live credentials (run with: pytest -m smoke)",
-    "real_resume_stream: don't route background resumes through the agent's ainvoke",
 ]
 
 [dependency-groups]

@@ -117,7 +117,6 @@ async def _rows(thread):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.real_resume_stream
 class TestRunStreamed:
     async def test_it_returns_the_final_state_and_streams_the_answer(self):
         _ws, _user, thread = await _thread("stream")
