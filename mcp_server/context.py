@@ -151,6 +151,7 @@ def _parse_db_url(url: str, schema: str) -> dict:
 
     params = pg_connection_identity(url)
     params["dbname"] = params["dbname"] or "scout"
+    # Only a local host reaches this; a remote one already has verify-full.
     params.setdefault("sslmode", "prefer")
     # schema has been validated against ^[a-z][a-z0-9_]*$ above — safe to interpolate
     params["options"] = f"-c search_path={schema},public -c statement_timeout=30000"

@@ -13,6 +13,7 @@ from psycopg_pool import PoolTimeout
 
 from apps.common.capacity import CapacityResource
 from apps.common.capacity_pool import CapacityTaggingPool
+from apps.common.db_urls import enforce_db_tls_conninfo
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ def get_database_url() -> str:
     # DATABASES dict below would drop them.
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
-        return database_url
+        return enforce_db_tls_conninfo(database_url)
 
     db_config = settings.DATABASES.get("default", {})
     engine = db_config.get("ENGINE", "")
@@ -58,7 +59,9 @@ def get_database_url() -> str:
         "user": db_config.get("USER"),
         "password": db_config.get("PASSWORD"),
     }
-    return make_conninfo(**{key: str(value) for key, value in params.items() if value})
+    return enforce_db_tls_conninfo(
+        make_conninfo(**{key: str(value) for key, value in params.items() if value})
+    )
 
 
 def _pool_is_usable(pool) -> bool:

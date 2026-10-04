@@ -20,6 +20,7 @@ from django.conf import settings
 from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
+from apps.common.db_urls import enforce_db_tls_conninfo
 from apps.common.errors import DataNotLoaded
 from apps.common.identifiers import (
     dbt_role_name,
@@ -251,7 +252,7 @@ def get_managed_db_connection():
     url = settings.MANAGED_DATABASE_URL
     if not url:
         raise RuntimeError("MANAGED_DATABASE_URL is not configured")
-    return psycopg.connect(url, autocommit=True)
+    return psycopg.connect(enforce_db_tls_conninfo(url), autocommit=True)
 
 
 def get_managed_db_transaction():

@@ -6,6 +6,7 @@ from django.test import override_settings
 from psycopg.conninfo import conninfo_to_dict
 
 from apps.chat import checkpointer
+from apps.common.db_urls import DEFAULT_DB_SSL_ROOT_CERT
 
 
 @pytest.fixture(autouse=True)
@@ -84,8 +85,10 @@ def _use_databases(monkeypatch, databases):
 
 
 def test_database_url_prefers_env(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:6543/scout?sslmode=require")
-    assert checkpointer.get_database_url() == "postgresql://u:p@db:6543/scout?sslmode=require"
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost:6543/scout?sslmode=require")
+    assert (
+        checkpointer.get_database_url() == "postgresql://u:p@localhost:6543/scout?sslmode=require"
+    )
 
 
 def test_database_url_falls_back_to_settings_with_libpq_defaults(monkeypatch):
@@ -127,4 +130,7 @@ def test_database_url_quotes_credentials(monkeypatch):
         "port": "5432",
         "user": "platform",
         "password": "p@ss w/:?#",
+        # "db" is a remote host, so verification is forced on.
+        "sslmode": "verify-full",
+        "sslrootcert": str(DEFAULT_DB_SSL_ROOT_CERT),
     }
