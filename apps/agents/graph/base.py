@@ -150,8 +150,8 @@ def human_turn_count(messages: list) -> int:
 AGENT_NODE = "agent"
 
 # Adaptive thinking counts toward max_tokens, so 4096 could cut a turn off
-# mid-answer or mid-tool-call. 16k stays under the Anthropic SDK's 21,333-token
-# guard for non-streamed requests (recipes use ainvoke; resumes stream).
+# mid-answer or mid-tool-call. Every call streams (see chat_model_kwargs), so the
+# SDK's 21,333-token guard for non-streamed requests does not apply.
 DEFAULT_MAX_TOKENS = 16_000
 
 # Anthropic prompt-caching breakpoint (arch #254, finding 02#3).

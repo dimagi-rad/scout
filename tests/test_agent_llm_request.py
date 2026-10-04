@@ -106,7 +106,16 @@ async def test_every_site_bounds_each_request(site_kwargs):
     """langchain-anthropic defaults to timeout=None, which disables the SDK's own
     cap: one hung connection would then stall the turn with no end."""
     llm = ChatAnthropic(**site_kwargs, api_key="test-key")
-    assert llm._async_client.timeout == settings.LLM_REQUEST_TIMEOUT_S == 120.0
+    assert llm._async_client.timeout == settings.LLM_REQUEST_TIMEOUT_S
+
+
+@pytest.mark.asyncio
+async def test_every_site_streams_even_without_a_streaming_callback(site_kwargs):
+    """Recipes ainvoke the graph with no streaming handler. Unstreamed, the reply
+    sends no bytes until it is done, so the read timeout would cap the whole
+    generation instead of the gap between chunks."""
+    llm = ChatAnthropic(**site_kwargs, api_key="test-key")
+    assert llm._should_stream(async_api=True) is True
 
 
 @override_settings(LLM_REQUEST_TIMEOUT_S=42.0)

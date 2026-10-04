@@ -35,10 +35,14 @@ def chat_model_kwargs(effort: Literal["low", "medium", "high"]) -> dict[str, Any
     ``timeout`` because langchain-anthropic passes ``None`` by default, which turns
     off the SDK's own 600s cap and lets one hung connection stall a turn forever.
     It is a single float (langchain-anthropic rejects an ``httpx.Timeout``), so it
-    bounds connect and each read alike; a streamed reply resets it on every chunk.
+    bounds connect and each read alike. ``streaming`` so callers that ``ainvoke``
+    without a streaming callback (recipes) stream too: a non-streamed reply sends
+    no bytes until it is done, which would turn the read timeout into a cap on the
+    whole generation.
     """
     return {
         "timeout": settings.LLM_REQUEST_TIMEOUT_S,
+        "streaming": True,
         "thinking": {
             "type": "adaptive",
             "display": "summarized",
