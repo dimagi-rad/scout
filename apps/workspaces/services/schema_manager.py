@@ -265,14 +265,6 @@ def get_managed_db_transaction():
     return conn
 
 
-async def aget_managed_db_connection():
-    """Get an async psycopg connection to the managed database."""
-    url = settings.MANAGED_DATABASE_URL
-    if not url:
-        raise RuntimeError("MANAGED_DATABASE_URL is not configured")
-    return await psycopg.AsyncConnection.connect(url, autocommit=True)
-
-
 class SchemaManager:
     """Creates and manages tenant schemas in the managed database."""
 
@@ -1320,56 +1312,6 @@ class SchemaManager:
         finally:
             conn.close()
 
-    async def ateardown(self, tenant_schema: TenantSchema) -> None:
-        """Async version of teardown — drop a tenant's schema from the managed database.
-
-        Role cleanup is best-effort — see ``teardown`` for rationale.
-        """
-        async with await aget_managed_db_connection() as conn, conn.cursor() as cursor:
-            await cursor.execute(
-                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
-                    psycopg.sql.Identifier(tenant_schema.schema_name)
-                )
-            )
-            try:
-                await self._adrop_readonly_role(cursor, tenant_schema.schema_name)
-                await cursor.execute(
-                    psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(
-                        psycopg.sql.Identifier(dbt_role_name(tenant_schema.schema_name))
-                    )
-                )
-            except Exception:
-                logger.exception(
-                    "ateardown: dropping derived roles for schema '%s' failed; "
-                    "physical schema was dropped, role may be dangling",
-                    tenant_schema.schema_name,
-                )
-
-    async def ateardown_view_schema(self, view_schema: WorkspaceViewSchema) -> None:
-        """Async version of teardown_view_schema — drop the physical PostgreSQL schema.
-
-        Role cleanup is best-effort — see ``teardown`` for rationale.
-        """
-        async with await aget_managed_db_connection() as conn, conn.cursor() as cursor:
-            await cursor.execute(
-                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
-                    psycopg.sql.Identifier(view_schema.schema_name)
-                )
-            )
-            try:
-                await self._adrop_readonly_role(cursor, view_schema.schema_name)
-                await cursor.execute(
-                    psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(
-                        psycopg.sql.Identifier(dbt_role_name(view_schema.schema_name))
-                    )
-                )
-            except Exception:
-                logger.exception(
-                    "ateardown_view_schema: dropping derived roles for '%s' failed; "
-                    "physical schema was dropped, role may be dangling",
-                    view_schema.schema_name,
-                )
-
     # Finds schemas where the role holds direct ACL entries that survive DROP SCHEMA
     # CASCADE and would block DROP ROLE. Relation-level ACLs must be searched
     # independently of schema-level ones: a leftover pg_default_acl entry stamps
@@ -1406,42 +1348,6 @@ class SchemaManager:
         JOIN pg_roles r ON r.oid = acl.grantee
         WHERE r.rolname = %s AND d.defaclobjtype = 'r'
     """
-
-    async def _adrop_readonly_role(self, cursor, schema_name: str) -> None:
-        """Async version of _drop_readonly_role."""
-        role_name = readonly_role_name(schema_name)
-        await cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
-        if not await cursor.fetchone():
-            return
-        await cursor.execute(self._SCHEMAS_WITH_ROLE_GRANTS_SQL, {"role": role_name})
-        schemas_with_grants = [row[0] for row in await cursor.fetchall()]
-        for schema in schemas_with_grants:
-            await cursor.execute(
-                psycopg.sql.SQL("REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA {} FROM {}").format(
-                    psycopg.sql.Identifier(schema),
-                    psycopg.sql.Identifier(role_name),
-                )
-            )
-            await cursor.execute(
-                psycopg.sql.SQL("REVOKE ALL PRIVILEGES ON SCHEMA {} FROM {}").format(
-                    psycopg.sql.Identifier(schema),
-                    psycopg.sql.Identifier(role_name),
-                )
-            )
-        await cursor.execute(self._SCHEMAS_WITH_ROLE_DEFAULT_ACLS_SQL, (role_name,))
-        for schema, owner_role in await cursor.fetchall():
-            await cursor.execute(
-                psycopg.sql.SQL(
-                    "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} REVOKE ALL ON TABLES FROM {}"
-                ).format(
-                    psycopg.sql.Identifier(owner_role),
-                    psycopg.sql.Identifier(schema),
-                    psycopg.sql.Identifier(role_name),
-                )
-            )
-        await cursor.execute(
-            psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role_name))
-        )
 
     def _drop_readonly_role(self, cursor, schema_name: str) -> None:
         """Drop the read-only role, first revoking schema-scoped ACLs it still

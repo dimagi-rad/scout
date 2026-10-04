@@ -78,9 +78,10 @@ The graph is built per turn with two inputs that change its tools and prompts:
 Canvas tools need a conversation ID as well as an interactive run.
 
 Leaving a write tool out isn't the only guard: each write operation re-checks
-the role when it runs and is refused if the role has changed. The local tools do this in the tool, and the MCP server
-does it for MCP materialization. The `artifact_manager` and `canvas_manager`
-subagents rely on the checks in the tools they call.
+the role when it runs and is refused if the role has changed. The local tools do
+this in the tool, and the MCP server does it for MCP materialization. The
+`artifact_manager` and `canvas_manager` subagents rely on the checks in the
+tools they call.
 
 The prompt follows the same split. `select_base_system_prompt` picks one of three
 base prompts:

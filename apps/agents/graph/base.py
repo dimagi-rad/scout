@@ -1209,7 +1209,8 @@ def _build_tools(
     """Build the tool list: MCP data tools plus local artifact/recipe/learning
     tools, and a blocking materialization tool in headless mode.
     """
-    # In headless mode drop the interactive fire-and-ack
+    # Write-capable MCP tools are dropped for read-only roles. In headless mode
+    # also drop the interactive fire-and-ack
     # ``run_materialization``: it requires a real chat Thread + checkpointer +
     # async resume that a headless run does not have. It is replaced below by the
     # blocking materialize tool, which runs the pipeline inline and returns when
