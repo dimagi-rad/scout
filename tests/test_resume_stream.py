@@ -133,6 +133,7 @@ class TestRunStreamed:
             )
 
         rows = await _rows(thread)
+        assert "".join(row.text for row in rows) == DEFAULT_REPLY
         assert rows[-1].done is True
 
     async def test_a_write_that_fails_never_fails_the_run(self):

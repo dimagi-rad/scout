@@ -6,7 +6,8 @@ node named as the app names it, with a scripted model in place of Claude. So
 ``astream_events`` (live chat), ``aget_state`` and ``aupdate_state`` (synthetic
 failure messages) all keep LangGraph's own contract, and what a turn writes lands
 in a checkpoint the test can read back. There is deliberately no ``ainvoke``:
-nothing in the app runs a turn that way, and a test that did would skip the
+no chat turn, live or resumed, runs that way (headless recipe runs do, see
+apps/recipes/services/runner.py), and a chat test that did would skip the
 streamed path.
 
 It is one node and one model call with plain-text content: no tool loop, no
