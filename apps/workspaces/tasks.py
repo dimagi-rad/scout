@@ -3780,25 +3780,39 @@ async def _resume_claimed_job(
             status=status,
         ) as langfuse_span:
             # Streamed, so a chat open on the thread shows the answer as it is written.
-            result = await asyncio.wait_for(
-                resume_stream.arun_streamed(agent, input_state, config, tj.thread_id),
-                timeout=timeout_s,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    resume_stream.arun_streamed(agent, input_state, config, tj.thread_id),
+                    timeout=timeout_s,
+                )
+            except LLM_TIMEOUT_ERRORS as exc:
+                # Converted only here: the agent build above does its own httpx I/O
+                # (the MCP tool list), and a stall there is not a slow answer.
+                raise TimeoutError("model request timed out") from exc
             if langfuse_span is not None:
                 # The resume already succeeded; a tracing error must not mark it agent_failed.
                 try:
                     langfuse_span.update(output=_final_message_content(result))
                 except Exception:
                     logger.warning("resume: failed to record Langfuse output", exc_info=True)
-    # A bounded model request that times out is the same "took too long" to the user.
-    except (TimeoutError, *LLM_TIMEOUT_ERRORS):
+    except TimeoutError as exc:
         elapsed = time.monotonic() - start
-        logger.exception(
-            "resume: ainvoke timed out after %.2fs (limit=%ds, tj=%s)",
-            elapsed,
-            timeout_s,
-            thread_job_id,
-        )
+        if isinstance(exc.__cause__, LLM_TIMEOUT_ERRORS):
+            # Expected once model requests are bounded, so below Sentry's ERROR level.
+            logger.warning(
+                "resume: model request timed out after %.2fs (request limit=%ss, tj=%s): %s",
+                elapsed,
+                settings.LLM_REQUEST_TIMEOUT_S,
+                thread_job_id,
+                exc.__cause__.__class__.__name__,
+            )
+        else:
+            logger.exception(
+                "resume: ainvoke timed out after %.2fs (limit=%ds, tj=%s)",
+                elapsed,
+                timeout_s,
+                thread_job_id,
+            )
         sentry_sdk.add_breadcrumb(
             category="resume",
             message="ainvoke_timeout",
