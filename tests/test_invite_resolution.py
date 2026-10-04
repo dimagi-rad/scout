@@ -19,13 +19,14 @@ from apps.workspaces.models import (
     WorkspaceRole,
 )
 from tests.tenant_access import grant_tenant_access
+from tests.verified_users import create_verified_user
 
 User = get_user_model()
 
 
 @pytest.fixture
 def invitee(db):
-    return User.objects.create_user(email="invitee@example.com", password="pass")
+    return create_verified_user("invitee@example.com")
 
 
 def _invite(workspace, email="invitee@example.com", status=WorkspaceInviteStatus.PENDING, **kw):

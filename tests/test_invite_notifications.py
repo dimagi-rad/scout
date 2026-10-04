@@ -20,6 +20,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services import invite_notifications
 from apps.workspaces.services.invite_notifications import describe_workspace_sources
 from tests.tenant_access import grant_tenant_access
+from tests.verified_users import create_verified_user
 
 User = get_user_model()
 
@@ -132,7 +133,7 @@ class TestResolverNotifications:
     def test_awaiting_access_notifies_invitee_and_manager(self, workspace, user, mocker):
 
         mock_task = mocker.patch.object(invite_notifications, "send_email")
-        invitee = User.objects.create_user(email="invitee@example.com", password="pass")
+        invitee = create_verified_user("invitee@example.com")
         WorkspaceInvite.objects.create(
             workspace=workspace,
             email="invitee@example.com",
@@ -150,7 +151,7 @@ class TestResolverNotifications:
     def test_accepted_notifies_invitee_and_manager(self, workspace, user, tenant, mocker):
 
         mock_task = mocker.patch.object(invite_notifications, "send_email")
-        invitee = User.objects.create_user(email="invitee@example.com", password="pass")
+        invitee = create_verified_user("invitee@example.com")
         grant_tenant_access(invitee, tenant)
         WorkspaceInvite.objects.create(
             workspace=workspace,
@@ -168,7 +169,7 @@ class TestResolverNotifications:
     def test_awaiting_access_is_not_renotified_on_repeat_login(self, workspace, user, mocker):
 
         mock_task = mocker.patch.object(invite_notifications, "send_email")
-        invitee = User.objects.create_user(email="invitee@example.com", password="pass")
+        invitee = create_verified_user("invitee@example.com")
         WorkspaceInvite.objects.create(
             workspace=workspace,
             email="invitee@example.com",
@@ -188,7 +189,7 @@ class TestResolverNotifications:
 class TestMyInvitesEndpoint:
     @pytest.mark.django_db
     def test_returns_current_users_awaiting_access_invites(self, client, workspace, user, tenant):
-        invitee = User.objects.create_user(email="invitee@example.com", password="pass")
+        invitee = create_verified_user("invitee@example.com")
         WorkspaceInvite.objects.create(
             workspace=workspace,
             email="invitee@example.com",
@@ -206,7 +207,7 @@ class TestMyInvitesEndpoint:
 
     @pytest.mark.django_db
     def test_pending_invites_are_not_surfaced_in_app(self, client, workspace, user):
-        invitee = User.objects.create_user(email="invitee@example.com", password="pass")
+        invitee = create_verified_user("invitee@example.com")
         WorkspaceInvite.objects.create(
             workspace=workspace,
             email="invitee@example.com",

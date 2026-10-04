@@ -2,7 +2,6 @@
 
 import logging
 
-from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.contrib.auth import SESSION_KEY, get_user_model
@@ -190,16 +189,9 @@ def resolve_pending_invites_on_login(user):
     An invite is pure pre-authorization — it carries no data access (Root Cause
     A's access.py is the sole gate). This flips it into a real WorkspaceMembership
     only once the user can use EVERY one of the workspace's tenants (#381), and
-    matches strictly on VERIFIED emails so an unverified address can't claim one.
+    matches strictly on PROVEN emails so an unverified address can't claim one.
     """
-    emails = {
-        e.lower()
-        for e in EmailAddress.objects.filter(user=user, verified=True).values_list(
-            "email", flat=True
-        )
-    }
-    if user.email:
-        emails.add(user.email.lower())
+    emails = proven_emails(user)
     if not emails:
         return
 

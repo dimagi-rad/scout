@@ -5,7 +5,6 @@ import logging
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -27,6 +26,7 @@ from apps.common.errors import (
 from apps.common.http import string_field
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.credential_resolver import aiter_social_tokens
+from apps.users.services.email_proof import proven_emails
 from apps.users.services.oauth_scope import account_scope
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
@@ -1128,21 +1128,14 @@ class MyInvitesView(APIView):
     """GET /api/invites/ — the signed-in user's awaiting_access invites.
 
     Feeds the in-app 'you're invited but need upstream access' banner. Matched on
-    the user's VERIFIED emails (same rule as the login resolver) so the message
+    the user's proven emails (same rule as the login resolver) so the message
     can't be surfaced against an unverified address.
     """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        emails = {
-            e.lower()
-            for e in EmailAddress.objects.filter(user=request.user, verified=True).values_list(
-                "email", flat=True
-            )
-        }
-        if request.user.email:
-            emails.add(request.user.email.lower())
+        emails = proven_emails(request.user)
 
         invites = WorkspaceInvite.objects.filter(
             email__in=emails,
