@@ -671,7 +671,9 @@ async def test_canvas_manager_model_timeout_is_a_tool_error(monkeypatch, timeout
     assert result["error_code"] == "MODEL_TIMEOUT"
     assert "a model call timed out" in result["message"]
     assert get_subagent_event_queue() is None
-    assert (
-        list(queue.get_nowait()["event"] for _ in range(queue.qsize()))[-1]["data"]["phase"]
-        == "failed"
-    )
+    statuses = [
+        item["event"]["data"]["phase"]
+        for item in (queue.get_nowait() for _ in range(queue.qsize()))
+        if item["event"]["type"] == "data-subagent-status"
+    ]
+    assert statuses[-1] == "failed"
