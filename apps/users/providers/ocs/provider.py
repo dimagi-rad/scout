@@ -19,6 +19,12 @@ def team_slug_from_uid(uid: str) -> str:
     return team
 
 
+def _verified_email(data: dict) -> str | None:
+    if data.get("email_verified") is not True:
+        return None
+    return data.get("email") or None
+
+
 class OCSAccount(ProviderAccount):
     def get_avatar_url(self) -> str | None:
         return None
@@ -59,25 +65,26 @@ class OCSProvider(OAuth2Provider):
 
     def extract_common_fields(self, data: dict) -> dict:
         return {
-            "email": data.get("email") or None,
-            "username": data.get("preferred_username") or data.get("email") or "",
+            "email": _verified_email(data),
+            "username": data.get("preferred_username") or _verified_email(data) or "",
             "first_name": data.get("given_name", ""),
             "last_name": data.get("family_name", ""),
         }
 
     def extract_email_addresses(self, data: dict) -> list[EmailAddress]:
-        """Return the user's email, trusted as verified only when OCS says so.
+        """Return the user's email only when OCS asserts it verified.
 
-        Unlike CommCare HQ/Connect, OCS exposes per-login verification via the
-        ``email_verified`` OIDC claim (open-chat-studio#3647). We mirror it rather
-        than trusting wholesale: ``verified=True`` only when OCS asserts the claim.
-        The claim is absent until that OCS change deploys, so this defaults closed
-        (unverified) — never over-trusting an email OCS hasn't confirmed.
+        Unlike CommCare HQ/Connect, OCS reports verification per login via the
+        ``email_verified`` OIDC claim (open-chat-studio#3647). An unverified email
+        is dropped rather than kept as unverified: allauth would still set it as
+        ``User.email``, and a collision with an existing account sends the login to
+        the social signup form, which Scout does not mount. Without it, the login
+        proceeds as an email-less identity, like a Connect user with no email.
         """
-        email = data.get("email") or None
+        email = _verified_email(data)
         if not email:
             return []
-        return [EmailAddress(email=email, verified=bool(data.get("email_verified")), primary=True)]
+        return [EmailAddress(email=email, verified=True, primary=True)]
 
 
 provider_classes = [OCSProvider]

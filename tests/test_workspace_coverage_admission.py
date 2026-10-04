@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import async_to_sync, sync_to_async
 from django.contrib.auth import get_user_model
@@ -48,6 +49,7 @@ from apps.workspaces.services.member_coverage import (
 )
 from tests.row_locks import LOCK_SAFETY_SECONDS, row_locked, user_row
 from tests.tenant_access import grant_tenant_access, ocs_team_connection
+from tests.verified_users import create_verified_user
 
 User = get_user_model()
 
@@ -690,7 +692,7 @@ class TestInviteResolution:
 
     def test_partial_coverage_invitee_awaits_access(self, user, t1, t2):
         ws = _workspace(user, t1, t2)
-        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        invitee = create_verified_user("inv@example.com")
         grant_tenant_access(invitee, t1)
         invite = self._invite(ws, invitee.email)
 
@@ -702,7 +704,7 @@ class TestInviteResolution:
 
     def test_full_coverage_invitee_joins(self, user, t1, t2):
         ws = _workspace(user, t1, t2)
-        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        invitee = create_verified_user("inv@example.com")
         grant_tenant_access(invitee, t1)
         grant_tenant_access(invitee, t2)
         invite = self._invite(ws, invitee.email)
@@ -716,16 +718,18 @@ class TestInviteResolution:
     def test_accepting_a_stale_invite_never_promotes(self, user, t1):
         ws = _workspace(user, t1)
         member = _member(ws, "m@example.com", t1, role=WorkspaceRole.READ)
+        EmailAddress.objects.create(user=member, email=member.email, verified=True, primary=True)
         invite = self._invite(ws, member.email, role=WorkspaceRole.MANAGE)
 
-        accept_invite_if_covered(invite, member)
+        membership = accept_invite_if_covered(invite, member)
 
+        assert membership is not None
         assert WorkspaceMembership.objects.get(workspace=ws, user=member).role == "read"
 
     def test_an_invite_revoked_mid_login_is_not_accepted(self, user, t1):
         """#561 G4: the login loop read the invite before a manager revoked it."""
         ws = _workspace(user, t1)
-        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        invitee = create_verified_user("inv@example.com")
         grant_tenant_access(invitee, t1)
         stale = self._invite(ws, invitee.email)
         WorkspaceInvite.objects.filter(pk=stale.pk).update(status=WorkspaceInviteStatus.REVOKED)
@@ -740,7 +744,7 @@ class TestInviteResolution:
     ):
         """#561 G4: an uncovered invitee's invite moves to awaiting access only if live."""
         ws = _workspace(user, t1, t2)
-        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        invitee = create_verified_user("inv@example.com")
         grant_tenant_access(invitee, t1)
         invite = self._invite(ws, invitee.email)
         accept = signals.accept_invite_if_covered
@@ -760,7 +764,7 @@ class TestInviteResolution:
     def test_login_does_not_expire_an_invite_revoked_mid_login(self, user, t1, monkeypatch):
         """#561 G4: a revoke between the login loop's read and its expiry write stands."""
         ws = _workspace(user, t1)
-        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        invitee = create_verified_user("inv@example.com")
         invite = self._invite(ws, invitee.email)
         WorkspaceInvite.objects.filter(pk=invite.pk).update(
             expires_at=timezone.now() - timedelta(days=1)
@@ -779,7 +783,7 @@ class TestInviteResolution:
 
     def test_acceptance_uses_the_role_as_it_stands_under_the_lock(self, user, t1):
         ws = _workspace(user, t1)
-        invitee = User.objects.create_user(email="inv@example.com", password="pass")
+        invitee = create_verified_user("inv@example.com")
         grant_tenant_access(invitee, t1)
         stale = self._invite(ws, invitee.email, role=WorkspaceRole.READ_WRITE)
         WorkspaceInvite.objects.filter(pk=stale.pk).update(role=WorkspaceRole.READ)
@@ -845,7 +849,7 @@ class TestCreate:
 @pytest.mark.django_db
 def test_awaiting_invite_banner_names_what_is_still_needed(client, user, t1, t2, mocker):
     ws = _workspace(user, t1, t2)
-    invitee = User.objects.create_user(email="inv@example.com", password="pass")
+    invitee = create_verified_user("inv@example.com")
     grant_tenant_access(invitee, t1)
     WorkspaceInvite.objects.create(
         workspace=ws,

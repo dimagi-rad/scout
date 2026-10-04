@@ -2,8 +2,6 @@
 
 import logging
 
-from allauth.account.models import EmailAddress
-from allauth.socialaccount.models import SocialAccount
 from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.contrib.auth import SESSION_KEY, get_user_model
@@ -14,6 +12,7 @@ from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.utils import timezone
 
+from apps.users.services.email_proof import proven_emails, verified_social_email
 from apps.users.services.merge import merge_users
 from apps.users.services.oauth_scope import canonical_provider
 from apps.users.services.onboarding_cache import me_onboarding_cache_key
@@ -40,17 +39,6 @@ from apps.workspaces.services.member_coverage import accept_invite_if_covered
 logger = logging.getLogger(__name__)
 
 
-def _trusted_email_providers() -> set[str]:
-    """allauth provider ids we trust to have verified the email upstream.
-
-    Derived from ``SOCIALACCOUNT_PROVIDERS[<id>]["VERIFIED_EMAIL"] is True``.
-    These are the Dimagi-operated IdPs (CommCare HQ, CommCare Connect, OCS) whose
-    ``extract_email_addresses`` returns a verified ``EmailAddress`` on login.
-    """
-    providers = getattr(settings, "SOCIALACCOUNT_PROVIDERS", {}) or {}
-    return {pid for pid, cfg in providers.items() if (cfg or {}).get("VERIFIED_EMAIL") is True}
-
-
 def _canonical_provably_owns_email(canonical, email: str) -> bool:
     """Whether ``canonical`` has *proven* it owns ``email`` (01#8).
 
@@ -61,35 +49,15 @@ def _canonical_provably_owns_email(canonical, email: str) -> bool:
     ``EmailAddress``) could absorb the victim's OAuth account on the victim's
     next login (closed by commit 1dc1d58).
 
-    Ownership is proven by EITHER:
-
-    1. a verified allauth ``EmailAddress`` for that email (the OAuth->OAuth case:
-       a prior trusted-provider login persisted one), OR
-    2. a ``SocialAccount`` on ``canonical`` from a trusted provider whose login
-       asserted this email — same upstream-verified signal, robust to the case
-       where the verified ``EmailAddress`` row was never persisted/got out of
-       sync.
+    Ownership is proven by a verified allauth ``EmailAddress`` or by a
+    ``SocialAccount`` whose provider vouched for the email (``proven_emails``).
 
     SEAM (01#8 / #258): a canonical that owns the email ONLY via a password
-    account satisfies NEITHER and is (correctly) refused here. Making the
+    account satisfies neither and is (correctly) refused here. Making the
     password->OAuth path auto-link safely needs email verification for password
-    accounts — that perimeter is owned by issue #258. See the PR body.
+    accounts — that perimeter is owned by issue #258.
     """
-    if EmailAddress.objects.filter(
-        user=canonical,
-        email__iexact=email,
-        verified=True,
-    ).exists():
-        return True
-
-    trusted = _trusted_email_providers()
-    if not trusted:
-        return False
-    for account in SocialAccount.objects.filter(user=canonical, provider__in=trusted):
-        account_email = (account.extra_data or {}).get("email") or ""
-        if account_email.strip().lower() == email.strip().lower():
-            return True
-    return False
+    return email.strip().lower() in proven_emails(canonical)
 
 
 @receiver(pre_save, sender=settings.AUTH_USER_MODEL)
@@ -215,22 +183,27 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
         logger.warning("Failed to clear the onboarding cache after login", exc_info=True)
 
 
+def _expire_invite(invite):
+    # Conditional, like the awaiting-access move: keep a revoke's audit trail.
+    WorkspaceInvite.objects.filter(pk=invite.pk, status=invite.status).update(
+        status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now()
+    )
+
+
+def _refreshed_expiry(invite):
+    invite.refresh_from_db(fields=["expires_at"])
+    return invite
+
+
 def resolve_pending_invites_on_login(user):
     """Materialize any live WorkspaceInvite addressed to *user* into a membership.
 
     An invite is pure pre-authorization — it carries no data access (Root Cause
     A's access.py is the sole gate). This flips it into a real WorkspaceMembership
     only once the user can use EVERY one of the workspace's tenants (#381), and
-    matches strictly on VERIFIED emails so an unverified address can't claim one.
+    matches strictly on PROVEN emails so an unverified address can't claim one.
     """
-    emails = {
-        e.lower()
-        for e in EmailAddress.objects.filter(user=user, verified=True).values_list(
-            "email", flat=True
-        )
-    }
-    if user.email:
-        emails.add(user.email.lower())
+    emails = proven_emails(user)
     if not emails:
         return
 
@@ -239,14 +212,14 @@ def resolve_pending_invites_on_login(user):
     ).select_related("workspace")
     for invite in invites:
         if invite.is_expired:
-            # Conditional, like the awaiting-access move below: keep a revoke's audit trail.
-            WorkspaceInvite.objects.filter(pk=invite.pk, status=invite.status).update(
-                status=WorkspaceInviteStatus.EXPIRED, updated_at=timezone.now()
-            )
+            _expire_invite(invite)
             continue
 
         if accept_invite_if_covered(invite, user) is not None:
             notify_invite_accepted(invite, user)
+        elif _refreshed_expiry(invite).is_expired:
+            # Lapsed (or was shortened) before the workspace lock; dead, not awaiting access.
+            _expire_invite(invite)
         elif invite.status != WorkspaceInviteStatus.AWAITING_ACCESS:
             # Conditional: a revoke since the read above must not be overwritten (#561 G4).
             moved = WorkspaceInvite.objects.filter(pk=invite.pk, status=invite.status).update(
@@ -262,16 +235,27 @@ def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
 
     When an existing OAuth user logs in and the provider now returns an email
     that the User row doesn't yet have, either backfill it or merge into the
-    user that already owns that email.
+    user that already owns that email — but only an email the provider vouched
+    for (``verified_social_email``).
     """
-    new_email = sociallogin.account.extra_data.get("email")
-    if not new_email:
-        return
     user = sociallogin.user
     if user.pk is None:
         return  # brand-new user; allauth's _lookup_by_email handles it
     if user.email:
         return  # already has an email — nothing to reconcile
+    extra_data = sociallogin.account.extra_data
+    if not isinstance(extra_data, dict) or not extra_data.get("email"):
+        return
+    new_email = verified_social_email(sociallogin.account.provider, extra_data)
+    if new_email is None:
+        # An email the provider did not vouch for must neither become the
+        # account's email nor pull it into another user's account.
+        logger.info(
+            "Not reconciling user=%s: %s did not verify the email it asserted",
+            user.pk,
+            sociallogin.account.provider,
+        )
+        return
 
     UserModel = get_user_model()
     canonical = UserModel.objects.filter(email__iexact=new_email).exclude(pk=user.pk).first()
@@ -283,7 +267,7 @@ def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
     if not _canonical_provably_owns_email(canonical, new_email):
         logger.warning(
             "Refusing auto-merge: canonical user=%s has not proven ownership of %s "
-            "(no verified EmailAddress and no trusted-provider SocialAccount)",
+            "(no verified EmailAddress and no SocialAccount vouching for it)",
             canonical.pk,
             new_email,
         )

@@ -5,7 +5,7 @@ fall back to an *unverified* EmailAddress. That unverified state is what made th
 cross-provider account merge refuse to reconcile, stranding email-less duplicate
 accounts. Each Scout provider now asserts verification per its upstream IdP:
 CommCare HQ and Connect verify emails themselves (trusted unconditionally); OCS
-exposes an ``email_verified`` OIDC claim that we mirror (default closed).
+exposes an ``email_verified`` OIDC claim, and an email without it is dropped.
 """
 
 import pytest
@@ -66,10 +66,9 @@ def test_ocs_trusts_email_only_when_claim_true():
     [
         {"email": "user@dimagi.com", "email_verified": False},
         {"email": "user@dimagi.com"},  # claim absent (pre open-chat-studio#3647 deploy)
+        {"email": "user@dimagi.com", "email_verified": "false"},
     ],
-    ids=["claim-false", "claim-absent"],
+    ids=["claim-false", "claim-absent", "claim-not-boolean"],
 )
-def test_ocs_email_unverified_without_true_claim(data):
-    addrs = _addresses(OCSProvider, data)
-    assert len(addrs) == 1
-    assert addrs[0].verified is False
+def test_ocs_drops_email_without_true_claim(data):
+    assert _addresses(OCSProvider, data) == []

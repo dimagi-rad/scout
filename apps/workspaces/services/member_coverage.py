@@ -21,6 +21,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.users.models import TenantMembership
+from apps.users.services.email_proof import proven_emails
 from apps.workspaces.access import (
     _workspace_tenants,
     all_of_access_enforced,
@@ -151,9 +152,10 @@ def admit_covered_member(workspace, user, *, role, invited_by):
 def accept_invite_if_covered(invite, user):
     """Turn ``invite`` into a membership once ``user`` covers every tenant.
 
-    Returns the membership, or ``None`` when coverage is still incomplete or the
-    invite is no longer live. An existing membership keeps its role: accepting a
-    stale invite never promotes.
+    Returns the membership, or ``None`` when coverage is still incomplete, the
+    invite is no longer live or has expired, or ``user`` has not proven they own
+    the invited email. An existing membership keeps its role: accepting a stale
+    invite never promotes.
     """
     with transaction.atomic():
         _lock(invite.workspace)
@@ -164,7 +166,11 @@ def accept_invite_if_covered(invite, user):
             .filter(pk=invite.pk, status__in=LIVE_INVITE_STATUSES)
             .first()
         )
-        if current is None:
+        if current is None or current.is_expired:
+            return None
+        # Rechecked here, not just by the caller's email match, so no path into
+        # acceptance can hand an invite to an address the user never proved.
+        if current.email.lower() not in proven_emails(user):
             return None
         if missing_for_user(user, invite.workspace):
             return None
