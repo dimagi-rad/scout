@@ -66,6 +66,7 @@ UNAVAILABLE = VerificationOutcome.UNAVAILABLE
 
 # Where each path reads its wall clock; verification takes an injected clock instead.
 _RESOLUTION_CLOCK = "apps.users.services.tenant_resolution"
+_PAGINATOR_CLOCK = "apps.users.services.tenant_listing.paginator"
 _COMMCARE_KEY_CLOCK = "apps.users.services.api_key_providers.commcare"
 _OCS_KEY_CLOCK = "apps.users.services.api_key_providers.ocs"
 
@@ -86,13 +87,13 @@ class EntryPath:
 
 
 COMMCARE_PATHS = [
-    EntryPath("commcare-oauth-discovery", "commcare", "discovery", clock_module=_RESOLUTION_CLOCK),
+    EntryPath("commcare-oauth-discovery", "commcare", "discovery", clock_module=_PAGINATOR_CLOCK),
     EntryPath(
         "commcare-eu-oauth-discovery",
         "commcare",
         "discovery",
         server="eu",
-        clock_module=_RESOLUTION_CLOCK,
+        clock_module=_PAGINATOR_CLOCK,
     ),
     EntryPath(
         "commcare-api-key",

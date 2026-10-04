@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -18,6 +19,7 @@ from apps.users.services.tenant_listing.types import (
     TenantDescriptor,
     UpstreamStatus,
 )
+from apps.users.services.tenant_resolution import TenantResolutionError, _fetch_all_domains
 
 LISTING = "https://provider.example/api/list/"
 REQUEST = ProviderRequest(LISTING, {"Authorization": "Bearer secret"})
@@ -146,3 +148,21 @@ def test_commcare_request_needs_a_known_server_and_a_whole_key():
     request = commcare_listing.list_request("eu", "api_key", "user@example.org:key")
     assert request.url == COMMCARE_SERVERS["eu"].user_domains_url
     assert request.headers == {"Authorization": "ApiKey user@example.org:key"}
+
+
+@pytest.mark.asyncio
+async def test_discovery_abandons_a_request_that_would_outlive_its_budget(httpx_mock):
+    """R23 follow-up: the budget used to be checked only between pages."""
+
+    async def hang(request):
+        await asyncio.sleep(5)
+        return httpx.Response(200, json={"objects": [], "meta": {"next": None}})
+
+    httpx_mock.add_callback(hang, is_optional=True)
+    started = time.monotonic()
+
+    with patch("apps.users.services.tenant_resolution._LISTING_BUDGET_SECONDS", 0.05):
+        with pytest.raises(TenantResolutionError, match="did not finish"):
+            await _fetch_all_domains("tok", COMMCARE_SERVERS[""])
+
+    assert time.monotonic() - started < 2
