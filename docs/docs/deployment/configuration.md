@@ -78,6 +78,14 @@ The managed database stores materialized data. Each tenant (a CommCare domain, C
 |----------|---------|-------------|
 | `MANAGED_DATABASE_URL` | (empty) | PostgreSQL connection URL for materialized data. Only the development settings fill it in when it is unset, pointing it at the main app database; tenant schemas still keep the data separate. |
 
+### Database TLS
+
+Every Postgres connection Scout makes from Python (the API, the worker, the MCP server, the chat checkpointer and dbt) to a remote host uses `sslmode=verify-full`. Remote means any host other than `localhost`, `127.0.0.1`, `::1`, the Compose service `platform-db`, or a Unix socket. The server certificate is checked against a CA bundle, and its hostname must match the host in the URL. An `sslmode` or `sslrootcert` in `DATABASE_URL` or `MANAGED_DATABASE_URL` can't weaken this for a remote host. If the bundle can't be read, the settings refuse to load. Local hosts keep whatever `sslmode` the URL sets, so the Compose stack doesn't verify TLS to its own database container.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCOUT_DB_SSL_ROOT_CERT` | `cube_config/rds-global-bundle.pem` (the AWS RDS global bundle) | CA bundle used to verify remote Postgres servers. Set it to your CA's PEM file if your database isn't on RDS. Cube's equivalent is `SCOUT_DB_SSL_CA_FILE` (see `cube_config/README.md`). |
+
 ### Access control
 
 These are staged-rollout switches.
