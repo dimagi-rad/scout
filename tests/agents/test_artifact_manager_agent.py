@@ -934,8 +934,8 @@ def _anthropic_request() -> httpx.Request:
 @pytest.mark.parametrize(
     "timeout_error",
     [
-        APITimeoutError(request=_anthropic_request()),
-        httpx.ReadTimeout("stream stalled", request=_anthropic_request()),
+        lambda: APITimeoutError(request=_anthropic_request()),
+        lambda: httpx.ReadTimeout("stream stalled", request=_anthropic_request()),
     ],
 )
 async def test_artifact_manager_model_timeout_is_a_tool_error(monkeypatch, timeout_error):
@@ -947,7 +947,7 @@ async def test_artifact_manager_model_timeout_is_a_tool_error(monkeypatch, timeo
             return self
 
         async def ainvoke(self, messages):
-            raise timeout_error
+            raise timeout_error()
 
     prefix = "apps.agents.tools.artifact_manager_agent"
     monkeypatch.setattr("apps.agents.graph.nested.ChatAnthropic", lambda **kwargs: TimingOutModel())

@@ -16,6 +16,9 @@ SUBAGENT_EFFORT = "low"
 
 # A connect/read timeout before the response starts surfaces as APITimeoutError (after
 # the SDK's retries); one between chunks of an open stream escapes the SDK unwrapped.
+# Only model calls can raise these to the catchers: tool I/O runs under ToolNode,
+# which turns its errors into ToolMessages. A direct httpx call added to a model
+# node or subagent body would be mislabelled as a model timeout.
 LLM_TIMEOUT_ERRORS = (APITimeoutError, httpx.TimeoutException)
 
 

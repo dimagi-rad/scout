@@ -597,7 +597,8 @@ async def langgraph_to_ui_stream(
             ref = _error_ref(exc)
             if isinstance(exc, LLM_TIMEOUT_ERRORS):
                 # Expected once requests are bounded: keep it out of ERROR-level
-                # Sentry. Not auto-retried; the request already ran its retries.
+                # Sentry. Not auto-retried: the turn may already have run tools, and
+                # a pre-response timeout has already used the SDK's retries.
                 logger.warning(
                     "Model request timed out during agent streaming [ref=%s]: %s",
                     ref,
