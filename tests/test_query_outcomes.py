@@ -9,7 +9,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from apps.agents.tools.artifact_manager_agent import _summarize_result
-from apps.artifacts.services import graph_runtime
+from apps.artifacts.services import graph_runtime, query_batch
 from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
 from apps.semantic.services import query as query_service
 from apps.semantic.services import query_outcomes
@@ -186,7 +186,7 @@ async def test_graph_and_parent_preserve_failure_classification(
         "recovery_action": action,
     }
     monkeypatch.setattr(
-        graph_runtime,
+        query_batch,
         "run_semantic_query",
         AsyncMock(return_value={"success": False, "error": error}),
     )
@@ -223,7 +223,7 @@ async def test_graph_and_parent_preserve_failure_classification(
 @pytest.mark.asyncio
 async def test_invalid_document_never_runs_queries(monkeypatch):
     execute = AsyncMock()
-    monkeypatch.setattr(graph_runtime, "run_semantic_query", execute)
+    monkeypatch.setattr(query_batch, "run_semantic_query", execute)
     artifact = SimpleNamespace(data={"story_doc": {"schema_version": 1, "blocks": []}})
     result = await graph_runtime.check_graph_artifact(artifact)
     execute.assert_not_awaited()
@@ -445,7 +445,7 @@ async def test_warning_only_document_still_executes_queries(monkeypatch):
     )
     monkeypatch.setattr(graph_runtime.Workspace.objects, "aget", AsyncMock(return_value=object()))
     execute = AsyncMock(return_value={"columns": [], "rows": [], "row_count": 0})
-    monkeypatch.setattr(graph_runtime, "run_semantic_query", execute)
+    monkeypatch.setattr(query_batch, "run_semantic_query", execute)
     artifact = SimpleNamespace(
         workspace_id="workspace",
         data={

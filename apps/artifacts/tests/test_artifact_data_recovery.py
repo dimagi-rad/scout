@@ -237,7 +237,7 @@ async def test_query_data_returns_recovery_contract_instead_of_generic_query_err
         f"{recovery_setup.artifact.id}/query-data/"
     )
     execute = AsyncMock()
-    with patch("apps.artifacts.views.run_semantic_query", new=execute):
+    with patch("apps.artifacts.services.query_batch.run_semantic_query", new=execute):
         response = await recovery_setup.client.get(query_url)
 
     assert response.status_code == 409

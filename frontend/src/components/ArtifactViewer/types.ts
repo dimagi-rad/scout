@@ -8,8 +8,17 @@ export interface QueryResult {
   error?: string
 }
 
+/** The resolved clock View Data ran a graph document's date bindings against. */
+export interface ResolvedQueryContext {
+  as_of: string
+  timezone: string
+  today: string
+}
+
 export interface QueryDataResponse {
   queries: QueryResult[]
+  // null when only stored queries ran; absent when the artifact has none.
+  query_context?: ResolvedQueryContext | null
   static_data: Record<string, unknown>
   semantic_query_manifest?: Record<string, unknown>
 }

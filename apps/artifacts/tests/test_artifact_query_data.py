@@ -2,6 +2,8 @@
 
 import asyncio
 import copy
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -43,7 +45,9 @@ async def test_query_inspector_resolves_controls_and_separates_filter_cache(
             "semantic_query": query,
         }
 
-    with patch("apps.artifacts.views.run_semantic_query", side_effect=execute) as run:
+    with patch(
+        "apps.artifacts.services.query_batch.run_semantic_query", side_effect=execute
+    ) as run:
         initial = await member_client.post(endpoint, CONTEXT, content_type="application/json")
         assert initial.status_code == 200
         assert initial.json()["queries"][0]["rows"] == [[18]]
@@ -75,7 +79,9 @@ async def test_inspector_never_executes_a_manifest_rejected_query(
     doc["blocks"][1]["config"]["queries"]["sessions"]["dateRange"] = ["2026-09-01", "2026-09-10"]
     live_artifact.data = {"story_doc": doc}
     await live_artifact.asave(update_fields=["data"])
-    with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as execute:
+    with patch(
+        "apps.artifacts.services.query_batch.run_semantic_query", new=AsyncMock()
+    ) as execute:
         response = await member_client.post(
             f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/",
             CONTEXT,
@@ -103,7 +109,7 @@ async def test_inspector_bounds_concurrent_queries(member_client, workspace, liv
         active -= 1
         return {"columns": ["visits.count"], "rows": [[1]], "row_count": 1}
 
-    with patch("apps.artifacts.views.run_semantic_query", side_effect=execute):
+    with patch("apps.artifacts.services.query_batch.run_semantic_query", side_effect=execute):
         response = await member_client.get(
             f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/"
         )
@@ -135,7 +141,7 @@ async def test_a_full_connection_limit_makes_the_panel_retryable(
     else:
         run = AsyncMock(return_value=outcome)
     with (
-        patch("apps.artifacts.views.run_semantic_query", new=run),
+        patch("apps.artifacts.services.query_batch.run_semantic_query", new=run),
         patch("apps.common.capacity.sentry_sdk"),
     ):
         response = await member_client.get(
@@ -168,7 +174,7 @@ async def test_inspector_shares_one_readiness_inspection_across_query_failures(
         )
 
     with (
-        patch("apps.artifacts.views.run_semantic_query", side_effect=execute) as run,
+        patch("apps.artifacts.services.query_batch.run_semantic_query", side_effect=execute) as run,
         patch(
             "apps.semantic.services.query_outcomes.query_surface_readiness",
             new=AsyncMock(
@@ -204,7 +210,7 @@ async def test_inspector_invalid_binding_does_not_fall_back_to_all_time(
     doc["blocks"][1]["inputs"]["date_range"] = {"$ref": "removed.value"}
     live_artifact.data = {"story_doc": doc}
     await live_artifact.asave(update_fields=["data"])
-    with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as run:
+    with patch("apps.artifacts.services.query_batch.run_semantic_query", new=AsyncMock()) as run:
         response = await member_client.post(
             f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/",
             CONTEXT,
@@ -221,31 +227,38 @@ async def test_inspector_invalid_binding_does_not_fall_back_to_all_time(
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+@pytest.mark.parametrize("compare", [False, True], ids=["date_filter", "comparison"])
 async def test_inspector_and_runtime_check_execute_same_default_periods(
-    member_client, workspace, live_artifact
+    member_client, workspace, live_artifact, compare
 ):
-    live_artifact.data = {"story_doc": story(compare=True)}
+    live_artifact.data = {"story_doc": story(compare=compare)}
     await live_artifact.asave(update_fields=["data"])
     result = {"columns": ["sessions.count"], "rows": [[18]], "row_count": 1}
+    expected_count = 2 if compare else 1
     with (
         freeze_time("2026-09-16T13:00:00Z"),
         patch(
-            "apps.artifacts.views.run_semantic_query", new=AsyncMock(return_value=result)
-        ) as inspect,
-        patch(
-            "apps.artifacts.services.graph_runtime.run_semantic_query",
+            "apps.artifacts.services.query_batch.run_semantic_query",
             new=AsyncMock(return_value=result),
-        ) as check,
+        ) as run,
     ):
         response = await member_client.get(
             f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/"
         )
+        inspected_calls = list(run.await_args_list)
         checked = await check_graph_artifact(live_artifact)
+    checked_calls = run.await_args_list[len(inspected_calls) :]
     assert response.status_code == 200
     assert checked["success"] is True
-    assert inspect.await_count == check.await_count == 2
-    for inspected, validated in zip(inspect.await_args_list, check.await_args_list, strict=True):
+    assert len(inspected_calls) == len(checked_calls) == expected_count
+    assert [q["name"] for q in response.json()["queries"]] == [
+        q["query_key"] for q in checked["queries"]
+    ]
+    assert response.json()["query_context"] == checked["query_context"]
+    assert response.json()["query_context"]["as_of"].startswith("2026-09-16T13:00:00")
+    for inspected, validated in zip(inspected_calls, checked_calls, strict=True):
         # Runtime checks cap row count; date ranges/timezones are identical.
+        assert validated.args[1]["limit"] == 50
         actual = copy.deepcopy(validated.args[1])
         actual.pop("limit", None)
         assert inspected.args[1] == actual
@@ -264,7 +277,9 @@ async def test_narrative_only_story_does_not_claim_a_query_date_context(
     }
     await live_artifact.asave(update_fields=["data"])
     result = {"columns": ["visits.count"], "rows": [[18]], "row_count": 1}
-    with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock(return_value=result)):
+    with patch(
+        "apps.artifacts.services.query_batch.run_semantic_query", new=AsyncMock(return_value=result)
+    ):
         response = await member_client.post(
             f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/",
             CONTEXT,
@@ -453,7 +468,7 @@ async def test_returns_query_results_for_live_artifact(live_artifact, member_cli
     url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
 
     with patch(
-        "apps.artifacts.views.run_semantic_query",
+        "apps.artifacts.services.query_batch.run_semantic_query",
         new=AsyncMock(side_effect=[MOCK_SUBMISSIONS_RESULT, MOCK_DAILY_RESULT]),
     ):
         response = await member_client.get(url)
@@ -554,7 +569,7 @@ async def test_individual_query_failure_continues(live_artifact, member_client, 
     error_result = {"success": False, "error": {"code": "QUERY_TIMEOUT", "message": "Timed out"}}
 
     with patch(
-        "apps.artifacts.views.run_semantic_query",
+        "apps.artifacts.services.query_batch.run_semantic_query",
         new=AsyncMock(side_effect=[error_result, MOCK_DAILY_RESULT]),
     ):
         response = await member_client.get(url)
@@ -595,7 +610,7 @@ async def test_semantic_queries_run_concurrently(live_artifact, member_client, m
         started.set()
         return MOCK_DAILY_RESULT if query_spec.get("time_dimension") else MOCK_SUBMISSIONS_RESULT
 
-    with patch("apps.artifacts.views.run_semantic_query", new=slow_execute):
+    with patch("apps.artifacts.services.query_batch.run_semantic_query", new=slow_execute):
         response = await member_client.get(url)
 
     assert response.status_code == 200
@@ -615,7 +630,7 @@ async def test_query_results_cached_across_opens(live_artifact, member_client, m
     url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
 
     exec_mock = AsyncMock(side_effect=[MOCK_SUBMISSIONS_RESULT, MOCK_DAILY_RESULT])
-    with patch("apps.artifacts.views.run_semantic_query", new=exec_mock):
+    with patch("apps.artifacts.services.query_batch.run_semantic_query", new=exec_mock):
         first = await member_client.get(url)
         calls_after_first = exec_mock.await_count
         second = await member_client.get(url)
@@ -639,7 +654,7 @@ async def test_malformed_stored_query_does_not_crash_inspector(
     ]
     await live_artifact.asave(update_fields=["semantic_queries"])
     with patch(
-        "apps.artifacts.views.run_semantic_query",
+        "apps.artifacts.services.query_batch.run_semantic_query",
         new=AsyncMock(return_value=MOCK_SUBMISSIONS_RESULT),
     ) as run:
         response = await member_client.get(
@@ -674,7 +689,7 @@ async def test_narrative_document_preserves_explicit_stored_queries(
     }
     await live_artifact.asave(update_fields=["data"])
     with patch(
-        "apps.artifacts.views.run_semantic_query",
+        "apps.artifacts.services.query_batch.run_semantic_query",
         new=AsyncMock(return_value=MOCK_SUBMISSIONS_RESULT),
     ) as run:
         response = await member_client.post(
@@ -714,7 +729,7 @@ async def test_inspector_rejects_a_body_that_is_not_a_json_object(
     data_state = {"status": "stale", "queryable": artifact_state != "not_ready", "message": "x"}
     with (
         patch("apps.artifacts.views.artifact_data_state", new=AsyncMock(return_value=data_state)),
-        patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as run,
+        patch("apps.artifacts.services.query_batch.run_semantic_query", new=AsyncMock()) as run,
     ):
         response = await member_client.post(
             f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/",
@@ -735,7 +750,7 @@ async def test_inspector_treats_an_empty_body_as_no_runtime_context(
     await live_artifact.asave(update_fields=["data"])
     await cache.aclear()
     with patch(
-        "apps.artifacts.views.run_semantic_query",
+        "apps.artifacts.services.query_batch.run_semantic_query",
         new=AsyncMock(return_value=MOCK_SUBMISSIONS_RESULT),
     ) as run:
         response = await member_client.post(
@@ -744,4 +759,399 @@ async def test_inspector_treats_an_empty_body_as_no_runtime_context(
             content_type="application/json",
         )
     assert response.status_code == 200
+    run.assert_awaited_once()
+
+
+# Characterization of the batch contract shared by View Data and runtime checks
+# (refactor deep dive finding 6): these pin the raw payloads both adapters emit.
+
+LEGACY_SQL_ERROR = (
+    "Legacy SQL-backed artifact queries are disabled. Recreate this artifact with semantic_queries."
+)
+
+
+def test_cache_key_identity_is_pinned(live_artifact):
+    """Changing the cache key's inputs invalidates (or wrongly shares) every cached panel."""
+    key = _artifact_query_cache_key(
+        live_artifact, "rev-1", [{"name": "q", "measures": ["visits.count"]}]
+    )
+    assert key == f"artifact_qdata:{live_artifact.id}:{live_artifact.version}:c3eda29659cb"
+    assert key != _artifact_query_cache_key(
+        live_artifact, "rev-2", [{"name": "q", "measures": ["visits.count"]}]
+    )
+
+
+def _json_bytes(payload):
+    """JsonResponse's exact serialization, so key order and spacing are pinned too."""
+    return json.dumps(payload).encode()
+
+
+def _batch_execute(results):
+    """Answer each query by its first measure so assertions don't depend on scheduling."""
+
+    async def execute(_workspace, query, **kwargs):
+        outcome = results[query["measures"][0]]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome(query) if callable(outcome) else outcome
+
+    return execute
+
+
+def _ok_result(query):
+    return {
+        "columns": ["visits.count"],
+        "rows": [[3]],
+        "row_count": 1,
+        "semantic_query": {**query, "query_context": {"as_of": "x", "timezone": "UTC"}},
+        "members": ["visits.count"],
+    }
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_view_data_partial_failure_payload_and_no_caching(
+    live_artifact, member_client, workspace, caplog
+):
+    live_artifact.semantic_queries = [
+        {"name": "ok", "measures": ["ok.count"]},
+        {"name": "failed", "measures": ["failed.count"], "limit": 7},
+        {"name": "raised", "measures": ["raised.count"]},
+        "not-an-object",
+        {"name": "plain_error", "measures": ["plain.count"]},
+    ]
+    live_artifact.source_queries = [{"name": "legacy", "sql": "SELECT 1"}]
+    await live_artifact.asave(update_fields=["semantic_queries", "source_queries"])
+    await cache.aclear()
+    execute = _batch_execute(
+        {
+            "ok.count": _ok_result,
+            "failed.count": {
+                "success": False,
+                "error": {"code": "QUERY_TIMEOUT", "message": "Timed out"},
+            },
+            "raised.count": RuntimeError("cube exploded"),
+            "plain.count": {"error": "plain text failure"},
+        }
+    )
+    with patch(
+        "apps.artifacts.services.query_batch.run_semantic_query", side_effect=execute
+    ) as run:
+        response = await member_client.get(
+            f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/"
+        )
+    assert response.status_code == 200
+    assert run.await_count == 4
+    assert response.content == _json_bytes(
+        {
+            "queries": [
+                {
+                    "name": "ok",
+                    "semantic_query": {
+                        "measures": ["ok.count"],
+                        "query_context": {"timezone": "UTC"},
+                    },
+                    "columns": ["visits.count"],
+                    "rows": [[3]],
+                    "row_count": 1,
+                    "truncated": False,
+                },
+                {
+                    "name": "failed",
+                    "semantic_query": {"limit": 7, "measures": ["failed.count"]},
+                    "error": "Timed out",
+                },
+                {
+                    "name": "raised",
+                    "semantic_query": {"measures": ["raised.count"]},
+                    "error": "Semantic query failed",
+                },
+                {"name": "semantic_query_3", "error": "Semantic query must be an object"},
+                {
+                    "name": "plain_error",
+                    "semantic_query": {"measures": ["plain.count"]},
+                    "error": "plain text failure",
+                },
+                {"name": "legacy", "error": LEGACY_SQL_ERROR},
+            ],
+            "query_context": None,
+            "static_data": {"story_doc": {"blocks": [], "version": 1}},
+            "semantic_query_manifest": {},
+        }
+    )
+    record = next(r for r in caplog.records if "Artifact query 'raised' failed" in r.getMessage())
+    assert record.exc_info is not None
+    key = _artifact_query_cache_key(live_artifact, "", live_artifact.semantic_queries)
+    assert await cache.aget(key) is None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_view_data_caches_only_a_fully_successful_batch(
+    live_artifact, member_client, workspace
+):
+    await cache.aclear()
+    url = f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/"
+    live_artifact.semantic_queries = [
+        {"name": "a", "measures": ["ok.count"]},
+        {"name": "b", "measures": ["ok.count"], "query_context": {"timezone": "UTC"}},
+    ]
+    await live_artifact.asave(update_fields=["semantic_queries"])
+    execute = _batch_execute({"ok.count": _ok_result})
+    with patch(
+        "apps.artifacts.services.query_batch.run_semantic_query", side_effect=execute
+    ) as run:
+        first = await member_client.get(url)
+        second = await member_client.post(url, b"", content_type="application/json")
+    assert run.await_count == 2
+    assert first.status_code == second.status_code == 200
+    assert first.content == second.content
+    key = _artifact_query_cache_key(live_artifact, "", live_artifact.semantic_queries)
+    assert await cache.aget(key) == first.json()["queries"]
+    assert first.content == _json_bytes(
+        {
+            "queries": [
+                {
+                    "name": "a",
+                    "semantic_query": {
+                        "measures": ["ok.count"],
+                        "query_context": {"timezone": "UTC"},
+                    },
+                    "columns": ["visits.count"],
+                    "rows": [[3]],
+                    "row_count": 1,
+                    "truncated": False,
+                },
+                {
+                    "name": "b",
+                    "semantic_query": {
+                        "measures": ["ok.count"],
+                        "query_context": {"timezone": "UTC"},
+                    },
+                    "columns": ["visits.count"],
+                    "rows": [[3]],
+                    "row_count": 1,
+                    "truncated": False,
+                },
+            ],
+            "query_context": None,
+            "static_data": {"story_doc": {"blocks": [], "version": 1}},
+            "semantic_query_manifest": {},
+        }
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "full",
+    [
+        query_error("CONNECTION_ERROR", "full", category=CAPACITY_EXHAUSTED_CATEGORY),
+        OperationalError("FATAL:  sorry, too many clients already"),
+    ],
+    ids=["cube_pool_full", "database_full"],
+)
+async def test_one_full_pool_fails_the_whole_panel_without_caching_partial_results(
+    live_artifact, member_client, workspace, full, caplog
+):
+    await cache.aclear()
+    live_artifact.semantic_queries = [
+        {"name": "ok", "measures": ["ok.count"]},
+        {"name": "full", "measures": ["full.count"]},
+        {"name": "bug", "measures": ["bug.count"]},
+    ]
+    await live_artifact.asave(update_fields=["semantic_queries"])
+    execute = _batch_execute(
+        {"ok.count": _ok_result, "full.count": full, "bug.count": RuntimeError("bug")}
+    )
+    url = f"/api/workspaces/{workspace.id}/artifacts/{live_artifact.id}/query-data/"
+    with (
+        patch("apps.artifacts.services.query_batch.run_semantic_query", side_effect=execute) as run,
+        patch("apps.common.capacity.sentry_sdk"),
+    ):
+        response = await member_client.get(url)
+        retried = await member_client.get(url)
+    assert response.status_code == retried.status_code == 503
+    assert run.await_count == 6
+    failures = [r.getMessage() for r in caplog.records if "Artifact query" in r.getMessage()]
+    assert len(failures) == 2
+    assert all("'bug' failed" in message for message in failures)
+    key = _artifact_query_cache_key(live_artifact, "", live_artifact.semantic_queries)
+    assert await cache.aget(key) is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_check_payload_for_mixed_outcomes(monkeypatch):
+    active = 0
+    peak = 0
+    results = {
+        "ok.count": {"columns": ["ok.count"], "rows": [[1]], "row_count": 1, "truncated": True},
+        "failed.count": {
+            "success": False,
+            "error": {"code": "QUERY_TIMEOUT", "message": "Timed out", "retryable": True},
+        },
+        "full.count": query_error(
+            "CONNECTION_ERROR", "Cube is full", category=CAPACITY_EXHAUSTED_CATEGORY, retryable=True
+        ),
+        "drift.count": {"columns": ["other.count"], "rows": [[2]], "row_count": 1},
+    }
+
+    async def execute(_workspace, query, *, user_id, readiness):
+        nonlocal active, peak
+        assert user_id == "u1"
+        active += 1
+        peak = max(peak, active)
+        await readiness.surface()
+        await asyncio.sleep(0)
+        active -= 1
+        return results[query["measures"][0]]
+
+    monkeypatch.setattr(
+        "apps.artifacts.services.graph_runtime.Workspace.objects.aget",
+        AsyncMock(return_value=SimpleNamespace(id="workspace")),
+    )
+    monkeypatch.setattr("apps.artifacts.services.query_batch.run_semantic_query", execute)
+    inspect = AsyncMock(return_value=QuerySurfaceReadiness({"queryable": True}))
+    monkeypatch.setattr("apps.semantic.services.query_outcomes.query_surface_readiness", inspect)
+    queries = {
+        "ok": {"measures": ["ok.count"]},
+        "failed": {"measures": ["failed.count"], "limit": 5},
+        "full": {"measures": ["full.count"]},
+        "drift": {"measures": ["drift.count"]},
+    }
+    doc = {
+        "schema_version": 1,
+        "blocks": [
+            {"id": "q", "type": "semantic_query", "hidden": True, "config": {"queries": queries}}
+        ],
+    }
+    with freeze_time("2026-09-16T13:00:00Z"):
+        result = await check_graph_artifact(
+            SimpleNamespace(workspace_id="workspace", data={"story_doc": doc}), user_id="u1"
+        )
+    assert peak == 1
+    inspect.assert_awaited_once()
+    ctx = {"as_of": "2026-09-16T13:00:00+00:00", "timezone": "UTC", "today": "2026-09-16"}
+    specs = [
+        {"measures": ["ok.count"], "query_context": ctx, "limit": 50},
+        {"measures": ["failed.count"], "limit": 5, "query_context": ctx},
+        {"measures": ["full.count"], "query_context": ctx, "limit": 50},
+        {"measures": ["drift.count"], "query_context": ctx, "limit": 50},
+    ]
+    assert inspect.await_args.args[1] == specs
+    failures = [
+        {
+            "code": "QUERY_TIMEOUT",
+            "message": "Timed out",
+            "category": "runtime_failure",
+            "retryable": True,
+            "recovery_action": None,
+        },
+        {
+            "code": "CONNECTION_ERROR",
+            "message": "Cube is full",
+            "category": "capacity_exhausted",
+            "retryable": True,
+            "recovery_action": None,
+        },
+    ]
+    drift = 'Expected result key "drift_count" was not returned'
+    expected = {
+        "success": False,
+        "query_context": ctx,
+        "diagnostics": [],
+        "manifest": {"schema_version": 1, "entry_count": 4, "unresolved_count": 0},
+        "queries": [
+            {
+                "query_key": "q.ok",
+                "status": "ok",
+                "row_count": 1,
+                "result_keys": ["ok_count"],
+                "truncated": True,
+                "semantic_query": specs[0],
+            },
+            {
+                "query_key": "q.failed",
+                "status": "error",
+                "error": "Timed out",
+                "failure": failures[0],
+                "semantic_query": specs[1],
+            },
+            {
+                "query_key": "q.full",
+                "status": "error",
+                "error": "Cube is full",
+                "failure": failures[1],
+                "semantic_query": specs[2],
+            },
+            {
+                "query_key": "q.drift",
+                "status": "ok",
+                "row_count": 1,
+                "result_keys": ["other_count"],
+                "truncated": False,
+                "semantic_query": specs[3],
+            },
+        ],
+        "failures": [
+            {"query_key": "q.failed", **failures[0]},
+            {"query_key": "q.full", **failures[1]},
+            {
+                "query_key": "q.drift",
+                "message": drift,
+                "category": "invalid_document",
+                "code": "RESULT_KEY_MISMATCH",
+                "retryable": False,
+                "recovery_action": None,
+            },
+        ],
+        "key_warnings": [
+            {
+                "query_key": "q.drift",
+                "message": drift,
+                "expected_key": "drift_count",
+                "actual_keys": ["other_count"],
+            }
+        ],
+        "summary": "2/4 queries ok",
+    }
+    # The agent reads this serialized, so key order is part of the contract.
+    assert json.dumps(result) == json.dumps(expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised",
+    [RuntimeError("cube exploded"), OperationalError("FATAL:  sorry, too many clients already")],
+    ids=["bug", "database_full"],
+)
+async def test_runtime_check_lets_a_raised_query_error_propagate(monkeypatch, raised):
+    """The agent tool reports the exception; a runtime check never swallows it as a failure."""
+    monkeypatch.setattr(
+        "apps.artifacts.services.graph_runtime.Workspace.objects.aget",
+        AsyncMock(return_value=SimpleNamespace(id="workspace")),
+    )
+    run = AsyncMock(side_effect=raised)
+    monkeypatch.setattr("apps.artifacts.services.query_batch.run_semantic_query", run)
+    doc = {
+        "schema_version": 1,
+        "blocks": [
+            {
+                "id": "q",
+                "type": "semantic_query",
+                "hidden": True,
+                "config": {
+                    "queries": {
+                        "count": {"measures": ["visits.count"]},
+                        "later": {"measures": ["visits.later"]},
+                    }
+                },
+            }
+        ],
+    }
+    with pytest.raises(type(raised)):
+        await check_graph_artifact(
+            SimpleNamespace(workspace_id="workspace", data={"story_doc": doc})
+        )
+    # A full pool must not be hit again by the rest of the check (old sequential abort).
     run.assert_awaited_once()

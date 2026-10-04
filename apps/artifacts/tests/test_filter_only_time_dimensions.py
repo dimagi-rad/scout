@@ -150,7 +150,7 @@ async def test_runtime_accepts_actual_cube_projection(query, time_key, row_forma
             new=AsyncMock(return_value=workspace),
         ),
         patch(
-            "apps.artifacts.services.graph_runtime.run_semantic_query",
+            "apps.artifacts.services.query_batch.run_semantic_query",
             new=AsyncMock(return_value=result),
         ) as execute,
     ):
@@ -187,7 +187,7 @@ async def test_runtime_still_rejects_missing_selected_columns(query, time_key, m
     with (
         patch("apps.artifacts.services.graph_runtime.Workspace.objects.aget", new=AsyncMock()),
         patch(
-            "apps.artifacts.services.graph_runtime.run_semantic_query",
+            "apps.artifacts.services.query_batch.run_semantic_query",
             new=AsyncMock(return_value=result),
         ),
     ):
@@ -207,7 +207,7 @@ async def test_filter_only_time_still_requires_a_valid_semantic_member():
     with (
         patch("apps.artifacts.services.graph_runtime.Workspace.objects.aget", new=AsyncMock()),
         patch(
-            "apps.artifacts.services.graph_runtime.run_semantic_query",
+            "apps.artifacts.services.query_batch.run_semantic_query",
             new=AsyncMock(return_value=error),
         ),
     ):
@@ -238,7 +238,7 @@ async def test_artifact_write_publishes_and_updates_valid_time_query(
         if tool.name == "artifact_write"
     )
     with patch(
-        "apps.artifacts.services.graph_runtime.run_semantic_query",
+        "apps.artifacts.services.query_batch.run_semantic_query",
         new=AsyncMock(return_value=cube_result(query, time_key)),
     ):
         created = await write.ainvoke(

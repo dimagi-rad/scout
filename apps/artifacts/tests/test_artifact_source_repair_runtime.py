@@ -163,7 +163,7 @@ async def test_partial_publication_missing_source_dispatches_materialization(
         with pytest.raises(ValueError, match="No active data schema"):
             await sync_to_async(SchemaManager().build_view_schema)(setup.workspace)
 
-    with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as query:
+    with patch("apps.artifacts.services.query_batch.run_semantic_query", new=AsyncMock()) as query:
         response = await setup.client.get(setup.url)
     assert response.status_code == 409
     state = response.json()["data_recovery"]
@@ -334,7 +334,7 @@ async def test_older_ready_surface_cannot_hide_current_explicit_missing_view(
             new=AsyncMock(return_value=full_surface),
         ),
         patch("apps.artifacts.views.recover_workspace_data.defer_async", new=defer),
-        patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as query,
+        patch("apps.artifacts.services.query_batch.run_semantic_query", new=AsyncMock()) as query,
     ):
         state = (await setup.client.get(_recovery_url(setup.artifact))).json()
         assert state["queryable"] is False
