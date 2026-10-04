@@ -158,7 +158,6 @@ def test_invite_lapsing_before_the_lock_expires_instead_of_awaiting(
         WorkspaceInvite.objects.filter(pk=stale.pk).update(
             expires_at=timezone.now() - timedelta(seconds=1)
         )
-        stale.expires_at = timezone.now() - timedelta(seconds=1)
         return accept(stale, who)
 
     monkeypatch.setattr(signals, "accept_invite_if_covered", lapse_then_accept)

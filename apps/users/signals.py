@@ -190,6 +190,11 @@ def _expire_invite(invite):
     )
 
 
+def _refreshed_expiry(invite):
+    invite.refresh_from_db(fields=["expires_at"])
+    return invite
+
+
 def resolve_pending_invites_on_login(user):
     """Materialize any live WorkspaceInvite addressed to *user* into a membership.
 
@@ -212,8 +217,8 @@ def resolve_pending_invites_on_login(user):
 
         if accept_invite_if_covered(invite, user) is not None:
             notify_invite_accepted(invite, user)
-        elif invite.is_expired:
-            # Lapsed while waiting for the workspace lock; it is dead, not awaiting access.
+        elif _refreshed_expiry(invite).is_expired:
+            # Lapsed (or was shortened) before the workspace lock; dead, not awaiting access.
             _expire_invite(invite)
         elif invite.status != WorkspaceInviteStatus.AWAITING_ACCESS:
             # Conditional: a revoke since the read above must not be overwritten (#561 G4).
@@ -233,15 +238,15 @@ def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
     user that already owns that email — but only an email the provider vouched
     for (``verified_social_email``).
     """
-    new_email = sociallogin.account.extra_data.get("email")
-    if not new_email:
-        return
     user = sociallogin.user
     if user.pk is None:
         return  # brand-new user; allauth's _lookup_by_email handles it
     if user.email:
         return  # already has an email — nothing to reconcile
-    new_email = verified_social_email(sociallogin.account.provider, sociallogin.account.extra_data)
+    extra_data = sociallogin.account.extra_data
+    if not isinstance(extra_data, dict) or not extra_data.get("email"):
+        return
+    new_email = verified_social_email(sociallogin.account.provider, extra_data)
     if new_email is None:
         # An email the provider did not vouch for must neither become the
         # account's email nor pull it into another user's account.

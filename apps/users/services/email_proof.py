@@ -20,6 +20,8 @@ from django.conf import settings
 # claim, instead of verifying every email they hand out (open-chat-studio#3647).
 CLAIM_VERIFIED_PROVIDERS = frozenset({"ocs"})
 
+_UNRESOLVED = object()
+
 
 def trusted_email_providers() -> set[str]:
     """Provider ids that verify every email they assert (CommCare HQ, Connect).
@@ -37,7 +39,9 @@ def provider_class_ids(provider_ids: Iterable[str]) -> dict[str, str | None]:
     A ``SocialApp`` with a ``provider_id`` (``hq_production``, ``ocs_staging``)
     stores its accounts under that alias, while allauth keys provider settings by
     the class id. An id no app claims resolves only if it is itself a class id, so
-    an orphaned or ambiguous alias maps to None and vouches for nothing.
+    an orphaned or ambiguous alias maps to None and vouches for nothing. This
+    deliberately does not use ``canonical_provider``'s prefix match, which would
+    trust any ``commcare*``-shaped id.
     """
     provider_ids = set(provider_ids)
     classes: dict[str, set[str]] = {}
@@ -60,7 +64,7 @@ def verified_social_email(
     provider: str,
     extra_data: dict | None,
     *,
-    class_id: str | None = None,
+    class_id: str | object | None = _UNRESOLVED,
     trusted: set[str] | None = None,
 ) -> str | None:
     """The email a provider login asserted, if that provider vouched for it.
@@ -76,7 +80,7 @@ def verified_social_email(
     if not isinstance(email, str) or not email.strip():
         return None
     email = email.strip()
-    if class_id is None:
+    if class_id is _UNRESOLVED:
         class_id = provider_class_ids([provider])[provider]
     if trusted is None:
         trusted = trusted_email_providers()
