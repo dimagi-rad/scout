@@ -5,8 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from apps.semantic.services.date_context import DateContextError
-from apps.semantic.services.query import run_semantic_query
-from apps.semantic.services.query_outcomes import QueryReadiness
 from apps.workspaces.models import Workspace
 
 from .graph_doc import (
@@ -17,7 +15,7 @@ from .graph_doc import (
     validate_doc,
 )
 from .graph_manifest import build_semantic_query_manifest
-from .query_context import resolve_artifact_queries
+from .query_batch import execute_artifact_plan, plan_story_queries
 
 CHECK_ROW_LIMIT = 50
 MAX_CHECK_QUERIES = 25
@@ -37,7 +35,7 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     query_results = []
     actual_keys: dict[str, list[str]] = {}
     try:
-        resolved, context = resolve_artifact_queries(doc)
+        plan = plan_story_queries(doc)
     except DateContextError as exc:
         return {
             "success": False,
@@ -61,7 +59,8 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             ],
             "summary": "Date context could not be resolved",
         }
-    if len(resolved) > MAX_CHECK_QUERIES:
+    context = plan.query_context
+    if len(plan.queries) > MAX_CHECK_QUERIES:
         return {
             "success": False,
             "diagnostics": [
@@ -69,7 +68,7 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
                 {
                     "severity": "error",
                     "code": "query_check_limit",
-                    "message": f"Runtime checks support at most {MAX_CHECK_QUERIES} queries, including both comparison periods; this artifact resolves to {len(resolved)}.",
+                    "message": f"Runtime checks support at most {MAX_CHECK_QUERIES} queries, including both comparison periods; this artifact resolves to {len(plan.queries)}.",
                 },
             ],
             "manifest": manifest_summary,
@@ -88,7 +87,6 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             ],
             "summary": "Too many queries to validate the complete artifact",
         }
-    entries = resolved
     if diagnostics_have_errors(diagnostics):
         return {
             "success": False,
@@ -109,18 +107,21 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             "summary": "Document validation failed; no queries executed.",
         }
     workspace = await Workspace.objects.aget(pk=artifact.workspace_id)
-    queries = [{key: value for key, value in entry.items() if key != "name"} for entry in entries]
-    for query in queries:
-        query.setdefault("limit", CHECK_ROW_LIMIT)
-    readiness = QueryReadiness(workspace, queries)
-    for entry, query in zip(entries, queries, strict=True):
-        result = await run_semantic_query(workspace, query, user_id=user_id, readiness=readiness)
-        if not result.get("success", True) or result.get("error"):
-            error = result.get("error")
-            failure = _query_failure(error)
+    batch = await execute_artifact_plan(
+        plan,
+        workspace,
+        user_id=user_id,
+        row_limit=CHECK_ROW_LIMIT,
+        concurrency=1,
+        raise_errors=True,
+    )
+    for outcome in batch.outcomes:
+        name, query, result = outcome.planned.name, outcome.executed, outcome.result or {}
+        if not outcome.succeeded:
+            failure = _query_failure(result.get("error"))
             query_results.append(
                 {
-                    "query_key": entry["name"],
+                    "query_key": name,
                     "status": "error",
                     "error": failure["message"],
                     "failure": failure,
@@ -129,10 +130,10 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
             )
             continue
         row_keys = _row_keys(result.get("columns", []), result.get("rows", []), query)
-        actual_keys[entry["name"]] = sorted(row_keys)
+        actual_keys[name] = sorted(row_keys)
         query_results.append(
             {
-                "query_key": entry["name"],
+                "query_key": name,
                 "status": "ok",
                 "row_count": result.get("row_count", 0),
                 "result_keys": sorted(row_keys),
@@ -144,8 +145,8 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     # let a valid current result hide a broken previous-period result.
     key_warnings = _key_contract_warnings(
         [
-            {"key": entry["name"], "result_keys": sorted(expected_result_keys(entry))}
-            for entry in entries
+            {"key": planned.name, "result_keys": sorted(expected_result_keys(planned.entry))}
+            for planned in plan.queries
         ],
         actual_keys,
     )

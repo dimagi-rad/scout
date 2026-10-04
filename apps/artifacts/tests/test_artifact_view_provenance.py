@@ -183,7 +183,7 @@ async def published_sources(settings, monkeypatch):
 
 
 async def _assert_recovery(setup, action="materialization"):
-    with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as query:
+    with patch("apps.artifacts.services.query_batch.run_semantic_query", new=AsyncMock()) as query:
         response = await setup.client.get(setup.url)
     assert response.status_code == 409
     state = response.json()["data_recovery"]
@@ -362,7 +362,7 @@ async def test_provenance_does_not_widen_artifact_access(published_sources):
     stranger_client = AsyncClient()
     await sync_to_async(_login)(stranger_client, stranger)
     wrong_scope = f"/api/workspaces/{other_workspace.id}/artifacts/{setup.artifact.id}/query-data/"
-    with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as query:
+    with patch("apps.artifacts.services.query_batch.run_semantic_query", new=AsyncMock()) as query:
         assert (await AsyncClient().get(setup.url)).status_code == 401
         assert (await stranger_client.get(setup.url)).status_code == 403
         assert (await setup.client.get(wrong_scope)).status_code == 404

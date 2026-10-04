@@ -137,7 +137,7 @@ async def test_runtime_never_reports_success_for_a_truncated_comparison_pair(mon
         for index in range(13)
     }
     run = AsyncMock()
-    monkeypatch.setattr("apps.artifacts.services.graph_runtime.run_semantic_query", run)
+    monkeypatch.setattr("apps.artifacts.services.query_batch.run_semantic_query", run)
     result = await check_graph_artifact(SimpleNamespace(data={"story_doc": doc}))
     assert result["success"] is False
     assert "query_check_limit" in {d["code"] for d in result["diagnostics"]}
@@ -221,7 +221,7 @@ async def test_comparison_checks_previous_period_keys_independently(monkeypatch)
         AsyncMock(return_value=object()),
     )
     monkeypatch.setattr(
-        "apps.artifacts.services.graph_runtime.run_semantic_query",
+        "apps.artifacts.services.query_batch.run_semantic_query",
         AsyncMock(
             side_effect=[
                 {"columns": ["sessions.count"], "rows": [[18]], "row_count": 1},

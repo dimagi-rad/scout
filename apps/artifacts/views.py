@@ -5,7 +5,6 @@ Provides views for rendering artifacts in a sandboxed iframe,
 fetching artifact data via API, and executing live queries.
 """
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -22,13 +21,15 @@ from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views import View
 
-from apps.artifacts.services.query_context import resolve_artifact_queries
-from apps.common.capacity import CapacityExhausted, CapacityResource, classify_capacity_error
+from apps.artifacts.services.query_batch import (
+    ArtifactQueryOutcome,
+    execute_artifact_plan,
+    plan_artifact_queries,
+)
+from apps.common.capacity import CapacityExhausted
 from apps.common.http import parse_json_object
 from apps.common.utils import creator_display_name
 from apps.semantic.services.date_context import DateContextError, date_context
-from apps.semantic.services.query import is_capacity_exhausted, run_semantic_query
-from apps.semantic.services.query_outcomes import QueryReadiness
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.models import WorkspaceDataRecovery, WorkspaceRole
 from apps.workspaces.services.data_recovery import artifact_data_state
@@ -795,6 +796,43 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
         }
 
 
+def _log_query_bugs(artifact: Artifact, outcomes) -> None:
+    # A full pool is reported by CapacityExhausted's own rate-limited event.
+    for outcome in outcomes:
+        if outcome.exception is not None and outcome.capacity is None:
+            logger.error(
+                "Artifact query '%s' failed for artifact %s",
+                outcome.planned.name,
+                artifact.id,
+                exc_info=outcome.exception,
+            )
+
+
+def _view_data_result(outcome: ArtifactQueryOutcome) -> dict[str, Any]:
+    name = outcome.planned.name
+    if outcome.executed is None:
+        return {"name": name, "error": "Semantic query must be an object"}
+    if outcome.exception is not None:
+        return {"name": name, "semantic_query": outcome.executed, "error": "Semantic query failed"}
+    result = outcome.result
+    if not outcome.succeeded:
+        error_info = result.get("error", {})
+        msg = (
+            error_info.get("message", "Semantic query failed")
+            if isinstance(error_info, dict)
+            else str(error_info)
+        )
+        return {"name": name, "semantic_query": outcome.executed, "error": msg}
+    return {
+        "name": name,
+        "semantic_query": _query_cache_intent(result.get("semantic_query", outcome.executed)),
+        "columns": result.get("columns", []),
+        "rows": result.get("rows", []),
+        "row_count": result.get("row_count", 0),
+        "truncated": result.get("truncated", False),
+    }
+
+
 class ArtifactQueryDataView(View):
     """
     Executes an artifact's semantic_queries and returns results.
@@ -856,13 +894,7 @@ class ArtifactQueryDataView(View):
         static_data = artifact.data or {}
 
         try:
-            doc = static_data.get("story_doc")
-            if isinstance(doc, dict) and doc.get("blocks"):
-                queries, resolved_context = resolve_artifact_queries(doc, runtime)
-                if not queries:
-                    queries, resolved_context = artifact.semantic_queries, None
-            else:
-                queries, resolved_context = artifact.semantic_queries, None
+            plan = plan_artifact_queries(artifact, runtime)
         except DateContextError as exc:
             logger.warning("Artifact %s date context rejected: %s", artifact.id, exc)
             return JsonResponse(
@@ -871,11 +903,12 @@ class ArtifactQueryDataView(View):
                 },
                 status=400,
             )
+        resolved_context = plan.query_context
 
         # Serve repeat opens of the same artifact version from a short-lived
         # cache so we don't re-run every source query on every open (09#9).
         cache_key = _artifact_query_cache_key(
-            artifact, data_state.get("data_revision", ""), queries
+            artifact, data_state.get("data_revision", ""), plan.entries
         )
         cached = await cache.aget(cache_key)
         if cached is not None:
@@ -888,67 +921,19 @@ class ArtifactQueryDataView(View):
                 }
             )
 
-        query_slots = asyncio.Semaphore(ARTIFACT_QUERY_CONCURRENCY)
-        readiness = QueryReadiness(
+        batch = await execute_artifact_plan(
+            plan,
             artifact.workspace,
-            [
-                {key: value for key, value in entry.items() if key != "name"}
-                for entry in queries
-                if isinstance(entry, dict)
-            ],
+            user_id=str(user.id),
+            row_limit=None,
+            concurrency=ARTIFACT_QUERY_CONCURRENCY,
         )
-
-        async def _run_one(i: int, entry: dict) -> dict:
-            if not isinstance(entry, dict):
-                return {"name": f"semantic_query_{i}", "error": "Semantic query must be an object"}
-            name = entry.get("name", f"semantic_query_{i}")
-            query_spec = {k: v for k, v in entry.items() if k != "name"}
-            try:
-                async with query_slots:
-                    result = await run_semantic_query(
-                        artifact.workspace,
-                        query_spec,
-                        user_id=str(user.id),
-                        readiness=readiness,
-                    )
-            except Exception as exc:
-                capacity = classify_capacity_error(exc)
-                if capacity is not None:
-                    return {"name": name, "capacity_exhausted": capacity.resource}
-                logger.exception("Artifact query '%s' failed for artifact %s", name, artifact.id)
-                return {
-                    "name": name,
-                    "semantic_query": query_spec,
-                    "error": "Semantic query failed",
-                }
-
-            if is_capacity_exhausted(result):
-                return {"name": name, "capacity_exhausted": CapacityResource.CUBE}
-            if not result.get("success", True) or result.get("error"):
-                error_info = result.get("error", {})
-                msg = (
-                    error_info.get("message", "Semantic query failed")
-                    if isinstance(error_info, dict)
-                    else str(error_info)
-                )
-                return {"name": name, "semantic_query": query_spec, "error": msg}
-            return {
-                "name": name,
-                "semantic_query": _query_cache_intent(result.get("semantic_query", query_spec)),
-                "columns": result.get("columns", []),
-                "rows": result.get("rows", []),
-                "row_count": result.get("row_count", 0),
-                "truncated": result.get("truncated", False),
-            }
-
-        results = list(
-            await asyncio.gather(*(_run_one(i, entry) for i, entry in enumerate(queries)))
-        )
+        _log_query_bugs(artifact, batch.outcomes)
         # One full pool makes the whole panel retryable, rather than caching nothing
         # and rendering a per-chart error the user cannot act on.
-        full = next((r["capacity_exhausted"] for r in results if r.get("capacity_exhausted")), None)
-        if full is not None:
-            raise CapacityExhausted(full)
+        if batch.capacity is not None:
+            raise CapacityExhausted(batch.capacity)
+        results = [_view_data_result(outcome) for outcome in batch.outcomes]
 
         for i, entry in enumerate(artifact.source_queries):
             name = entry.get("name", f"query_{i}")

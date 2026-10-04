@@ -1153,7 +1153,7 @@ async def test_check_graph_artifact_loads_workspace_in_async_context(workspace, 
     artifact = await Artifact.objects.aget(pk=artifact.pk)
 
     with patch(
-        "apps.artifacts.services.graph_runtime.run_semantic_query",
+        "apps.artifacts.services.query_batch.run_semantic_query",
         new=AsyncMock(
             return_value={
                 "success": True,
@@ -1334,7 +1334,7 @@ def test_read_member_get_of_manifest_less_story_writes_nothing(workspace, member
 
     url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/{endpoint}/"
     with (
-        patch("apps.artifacts.views.run_semantic_query", side_effect=execute),
+        patch("apps.artifacts.services.query_batch.run_semantic_query", side_effect=execute),
         patch(
             "apps.artifacts.views._current_artifact_data_state",
             new=AsyncMock(return_value={"queryable": True, "status": "ready"}),
@@ -1476,7 +1476,7 @@ def test_stored_story_with_a_wrong_typed_enum_value_still_reads(
         return {"columns": ["visits_count"], "rows": [[3]], "row_count": 1, "semantic_query": query}
 
     with (
-        patch("apps.artifacts.views.run_semantic_query", side_effect=execute),
+        patch("apps.artifacts.services.query_batch.run_semantic_query", side_effect=execute),
         patch(
             "apps.artifacts.views._current_artifact_data_state",
             new=AsyncMock(return_value={"queryable": True, "status": "ready"}),

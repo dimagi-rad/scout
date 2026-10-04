@@ -234,7 +234,7 @@ async def test_get_is_read_only_for_catalog_and_required_query_is_gated(required
     before = [
         row async for row in SemanticDataset.objects.filter(workspace=setup.workspace).values()
     ]
-    with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as query:
+    with patch("apps.artifacts.services.query_batch.run_semantic_query", new=AsyncMock()) as query:
         response = await setup.client.get(query_url(setup.b))
     assert response.status_code == 409
     assert response.json()["data_recovery"]["recovery_action"] == "materialization"
@@ -646,7 +646,7 @@ async def test_readable_failure_is_disclosed_until_later_verified_repair(
     assert failed.json()["queryable"] is True
     assert failed.json()["recovery_action"] == "semantic_rebuild"
     with patch(
-        "apps.artifacts.views.run_semantic_query",
+        "apps.artifacts.services.query_batch.run_semantic_query",
         new=AsyncMock(return_value={"columns": ["count"], "rows": [[4]], "row_count": 1}),
     ) as query:
         assert (await setup.client.get(query_url(setup.a))).status_code == 200
@@ -707,7 +707,7 @@ async def test_catalog_member_not_promoted_is_blocking_but_old_member_remains_re
     assert new.json()["queryable"] is False
     assert new.json()["recovery_action"] == "semantic_rebuild"
     assert "serving data model" in new.json()["message"]
-    with patch("apps.artifacts.views.run_semantic_query", new=AsyncMock()) as query:
+    with patch("apps.artifacts.services.query_batch.run_semantic_query", new=AsyncMock()) as query:
         assert (await setup.client.get(query_url(setup.b))).status_code == 409
     query.assert_not_awaited()
 
@@ -740,7 +740,7 @@ async def test_success_between_request_creation_and_failure_does_not_clear_warni
 async def test_new_publication_invalidates_cached_iframe_query_rows(required_setup):
     setup = required_setup
     with patch(
-        "apps.artifacts.views.run_semantic_query",
+        "apps.artifacts.services.query_batch.run_semantic_query",
         new=AsyncMock(return_value={"columns": ["count"], "rows": [[4]], "row_count": 1}),
     ) as query:
         first = await setup.client.get(query_url(setup.a))
