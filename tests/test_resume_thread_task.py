@@ -505,14 +505,14 @@ async def test_resume_bumps_thread_updated_at_on_success():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_resume_does_not_clobber_concurrent_cancel_during_ainvoke():
-    """If the user clicks Stop during agent.ainvoke (a 30s+ operation), the
-    cancel endpoint writes ThreadJob.state=CANCELLED to the DB. When ainvoke
-    returns, the resume task must NOT overwrite that with a success terminal.
+async def test_resume_does_not_clobber_concurrent_cancel_during_the_turn():
+    """If the user clicks Stop during the agent's turn (a 30s+ operation), the
+    cancel endpoint writes ThreadJob.state=CANCELLED to the DB. When the turn
+    ends, the resume task must NOT overwrite that with a success terminal.
 
-    We simulate the race by having the mocked ainvoke flip the DB state
-    inside its body — this is the same sequence the cancel endpoint would
-    produce while the worker is blocked on the LLM call."""
+    We simulate the race by having the agent flip the DB state mid-turn —
+    this is the same sequence the cancel endpoint would produce while the
+    worker is blocked on the LLM call."""
     user = await User.objects.acreate_user(email="race@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W-race", created_by=user)
     tenant = await Tenant.objects.acreate(
@@ -538,7 +538,7 @@ async def test_resume_does_not_clobber_concurrent_cancel_during_ainvoke():
     )
 
     async def flip_to_cancelled(_state):
-        # Simulate the cancel endpoint landing while ainvoke is mid-flight.
+        # Simulate the cancel endpoint landing while the turn is mid-flight.
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.CANCELLED,
         )
@@ -849,7 +849,7 @@ async def test_resume_discloses_dbt_test_failures_without_claiming_build_failure
 @pytest.mark.django_db(transaction=True)
 async def test_resume_cas_rejects_already_running_threadjob():
     """If a ThreadJob is already in RUNNING state (a concurrent resume
-    claimed it first), a second invocation must NOT proceed to ainvoke."""
+    claimed it first), a second invocation must NOT run the agent."""
     user = await User.objects.acreate_user(email="cas@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W-cas", created_by=user)
     tenant = await Tenant.objects.acreate(
@@ -940,10 +940,10 @@ async def test_resume_recursion_limit_is_lowered_from_default():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @override_settings(AGENT_RESUME_TIMEOUT_S=1)
-async def test_ainvoke_timeout_marks_failed_and_persists_message():
-    """When agent.ainvoke exceeds AGENT_RESUME_TIMEOUT_S, the ThreadJob lands
-    in FAILED and a synthetic AIMessage is persisted via aupdate_state so the
-    user sees a friendly explanation instead of a forever-spinner."""
+async def test_agent_timeout_marks_failed_and_persists_message():
+    """When the agent's turn exceeds AGENT_RESUME_TIMEOUT_S, the ThreadJob lands
+    in FAILED and a synthetic AIMessage is checkpointed so the user sees a
+    friendly explanation instead of a forever-spinner."""
     _, _, _, tj = await _make_thread_job_ready_to_resume(
         email="timeout@b.c",
         ws_name="W-timeout",
@@ -983,8 +983,8 @@ async def test_ainvoke_timeout_marks_failed_and_persists_message():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_ainvoke_exception_marks_failed_and_persists_message():
-    """When agent.ainvoke raises (non-timeout), the ThreadJob lands in FAILED
+async def test_agent_exception_marks_failed_and_persists_message():
+    """When the agent's turn raises (non-timeout), the ThreadJob lands in FAILED
     and a synthetic AIMessage with the generic-exception copy is persisted."""
     _, _, _, tj = await _make_thread_job_ready_to_resume(
         email="boom@b.c",
@@ -1054,9 +1054,9 @@ async def test_successful_ainvoke_logs_bookends(caplog):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_resume_emits_langfuse_span_on_each_outcome():
-    """The Langfuse span context manager must wrap the ainvoke on success,
+    """The Langfuse span context manager must wrap the agent's turn on success,
     timeout, and exception paths so traces are emitted on every terminal
-    outcome (the production bug was a silent ainvoke with no trace)."""
+    outcome (the production bug was a silent turn with no trace)."""
     user, ws, _, tj = await _make_thread_job_ready_to_resume(
         email="lf@b.c",
         ws_name="W-lf",
@@ -1103,7 +1103,7 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_resume_agent_failure_sets_error_summary():
-    """When agent.ainvoke raises, the ThreadJob is marked FAILED with a
+    """When the agent's turn raises, the ThreadJob is marked FAILED with a
     generic error_summary so the frontend can render an inline retry card."""
     user = await User.objects.acreate_user(email="afail@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W-afail", created_by=user)
