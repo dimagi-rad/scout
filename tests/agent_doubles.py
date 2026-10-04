@@ -127,8 +127,8 @@ def serving(agent: FakeAgent):
     thread's checkpoint from it, as the real agent and checkpointer share one."""
     build = AsyncMock(return_value=agent)
     with (
-        patch("apps.workspaces.tasks._build_agent_for_resume", build),
-        patch("apps.workspaces.services.reconciliation.build_agent_for_resume", build),
+        patch("apps.chat.services.continuation.build_agent_for_resume", build),
+        patch("apps.chat.services.agent_execution.build_agent_for_resume", build),
         patch(
             "apps.chat.pending_requests.ensure_checkpointer",
             AsyncMock(return_value=agent.checkpointer),

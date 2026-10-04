@@ -20,7 +20,7 @@ from langgraph.prebuilt import ToolNode
 
 from apps.chat import pending_requests, resume_stream
 from apps.chat.models import ResumeStreamChunk, Thread
-from apps.workspaces import tasks
+from apps.chat.services import continuation
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 from tests.agent_doubles import DEFAULT_REPLY, FakeAgent
 from tests.test_pending_requests import _loading_chat, _member
@@ -187,9 +187,10 @@ class TestRunStreamed:
         )
 
         with patch(
-            "apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=FakeAgent())
+            "apps.chat.services.continuation.build_agent_for_resume",
+            AsyncMock(return_value=FakeAgent()),
         ):
-            await tasks._answer_flushed_request(thread, held)
+            await continuation._answer_flushed_request(thread, held)
 
         rows = await _rows(thread)
         assert "".join(row.text for row in rows) == DEFAULT_REPLY
@@ -322,12 +323,14 @@ async def test_a_flush_model_timeout_fails_the_flush_without_paging(caplog):
     agent = FakeAgent(during=AsyncMock(side_effect=timeout))
 
     with (
-        patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
-        caplog.at_level(logging.WARNING, logger="apps.workspaces.tasks"),
+        patch(
+            "apps.chat.services.continuation.build_agent_for_resume", AsyncMock(return_value=agent)
+        ),
+        caplog.at_level(logging.WARNING, logger="apps.chat.services.continuation"),
     ):
-        answered = await tasks._answer_flushed_request(thread, held)
+        answered = await continuation._answer_flushed_request(thread, held)
 
     assert answered is False
-    flush_logs = [r for r in caplog.records if r.name == "apps.workspaces.tasks"]
+    flush_logs = [r for r in caplog.records if r.name == "apps.chat.services.continuation"]
     assert any("model request timed out" in r.getMessage() for r in flush_logs)
     assert all(r.levelno < logging.ERROR for r in flush_logs)

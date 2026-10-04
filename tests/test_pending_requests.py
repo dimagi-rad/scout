@@ -25,6 +25,12 @@ from apps.chat import pending_requests, turn_lease
 from apps.chat.constants import MAX_MESSAGE_LENGTH, SYSTEM_RESUME_MARKER
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import PendingRequest, Thread, ThreadJob
+from apps.chat.services import continuation
+from apps.chat.services.continuation import (
+    HELD_REQUEST_NOTE,
+    NO_REQUEST_NOTE,
+    REQUEST_STILL_WAITING_NOTE,
+)
 from apps.chat.turn_lease import atry_acquire_turn_lease
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces import tasks
@@ -37,13 +43,8 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.services import load_activity, reconciliation
-from apps.workspaces.tasks import (
-    HELD_REQUEST_NOTE,
-    NO_REQUEST_NOTE,
-    REQUEST_STILL_WAITING_NOTE,
-    resume_thread_after_materialization,
-)
+from apps.workspaces.services import load_activity
+from apps.workspaces.tasks import resume_thread_after_materialization
 from tests.agent_doubles import FakeAgent
 from tests.tenant_access import ausable_connection
 
@@ -541,7 +542,9 @@ class TestResume:
         return thread, tj
 
     async def _resume(self, tj, agent):
-        with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+        with patch(
+            "apps.chat.services.continuation.build_agent_for_resume", AsyncMock(return_value=agent)
+        ):
             return await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
     async def test_the_held_request_follows_its_own_marker_message(self, checkpoint):
@@ -595,7 +598,8 @@ class TestResume:
         await pending_requests.ahold_message(thread.id, part_id="m1", text="visits?")
 
         with patch(
-            "apps.workspaces.tasks._persist_synthetic_failure_message", new_callable=AsyncMock
+            "apps.chat.services.continuation.persist_synthetic_failure_message",
+            new_callable=AsyncMock,
         ):
             result = await self._resume(tj, _resume_agent(raises=RuntimeError("model down")))
 
@@ -612,7 +616,7 @@ class TestResume:
 
         with (
             patch(
-                "apps.workspaces.tasks._aggregate_materialization_state",
+                "apps.chat.services.continuation.aggregate_materialization_state",
                 AsyncMock(side_effect=RuntimeError("db blip")),
             ),
             pytest.raises(RuntimeError),
@@ -943,9 +947,15 @@ class TestHoldForWorkspaceLoad:
 class TestFlush:
     async def _flush(self, ws, agent):
         with (
-            patch("apps.workspaces.tasks.aworkspace_build_pending", AsyncMock(return_value=False)),
-            patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
-            patch("apps.workspaces.tasks.aschedule_thread_title", AsyncMock()),
+            patch(
+                "apps.chat.services.continuation.aworkspace_build_pending",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "apps.chat.services.continuation.build_agent_for_resume",
+                AsyncMock(return_value=agent),
+            ),
+            patch("apps.chat.services.continuation.aschedule_thread_title", AsyncMock()),
         ):
             return await tasks.flush_pending_requests(str(ws.id))
 
@@ -959,7 +969,7 @@ class TestFlush:
         assert result == {"status": "flushed", "sent": 1}
         marker, request = agent.last_run.messages
         assert marker.content.startswith(SYSTEM_RESUME_MARKER)
-        assert marker.content == tasks.FLUSH_NOTE
+        assert marker.content == continuation.FLUSH_NOTE
         assert request.content == "visits?"
         assert marker.id == f"{request.id}-sys"
         assert not await PendingRequest.objects.filter(thread=thread).aexists()
@@ -969,7 +979,9 @@ class TestFlush:
         await _hold_without_load(thread)
         agent = _flush_agent(checkpoint)
 
-        with patch("apps.workspaces.tasks.aworkspace_build_pending", AsyncMock(return_value=True)):
+        with patch(
+            "apps.chat.services.continuation.aworkspace_build_pending", AsyncMock(return_value=True)
+        ):
             result = await tasks.flush_pending_requests(str(ws.id))
 
         assert result == {"status": "load_pending", "sent": 0}
@@ -1073,19 +1085,19 @@ class TestFlush:
         agent = FakeAgent(during=lands_then_fails)
 
         with patch(
-            "apps.workspaces.tasks._persist_synthetic_thread_message", AsyncMock()
+            "apps.chat.services.continuation.persist_synthetic_thread_message", AsyncMock()
         ) as persist:
             result = await self._flush(ws, agent)
 
         assert result["sent"] == 1
         persist.assert_awaited_once()
-        assert persist.await_args.args[1] == tasks.FLUSH_FAILED_MESSAGE
+        assert persist.await_args.args[1] == continuation.FLUSH_FAILED_MESSAGE
         assert not await PendingRequest.objects.filter(thread=thread).aexists()
 
     async def test_a_thread_answering_now_is_skipped(self, checkpoint):
         ws, _user, _client, thread = await _thread("flush-leased")
         await _hold_without_load(thread)
-        lease = await tasks.atry_acquire_turn_lease(thread.id)
+        lease = await atry_acquire_turn_lease(thread.id)
         agent = _flush_agent(checkpoint)
 
         assert await pending_requests.aflushable_thread_ids(ws.id) == []
@@ -1098,15 +1110,16 @@ class TestFlush:
     async def test_a_flush_sends_a_few_and_queues_the_rest(self, checkpoint):
         ws, user, _client, thread = await _thread("flush-batch")
         threads = [thread] + [
-            await Thread.objects.acreate(workspace=ws, user=user) for _ in range(tasks.FLUSH_BATCH)
+            await Thread.objects.acreate(workspace=ws, user=user)
+            for _ in range(continuation.FLUSH_BATCH)
         ]
         for each in threads:
             await _hold_without_load(each)
 
-        with patch("apps.workspaces.tasks._defer_pending_flush", AsyncMock()) as defer:
+        with patch("apps.chat.services.continuation.defer_pending_flush", AsyncMock()) as defer:
             result = await self._flush(ws, _flush_agent(checkpoint))
 
-        assert result["sent"] == tasks.FLUSH_BATCH
+        assert result["sent"] == continuation.FLUSH_BATCH
         defer.assert_awaited_once_with(str(ws.id))
 
     async def test_the_sweep_queues_a_flush_for_every_workspace_with_one(self, checkpoint):
@@ -1115,7 +1128,7 @@ class TestFlush:
         await _hold_without_load(thread_a)
         await _hold_without_load(thread_b)
 
-        with patch("apps.workspaces.tasks._defer_pending_flush", AsyncMock()) as defer:
+        with patch("apps.chat.services.continuation.defer_pending_flush", AsyncMock()) as defer:
             result = await tasks.sweep_pending_requests()
 
         assert result == {"queued": 2}
@@ -1127,7 +1140,7 @@ class TestFlush:
         job = await ThreadJob.objects.acreate(
             thread=thread, job_type="materialization", procrastinate_job_id=818181
         )
-        lease = await tasks.atry_acquire_turn_lease(thread.id)
+        lease = await atry_acquire_turn_lease(thread.id)
 
         with patch.object(
             pending_requests, "workspace_build_pending", MagicMock(return_value=True)
@@ -1147,7 +1160,7 @@ async def test_queueing_a_flush_twice_is_quiet():
     configured = MagicMock()
     configured.defer_async = AsyncMock(side_effect=AlreadyEnqueued("dup"))
     with patch.object(tasks.flush_pending_requests, "configure", return_value=configured):
-        await tasks._defer_pending_flush("ws-1")
+        await continuation.defer_pending_flush("ws-1")
 
     configured.defer_async.assert_awaited_once_with(workspace_id="ws-1")
 
@@ -1184,9 +1197,9 @@ async def test_a_synthetic_thread_message_never_raises():
     _ws, _user, _client, thread = await _thread("synthetic")
 
     with patch(
-        "apps.workspaces.services.reconciliation._append_synthetic_message",
+        "apps.chat.services.continuation.append_synthetic_message",
         AsyncMock(side_effect=RuntimeError("checkpointer down")),
     ) as append:
-        await reconciliation.persist_synthetic_thread_message(thread, "Sorry.")
+        await continuation.persist_synthetic_thread_message(thread, "Sorry.")
 
     append.assert_awaited_once_with(thread, "Sorry.")

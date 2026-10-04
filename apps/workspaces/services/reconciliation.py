@@ -8,21 +8,16 @@ Nothing here may import ``apps.workspaces.tasks``: the resume task is reached by
 its registered name instead (see ``tests/test_workspace_task_registry.py``).
 """
 
-import asyncio
 import logging
 from datetime import timedelta
 
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
-from langchain_core.messages import AIMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
 
-from apps.agents.graph.base import build_agent_graph
-from apps.agents.mcp_client import get_mcp_tools
-from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.models import ThreadJob
-from apps.chat.turn_lease import atry_acquire_turn_lease
+from apps.chat.services.continuation import RESUME_TASK_NAME, persist_synthetic_failure_message
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -31,13 +26,11 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.data_operation import to_thread_fresh_db, workspace_data_lock_if_free
 from apps.workspaces.services.data_recovery import recovery_query_surface, workspace_recovery_error
-from apps.workspaces.services.failure_guidance import compose_failure_summary
 from apps.workspaces.services.load_activity import MATERIALIZE_TASK_NAME, REBUILD_VIEW_TASK_NAME
+from apps.workspaces.services.load_outcome import build_failure_summary_for_job
 from config.procrastinate import app
 
 logger = logging.getLogger(__name__)
-
-RESUME_TASK_NAME = "apps.workspaces.tasks.resume_thread_after_materialization"
 
 RESUME_STUCK_RUNNING_MESSAGE = (
     "Your materialization completed but the follow-up response was interrupted "
@@ -577,95 +570,3 @@ async def _settle_orphaned_view_builds() -> int:
             )
             settled += 1
     return settled
-
-
-async def build_failure_summary_for_job(procrastinate_job_id: int) -> str:
-    """Read MaterializationRuns for this job and compose a user-facing summary."""
-    runs = [
-        r
-        async for r in MaterializationRun.objects.filter(
-            procrastinate_job_id=procrastinate_job_id,
-        )
-    ]
-    return compose_failure_summary(runs)
-
-
-async def build_agent_for_resume(workspace, user, conversation_id=None):
-    """Build the LangGraph agent for the resume task."""
-    mcp_tools = await get_mcp_tools()
-    checkpointer = await ensure_checkpointer()
-    return await build_agent_graph(
-        workspace=workspace,
-        user=user,
-        checkpointer=checkpointer,
-        mcp_tools=mcp_tools,
-        conversation_id=conversation_id,
-    )
-
-
-# Bounds how long the synthetic write keeps the thread from the user's chat.
-SYNTHETIC_MESSAGE_TIMEOUT_SECONDS = 120
-
-
-async def persist_synthetic_failure_message(
-    thread_job, text: str, *, holds_turn_lease: bool = False
-) -> None:
-    """Append a plain-text AIMessage to the LangGraph checkpointer for
-    ``thread_job.thread`` so the chat UI shows a user-visible explanation when
-    the agent never produced one.
-
-    The frontend (apps/chat/thread_views.py:_load_thread_messages) reads
-    assistant responses from the checkpointer, so a failure message that
-    bypasses this path would never appear. We reuse build_agent_graph because
-    aupdate_state requires a compiled graph carrying the AgentState schema and
-    the same checkpointer as a normal turn.
-
-    Failures here are logged but never re-raised — the caller has already
-    decided this is a terminal failure and a synthetic message is a UX nicety,
-    not a correctness invariant. For the same reason it is skipped, not
-    waited for, while another run holds the thread's turn lease: the ThreadJob's
-    error card still reports the failure.
-    """
-    try:
-        if holds_turn_lease:
-            async with asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
-                await _append_synthetic_message(thread_job.thread, text)
-            return
-        lease = await atry_acquire_turn_lease(thread_job.thread_id)
-        if lease is None:
-            logger.info(
-                "resume: thread %s busy; skipped synthetic failure message for tj=%s",
-                thread_job.thread_id,
-                thread_job.id,
-            )
-            return
-        async with lease.held(), asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
-            await _append_synthetic_message(thread_job.thread, text)
-    except Exception:
-        logger.warning(
-            "resume: failed to persist synthetic failure message for tj=%s",
-            thread_job.id,
-            exc_info=True,
-        )
-
-
-async def persist_synthetic_thread_message(thread, text: str) -> None:
-    """``persist_synthetic_failure_message`` for a caller holding ``thread``'s turn
-    lease with no ThreadJob, such as the held-request flush. Never raises."""
-    try:
-        async with asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
-            await _append_synthetic_message(thread, text)
-    except Exception:
-        logger.warning(
-            "Could not persist a synthetic message on thread %s", thread.id, exc_info=True
-        )
-
-
-async def _append_synthetic_message(thread, text: str) -> None:
-    agent = await build_agent_for_resume(
-        thread.workspace,
-        thread.user,
-        conversation_id=str(thread.id),
-    )
-    config = {"configurable": {"thread_id": str(thread.id)}}
-    await agent.aupdate_state(config, {"messages": [AIMessage(content=text)]})

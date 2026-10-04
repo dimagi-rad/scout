@@ -12,6 +12,12 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage
 
 from apps.chat.models import Thread, ThreadJob
+from apps.chat.services.continuation import (
+    RESUME_EXCEPTION_MESSAGE,
+    RESUME_SETUP_BUDGET_SECONDS,
+    RESUME_TIMEOUT_MESSAGE,
+    SYNTHETIC_MESSAGE_TIMEOUT_SECONDS,
+)
 from apps.common.error_codes import ErrorCode
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.users.models import Tenant, TenantMembership
@@ -26,18 +32,11 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.failure_guidance import credential_guidance
-from apps.workspaces.services.reconciliation import (
-    STALE_JOB_THRESHOLD,
-    SYNTHETIC_MESSAGE_TIMEOUT_SECONDS,
-)
+from apps.workspaces.services.load_outcome import TENANT_NOT_RUN, aggregate_materialization_state
+from apps.workspaces.services.query_state import semantic_layer_state
+from apps.workspaces.services.reconciliation import STALE_JOB_THRESHOLD
 from apps.workspaces.tasks import (
-    RESUME_EXCEPTION_MESSAGE,
-    RESUME_SETUP_BUDGET_SECONDS,
-    RESUME_TIMEOUT_MESSAGE,
-    TENANT_NOT_RUN,
-    _aggregate_materialization_state,
     _defer_cube_promotion,
-    _semantic_layer_state,
     _summary_failures,
     resume_thread_after_materialization,
 )
@@ -116,7 +115,7 @@ async def test_resume_appends_system_message_and_invokes_agent():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(
@@ -177,7 +176,7 @@ async def test_resume_failed_or_cancelled_prompt_is_honest(
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -254,7 +253,7 @@ async def test_resume_no_runs_still_invokes_agent_with_explanation():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -305,7 +304,7 @@ async def test_resume_partial_maps_to_failed():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -341,7 +340,7 @@ async def test_resume_semantic_build_failure_maps_to_failed():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -388,7 +387,7 @@ async def test_resume_semantic_stale_appends_note_and_stays_completed():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -435,7 +434,7 @@ async def test_resume_invokes_agent_for_cancelled_threadjob():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(
@@ -488,10 +487,10 @@ async def test_resume_bumps_thread_updated_at_on_success():
     schedule_title = AsyncMock()
     with (
         patch(
-            "apps.workspaces.tasks._build_agent_for_resume",
+            "apps.chat.services.continuation.build_agent_for_resume",
             AsyncMock(return_value=mock_agent),
         ),
-        patch("apps.workspaces.tasks.aschedule_thread_title", schedule_title),
+        patch("apps.chat.services.continuation.aschedule_thread_title", schedule_title),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -547,7 +546,7 @@ async def test_resume_does_not_clobber_concurrent_cancel_during_the_turn():
 
     mock_agent = FakeAgent(during=flip_to_cancelled)
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -598,7 +597,7 @@ async def test_resume_does_not_force_cancelled_status_when_runs_completed():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -660,7 +659,7 @@ async def test_resume_partial_run_surfaces_per_source_state_in_prompt():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -675,7 +674,7 @@ async def test_resume_partial_run_surfaces_per_source_state_in_prompt():
     # _summarize_error's string itself reaches the agent verbatim. Pinned because
     # its docstring claims this and nothing was holding the claim up (#388 review):
     # materializer._summarize_error -> result["sources"][n]["error"]
-    #   -> _aggregate_materialization_state (detail["error"])
+    #   -> aggregate_materialization_state (detail["error"])
     #   -> "Per-tenant: {summary}" in the resume prompt body.
     assert "Connect 500" in body
     # And the resume terminal state for partial is FAILED (matches existing behavior).
@@ -716,7 +715,7 @@ async def test_aggregate_surfaces_failed_transform_phase():
         },
     )
 
-    status, summary = await _aggregate_materialization_state(778899, ws, str(user.id))
+    status, summary = await aggregate_materialization_state(778899, ws, str(user.id))
 
     # Raw sources loaded → run-level status stays completed (transforms isolated).
     assert status == "completed"
@@ -751,7 +750,7 @@ async def test_aggregate_no_transform_error_when_transforms_succeed():
         },
     )
 
-    _, summary = await _aggregate_materialization_state(778900, ws, str(user.id))
+    _, summary = await aggregate_materialization_state(778900, ws, str(user.id))
     assert "transform_error" not in summary[0]
 
 
@@ -791,7 +790,7 @@ async def test_aggregate_surfaces_dbt_test_failures_separately():
     user = await User.objects.acreate_user(email="xform-tests@example.com", password="x")
     workspace = await Workspace.objects.acreate(name="Xform tests", created_by=user)
     await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
-    status, summary = await _aggregate_materialization_state(778901, workspace, str(user.id))
+    status, summary = await aggregate_materialization_state(778901, workspace, str(user.id))
 
     assert status == "completed"
     assert "transform_error" not in summary[0]
@@ -830,7 +829,7 @@ async def test_resume_discloses_dbt_test_failures_without_claiming_build_failure
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -878,7 +877,7 @@ async def test_resume_cas_rejects_already_running_threadjob():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(
@@ -921,7 +920,7 @@ async def test_resume_recursion_limit_is_lowered_from_default():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -962,11 +961,11 @@ async def test_agent_timeout_marks_failed_and_persists_message():
 
     with (
         patch(
-            "apps.workspaces.tasks._build_agent_for_resume",
+            "apps.chat.services.continuation.build_agent_for_resume",
             AsyncMock(return_value=mock_agent),
         ),
         patch(
-            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            "apps.chat.services.agent_execution.build_agent_for_resume",
             AsyncMock(return_value=mock_agent),
         ),
     ):
@@ -1008,14 +1007,14 @@ async def test_model_request_timeout_reports_the_resume_as_timed_out(caplog, tim
 
     with (
         patch(
-            "apps.workspaces.tasks._build_agent_for_resume",
+            "apps.chat.services.continuation.build_agent_for_resume",
             AsyncMock(return_value=mock_agent),
         ),
         patch(
-            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            "apps.chat.services.agent_execution.build_agent_for_resume",
             AsyncMock(return_value=mock_agent),
         ),
-        caplog.at_level(logging.WARNING, logger="apps.workspaces.tasks"),
+        caplog.at_level(logging.WARNING, logger="apps.chat.services.continuation"),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -1024,7 +1023,7 @@ async def test_model_request_timeout_reports_the_resume_as_timed_out(caplog, tim
     assert tj.state == ThreadJob.State.FAILED
     msg = (await mock_agent.thread_messages(tj.thread_id))[-1]
     assert msg.content == RESUME_TIMEOUT_MESSAGE
-    resume_logs = [r for r in caplog.records if r.name == "apps.workspaces.tasks"]
+    resume_logs = [r for r in caplog.records if r.name == "apps.chat.services.continuation"]
     assert any("model request timed out" in r.getMessage() for r in resume_logs)
     assert all(r.levelno < logging.ERROR for r in resume_logs)
 
@@ -1046,9 +1045,11 @@ async def test_agent_build_stall_is_a_failure_not_a_slow_answer():
     stall = httpx.ConnectTimeout("mcp stalled", request=httpx.Request("POST", "http://mcp"))
 
     with (
-        patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(side_effect=stall)),
         patch(
-            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            "apps.chat.services.continuation.build_agent_for_resume", AsyncMock(side_effect=stall)
+        ),
+        patch(
+            "apps.chat.services.agent_execution.build_agent_for_resume",
             AsyncMock(return_value=mock_agent),
         ),
     ):
@@ -1080,14 +1081,14 @@ async def test_agent_exception_marks_failed_and_persists_message():
 
     with (
         patch(
-            "apps.workspaces.tasks._build_agent_for_resume",
+            "apps.chat.services.continuation.build_agent_for_resume",
             AsyncMock(return_value=mock_agent),
         ),
         patch(
-            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            "apps.chat.services.agent_execution.build_agent_for_resume",
             AsyncMock(return_value=mock_agent),
         ),
-        patch("apps.workspaces.tasks.aschedule_thread_title", schedule_title),
+        patch("apps.chat.services.continuation.aschedule_thread_title", schedule_title),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -1118,9 +1119,9 @@ async def test_successful_ainvoke_logs_bookends(caplog):
 
     mock_agent = FakeAgent()
 
-    caplog.set_level(logging.INFO, logger="apps.workspaces.tasks")
+    caplog.set_level(logging.INFO, logger="apps.chat.services.continuation")
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -1156,14 +1157,14 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
     handler = BaseCallbackHandler()
     with (
         patch(
-            "apps.workspaces.tasks._build_agent_for_resume",
+            "apps.chat.services.continuation.build_agent_for_resume",
             AsyncMock(return_value=mock_agent),
         ),
         patch(
-            "apps.workspaces.tasks._resume_langfuse_span",
+            "apps.chat.services.continuation.resume_langfuse_span",
             return_value=span_cm,
         ) as span_helper,
-        patch("apps.workspaces.tasks.get_langfuse_callback", return_value=handler),
+        patch("apps.chat.services.continuation.get_langfuse_callback", return_value=handler),
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -1215,11 +1216,11 @@ async def test_resume_agent_failure_sets_error_summary():
     mock_agent = FakeAgent(during=AsyncMock(side_effect=RuntimeError("LLM 503")))
     with (
         patch(
-            "apps.workspaces.tasks._build_agent_for_resume",
+            "apps.chat.services.continuation.build_agent_for_resume",
             AsyncMock(return_value=mock_agent),
         ),
         patch(
-            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            "apps.chat.services.agent_execution.build_agent_for_resume",
             AsyncMock(return_value=mock_agent),
         ),
     ):
@@ -1280,7 +1281,7 @@ async def test_resume_partial_run_sets_threadjob_error_summary():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -1322,7 +1323,7 @@ async def test_resume_no_runs_sets_helpful_error_summary():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -1396,7 +1397,7 @@ async def test_resume_surfaces_view_schema_failure_for_multi_tenant():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -1439,7 +1440,7 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun(current_state):
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -1483,7 +1484,7 @@ async def test_resume_missing_tenant_data_allows_refresh_without_cascade_marker(
     )
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -1514,7 +1515,7 @@ async def test_resume_plain_completed_for_multi_tenant_active_view_schema():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -1529,7 +1530,7 @@ async def test_resume_plain_completed_for_multi_tenant_active_view_schema():
 
 
 # ---------------------------------------------------------------------------
-# #364 surface 2: the interactive chat resume. _aggregate_materialization_state
+# #364 surface 2: the interactive chat resume. aggregate_materialization_state
 # derives everything from MaterializationRun rows, and rows are only created
 # from inside run_pipeline — so a tenant the run never got to is invisible and
 # chat reported "completed" for a workspace it had only partly loaded.
@@ -1599,7 +1600,7 @@ async def test_aggregate_does_not_report_completed_when_a_tenant_has_no_run_row(
         email="agg-uncovered@b.c", ws_name="W-agg-unc", pj_id=90001
     )
 
-    status, summary = await _aggregate_materialization_state(90001, ws, str(user.id))
+    status, summary = await aggregate_materialization_state(90001, ws, str(user.id))
 
     assert status == "partial"
     # Non-vacuous: the uncovered tenant is IN the summary, so it is what held
@@ -1623,7 +1624,7 @@ async def test_aggregate_reports_a_reachable_tenant_with_no_run_row_without_advi
     )
 
     assert _tj.materialization_preflight_failures == []
-    status, summary = await _aggregate_materialization_state(90002, ws, str(user.id))
+    status, summary = await aggregate_materialization_state(90002, ws, str(user.id))
 
     assert status == "partial"
     entry = next(t for t in summary if t["tenant"] == uncovered.external_id)
@@ -1650,7 +1651,7 @@ async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state, rea
     await WorkspaceViewSchema.objects.filter(workspace=_ws).aupdate(state=view_state)
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -1696,7 +1697,7 @@ async def test_resume_no_runs_prompt_names_the_tenants_and_carries_guidance():
 
     mock_agent = FakeAgent()
     with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
+        "apps.chat.services.continuation.build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
@@ -1721,9 +1722,11 @@ async def test_uncovered_tenant_with_failed_semantic_build_does_not_claim_full_r
     )
     agent = FakeAgent()
     with (
-        patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
         patch(
-            "apps.workspaces.tasks._semantic_layer_state",
+            "apps.chat.services.continuation.build_agent_for_resume", AsyncMock(return_value=agent)
+        ),
+        patch(
+            "apps.chat.services.continuation.semantic_layer_state",
             AsyncMock(return_value=("unavailable", "bad model")),
         ),
     ):
@@ -1767,7 +1770,7 @@ async def test_recorded_preflight_reasons_match_uuid_and_provider():
             "error_code": "",
         },
     ]
-    status, summary = await _aggregate_materialization_state(90006, ws, str(user.id), failures)
+    status, summary = await aggregate_materialization_state(90006, ws, str(user.id), failures)
     assert status == "no_runs"
     assert (
         next(entry for entry in summary if entry["provider"] == "ocs")["error_code"]
@@ -1801,7 +1804,9 @@ async def test_no_runs_banner_does_not_advertise_unmatched_recorded_details(chan
         uncovered.provider = "ocs"
         await uncovered.asave(update_fields=["provider"])
     agent = FakeAgent()
-    with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+    with patch(
+        "apps.chat.services.continuation.build_agent_for_resume", AsyncMock(return_value=agent)
+    ):
         await resume_thread_after_materialization(None, str(tj.id))
     await tj.arefresh_from_db()
     assert "failure details below" not in tj.error_summary
@@ -1829,9 +1834,11 @@ async def test_deferred_resume_preserves_partial_refresh_and_credential_guidance
     await tj.asave(update_fields=["materialization_preflight_failures"])
     agent = FakeAgent()
     with (
-        patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
         patch(
-            "apps.workspaces.tasks._semantic_layer_state",
+            "apps.chat.services.continuation.build_agent_for_resume", AsyncMock(return_value=agent)
+        ),
+        patch(
+            "apps.chat.services.continuation.semantic_layer_state",
             AsyncMock(return_value=("deferred", "Another refresh is running")),
         ),
     ):
@@ -1877,7 +1884,7 @@ async def test_deferred_semantic_state_checks_current_availability_and_writers(
         await MaterializationRun.objects.acreate(
             tenant_schema=schema, pipeline="sync", state=run_state
         )
-    state, reason = await _semantic_layer_state(workspace)
+    state, reason = await semantic_layer_state(workspace)
     expected = "unavailable" if not has_cube else "deferred" if run_state == "loading" else "stale"
     assert state == expected
     if run_state != "loading":
@@ -1910,7 +1917,7 @@ async def test_deferral_retains_prior_validation_failure(workspace, tenant, writ
     await _defer_cube_promotion(workspace)
     await model.arefresh_from_db()
     assert model.metadata["last_build"]["error"] == "Cube validation failed: bad metric"
-    state, reason = await _semantic_layer_state(workspace)
+    state, reason = await semantic_layer_state(workspace)
     assert state == "stale"
     assert "Cube validation failed: bad metric" in reason
 

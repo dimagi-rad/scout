@@ -19,17 +19,16 @@ from apps.chat import pending_requests
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import PendingRequest, Thread, ThreadJob
 from apps.chat.resume_stream import aread_after
-from apps.chat.stream import langgraph_to_ui_stream
-from apps.chat.turn_lease import atry_acquire_turn_lease
-from apps.workspaces.tasks import (
+from apps.chat.services.continuation import (
     FLUSH_FAILED_MESSAGE,
     FLUSH_NOTE,
     HELD_REQUEST_NOTE,
     RESUME_EXCEPTION_MESSAGE,
     RESUME_TIMEOUT_MESSAGE,
-    flush_pending_requests,
-    resume_thread_after_materialization,
 )
+from apps.chat.stream import langgraph_to_ui_stream
+from apps.chat.turn_lease import atry_acquire_turn_lease
+from apps.workspaces.tasks import flush_pending_requests, resume_thread_after_materialization
 from tests.agent_doubles import DEFAULT_REPLY, FakeAgent, serving
 from tests.test_pending_requests import (  # noqa: F401 (queued_jobs registers the fixture)
     _held_id,

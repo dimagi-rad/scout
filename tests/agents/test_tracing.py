@@ -14,7 +14,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
-from apps.workspaces.tasks import _resume_langfuse_span
+from apps.chat.services.agent_execution import resume_langfuse_span
 
 
 @pytest.mark.django_db
@@ -155,7 +155,7 @@ async def test_chat_turn_propagates_session_to_every_observation(langfuse_spans)
 @pytest.mark.asyncio
 async def test_resume_span_is_root_and_propagates_session_to_generations(langfuse_spans):
     handler = get_langfuse_callback(session_id="thread-abc", user_id="user-123")
-    with _resume_langfuse_span(
+    with resume_langfuse_span(
         thread_job_id="tj-1",
         thread_id="thread-abc",
         user_id="user-123",
@@ -182,7 +182,7 @@ def test_resume_span_yields_none_when_not_configured(settings):
     settings.LANGFUSE_PUBLIC_KEY = ""
     settings.LANGFUSE_BASE_URL = ""
 
-    with _resume_langfuse_span(
+    with resume_langfuse_span(
         thread_job_id="tj-1",
         thread_id="thread-abc",
         user_id="user-123",
@@ -203,7 +203,7 @@ def _trace_context_failing_on(phase):
 
 
 def _open_resume_span():
-    return _resume_langfuse_span(
+    return resume_langfuse_span(
         thread_job_id="tj-1",
         thread_id="thread-abc",
         user_id="user-123",
@@ -216,7 +216,7 @@ def _open_resume_span():
 def test_resume_span_swallows_tracing_errors_after_a_successful_body(langfuse_spans, phase):
     failing = functools.partial(_trace_context_failing_on, phase)
     with (
-        patch("apps.workspaces.tasks.langfuse_trace_context", lambda **_: failing()),
+        patch("apps.chat.services.agent_execution.langfuse_trace_context", lambda **_: failing()),
         _open_resume_span() as span,
     ):
         pass
@@ -227,7 +227,7 @@ def test_resume_span_swallows_tracing_errors_after_a_successful_body(langfuse_sp
 def test_resume_span_reraises_the_body_error_not_the_tracing_error(langfuse_spans):
     failing = functools.partial(_trace_context_failing_on, "exit")
     with (
-        patch("apps.workspaces.tasks.langfuse_trace_context", lambda **_: failing()),
+        patch("apps.chat.services.agent_execution.langfuse_trace_context", lambda **_: failing()),
         pytest.raises(TimeoutError),
         _open_resume_span(),
     ):

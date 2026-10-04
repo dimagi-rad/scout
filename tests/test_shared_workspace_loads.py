@@ -30,6 +30,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services import load_outcome
 from apps.workspaces.services.data_operation import (
     LockOrderError,
     tenant_data_lock,
@@ -671,7 +672,7 @@ async def test_a_reused_tenant_is_reported_as_served_when_the_chat_resumes(works
     assert "reused_generation" in reused["tenants"][0]
     assert len(pipeline.calls) == 1
     records = workspaces_tasks._resume_records(reused)
-    status, summary = await workspaces_tasks._aggregate_materialization_state(
+    status, summary = await load_outcome.aggregate_materialization_state(
         202, sibling, str(user.id), records
     )
 
@@ -694,7 +695,7 @@ async def test_an_already_serving_tenant_is_reported_as_served_when_the_chat_res
     assert passed_over["tenants"][0]["result"]["status"] == "already_loaded"
     assert len(pipeline.calls) == 1
     records = workspaces_tasks._resume_records(passed_over)
-    status, summary = await workspaces_tasks._aggregate_materialization_state(
+    status, summary = await load_outcome.aggregate_materialization_state(
         202, workspace, str(user.id), records
     )
 
@@ -716,7 +717,7 @@ async def test_a_reused_run_of_a_tenant_outside_the_workspace_is_ignored(workspa
         result={"sources": {}},
     )
 
-    _status, summary = await workspaces_tasks._aggregate_materialization_state(
+    _status, summary = await load_outcome.aggregate_materialization_state(
         303,
         workspace,
         str(user.id),
@@ -944,7 +945,7 @@ async def test_the_resume_never_reports_rows_of_an_unpublished_candidate_as_load
         },
     )
 
-    status, summary = await workspaces_tasks._aggregate_materialization_state(
+    status, summary = await load_outcome.aggregate_materialization_state(
         404, workspace, str(user.id)
     )
 
@@ -967,7 +968,7 @@ async def test_the_resume_reports_a_retired_published_candidate_as_published(
     run.result = {"sources": {"users": {"state": "completed", "rows": 100}}}
     await run.asave(update_fields=["result"])
 
-    status, summary = await workspaces_tasks._aggregate_materialization_state(
+    status, summary = await load_outcome.aggregate_materialization_state(
         405, workspace, str(user.id)
     )
 

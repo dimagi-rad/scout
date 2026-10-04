@@ -26,6 +26,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services import load_outcome
 from apps.workspaces.services.access_freshness import CREDENTIAL_EXPIRED
 from apps.workspaces.services.credential_coverage import CoverageRecovery, MissingTenant
 from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE, compose_failure_summary
@@ -149,7 +150,9 @@ async def test_queued_materialization_downgrade_reaches_resume_as_authorization_
     )
 
     agent = FakeAgent()
-    with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+    with patch(
+        "apps.chat.services.continuation.build_agent_for_resume", AsyncMock(return_value=agent)
+    ):
         resumed = await workspaces_tasks.resume_thread_after_materialization.func(
             None, str(thread_job.id)
         )
@@ -222,7 +225,7 @@ async def test_aggregate_materialization_state_surfaces_top_level_error(workspac
         },
     )
 
-    status, summary = await workspaces_tasks._aggregate_materialization_state(
+    status, summary = await load_outcome.aggregate_materialization_state(
         12345, workspace, str(user.id)
     )
 
@@ -1657,7 +1660,9 @@ async def test_manager_who_lost_tenant_access_gets_reconnect_guidance_on_resume(
     ]
 
     agent = FakeAgent()
-    with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+    with patch(
+        "apps.chat.services.continuation.build_agent_for_resume", AsyncMock(return_value=agent)
+    ):
         await workspaces_tasks.resume_thread_after_materialization.func(None, str(thread_job.id))
 
     body = agent.last_run.messages[0].content
@@ -1966,7 +1971,9 @@ async def test_preflight_reason_survives_core_wrapper_and_resume(
     }[reason]
     assert expected in failure["error"]
     agent = FakeAgent()
-    with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+    with patch(
+        "apps.chat.services.continuation.build_agent_for_resume", AsyncMock(return_value=agent)
+    ):
         await workspaces_tasks.resume_thread_after_materialization(None, str(tj.id))
     body = agent.last_run.messages[0].content
     await tj.arefresh_from_db()
