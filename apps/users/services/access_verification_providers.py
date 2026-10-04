@@ -4,13 +4,13 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from contextlib import aclosing
 from threading import BoundedSemaphore
 from typing import Any
 
 import httpx
 from django.conf import settings as django_settings
 
-from apps.common.commcare_servers import COMMCARE_SERVERS
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantConnection
 from apps.users.services.access_verification_types import (
@@ -19,6 +19,19 @@ from apps.users.services.access_verification_types import (
     VerificationOutcome,
 )
 from apps.users.services.oauth_scope import canonical_provider
+from apps.users.services.tenant_listing import commcare as commcare_listing
+from apps.users.services.tenant_listing.paginator import paginate
+from apps.users.services.tenant_listing.rows import descriptor
+from apps.users.services.tenant_listing.types import (
+    ListingDeadlineExceeded,
+    MalformedTenantList,
+    ProviderRequest,
+    RequestTimedOut,
+    TenantListError,
+    TenantListPage,
+    UpstreamStatus,
+    UpstreamUnreachable,
+)
 from apps.users.services.token_refresh import is_transient_status
 from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
 
@@ -99,20 +112,10 @@ def _provider_request(snapshot, settings):
     credential_type = snapshot.observation.credential_type
     credential = snapshot.credential
     if provider == "commcare":
-        server = COMMCARE_SERVERS.get(snapshot.observation.scope_key)
-        if server is None:
-            return None
-        url = server.user_domains_url
-        if credential_type == TenantConnection.OAUTH:
-            headers = {"Authorization": f"Bearer {credential}"}
-        elif credential_type == TenantConnection.API_KEY:
-            username, separator, api_key = credential.partition(":")
-            if not separator or not username or not api_key:
-                return None
-            headers = {"Authorization": f"ApiKey {username}:{api_key}"}
-        else:
-            return None
-        return provider, url, headers
+        request = commcare_listing.list_request(
+            snapshot.observation.scope_key, credential_type, credential
+        )
+        return None if request is None else (provider, request, commcare_listing.decode_page)
     if provider == "ocs":
         url = f"{settings.OCS_URL.rstrip('/')}/api/experiments/"
         if credential_type == TenantConnection.OAUTH:
@@ -123,10 +126,11 @@ def _provider_request(snapshot, settings):
             headers = {"X-api-key": credential}
         else:
             return None
-        return provider, url, headers
+        return provider, ProviderRequest(url, headers), _decode_ocs_page
     if provider == "commcare_connect" and credential_type == TenantConnection.OAUTH:
         url = f"{settings.CONNECT_API_URL.rstrip('/')}/export/opp_org_program_list/"
-        return provider, url, {"Authorization": f"Bearer {credential}"}
+        request = ProviderRequest(url, {"Authorization": f"Bearer {credential}"})
+        return provider, request, _decode_connect_page
     return None
 
 
@@ -319,54 +323,21 @@ def _status_result(status_code: int):
     return None
 
 
-def _row_identity(row: Any, *, id_key: str, name_key: str) -> tuple[str, str]:
-    if not isinstance(row, dict):
-        raise TypeError("provider row must be an object")
-    raw_id = row.get(id_key)
-    if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)):
-        raise TypeError("provider row has invalid id")
-    external_id = str(raw_id).strip()
-    if not external_id:
-        raise ValueError("provider row has empty id")
-    raw_name = row.get(name_key)
-    if raw_name is not None and not isinstance(raw_name, str):
-        raise ValueError("provider row has invalid name")
-    return external_id, (raw_name or external_id)
-
-
-def _add_rows(
-    rows: Any,
-    seen: dict[str, str],
-    *,
-    id_key: str,
-    name_key: str,
-) -> None:
+def _decode_ocs_page(payload: Any) -> TenantListPage:
+    if not isinstance(payload, dict) or "results" not in payload or "next" not in payload:
+        raise MalformedTenantList("OCS response is incomplete")
+    rows, next_url = payload["results"], payload["next"]
     if not isinstance(rows, list):
-        raise TypeError("provider collection must be a list")
-    for row in rows:
-        external_id, name = _row_identity(row, id_key=id_key, name_key=name_key)
-        previous_name = seen.setdefault(external_id, name)
-        if previous_name != name:
-            raise ValueError("provider returned conflicting duplicate ids")
+        raise MalformedTenantList("OCS results are not a list")
+    if next_url is not None and (not isinstance(next_url, str) or not next_url):
+        raise MalformedTenantList("OCS next link is not a URL")
+    return TenantListPage(
+        tuple(descriptor(row, id_key="id", name_key="name") for row in rows), next_url
+    )
 
 
-def _parse_page(provider: str, payload: Any, seen: dict[str, str]):
-    if not isinstance(payload, dict):
-        raise TypeError("provider response must be an object")
-    if provider == "commcare":
-        if "objects" not in payload or not isinstance(payload.get("meta"), dict):
-            raise ValueError("CommCare response is incomplete")
-        meta = payload["meta"]
-        if "next" not in meta:
-            raise ValueError("CommCare pagination metadata is incomplete")
-        _add_rows(payload["objects"], seen, id_key="domain_name", name_key="project_name")
-        return meta["next"], len(payload["objects"])
-    if provider == "ocs":
-        if "results" not in payload or "next" not in payload:
-            raise ValueError("OCS response is incomplete")
-        _add_rows(payload["results"], seen, id_key="id", name_key="name")
-        return payload["next"], len(payload["results"])
-    pagination_keys = {
+_CONNECT_PAGINATION_KEYS = frozenset(
+    {
         "next",
         "previous",
         "pagination",
@@ -379,10 +350,22 @@ def _parse_page(provider: str, payload: Any, seen: dict[str, str]):
         "limit",
         "offset",
     }
-    if "opportunities" not in payload or pagination_keys.intersection(payload):
-        raise ValueError("Connect response is incomplete or paginated")
-    _add_rows(payload["opportunities"], seen, id_key="id", name_key="name")
-    return None, len(payload["opportunities"])
+)
+
+
+def _decode_connect_page(payload: Any) -> TenantListPage:
+    if (
+        not isinstance(payload, dict)
+        or "opportunities" not in payload
+        or _CONNECT_PAGINATION_KEYS.intersection(payload)
+    ):
+        raise MalformedTenantList("Connect response is incomplete or paginated")
+    rows = payload["opportunities"]
+    if not isinstance(rows, list):
+        raise MalformedTenantList("Connect opportunities are not a list")
+    return TenantListPage(
+        tuple(descriptor(row, id_key="id", name_key="name") for row in rows), None
+    )
 
 
 async def verify_provider(
@@ -408,7 +391,8 @@ async def verify_provider(
     request = _provider_request(snapshot, settings)
     if request is None:
         return ProviderVerificationResult.indeterminate(_INDETERMINATE)
-    provider, initial_url, headers = request
+    provider, list_request, decode_page = request
+    initial_url, headers = list_request.url, dict(list_request.headers)
     light_ids = _connect_light_ids(snapshot, external_ids)
 
     def log(cause, *, page=0, status=None, outcome="unavailable"):
@@ -454,9 +438,6 @@ async def verify_provider(
                 limiter.release()
             raise
         acquired = True
-        seen_urls: set[str] = set()
-        seen_rows: dict[str, str] = {}
-        total_rows = 0
         async with client_factory() as client:
             if light_ids is not None:
                 light_result = await _verify_connect_opportunities(
@@ -473,62 +454,61 @@ async def verify_provider(
                 )
                 if light_result is not None:
                     return light_result
-            for page_index in range(MAX_PAGES):
-                page = page_index + 1
-                if url in seen_urls:
-                    return ProviderVerificationResult.indeterminate(_INDETERMINATE)
-                seen_urls.add(url)
-                remaining = deadline - clock()
-                if remaining <= 0:
-                    return unavailable("deadline_before_request", page=page)
-                try:
-                    request_timeout = min(PER_REQUEST_TIMEOUT_SECONDS, remaining)
-                    response = await asyncio.wait_for(
-                        client.get(
-                            url,
-                            headers=headers,
-                            follow_redirects=False,
-                            timeout=request_timeout,
-                        ),
-                        timeout=request_timeout,
-                    )
-                except TimeoutError:
-                    return unavailable("request_timeout", page=page)
-                except httpx.RequestError as exc:
-                    # The class name only: str(exc) can carry the request URL.
-                    return unavailable(f"request_error:{type(exc).__name__}", page=page)
-                if clock() >= deadline:
-                    return unavailable(
-                        "deadline_after_response", page=page, status=response.status_code
-                    )
-                status_result = _status_result(response.status_code)
-                if response.status_code == 401:
+            page = 1
+            seen_rows: dict[str, str] = {}
+            total_rows = 0
+            pages = paginate(
+                client,
+                list_request,
+                decode_page,
+                deadline=deadline,
+                max_pages=MAX_PAGES,
+                request_timeout=PER_REQUEST_TIMEOUT_SECONDS,
+                clock=clock,
+            )
+            try:
+                async with aclosing(pages):
+                    async for listed in pages:
+                        if not listed.next_declared:
+                            return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+                        total_rows += len(listed.tenants)
+                        if total_rows > MAX_ROWS:
+                            return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+                        for tenant in listed.tenants:
+                            name = seen_rows.setdefault(tenant.external_id, tenant.canonical_name)
+                            if name != tenant.canonical_name:
+                                # One id under two names: the listing cannot be trusted.
+                                return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+                        page += 1
+            except ListingDeadlineExceeded as error:
+                if error.status_code is None:
+                    return unavailable("deadline_before_request", page=error.page)
+                return unavailable(
+                    "deadline_after_response", page=error.page, status=error.status_code
+                )
+            except RequestTimedOut as error:
+                return unavailable("request_timeout", page=error.page)
+            except UpstreamUnreachable as error:
+                # The class name only: str(exc) can carry the request URL.
+                return unavailable(f"request_error:{type(error.cause).__name__}", page=error.page)
+            except UpstreamStatus as error:
+                status_result = _status_result(error.status_code)
+                if error.status_code == 401:
                     logger.info(
                         "Provider %s answered verification for connection %s with HTTP 401 (%s)",
                         provider,
                         snapshot.observation.connection_id,
-                        "invalid_token" if _names_invalid_token(response) else "no token error",
+                        "invalid_token"
+                        if _names_invalid_token(error.response)
+                        else "no token error",
                     )
-                if status_result is not None:
-                    if status_result.outcome == VerificationOutcome.UNAVAILABLE:
-                        log("http_status", page=page, status=response.status_code)
-                    return status_result
-                try:
-                    next_reference, page_rows = _parse_page(provider, response.json(), seen_rows)
-                except (ValueError, TypeError):
-                    return ProviderVerificationResult.indeterminate(_INDETERMINATE)
-                total_rows += page_rows
-                if total_rows > MAX_ROWS:
-                    return ProviderVerificationResult.indeterminate(_INDETERMINATE)
-                if next_reference is None:
-                    return ProviderVerificationResult.complete(seen_rows)
-                if not isinstance(next_reference, str) or not next_reference:
-                    return ProviderVerificationResult.indeterminate(_INDETERMINATE)
-                try:
-                    url = policy.resolve(next_reference, relative_to=url)
-                except UnsafeProviderURL:
-                    return ProviderVerificationResult.indeterminate(_INDETERMINATE)
-        return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+                if status_result.outcome == VerificationOutcome.UNAVAILABLE:
+                    log("http_status", page=error.page, status=error.status_code)
+                return status_result
+            except TenantListError:
+                # Off-origin next, a cycle, the page cap or a malformed page.
+                return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+            return ProviderVerificationResult.complete(seen_rows)
     except TimeoutError:
         # Before the permit is held this is the shared limiter wait; after, a stray
         # timeout from the client's context manager.

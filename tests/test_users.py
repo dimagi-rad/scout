@@ -91,8 +91,8 @@ class TestResolveCommcareDomains:
         and link every membership it produces to it."""
 
         fake_domains = [
-            {"domain_name": "domain-a", "project_name": "Domain A"},
-            {"domain_name": "domain-b", "project_name": "Domain B"},
+            TenantDescriptor("domain-a", "Domain A"),
+            TenantDescriptor("domain-b", "Domain B"),
         ]
         with patch(
             "apps.users.services.tenant_resolution._fetch_all_domains",
@@ -120,7 +120,7 @@ class TestResolveCommcareDomains:
     async def test_idempotent_on_re_resolve(self, user):
         """Calling resolve twice does not create duplicate TenantConnections."""
 
-        fake_domains = [{"domain_name": "domain-a", "project_name": "Domain A"}]
+        fake_domains = [TenantDescriptor("domain-a", "Domain A")]
         with patch(
             "apps.users.services.tenant_resolution._fetch_all_domains",
             new_callable=AsyncMock,

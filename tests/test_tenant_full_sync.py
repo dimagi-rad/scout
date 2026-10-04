@@ -106,8 +106,8 @@ async def test_commcare_pagination_follows_relative_next(user, httpx_mock):
         url="https://www.commcarehq.org/api/user_domains/v1/?offset=1",
         json={"objects": [{"domain_name": "b", "project_name": "B"}], "meta": {"next": None}},
     )
-    domains = await _fetch_all_domains("tok", COMMCARE_DOMAIN_API)
-    assert {d["domain_name"] for d in domains} == {"a", "b"}  # page 2 not silently dropped
+    domains = await _fetch_all_domains("tok", COMMCARE_SERVERS[""])
+    assert {d.external_id for d in domains} == {"a", "b"}  # page 2 not silently dropped
 
 
 @pytest.mark.asyncio
@@ -120,7 +120,7 @@ async def test_commcare_pagination_cycle_raises(user, httpx_mock):
         },
     )
     with pytest.raises(TenantResolutionError):
-        await _fetch_all_domains("tok", COMMCARE_DOMAIN_API)
+        await _fetch_all_domains("tok", COMMCARE_SERVERS[""])
     assert len(httpx_mock.get_requests()) == 1
 
 

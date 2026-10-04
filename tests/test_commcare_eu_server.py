@@ -16,7 +16,11 @@ from django.db import IntegrityError
 from django.test import override_settings
 from django.utils import timezone
 
-from apps.common.commcare_servers import UnknownCommCareServer, server_for_provider
+from apps.common.commcare_servers import (
+    COMMCARE_SERVERS,
+    UnknownCommCareServer,
+    server_for_provider,
+)
 from apps.common.identifiers import refresh_schema_name, tenant_schema_name
 from apps.users.adapters import EncryptingSocialAccountAdapter
 from apps.users.models import Tenant, TenantConnection, TenantMembership
@@ -395,7 +399,7 @@ async def test_eu_discovery_never_follows_a_next_link_to_www(httpx_mock):
     )
 
     with pytest.raises(TenantResolutionError, match="left its server"):
-        await _fetch_all_domains("eu-token", f"{EU}/api/user_domains/v1/")
+        await _fetch_all_domains("eu-token", COMMCARE_SERVERS["eu"])
 
     assert len(httpx_mock.get_requests()) == 1
 

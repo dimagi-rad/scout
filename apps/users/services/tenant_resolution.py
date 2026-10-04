@@ -40,7 +40,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from apps.common.commcare_servers import get_commcare_server
+from apps.common.commcare_servers import CommCareServer, get_commcare_server
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import CommCareAuthError, ConnectAuthError, OCSAuthError
 from apps.users.models import Tenant, TenantConnection, TenantMembership, User
@@ -51,6 +51,16 @@ from apps.users.services.oauth_scope import (
     scope_account_ids,
 )
 from apps.users.services.ocs_team import adetect_team_name_from_oauth
+from apps.users.services.tenant_listing import commcare as commcare_listing
+from apps.users.services.tenant_listing.paginator import list_tenants
+from apps.users.services.tenant_listing.types import (
+    MalformedTenantList,
+    TenantDescriptor,
+    TenantListError,
+    UnsafeNextURL,
+    UpstreamStatus,
+    UpstreamUnreachable,
+)
 from apps.users.services.upstream_denial import (
     adiscovery_connection,
     arecord_upstream_denial,
@@ -63,6 +73,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_PAGES = 100
 _LISTING_BUDGET_SECONDS = 60.0
+_REQUEST_TIMEOUT_SECONDS = 30.0
 _OCS_UNSAFE_NEXT = "OCS returned an untrusted pagination link"
 
 
@@ -295,7 +306,7 @@ async def resolve_commcare_domains(
     server = get_commcare_server(account_scope(account))
     observed = await adiscovery_connection(user, "commcare", access_token, account)
     try:
-        domains = await _fetch_all_domains(access_token, server.user_domains_url)
+        domains = await _fetch_all_domains(access_token, server)
     except CommCareAuthError as error:
         if may_revoke:
             await _record_discovery_denial(observed, access_token, error.status_code, account)
@@ -318,8 +329,8 @@ async def resolve_commcare_domains(
         tenant, _ = await Tenant.objects.aupdate_or_create(
             provider="commcare",
             server=server.key,
-            external_id=domain["domain_name"],
-            defaults={"canonical_name": domain.get("project_name")},
+            external_id=domain.external_id,
+            defaults={"canonical_name": domain.canonical_name},
         )
         fresh.append(tenant)
 
@@ -530,41 +541,49 @@ async def _record_discovery_denial(connection, access_token, status, account=Non
     )
 
 
-async def _fetch_all_domains(access_token: str, domains_url: str) -> list[dict]:
-    """Paginate through the CommCare user_domains API, returning the COMPLETE set.
+async def _fetch_all_domains(access_token: str, server: CommCareServer) -> list[TenantDescriptor]:
+    """Every domain the token can see on ``server``, or a raise; never a partial list.
 
-    Tastypie returns a *relative* ``meta.next`` (e.g. ``/api/user_domains/v1/?offset=20``),
-    so we resolve it against the base URL and follow it. (The previous code only
-    followed an *absolute* same-host next, so a relative next silently truncated after
-    page 1 — under full-sync that would archive every domain past page 1.)
-    Raises CommCareAuthError on 401/403; TenantResolutionError on shape drift.
+    Raises CommCareAuthError on 401/403, httpx.HTTPStatusError on any other status,
+    the httpx error on a transport failure, and TenantResolutionError when the list
+    cannot be read to its end (shape drift, a next link off the server, a cycle, the
+    page or time limit, or a request cut off at the budget).
     """
-    results: list[dict] = []
-    policy = ProviderURLPolicy(domains_url)
-    url: str | None = policy.base_url
-    seen: set[str] = set()
-    deadline = time.monotonic() + _LISTING_BUDGET_SECONDS
-    async with httpx.AsyncClient(timeout=30) as client:
-        while url:
-            if url in seen or len(seen) >= _MAX_PAGES or time.monotonic() > deadline:
-                raise TenantResolutionError("CommCare domain list did not finish")
-            seen.add(url)
-            resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
-            if resp.status_code in (401, 403):
-                raise CommCareAuthError(
-                    f"CommCare returned {resp.status_code} while listing domains — the "
-                    f"access token is expired, revoked, or not authorized for this API",
-                    status_code=resp.status_code,
-                )
-            resp.raise_for_status()
-            data = resp.json()
-            if "objects" not in data:  # shape-drift guard
-                raise TenantResolutionError("CommCare response missing 'objects' key")
-            results.extend(data["objects"])
-            next_url = (data.get("meta") or {}).get("next")
-            try:
-                url = policy.resolve(next_url, relative_to=url) if next_url else None
-            except UnsafeProviderURL as error:
-                # Following it would send this server's token to another origin.
-                raise TenantResolutionError("CommCare pagination left its server") from error
-    return results
+    request = commcare_listing.list_request(server.key, TenantConnection.OAUTH, access_token)
+    if request is None:
+        raise TenantResolutionError(f"No CommCare domain list for server {server.key!r}")
+    try:
+        async with httpx.AsyncClient() as client:
+            return await list_tenants(
+                client,
+                request,
+                commcare_listing.decode_page,
+                budget_seconds=_LISTING_BUDGET_SECONDS,
+                max_pages=_MAX_PAGES,
+                request_timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+    except UpstreamStatus as error:
+        if error.status_code in (401, 403):
+            raise CommCareAuthError(
+                f"CommCare returned {error.status_code} while listing domains — the "
+                f"access token is expired, revoked, or not authorized for this API",
+                status_code=error.status_code,
+            ) from None
+        raise httpx.HTTPStatusError(
+            f"CommCare answered HTTP {error.status_code} while listing domains",
+            request=error.response.request,
+            response=error.response,
+        ) from None
+    except UpstreamUnreachable as error:
+        raise error.cause from None
+    except UnsafeNextURL:
+        # Following it would send this server's token to another origin.
+        raise TenantResolutionError("CommCare pagination left its server") from None
+    except MalformedTenantList as error:
+        raise TenantResolutionError(
+            f"CommCare returned an unexpected domain list: {error}"
+        ) from None
+    except TenantListError as error:
+        raise TenantResolutionError(
+            f"CommCare domain list did not finish ({type(error).__name__})"
+        ) from None
