@@ -516,7 +516,7 @@ class TestClaim:
 
 
 def _resume_agent(*, raises=None):
-    return FakeAgent(during=AsyncMock(side_effect=raises) if raises else None)
+    return FakeAgent(fails_to_start=raises)
 
 
 @pytest.mark.asyncio
@@ -876,12 +876,10 @@ async def test_messages_include_pending_for_a_thread_not_yet_created():
 
 def _flush_agent(checkpoint_ids, *, lands=True, raises=None):
     async def during(state):
-        if raises:
-            raise raises
         if lands:
             checkpoint_ids.update(m.id for m in state["messages"])
 
-    return FakeAgent(during=during)
+    return FakeAgent(during=during, fails_to_start=raises)
 
 
 async def _thread(slug, **member_kwargs):

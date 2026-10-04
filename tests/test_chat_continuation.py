@@ -8,9 +8,11 @@ move of that code.
 """
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 from django.test import override_settings
+from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
 
 from apps.chat import pending_requests
@@ -165,6 +167,22 @@ class TestHeldRequest:
         assert not await PendingRequest.objects.filter(thread=thread).aexists()
         assert (await _streamed(thread))[0] == DEFAULT_REPLY
 
+    async def test_a_turn_that_failed_before_the_request_landed_leaves_it_waiting(self):
+        _ws, thread, tj = await _resumable("cont-held-unsent", 930007)
+        await pending_requests.ahold_message(thread.id, part_id="m1", text="visits?")
+        agent = FakeAgent(fails_to_start=RuntimeError("no connection"))
+
+        result = await _resume(agent, tj)
+
+        assert result == {"status": "agent_failed"}
+        assert [m.content for m in await agent.thread_messages(thread.id)] == [
+            RESUME_EXCEPTION_MESSAGE
+        ]
+        pending = await PendingRequest.objects.aget(thread=thread)
+        assert pending.state == PendingRequest.State.WAITING
+        assert pending.claim_token is None
+        assert await _thread_is_free(thread)
+
     async def test_a_request_that_landed_before_the_turn_failed_is_not_held_again(self):
         _ws, thread, tj = await _resumable("cont-held-fail", 930006)
         await pending_requests.ahold_message(thread.id, part_id="m1", text="visits?")
@@ -187,8 +205,11 @@ class TestFlush:
     async def test_held_requests_are_answered_oldest_first_each_in_its_own_thread(self):
         ws, user, _client, older = await _thread("cont-flush")
         newer = await Thread.objects.acreate(workspace=ws, user=user)
-        await _hold_without_load(older, "older?")
         await _hold_without_load(newer, "newer?")
+        await _hold_without_load(older, "older?")
+        await PendingRequest.objects.filter(thread=older).aupdate(
+            created_at=timezone.now() - timedelta(hours=1)
+        )
         agent = FakeAgent()
 
         with serving(agent):
