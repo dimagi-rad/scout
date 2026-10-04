@@ -50,8 +50,17 @@ def _after(source: str, anchor: str) -> int:
     return match.end()
 
 
+def _string_list(body: str) -> list[str]:
+    """Strings of a TS list body; fails if anything but double-quoted literals is in it."""
+    leftover = STRING.sub("", body)
+    assert not leftover.strip(" \t\n,"), (
+        f"unparseable content in TS list (single quotes, spread, comment?): {leftover.strip()!r}"
+    )
+    return STRING.findall(body)
+
+
 def _strings(body: str) -> set[str]:
-    return {m.group(1) for m in STRING.finditer(body)}
+    return set(_string_list(body))
 
 
 def _string_set(source: str, name: str) -> set[str]:
@@ -75,7 +84,10 @@ def _ts_prop_allowlist(source: str) -> dict[str, set[str]]:
 
 def _ts_registry_kinds(source: str) -> set[str]:
     start = _after(source, r"const RECHARTS_REGISTRY\b[^=]*=\s*(?=\{)")
-    kinds = set(re.findall(r"\b([A-Z]\w+)\b", _balanced(source, start)))
+    body = _balanced(source, start)
+    kinds = set(re.findall(r"^\s*(\w+),?\s*$", body, re.MULTILINE))
+    leftover = re.sub(r"^\s*\w+,?\s*$", "", body, flags=re.MULTILINE).strip()
+    assert not leftover, f"unparseable content in RECHARTS_REGISTRY: {leftover!r}"
     assert kinds, "parsed no component kinds from TypeScript RECHARTS_REGISTRY"
     return kinds
 
@@ -85,7 +97,7 @@ def _ts_palettes(source: str) -> dict[str, list[str]]:
     body = _balanced(source, start)
     palettes = {}
     for match in re.finditer(r"^  (\w+): (?=\[)", body, re.MULTILINE):
-        palettes[match.group(1)] = list(STRING.findall(_balanced(body, match.end())))
+        palettes[match.group(1)] = _string_list(_balanced(body, match.end()))
     assert palettes, "parsed no palettes from TypeScript CHART_PALETTES"
     assert all(palettes.values()), "a TypeScript palette parsed as empty"
     return palettes
@@ -96,8 +108,15 @@ def _ts_block_types(source: str) -> set[str]:
         source, r"function buildStoryRegistry\([^)]*\)[^{]*\{\s*const specs: BlockSpec\[\] = (?=\[)"
     )
     body = _balanced(source, start)
-    # Top-level specs only: nested `type:` keys sit deeper than the 6-space spec indent.
-    kinds = set(re.findall(r'^      type: "(\w+)",$', body, re.MULTILINE))
+    kinds = set()
+    i = 0
+    while (i := body.find("{", i)) != -1:
+        element = _balanced(body, i)
+        found = re.findall(r'^\s*type: "(\w+)",', element, re.MULTILINE)
+        assert len(found) == 1, f"block spec without exactly one top-level type: {found}"
+        kinds.add(found[0])
+        i += len(element) + 2
+    assert not body.count("..."), "spread inside TS block spec array is not parseable"
     assert kinds, "parsed no block types from TypeScript buildStoryRegistry"
     return kinds
 
@@ -141,7 +160,12 @@ def test_palette_colors_match(recharts_source):
 
 def test_compact_chart_types_match(recharts_source):
     start = _after(recharts_source, r'if \(!(?=\["line")')
-    assert set(STRING.findall(_balanced(recharts_source, start))) == graph_doc.COMPACT_CHART_TYPES
+    assert _strings(_balanced(recharts_source, start)) == graph_doc.COMPACT_CHART_TYPES
+
+
+def test_curve_styles_match(recharts_source):
+    start = _after(recharts_source, r"const curve = (?=\[)")
+    assert _strings(_balanced(recharts_source, start)) == graph_doc.GRAPH_STYLE_KEYS["curve"]
 
 
 def test_block_kinds_match(blocks_source):
