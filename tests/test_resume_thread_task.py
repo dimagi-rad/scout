@@ -6,6 +6,7 @@ import pytest
 from django.conf import settings as dj_settings
 from django.contrib.auth import get_user_model
 from django.test import override_settings
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage
 
 from apps.chat.models import Thread, ThreadJob
@@ -38,6 +39,7 @@ from apps.workspaces.tasks import (
     _summary_failures,
     resume_thread_after_materialization,
 )
+from tests.agent_doubles import FakeAgent
 
 User = get_user_model()
 
@@ -110,8 +112,7 @@ async def test_resume_appends_system_message_and_invokes_agent():
         result={"rows": 50000},
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -124,9 +125,7 @@ async def test_resume_appends_system_message_and_invokes_agent():
     assert result["status"] == "resumed"
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.COMPLETED
-    # Inspect the input_state passed to ainvoke.
-    call_args = mock_agent.ainvoke.await_args
-    input_state = call_args.args[0]
+    input_state = mock_agent.last_run.input_state
     messages = input_state["messages"]
     assert len(messages) == 1
     assert messages[0].content.startswith("[__system_resume__]")
@@ -135,7 +134,7 @@ async def test_resume_appends_system_message_and_invokes_agent():
     # the resume to the right conversation via configurable.thread_id. The dead
     # OAuth-token plumbing that used to ride along in this config was removed
     # (arch #253, finding 01#0).
-    config = call_args.args[1]
+    config = mock_agent.last_run.config
     assert config["configurable"]["thread_id"] == str(thread.id)
 
 
@@ -174,8 +173,7 @@ async def test_resume_failed_or_cancelled_prompt_is_honest(
         run_state=run_state,
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -183,7 +181,7 @@ async def test_resume_failed_or_cancelled_prompt_is_honest(
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
     assert result["status"] == "resumed"
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    body = mock_agent.last_run.messages[0].content
     lowered = body.lower()
 
     # The status must be reflected honestly.
@@ -252,8 +250,7 @@ async def test_resume_no_runs_still_invokes_agent_with_explanation():
     )
     # No MaterializationRun rows for procrastinate_job_id=5050.
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -261,8 +258,8 @@ async def test_resume_no_runs_still_invokes_agent_with_explanation():
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
     # Agent IS invoked — user must get a message
-    mock_agent.ainvoke.assert_awaited_once()
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert len(mock_agent.runs) == 1
+    body = mock_agent.last_run.messages[0].content
     assert any(
         phrase in body.lower()
         for phrase in ("no pipelines", "no_runs", "no credentials", "pipeline configured")
@@ -304,8 +301,7 @@ async def test_resume_partial_maps_to_failed():
         procrastinate_job_id=6060,
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -341,8 +337,7 @@ async def test_resume_semantic_build_failure_maps_to_failed():
         state=SchemaState.ACTIVE
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -351,7 +346,7 @@ async def test_resume_semantic_build_failure_maps_to_failed():
 
     assert result["status"] == "resumed"
     assert result["terminal_state"] == ThreadJob.State.FAILED
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    body = mock_agent.last_run.messages[0].content
     assert "semantic model" in body
     assert "validator exploded" in body
     assert "list_datasets" in body
@@ -389,8 +384,7 @@ async def test_resume_semantic_stale_appends_note_and_stays_completed():
         content_hash="stalehash",
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -398,7 +392,7 @@ async def test_resume_semantic_stale_appends_note_and_stays_completed():
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
     assert result["terminal_state"] == ThreadJob.State.COMPLETED
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    body = mock_agent.last_run.messages[0].content
     assert "PREVIOUS semantic model" in body
     assert "validator flaked" in body
     await tj.arefresh_from_db()
@@ -437,8 +431,7 @@ async def test_resume_invokes_agent_for_cancelled_threadjob():
         procrastinate_job_id=7777,
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -449,10 +442,9 @@ async def test_resume_invokes_agent_for_cancelled_threadjob():
         )
 
     assert result["status"] == "resumed"
-    mock_agent.ainvoke.assert_awaited_once()
+    assert len(mock_agent.runs) == 1
     # Confirm the system-resume message mentions cancellation
-    call_args = mock_agent.ainvoke.await_args
-    body = call_args.args[0]["messages"][0].content
+    body = mock_agent.last_run.messages[0].content
     assert "cancelled" in body.lower()
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.CANCELLED
@@ -490,8 +482,7 @@ async def test_resume_bumps_thread_updated_at_on_success():
     # Record the updated_at before the resume runs
     pre_resume_updated_at = thread.updated_at
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     schedule_title = AsyncMock()
     with (
         patch(
@@ -514,14 +505,14 @@ async def test_resume_bumps_thread_updated_at_on_success():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_resume_does_not_clobber_concurrent_cancel_during_ainvoke():
-    """If the user clicks Stop during agent.ainvoke (a 30s+ operation), the
-    cancel endpoint writes ThreadJob.state=CANCELLED to the DB. When ainvoke
-    returns, the resume task must NOT overwrite that with a success terminal.
+async def test_resume_does_not_clobber_concurrent_cancel_during_the_turn():
+    """If the user clicks Stop during the agent's turn (a 30s+ operation), the
+    cancel endpoint writes ThreadJob.state=CANCELLED to the DB. When the turn
+    ends, the resume task must NOT overwrite that with a success terminal.
 
-    We simulate the race by having the mocked ainvoke flip the DB state
-    inside its body — this is the same sequence the cancel endpoint would
-    produce while the worker is blocked on the LLM call."""
+    We simulate the race by having the agent flip the DB state mid-turn —
+    this is the same sequence the cancel endpoint would produce while the
+    worker is blocked on the LLM call."""
     user = await User.objects.acreate_user(email="race@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W-race", created_by=user)
     tenant = await Tenant.objects.acreate(
@@ -546,15 +537,13 @@ async def test_resume_does_not_clobber_concurrent_cancel_during_ainvoke():
         procrastinate_job_id=8484,
     )
 
-    async def flip_to_cancelled_then_return(*args, **kwargs):
-        # Simulate the cancel endpoint landing while ainvoke is mid-flight.
+    async def flip_to_cancelled(_state):
+        # Simulate the cancel endpoint landing while the turn is mid-flight.
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.CANCELLED,
         )
-        return {"messages": []}
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(side_effect=flip_to_cancelled_then_return)
+    mock_agent = FakeAgent(during=flip_to_cancelled)
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -605,8 +594,7 @@ async def test_resume_does_not_force_cancelled_status_when_runs_completed():
         result={"rows": 1234},
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -614,8 +602,8 @@ async def test_resume_does_not_force_cancelled_status_when_runs_completed():
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
     # The system-resume body must say "completed" — the data is loaded.
-    mock_agent.ainvoke.assert_awaited_once()
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert len(mock_agent.runs) == 1
+    body = mock_agent.last_run.messages[0].content
     assert "completed" in body.lower()
     assert "cancelled" not in body.lower()
     # Terminal state should be COMPLETED to match reality.
@@ -668,16 +656,15 @@ async def test_resume_partial_run_surfaces_per_source_state_in_prompt():
         },
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
-    mock_agent.ainvoke.assert_awaited_once()
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert len(mock_agent.runs) == 1
+    body = mock_agent.last_run.messages[0].content
     # The prompt must call out PARTIAL state and include per-source detail.
     assert "PARTIAL" in body or "partial" in body
     # Per-source state must be present so the agent knows what's queryable.
@@ -839,8 +826,7 @@ async def test_resume_discloses_dbt_test_failures_without_claiming_build_failure
         }
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -848,7 +834,7 @@ async def test_resume_discloses_dbt_test_failures_without_claiming_build_failure
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
     assert result["terminal_state"] == ThreadJob.State.COMPLETED
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    body = mock_agent.last_run.messages[0].content
     assert "data-quality tests" in body
     assert "unique_stg_cases_case_id" in body
     assert "stg_cases" in body
@@ -863,7 +849,7 @@ async def test_resume_discloses_dbt_test_failures_without_claiming_build_failure
 @pytest.mark.django_db(transaction=True)
 async def test_resume_cas_rejects_already_running_threadjob():
     """If a ThreadJob is already in RUNNING state (a concurrent resume
-    claimed it first), a second invocation must NOT proceed to ainvoke."""
+    claimed it first), a second invocation must NOT run the agent."""
     user = await User.objects.acreate_user(email="cas@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W-cas", created_by=user)
     tenant = await Tenant.objects.acreate(
@@ -888,8 +874,7 @@ async def test_resume_cas_rejects_already_running_threadjob():
         procrastinate_job_id=24680,
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -900,7 +885,7 @@ async def test_resume_cas_rejects_already_running_threadjob():
         )
 
     assert result["status"] == "already_claimed"
-    mock_agent.ainvoke.assert_not_called()
+    assert mock_agent.runs == []
 
 
 @pytest.mark.asyncio
@@ -932,15 +917,14 @@ async def test_resume_recursion_limit_is_lowered_from_default():
         result={"rows": 100},
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
-    config = mock_agent.ainvoke.await_args.args[1]
+    config = mock_agent.last_run.config
     # Must read from the AGENT_RESUME_RECURSION_LIMIT setting (so ops can
     # tune it without code change) and must be lower than the chat default
     # of 50.
@@ -956,10 +940,10 @@ async def test_resume_recursion_limit_is_lowered_from_default():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @override_settings(AGENT_RESUME_TIMEOUT_S=1)
-async def test_ainvoke_timeout_marks_failed_and_persists_message():
-    """When agent.ainvoke exceeds AGENT_RESUME_TIMEOUT_S, the ThreadJob lands
-    in FAILED and a synthetic AIMessage is persisted via aupdate_state so the
-    user sees a friendly explanation instead of a forever-spinner."""
+async def test_agent_timeout_marks_failed_and_persists_message():
+    """When the agent's turn exceeds AGENT_RESUME_TIMEOUT_S, the ThreadJob lands
+    in FAILED and a synthetic AIMessage is checkpointed so the user sees a
+    friendly explanation instead of a forever-spinner."""
     _, _, _, tj = await _make_thread_job_ready_to_resume(
         email="timeout@b.c",
         ws_name="W-timeout",
@@ -969,13 +953,10 @@ async def test_ainvoke_timeout_marks_failed_and_persists_message():
         tool_call="tc-timeout",
     )
 
-    async def _sleeping_invoke(*_args, **_kwargs):
+    async def _stall(_state):
         await asyncio.sleep(5)
-        return {"messages": []}
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(side_effect=_sleeping_invoke)
-    mock_agent.aupdate_state = AsyncMock(return_value=None)
+    mock_agent = FakeAgent(during=_stall)
 
     with (
         patch(
@@ -995,20 +976,15 @@ async def test_ainvoke_timeout_marks_failed_and_persists_message():
     assert tj.failure_phase == ThreadJob.FailurePhase.RESUME
     assert tj.completed_at is not None
 
-    # aupdate_state was called with a single AIMessage carrying the timeout copy
-    mock_agent.aupdate_state.assert_awaited()
-    update_args = mock_agent.aupdate_state.await_args
-    payload = update_args.args[1]
-    assert "messages" in payload
-    msg = payload["messages"][0]
+    msg = (await mock_agent.thread_messages(tj.thread_id))[-1]
     assert isinstance(msg, AIMessage)
     assert msg.content == RESUME_TIMEOUT_MESSAGE
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_ainvoke_exception_marks_failed_and_persists_message():
-    """When agent.ainvoke raises (non-timeout), the ThreadJob lands in FAILED
+async def test_agent_exception_marks_failed_and_persists_message():
+    """When the agent's turn raises (non-timeout), the ThreadJob lands in FAILED
     and a synthetic AIMessage with the generic-exception copy is persisted."""
     _, _, _, tj = await _make_thread_job_ready_to_resume(
         email="boom@b.c",
@@ -1019,9 +995,7 @@ async def test_ainvoke_exception_marks_failed_and_persists_message():
         tool_call="tc-boom",
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(side_effect=RuntimeError("upstream LLM 500"))
-    mock_agent.aupdate_state = AsyncMock(return_value=None)
+    mock_agent = FakeAgent(during=AsyncMock(side_effect=RuntimeError("upstream LLM 500")))
     schedule_title = AsyncMock()
 
     with (
@@ -1043,8 +1017,7 @@ async def test_ainvoke_exception_marks_failed_and_persists_message():
     assert tj.state == ThreadJob.State.FAILED
     assert tj.failure_phase == ThreadJob.FailurePhase.RESUME
 
-    mock_agent.aupdate_state.assert_awaited()
-    msg = mock_agent.aupdate_state.await_args.args[1]["messages"][0]
+    msg = (await mock_agent.thread_messages(tj.thread_id))[-1]
     assert isinstance(msg, AIMessage)
     assert msg.content == RESUME_EXCEPTION_MESSAGE
 
@@ -1063,8 +1036,7 @@ async def test_successful_ainvoke_logs_bookends(caplog):
         tool_call="tc-bookend",
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
 
     caplog.set_level(logging.INFO, logger="apps.workspaces.tasks")
     with patch(
@@ -1082,9 +1054,9 @@ async def test_successful_ainvoke_logs_bookends(caplog):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_resume_emits_langfuse_span_on_each_outcome():
-    """The Langfuse span context manager must wrap the ainvoke on success,
+    """The Langfuse span context manager must wrap the agent's turn on success,
     timeout, and exception paths so traces are emitted on every terminal
-    outcome (the production bug was a silent ainvoke with no trace)."""
+    outcome (the production bug was a silent turn with no trace)."""
     user, ws, _, tj = await _make_thread_job_ready_to_resume(
         email="lf@b.c",
         ws_name="W-lf",
@@ -1094,15 +1066,14 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
         tool_call="tc-lf",
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": [AIMessage(content="done")]})
+    mock_agent = FakeAgent("done")
 
     span = MagicMock()
     span_cm = MagicMock()
     span_cm.__enter__ = MagicMock(return_value=span)
     span_cm.__exit__ = MagicMock(return_value=False)
 
-    handler = object()
+    handler = BaseCallbackHandler()
     with (
         patch(
             "apps.workspaces.tasks._build_agent_for_resume",
@@ -1116,7 +1087,7 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
-    assert mock_agent.ainvoke.await_args.args[1]["callbacks"] == [handler]
+    assert mock_agent.last_run.config["callbacks"] == [handler]
 
     span_helper.assert_called_once()
     kwargs = span_helper.call_args.kwargs
@@ -1132,7 +1103,7 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_resume_agent_failure_sets_error_summary():
-    """When agent.ainvoke raises, the ThreadJob is marked FAILED with a
+    """When the agent's turn raises, the ThreadJob is marked FAILED with a
     generic error_summary so the frontend can render an inline retry card."""
     user = await User.objects.acreate_user(email="afail@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W-afail", created_by=user)
@@ -1161,8 +1132,7 @@ async def test_resume_agent_failure_sets_error_summary():
         procrastinate_job_id=4801,
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(side_effect=RuntimeError("LLM 503"))
+    mock_agent = FakeAgent(during=AsyncMock(side_effect=RuntimeError("LLM 503")))
     with (
         patch(
             "apps.workspaces.tasks._build_agent_for_resume",
@@ -1228,8 +1198,7 @@ async def test_resume_partial_run_sets_threadjob_error_summary():
         },
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -1271,8 +1240,7 @@ async def test_resume_no_runs_sets_helpful_error_summary():
     )
     # No MaterializationRun rows -> no_runs path.
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
@@ -1346,16 +1314,15 @@ async def test_resume_surfaces_view_schema_failure_for_multi_tenant():
         last_error="Canonical name collision: 'a' and 'b' both sanitize to 'x'",
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
-    mock_agent.ainvoke.assert_awaited_once()
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert len(mock_agent.runs) == 1
+    body = mock_agent.last_run.messages[0].content
     lower = body.lower()
     # The view-schema-failure instruction must be present.
     assert "view schema" in lower
@@ -1390,16 +1357,15 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun(current_state):
     )
     await TenantSchema.objects.filter(schema_name="W_vsc_s2").aupdate(state=current_state)
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
-    mock_agent.ainvoke.assert_awaited_once()
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert len(mock_agent.runs) == 1
+    body = mock_agent.last_run.messages[0].content
     lower = body.lower()
     # Correct, cause-specific advice: re-running materialization WILL fix it.
     if current_state == SchemaState.ACTIVE:
@@ -1435,15 +1401,14 @@ async def test_resume_missing_tenant_data_allows_refresh_without_cascade_marker(
     await TenantSchema.objects.filter(schema_name="W_missing_current_s2").aupdate(
         state=current_state
     )
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    body = mock_agent.last_run.messages[0].content
     assert "Tenant 2" in body
     assert "Verify current access and account credentials" in body
     assert "ask someone with access" in body
@@ -1467,16 +1432,15 @@ async def test_resume_plain_completed_for_multi_tenant_active_view_schema():
         view_schema_state=SchemaState.ACTIVE,
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
-    mock_agent.ainvoke.assert_awaited_once()
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert len(mock_agent.runs) == 1
+    body = mock_agent.last_run.messages[0].content
     assert "Materialization just completed" in body
     assert "view schema" not in body.lower()
     assert result["terminal_state"] == ThreadJob.State.COMPLETED
@@ -1604,15 +1568,14 @@ async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state, rea
         tenant=uncovered, schema_name="retained_uncovered", state=SchemaState.ACTIVE
     )
     await WorkspaceViewSchema.objects.filter(workspace=_ws).aupdate(state=view_state)
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    body = mock_agent.last_run.messages[0].content
     assert "Materialization just completed" not in body
     assert uncovered.external_id in body
     assert "did not refresh" in body
@@ -1651,15 +1614,14 @@ async def test_resume_no_runs_prompt_names_the_tenants_and_carries_guidance():
         email="resume-noruns@b.c", ws_name="W-res-nor", pj_id=90004, covered_run=False
     )
 
-    mock_agent = MagicMock()
-    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    mock_agent = FakeAgent()
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
         AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
-    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    body = mock_agent.last_run.messages[0].content
     assert uncovered.external_id in body
     assert "not connected to your account" in body
     assert result["terminal_state"] == ThreadJob.State.FAILED
@@ -1677,7 +1639,7 @@ async def test_uncovered_tenant_with_failed_semantic_build_does_not_claim_full_r
         pj_id=90005,
         uncovered_reachable=True,
     )
-    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    agent = FakeAgent()
     with (
         patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
         patch(
@@ -1686,7 +1648,7 @@ async def test_uncovered_tenant_with_failed_semantic_build_does_not_claim_full_r
         ),
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
-    body = agent.ainvoke.await_args.args[0]["messages"][0].content
+    body = agent.last_run.messages[0].content
     assert "the data is already loaded" not in body
     assert "incomplete refresh coverage" in body
     assert uncovered.external_id in body
@@ -1758,7 +1720,7 @@ async def test_no_runs_banner_does_not_advertise_unmatched_recorded_details(chan
     else:
         uncovered.provider = "ocs"
         await uncovered.asave(update_fields=["provider"])
-    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    agent = FakeAgent()
     with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
         await resume_thread_after_materialization(None, str(tj.id))
     await tj.arefresh_from_db()
@@ -1785,7 +1747,7 @@ async def test_deferred_resume_preserves_partial_refresh_and_credential_guidance
         }
     ]
     await tj.asave(update_fields=["materialization_preflight_failures"])
-    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    agent = FakeAgent()
     with (
         patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
         patch(
@@ -1794,7 +1756,7 @@ async def test_deferred_resume_preserves_partial_refresh_and_credential_guidance
         ),
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
-    body = agent.ainvoke.await_args.args[0]["messages"][0].content
+    body = agent.last_run.messages[0].content
     assert "incomplete refresh coverage" in body
     assert "reconnect the affected account" in body
     assert uncovered.external_id in body

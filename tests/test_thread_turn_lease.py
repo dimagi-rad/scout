@@ -48,6 +48,7 @@ from apps.workspaces.tasks import (
     RESUME_THREAD_BUSY_SUMMARY,
     resume_thread_after_materialization,
 )
+from tests.agent_doubles import FakeAgent
 from tests.tenant_access import ausable_connection
 
 User = get_user_model()
@@ -390,7 +391,7 @@ class TestResume:
     async def test_a_live_turn_defers_the_resume_without_touching_the_thread(self):
         tj = await _resumable_job("resume-busy", 880001)
         live = await atry_acquire_turn_lease(tj.thread_id)
-        agent = MagicMock(ainvoke=AsyncMock())
+        agent = FakeAgent()
         requeue, configured = _requeue_capture()
 
         with (
@@ -402,7 +403,7 @@ class TestResume:
             )
 
         assert result == {"status": "thread_busy_deferred", "retry_in_seconds": 20}
-        agent.ainvoke.assert_not_awaited()
+        assert agent.runs == []
         configured.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id), busy_attempt=3)
         await tj.arefresh_from_db()
         assert tj.state == ThreadJob.State.PENDING
@@ -456,11 +457,10 @@ class TestResume:
         tj = await _resumable_job("resume-idle", 880004)
         seen_during_invoke = []
 
-        async def ainvoke(*_args, **_kwargs):
+        async def try_the_lease(_state):
             seen_during_invoke.append(await atry_acquire_turn_lease(tj.thread_id))
-            return {"messages": []}
 
-        agent = MagicMock(ainvoke=AsyncMock(side_effect=ainvoke))
+        agent = FakeAgent(during=try_the_lease)
         with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
             result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -472,13 +472,13 @@ class TestResume:
         tj = await _resumable_job("resume-stale", 880005)
         await atry_acquire_turn_lease(tj.thread_id)
         await _expire(tj.thread_id)
-        agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+        agent = FakeAgent()
 
         with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
             result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
         assert result["status"] == "resumed"
-        agent.ainvoke.assert_awaited_once()
+        assert len(agent.runs) == 1
 
     async def test_a_resume_that_loses_the_claim_frees_the_thread(self):
         tj = await _resumable_job("resume-claimed", 880006)
@@ -594,11 +594,11 @@ class TestResumeDeadline:
     async def test_a_resume_that_loses_the_thread_mid_run_fails_its_job_without_writing(self):
         tj = await _resumable_job("resume-lost", 880014)
 
-        async def lose_the_thread_then_stall(*_args, **_kwargs):
+        async def lose_the_thread_then_stall(_state):
             await _take_over(tj.thread_id)
             await _stall_until_cancelled()
 
-        agent = MagicMock(ainvoke=AsyncMock(side_effect=lose_the_thread_then_stall))
+        agent = FakeAgent(during=lose_the_thread_then_stall)
         persist = AsyncMock()
         with (
             patch.object(turn_lease, "TURN_LEASE_HEARTBEAT_SECONDS", 0.05),
