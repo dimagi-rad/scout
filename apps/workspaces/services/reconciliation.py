@@ -26,7 +26,11 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.data_operation import to_thread_fresh_db, workspace_data_lock_if_free
 from apps.workspaces.services.data_recovery import recovery_query_surface, workspace_recovery_error
-from apps.workspaces.services.load_activity import MATERIALIZE_TASK_NAME, REBUILD_VIEW_TASK_NAME
+from apps.workspaces.services.load_activity import (
+    MATERIALIZATION_STALLED_HEARTBEAT_SECONDS,
+    MATERIALIZE_TASK_NAME,
+    REBUILD_VIEW_TASK_NAME,
+)
 from apps.workspaces.services.load_outcome import build_failure_summary_for_job
 from apps.workspaces.task_dispatch import adefer_resume_thread
 from config.procrastinate import app
@@ -262,12 +266,6 @@ async def sweep_stale_thread_jobs() -> dict:
             flipped += 1
     return {"flipped": flipped}
 
-
-# A hard worker death (SIGKILL/OOM/host crash) leaves the procrastinate job 'doing'
-# and its MaterializationRun stuck ACTIVE, and the ThreadJob janitor can't see it
-# (None for a zombie job; /refresh/ runs have no ThreadJob). Detect it via
-# procrastinate's heartbeat stalled-job query and fail the run truthfully (arch #255 03#9).
-MATERIALIZATION_STALLED_HEARTBEAT_SECONDS = 300
 
 # Terminal procrastinate statuses for a materialization job: the job is finished,
 # so a MaterializationRun still ACTIVE is a zombie the worker never closed out.

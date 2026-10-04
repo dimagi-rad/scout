@@ -43,7 +43,6 @@ from apps.workspaces.services.load_outcome import (
 )
 from apps.workspaces.services.query_state import semantic_layer_state
 from apps.workspaces.task_dispatch import (
-    FLUSH_PENDING_REQUESTS,
     RESUME_THREAD_AFTER_MATERIALIZATION,
     adefer_flush_pending_requests,
     adefer_resume_thread,
@@ -52,7 +51,6 @@ from apps.workspaces.task_dispatch import (
 logger = logging.getLogger(__name__)
 
 RESUME_TASK_NAME = RESUME_THREAD_AFTER_MATERIALIZATION
-FLUSH_TASK_NAME = FLUSH_PENDING_REQUESTS
 
 # User-facing failure copy. The frontend renders these straight from the
 # checkpointer (apps/chat/thread_views.py:_load_thread_messages → AIMessage).

@@ -16,7 +16,7 @@ from apps.common.identifiers import tenant_schema_name
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.access import resolve_workspace_access_ex
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceRole, WorkspaceTenant
-from apps.workspaces.services.reconciliation import MATERIALIZATION_STALLED_HEARTBEAT_SECONDS
+from apps.workspaces.services.load_activity import MATERIALIZATION_STALLED_HEARTBEAT_SECONDS
 from apps.workspaces.task_dispatch import (
     JOB_RETENTION_HOURS,
     REFRESH_TENANT_SCHEMA,
