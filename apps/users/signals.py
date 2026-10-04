@@ -123,14 +123,22 @@ def resolve_existing_tenants_on_social_login(request, sociallogin, **kwargs):
         resolve_tenant_on_social_login(request, sociallogin)
 
 
+def resolve_tenants_on_social_signup(request, user, sociallogin=None, **kwargs):
+    # Auto-signup sends neither social_account_added (connect only) nor an existing
+    # pre_social_login, so a first sign-in would otherwise resolve nothing until the next.
+    if sociallogin is not None:
+        resolve_tenant_on_social_login(request, sociallogin)
+
+
 def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
     """After CommCare/Connect/OCS OAuth, resolve tenants and create TenantMembership records.
 
     ``sociallogin.account`` is threaded through so the resolver attributes the
     fetch to *this* identity. It matters because an OCS token is team-scoped and a
-    user may hold several. New connects resolve on ``social_account_added``;
-    existing identities resolve on ``pre_social_login``, after allauth stores the
-    refreshed token so the credential observation can be checked safely.
+    user may hold several. New connects resolve on ``social_account_added`` and new
+    users on ``user_signed_up``; existing identities resolve on ``pre_social_login``,
+    after allauth stores the refreshed token so the credential observation can be
+    checked safely.
     """
     provider = canonical_provider(sociallogin.account.provider)
 
