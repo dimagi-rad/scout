@@ -234,7 +234,8 @@ def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
         return  # brand-new user; allauth's _lookup_by_email handles it
     if user.email:
         return  # already has an email — nothing to reconcile
-    if verified_social_email(sociallogin.account.provider, sociallogin.account.extra_data) is None:
+    new_email = verified_social_email(sociallogin.account.provider, sociallogin.account.extra_data)
+    if new_email is None:
         # An email the provider did not vouch for must neither become the
         # account's email nor pull it into another user's account.
         logger.info(

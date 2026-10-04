@@ -189,9 +189,39 @@ def test_canonical_owning_email_only_via_ocs_needs_the_claim(claim, merged):
     assert (login.user == canonical) is merged
 
 
+@pytest.mark.django_db
 def test_trusted_providers_vouch_without_a_claim():
     for provider in ("commcare", "commcare_eu", "commcare_connect"):
         assert verified_social_email(provider, {"email": "a@b.co"}) == "a@b.co"
     assert verified_social_email("ocs", {"email": "a@b.co"}) is None
     assert verified_social_email("ocs", {"email": "a@b.co", "email_verified": True}) == "a@b.co"
     assert verified_social_email("commcare", {}) is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "alias, cls, extra_data, vouched",
+    [
+        ("hq_production", "commcare", {"email": " a@b.co "}, True),
+        ("commcare_prod", None, {"email": "a@b.co"}, True),
+        ("connect_production", "commcare_connect", {"email": "a@b.co"}, True),
+        ("ocs_staging", "ocs", {"email": "a@b.co"}, False),
+        ("ocs_staging", "ocs", {"email": "a@b.co", "email_verified": True}, True),
+        ("chat_prod", "ocs", {"email": "a@b.co"}, False),
+    ],
+)
+def test_aliased_provider_ids_resolve_to_their_class(alias, cls, extra_data, vouched):
+    """SocialAccount.provider stores a SocialApp's provider_id alias, not the class id."""
+    if cls:
+        SocialApp.objects.create(provider=cls, provider_id=alias, name=alias, client_id=alias)
+    user = User.objects.create(email=None, username="aliased")
+    SocialAccount.objects.create(user=user, provider=alias, uid="u", extra_data=extra_data)
+
+    assert (verified_social_email(alias, extra_data) == "a@b.co") is vouched
+    assert ("a@b.co" in proven_emails(user)) is vouched
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("email", [["a@b.co"], 7, "   "])
+def test_malformed_email_is_not_vouched(email):
+    assert verified_social_email("commcare", {"email": email}) is None
