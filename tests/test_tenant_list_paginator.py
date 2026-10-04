@@ -13,6 +13,7 @@ from apps.common.commcare_servers import COMMCARE_SERVERS
 from apps.users.services.tenant_listing import commcare as commcare_listing
 from apps.users.services.tenant_listing.paginator import list_tenants, paginate
 from apps.users.services.tenant_listing.types import (
+    ListingDeadlineExceeded,
     MalformedTenantList,
     ProviderRequest,
     RequestTimedOut,
@@ -76,6 +77,29 @@ async def test_each_request_is_cut_off_at_the_remaining_budget():
     assert [tenant.external_id for tenant in tenants] == ["a", "b"]
     # 55s spent on page 1 leaves 5s of the 60s budget, so page 2 gets 5s, not 30s.
     assert [kwargs["timeout"] for _, kwargs in client.calls] == [30.0, 5.0]
+
+
+@pytest.mark.asyncio
+async def test_the_budget_running_out_between_pages_stops_before_the_next_request():
+    readings = iter([0.0, 0.0, 10.0, 61.0])
+    client = _Client(_page([{"domain_name": "a"}], "?offset=1"), _page([{"domain_name": "b"}]))
+
+    with pytest.raises(ListingDeadlineExceeded) as raised:
+        await _collect(client, clock=lambda: next(readings))
+
+    assert (raised.value.page, raised.value.status_code) == (2, None)
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_response_after_the_deadline_is_not_trusted():
+    readings = iter([0.0, 0.0, 60.0])
+    client = _Client(_page([{"domain_name": "a"}]))
+
+    with pytest.raises(ListingDeadlineExceeded) as raised:
+        await _collect(client, clock=lambda: next(readings))
+
+    assert (raised.value.page, raised.value.status_code) == (1, 200)
 
 
 @pytest.mark.asyncio

@@ -44,7 +44,6 @@ from apps.common.commcare_servers import CommCareServer, get_commcare_server
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import CommCareAuthError, ConnectAuthError, OCSAuthError
 from apps.users.models import Tenant, TenantConnection, TenantMembership, User
-from apps.users.services.api_key_providers.base import TenantDescriptor
 from apps.users.services.oauth_scope import (
     account_scope,
     ocs_scope_unusable,
@@ -56,6 +55,7 @@ from apps.users.services.tenant_listing import commcare as commcare_listing
 from apps.users.services.tenant_listing.paginator import list_tenants
 from apps.users.services.tenant_listing.types import (
     MalformedTenantList,
+    TenantDescriptor,
     TenantListError,
     UnsafeNextURL,
     UpstreamStatus,
@@ -544,9 +544,10 @@ async def _record_discovery_denial(connection, access_token, status, account=Non
 async def _fetch_all_domains(access_token: str, server: CommCareServer) -> list[TenantDescriptor]:
     """Every domain the token can see on ``server``, or a raise; never a partial list.
 
-    Raises CommCareAuthError on 401/403, the httpx error on any other status or a
-    transport failure, and TenantResolutionError when the list cannot be read to
-    its end (shape drift, a next link off the server, a cycle, the page or time limit).
+    Raises CommCareAuthError on 401/403, httpx.HTTPStatusError on any other status,
+    the httpx error on a transport failure, and TenantResolutionError when the list
+    cannot be read to its end (shape drift, a next link off the server, a cycle, the
+    page or time limit, or a request cut off at the budget).
     """
     request = commcare_listing.list_request(server.key, TenantConnection.OAUTH, access_token)
     if request is None:
@@ -568,8 +569,11 @@ async def _fetch_all_domains(access_token: str, server: CommCareServer) -> list[
                 f"access token is expired, revoked, or not authorized for this API",
                 status_code=error.status_code,
             ) from None
-        error.response.raise_for_status()
-        raise TenantResolutionError(f"CommCare answered HTTP {error.status_code}") from None
+        raise httpx.HTTPStatusError(
+            f"CommCare answered HTTP {error.status_code} while listing domains",
+            request=error.response.request,
+            response=error.response,
+        ) from None
     except UpstreamUnreachable as error:
         raise error.cause from None
     except UnsafeNextURL:
