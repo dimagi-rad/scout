@@ -427,6 +427,15 @@ test('remote databases are reached only with a verified RDS certificate and host
   assert.equal(drivers[0].config.host, 'scout.abc123.us-east-1.rds.amazonaws.com');
 });
 
+test('URL parameters cannot weaken the catalog pool TLS settings', () => {
+  for (const query of ['?sslmode=no-verify', '?sslmode=disable', '?ssl=0']) {
+    const pools = [];
+    loadConfig(undefined, pools, { DATABASE_URL: `${RDS_URL}${query}`, SCOUT_DB_SSL_CA_FILE: BUNDLE });
+    assert.equal(pools[0].connectionString, undefined);
+    assert.equal(pools[0].ssl.rejectUnauthorized, true);
+  }
+});
+
 test('a separate managed database URL is verified too', () => {
   const config = loadConfig(undefined, [], { MANAGED_DATABASE_URL: RDS_URL, SCOUT_DB_SSL_CA_FILE: BUNDLE });
   assert.equal(config.driverFactory(context()).config.ssl.rejectUnauthorized, true);

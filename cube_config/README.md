@@ -156,7 +156,8 @@ https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem and copied to
 `/cube/conf/` by the Dockerfile). `SCOUT_DB_SSL_CA_FILE` points at a different CA
 file; there is no unverified mode. A missing CA file fails startup. Hostname
 verification means the URLs must use the RDS endpoint name, not an IP or a CNAME
-the certificate does not list. When AWS adds a CA, refresh the vendored bundle.
+the certificate does not list. URL query parameters such as `sslmode` are ignored.
+When AWS adds a CA, refresh the vendored bundle and check its sha256 against upstream.
 
 ## Verification
 

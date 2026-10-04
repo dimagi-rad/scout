@@ -62,7 +62,6 @@ function boundedPoolConfig(maxPoolSize) {
   };
 }
 
-// Copied into the image by the Dockerfile; the public AWS RDS CA bundle.
 const DEFAULT_DB_SSL_CA_FILE = '/cube/conf/rds-global-bundle.pem';
 let dbSslCa = null;
 
@@ -130,10 +129,11 @@ const managedDatabaseUrl = process.env.MANAGED_DATABASE_URL || appDatabaseUrl;
 // Pin search_path: the default "$user", public resolves differently for the
 // owner and for the role, so the grant check and the reads could otherwise
 // see different semantic_cubeschema tables.
+// Not connectionString: pg lets URL parameters such as ?sslmode=no-verify
+// replace the ssl option, which would bypass certificate verification.
 const catalogPoolOptions = {
-  connectionString: appDatabaseUrl,
+  ...connectionFromUrl(appDatabaseUrl),
   options: '-c search_path=public',
-  ssl: sslConfigForUrl(appDatabaseUrl),
   connectionTimeoutMillis: CATALOG_QUERY_TIMEOUT_MS,
   statement_timeout: CATALOG_QUERY_TIMEOUT_MS,
   query_timeout: CATALOG_QUERY_TIMEOUT_MS,
