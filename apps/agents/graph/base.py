@@ -115,21 +115,6 @@ MCP_TOOL_NAMES = frozenset(
 LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager", "canvas_manager"})
 ARTIFACT_READ_TOOL_NAMES = frozenset({"artifact_graph_overview", "get_artifact_semantic_queries"})
 
-# MCP tools the server advertises but that must NEVER be exposed to the agent.
-#
-# ``teardown_schema`` (arch #237 / finding 00#2) physically DROPs every tenant
-# and view schema for a workspace but updates no Django state — TenantSchema
-# stays ACTIVE over dropped schemas, MaterializationRuns stay COMPLETED, the
-# WorkspaceViewSchema stays ACTIVE, and sibling multi-tenant workspaces sharing
-# the (external_id-keyed) tenant schema are silently destroyed without being
-# failed. Its only guards are an LLM-suppliable ``confirm`` flag and workspace
-# existence; there is no role/membership check. It duplicates the worker
-# ``teardown_schema`` task (which carries the full state-update + sibling-fail
-# machinery) with none of its safety, and has no legitimate agent use case
-# (schemas are re-provisioned automatically on the next materialization). It is
-# therefore filtered out before tools are bound to the LLM. The MCP server still
-# defines the tool so operator/HTTP callers are unaffected.
-AGENT_EXCLUDED_MCP_TOOLS = frozenset({"teardown_schema"})
 AGENT_WRITE_MCP_TOOLS = frozenset({"run_materialization", "cancel_materialization"})
 
 # Context params the graph injects into every MCP tool call server-side. They
@@ -1224,14 +1209,12 @@ def _build_tools(
     """Build the tool list: MCP data tools plus local artifact/recipe/learning
     tools, and a blocking materialization tool in headless mode.
     """
-    # Drop any MCP tool the server advertises but that must not reach the LLM
-    # (e.g. the destructive ``teardown_schema`` — see AGENT_EXCLUDED_MCP_TOOLS).
-    # In headless mode also drop the interactive fire-and-ack
+    # In headless mode drop the interactive fire-and-ack
     # ``run_materialization``: it requires a real chat Thread + checkpointer +
     # async resume that a headless run does not have. It is replaced below by the
     # blocking materialize tool, which runs the pipeline inline and returns when
     # data is ready.
-    excluded = set(AGENT_EXCLUDED_MCP_TOOLS)
+    excluded: set[str] = set()
     if not write_capable:
         excluded.update(AGENT_WRITE_MCP_TOOLS)
     if not interactive:

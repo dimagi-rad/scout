@@ -47,7 +47,6 @@ from mcp_server.server import (
     list_tables,
     list_workspaces,
     semantic_catalog,
-    teardown_schema,
 )
 from mcp_server.services.pool import close_all_pools
 from mcp_server.services.query import _execute_async_parameterized, execute_query
@@ -897,50 +896,6 @@ class TestGetSchemaStatusTool:
         error = result["error"]
         # The collision text must survive so the agent and the card can show it.
         assert "View name collision" in (error["message"] + str(error.get("detail", "")))
-
-
-# ---------------------------------------------------------------------------
-# teardown_schema tool
-# ---------------------------------------------------------------------------
-
-PATCH_SCHEMA_MANAGER = "apps.workspaces.services.schema_manager.SchemaManager"
-
-
-@pytest.mark.django_db(transaction=True)
-class TestTeardownSchemaTool:
-    """Test the teardown_schema MCP tool."""
-
-    async def test_requires_confirm_true(self):
-
-        result = await teardown_schema(confirm=False, workspace_id="ws-123")
-
-        assert result["success"] is False
-        assert result["error"]["code"] == VALIDATION_ERROR
-        assert "confirm=True" in result["error"]["message"]
-
-    async def test_default_confirm_is_false(self):
-
-        result = await teardown_schema(workspace_id="ws-123")
-
-        assert result["success"] is False
-        assert result["error"]["code"] == VALIDATION_ERROR
-
-    async def test_requires_workspace_id(self):
-
-        result = await teardown_schema(confirm=True)
-
-        assert result["success"] is False
-        assert result["error"]["code"] == VALIDATION_ERROR
-
-    @pytest.mark.django_db
-    async def test_not_found_when_no_workspace(self):
-
-        result = await teardown_schema(
-            confirm=True, workspace_id="00000000-0000-0000-0000-000000000000"
-        )
-
-        assert result["success"] is False
-        assert result["error"]["code"] == NOT_FOUND
 
 
 @pytest.mark.django_db(transaction=True)

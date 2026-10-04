@@ -44,7 +44,6 @@ from mcp.client.session import ClientSession
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from apps.agents.graph.base import (
-    AGENT_EXCLUDED_MCP_TOOLS,
     MCP_TOOL_NAMES,
     _fetch_semantic_model_context,
     _make_injecting_tool_node,
@@ -137,13 +136,7 @@ async def test_advertised_tool_set_matches_graph_expectation():
     """
     async with mcp_wire() as (_session, tools):
         advertised = set(tools)
-    # ``AGENT_EXCLUDED_MCP_TOOLS`` (e.g. the destructive ``teardown_schema``) are
-    # advertised by the server for operator/HTTP callers but deliberately NOT bound
-    # to the agent (arch #237 / finding 00#2). They are a third accounted-for bucket
-    # alongside graph-injected (``MCP_TOOL_NAMES``) and ``CONTEXT_FREE_TOOLS`` tools.
-    # The drift-detection intent is preserved: a NEW server tool that is neither
-    # expected, context-free, nor explicitly excluded still trips the ``extra`` check.
-    expected = set(MCP_TOOL_NAMES) | CONTEXT_FREE_TOOLS | AGENT_EXCLUDED_MCP_TOOLS
+    expected = set(MCP_TOOL_NAMES) | CONTEXT_FREE_TOOLS
 
     missing = expected - advertised
     extra = advertised - expected
@@ -152,6 +145,13 @@ async def test_advertised_tool_set_matches_graph_expectation():
         f"Tools the server exposes that the graph does not account for: {extra}. "
         "Add to MCP_TOOL_NAMES (if context-injected) or CONTEXT_FREE_TOOLS."
     )
+
+
+async def test_destructive_teardown_schema_tool_is_not_registered():
+    """R19: schema teardown is owned by the worker task, never an MCP tool."""
+    async with mcp_wire() as (_session, tools):
+        assert "teardown_schema" not in set(tools)
+    assert "teardown_schema" not in {t.name for t in await scout_mcp.list_tools()}
 
 
 async def test_every_injected_tool_advertises_workspace_id():

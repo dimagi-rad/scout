@@ -77,9 +77,8 @@ The graph is built per turn with two inputs that change its tools and prompts:
 
 Canvas tools need a conversation ID as well as an interactive run.
 
-`teardown_schema` is never exposed. Leaving a write tool out isn't the only
-guard: each write operation re-checks the role when it runs and is refused if
-the role has changed. The local tools do this in the tool, and the MCP server
+Leaving a write tool out isn't the only guard: each write operation re-checks
+the role when it runs and is refused if the role has changed. The local tools do this in the tool, and the MCP server
 does it for MCP materialization. The `artifact_manager` and `canvas_manager`
 subagents rely on the checks in the tools they call.
 
@@ -209,8 +208,6 @@ rejected. Ordinary allowed functions resolve through
 a read-only transaction. Unsupported statements/functions and system catalog
 reads are rejected before execution. Row limits and timeouts still apply.
 See [Security](security.md#raw-sql-validation) for the enforcement details.
-
-`teardown_schema` remains excluded from the agent's tools.
 
 ### artifact_manager
 
