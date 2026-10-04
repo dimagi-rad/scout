@@ -139,6 +139,33 @@ def test_adding_a_serving_source_queues_a_view_rebuild(workspace, tenant, tenant
 
 
 @pytest.mark.django_db
+def test_adding_an_unloaded_source_queues_the_rebuild_before_its_load(
+    workspace, tenant, tenant2, user
+):
+    TenantSchema.objects.create(tenant=tenant, schema_name="t_enqueue_1", state=SchemaState.ACTIVE)
+    WorkspaceViewSchema.objects.create(
+        workspace=workspace, schema_name="ws_enqueue", state=SchemaState.ACTIVE
+    )
+    intent = capture_load_intent([tenant2.id], INTENT_RECONCILE_MISSING)
+
+    add_workspace_tenant(workspace, tenant2, actor_id=user.id)
+
+    assert [_row(job) for job in _queued(workspace_id=str(workspace.id))] == [
+        _expected("rebuild_workspace_view_schema", {"workspace_id": str(workspace.id)}),
+        _expected(
+            "materialize_workspace",
+            {
+                "workspace_id": str(workspace.id),
+                "user_id": str(user.id),
+                "load_intent": intent,
+                "only_unserved": True,
+                "notify_thread": False,
+            },
+        ),
+    ]
+
+
+@pytest.mark.django_db
 def test_removing_down_to_one_source_queues_view_teardown(workspace, tenant2):
     wt = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
     vs = WorkspaceViewSchema.objects.create(

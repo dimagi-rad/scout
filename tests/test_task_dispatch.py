@@ -36,17 +36,36 @@ def _production_modules() -> list[Path]:
     )
 
 
-def _imports_tasks_module(tree: ast.AST) -> bool:
+def _absolute(node: ast.ImportFrom, package: str) -> str:
+    if not node.level:
+        return node.module or ""
+    base = package.split(".")[: len(package.split(".")) - (node.level - 1)]
+    return ".".join([*base, node.module] if node.module else base)
+
+
+def _imports_tasks_module(tree: ast.AST, package: str = "") -> bool:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             if any(alias.name == TASKS_MODULE for alias in node.names):
                 return True
-        elif isinstance(node, ast.ImportFrom) and node.level == 0:
-            if node.module == TASKS_MODULE:
+        elif isinstance(node, ast.ImportFrom):
+            module = _absolute(node, package)
+            if module == TASKS_MODULE:
                 return True
-            if any(f"{node.module}.{alias.name}" == TASKS_MODULE for alias in node.names):
+            if any(f"{module}.{alias.name}" == TASKS_MODULE for alias in node.names):
                 return True
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value == TASKS_MODULE
+        ):
+            # importlib.import_module("apps.workspaces.tasks") and the like.
+            return True
     return False
+
+
+def _package(path: Path) -> str:
+    return ".".join(path.with_suffix("").parts[:-1])
 
 
 def test_the_guard_sees_the_production_tree():
@@ -69,11 +88,32 @@ def test_the_guard_recognizes_each_import_form(source):
     assert _imports_tasks_module(ast.parse(source))
 
 
+@pytest.mark.parametrize(
+    ("source", "package"),
+    [
+        ("from . import tasks", "apps.workspaces"),
+        ("from .tasks import materialize_workspace", "apps.workspaces"),
+        ("from ..tasks import materialize_workspace", "apps.workspaces.services"),
+        ("from ... import workspaces", "apps.workspaces.api"),
+    ],
+)
+def test_the_guard_resolves_relative_imports(source, package):
+    expected = source != "from ... import workspaces"
+    assert _imports_tasks_module(ast.parse(source), package) is expected
+
+
+def test_the_guard_flags_a_dynamic_import_by_name():
+    assert _imports_tasks_module(
+        ast.parse('importlib.import_module("apps.workspaces.tasks")'), "apps.common"
+    )
+
+
 def test_no_production_module_imports_workspace_tasks():
     offenders = [
         str(path)
         for path in _production_modules()
-        if path != TASKS_FILE and _imports_tasks_module(ast.parse((REPO_ROOT / path).read_text()))
+        if path != TASKS_FILE
+        and _imports_tasks_module(ast.parse((REPO_ROOT / path).read_text()), _package(path))
     ]
     assert offenders == []
 

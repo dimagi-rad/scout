@@ -169,8 +169,9 @@ _inline: dict[str, InlineMaterializer] = {}
 
 
 def register_inline_materializer(run: InlineMaterializer) -> None:
-    """Called by the tasks module at import; procrastinate's autodiscovery imports it
-    in every process once Django is ready, before any request or job runs."""
+    """Called by the tasks module at import. Procrastinate's Django app imports every
+    installed app's ``tasks`` module in ``ready()``, so any process that ran
+    ``django.setup()`` (ASGI, worker, MCP server, management commands) has it."""
     _inline["materialize"] = run
 
 
@@ -182,7 +183,6 @@ async def materialize_workspace_inline(
     Not a queue dispatch: the caller waits for the summary. The runner lives with
     the task bodies, so it is reached through registration rather than an import.
     """
-    app.perform_import_paths()
     try:
         run = _inline["materialize"]
     except KeyError:

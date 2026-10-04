@@ -20,7 +20,6 @@ from apps.workspaces.models import (
     WorkspaceDataRecovery,
     WorkspaceRole,
 )
-from apps.workspaces.tasks import materialize_workspace, recover_workspace_data
 from apps.workspaces.workspace_resolver import (
     aresolve_workspace,
     resolve_workspace,
@@ -183,7 +182,9 @@ def test_read_write_member_can_reach_job_lifecycle_mutations(write_user, workspa
         state=ThreadJob.State.PENDING,
     )
     deferred = AsyncMock(return_value=456)
-    monkeypatch.setattr(materialize_workspace, "defer_async", deferred)
+    monkeypatch.setattr(
+        "apps.workspaces.api.materialization_views.adefer_materialize_workspace", deferred
+    )
     cancelled = AsyncMock(return_value=1)
     monkeypatch.setattr("apps.workspaces.api.jobs_views.cancel_thread_job", cancelled)
 
@@ -303,8 +304,10 @@ def test_read_mutations_leave_existing_content_and_jobs_unchanged(
     retry_dispatch = AsyncMock(return_value=992)
     materialization_cancel = AsyncMock(return_value=1)
     job_cancel = AsyncMock(return_value=1)
-    monkeypatch.setattr(recover_workspace_data, "defer_async", recovery_dispatch)
-    monkeypatch.setattr(materialize_workspace, "defer_async", retry_dispatch)
+    monkeypatch.setattr("apps.artifacts.views.adefer_recover_workspace_data", recovery_dispatch)
+    monkeypatch.setattr(
+        "apps.workspaces.api.materialization_views.adefer_materialize_workspace", retry_dispatch
+    )
     monkeypatch.setattr(
         "apps.workspaces.api.materialization_views.cancel_thread_job",
         materialization_cancel,
