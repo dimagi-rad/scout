@@ -1,0 +1,10 @@
+{
+  "id": 101,
+  "name": "Malaria Visits",
+  "date_created": "2026-03-02T09:15:00Z",
+  "organization": "acme-health",
+  "end_date": "2026-12-31",
+  "is_active": true,
+  "program": 7,
+  "visit_count": 1204
+}
