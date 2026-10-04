@@ -71,6 +71,7 @@ def _mock_httpx(mocker, fake_get):
 def _ocs_sessions(results):
     class R:
         status_code = 200
+        is_success = 200 <= status_code < 300
 
         def raise_for_status(self):
             pass

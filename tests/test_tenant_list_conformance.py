@@ -8,8 +8,8 @@ unfinished or untrusted listing for a complete one: page 2 past a relative
 ``next`` is a real membership (#328), and a ``next`` off the configured origin
 would carry the credential elsewhere (R23).
 
-Cases marked ``xfail(strict=True)`` are gaps in one path that the shared
-paginator closes; they flip to passing, and so fail here, when it lands.
+A gap still open in one path belongs in ``KNOWN_GAPS``, which marks its cases
+``xfail(strict=True)`` so that closing it fails them until the entry goes.
 """
 
 from __future__ import annotations
@@ -65,9 +65,7 @@ INDETERMINATE = VerificationOutcome.INDETERMINATE
 UNAVAILABLE = VerificationOutcome.UNAVAILABLE
 
 # Where each path reads its wall clock; verification takes an injected clock instead.
-_RESOLUTION_CLOCK = "apps.users.services.tenant_resolution"
 _PAGINATOR_CLOCK = "apps.users.services.tenant_listing.paginator"
-_OCS_KEY_CLOCK = "apps.users.services.api_key_providers.ocs"
 
 
 @dataclass(frozen=True)
@@ -127,20 +125,20 @@ COMMCARE_PATHS = [
     ),
 ]
 OCS_PATHS = [
-    EntryPath("ocs-oauth-discovery", "ocs", "discovery", clock_module=_RESOLUTION_CLOCK),
+    EntryPath("ocs-oauth-discovery", "ocs", "discovery", clock_module=_PAGINATOR_CLOCK),
     EntryPath(
         "ocs-api-key",
         "ocs",
         "api_key",
         credential_type=TenantConnection.API_KEY,
-        clock_module=_OCS_KEY_CLOCK,
+        clock_module=_PAGINATOR_CLOCK,
     ),
     EntryPath(
         "ocs-api-key-rotation",
         "ocs",
         "api_key",
         credential_type=TenantConnection.API_KEY,
-        clock_module=_OCS_KEY_CLOCK,
+        clock_module=_PAGINATOR_CLOCK,
         rotation=True,
     ),
     EntryPath("ocs-oauth-verification", "ocs", "verification"),
@@ -153,32 +151,12 @@ OCS_PATHS = [
 ]
 PAGINATED_PATHS = COMMCARE_PATHS + OCS_PATHS
 CONNECT_PATHS = [
-    EntryPath("connect-oauth-discovery", "connect", "discovery"),
+    EntryPath("connect-oauth-discovery", "connect", "discovery", clock_module=_PAGINATOR_CLOCK),
     EntryPath("connect-oauth-verification", "connect", "verification"),
 ]
 
-_OCS_KEY_UNBOUNDED = "OCS API-key listing has no wall-clock budget"
-_OCS_KEY_RAW_ERRORS = "OCS API-key listing lets shape drift escape as a non-form error"
-_OCS_KEY_PARTIAL = "OCS API-key listing reads a page without results as an empty page"
-_OCS_KEY_TRANSPORT = "OCS API-key listing lets a transport error escape as a non-form error"
-_CONNECT_DISCOVERY_PAGES = "Connect discovery would read only page 1 of a paginated envelope"
-KNOWN_GAPS = {
-    ("ocs-api-key-rotation", "deadline"): _OCS_KEY_UNBOUNDED,
-    ("ocs-api-key-rotation", "list-not-an-array"): _OCS_KEY_RAW_ERRORS,
-    ("ocs-api-key-rotation", "not-an-object"): _OCS_KEY_RAW_ERRORS,
-    ("ocs-api-key-rotation", "not-json"): _OCS_KEY_RAW_ERRORS,
-    ("ocs-api-key-rotation", "missing-list-on-page-2"): _OCS_KEY_PARTIAL,
-    ("ocs-api-key-rotation", "transport-page-1"): _OCS_KEY_TRANSPORT,
-    ("ocs-api-key-rotation", "transport-page-2"): _OCS_KEY_TRANSPORT,
-    ("ocs-api-key", "deadline"): _OCS_KEY_UNBOUNDED,
-    ("ocs-api-key", "list-not-an-array"): _OCS_KEY_RAW_ERRORS,
-    ("ocs-api-key", "not-an-object"): _OCS_KEY_RAW_ERRORS,
-    ("ocs-api-key", "not-json"): _OCS_KEY_RAW_ERRORS,
-    ("ocs-api-key", "missing-list-on-page-2"): _OCS_KEY_PARTIAL,
-    ("ocs-api-key", "transport-page-1"): _OCS_KEY_TRANSPORT,
-    ("ocs-api-key", "transport-page-2"): _OCS_KEY_TRANSPORT,
-    ("connect-oauth-discovery", "paginated-envelope"): _CONNECT_DISCOVERY_PAGES,
-}
+# (path id, variant) -> reason, for a gap in one path that is still open.
+KNOWN_GAPS: dict[tuple[str, str], str] = {}
 
 
 # Discovery cases need a transactional database, so they cover the protocol matrix
@@ -468,12 +446,7 @@ async def run(
     path: EntryPath, upstream: Upstream, *, probe: str = "first", external_ids=()
 ) -> Outcome:
     clock = (
-        # create=True: a path with no budget yet has no clock to patch.
-        patch(
-            f"{path.clock_module}.time",
-            SimpleNamespace(monotonic=upstream.monotonic),
-            create=True,
-        )
+        patch(f"{path.clock_module}.time", SimpleNamespace(monotonic=upstream.monotonic))
         if path.clock_module
         else nullcontext()
     )

@@ -38,6 +38,7 @@ async def test_resolve_ocs_chatbots_creates_tenants(user):
     async def fake_get(*args, **kwargs):
         class R:
             status_code = 200
+            is_success = 200 <= status_code < 300
 
             def raise_for_status(self):
                 pass
@@ -83,6 +84,7 @@ async def test_resolve_ocs_chatbots_raises_on_auth_failure(user):
     async def fake_get(*args, **kwargs):
         class R:
             status_code = 401
+            is_success = 200 <= status_code < 300
 
             def raise_for_status(self):
                 pass
@@ -129,6 +131,7 @@ async def test_teamless_identity_still_discovers_under_any_of_access(user, setti
     async def fake_get(*args, **kwargs):
         class R:
             status_code = 200
+            is_success = 200 <= status_code < 300
 
             def raise_for_status(self):
                 pass
@@ -151,6 +154,7 @@ def _paged_get(pages: dict[str, dict], seen: list[tuple[str, dict]]):
 
         class R:
             status_code = 200
+            is_success = 200 <= status_code < 300
 
             def raise_for_status(self):
                 pass

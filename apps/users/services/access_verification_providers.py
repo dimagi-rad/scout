@@ -20,15 +20,13 @@ from apps.users.services.access_verification_types import (
 )
 from apps.users.services.oauth_scope import canonical_provider
 from apps.users.services.tenant_listing import commcare as commcare_listing
+from apps.users.services.tenant_listing import connect as connect_listing
+from apps.users.services.tenant_listing import ocs as ocs_listing
 from apps.users.services.tenant_listing.paginator import paginate
-from apps.users.services.tenant_listing.rows import descriptor
 from apps.users.services.tenant_listing.types import (
     ListingDeadlineExceeded,
-    MalformedTenantList,
-    ProviderRequest,
     RequestTimedOut,
     TenantListError,
-    TenantListPage,
     UpstreamStatus,
     UpstreamUnreachable,
 )
@@ -41,8 +39,6 @@ PROVIDER_BUDGET_SECONDS = 20.0
 PER_REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_PAGES = 100
 MAX_ROWS = 10_000
-# Above this many requested opportunities, one full listing beats one request each.
-CONNECT_LIGHT_CHECK_MAX_OPPORTUNITIES = 5
 CONNECT_LIGHT_REQUEST_FLOOR_SECONDS = 4.0
 CONNECT_LISTING_RESERVE_SECONDS = 5.0
 
@@ -109,97 +105,42 @@ def _default_client_factory():
 
 def _provider_request(snapshot, settings):
     provider = canonical_provider(snapshot.observation.provider)
-    credential_type = snapshot.observation.credential_type
-    credential = snapshot.credential
+    observation = snapshot.observation
     if provider == "commcare":
         request = commcare_listing.list_request(
-            snapshot.observation.scope_key, credential_type, credential
+            observation.scope_key, observation.credential_type, snapshot.credential
         )
-        return None if request is None else (provider, request, commcare_listing.decode_page)
-    if provider == "ocs":
-        url = f"{settings.OCS_URL.rstrip('/')}/api/experiments/"
-        if credential_type == TenantConnection.OAUTH:
-            if not snapshot.observation.scope_key:
-                return None
-            headers = {"Authorization": f"Bearer {credential}"}
-        elif credential_type == TenantConnection.API_KEY:
-            headers = {"X-api-key": credential}
-        else:
+        decode_page = commcare_listing.decode_page
+    elif provider == "ocs":
+        # An OAuth connection's proof is per team; without one there is nothing to verify.
+        if observation.credential_type == TenantConnection.OAUTH and not observation.scope_key:
             return None
-        return provider, ProviderRequest(url, headers), _decode_ocs_page
-    if provider == "commcare_connect" and credential_type == TenantConnection.OAUTH:
-        url = f"{settings.CONNECT_API_URL.rstrip('/')}/export/opp_org_program_list/"
-        request = ProviderRequest(url, {"Authorization": f"Bearer {credential}"})
-        return provider, request, _decode_connect_page
-    return None
+        request = ocs_listing.list_request(
+            settings.OCS_URL, observation.credential_type, snapshot.credential
+        )
+        decode_page = ocs_listing.decode_page
+    elif provider == "commcare_connect":
+        request = connect_listing.list_request(
+            settings.CONNECT_API_URL, observation.credential_type, snapshot.credential
+        )
+        decode_page = connect_listing.decode_page
+    else:
+        return None
+    return None if request is None else (provider, request, decode_page)
 
 
 def _connect_light_ids(snapshot, external_ids) -> tuple[str, ...] | None:
-    """The opportunity ids to check one by one, or None to use the full listing.
-
-    ``/export/opp_org_program_list/`` exports every opportunity with a per-row
-    visit count and takes ~10s for users with many opportunities, which alone
-    exhausts the interactive budget. ``/export/opportunity/<id>/`` answers the
-    question for one opportunity cheaply.
-    """
+    """The opportunities to check one by one, or None to use the full listing."""
     if (
         canonical_provider(snapshot.observation.provider) != "commcare_connect"
         or snapshot.observation.credential_type != TenantConnection.OAUTH
-        or not external_ids
-        or len(external_ids) > CONNECT_LIGHT_CHECK_MAX_OPPORTUNITIES
     ):
         return None
-    ids = tuple(sorted(external_ids))
-    # Connect routes ``<int:opp_id>``; any other id 404s at routing, which must
-    # never be read as a denial, and a zero-padded one comes back renumbered.
-    if not all(
-        external_id.isascii() and external_id.isdigit() and str(int(external_id)) == external_id
-        for external_id in ids
-    ):
-        return None
-    return ids
-
-
-def _is_connect_no_access_404(response) -> bool:
-    """DRF's NotFound body, as opposed to a routing 404 (an HTML page) or a proxy's.
-
-    Connect answers an opportunity the user may not export via
-    ``_get_opportunity_or_404`` with ``{"detail": "Not found."}``. ``detail`` is
-    localized, so only the shape is checked.
-    """
-    if response.status_code != 404:
-        return False
-    media_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-    if media_type != "application/json":
-        return False
-    try:
-        payload = response.json()
-    except ValueError:
-        return False
-    return (
-        isinstance(payload, dict)
-        and set(payload) == {"detail"}
-        and isinstance(payload["detail"], str)
-    )
-
-
-def _is_requested_opportunity(response, external_id: str) -> bool:
-    try:
-        payload = response.json()
-    except ValueError:
-        return False
-    if not isinstance(payload, dict):
-        return False
-    raw_id = payload.get("id")
-    return (
-        not isinstance(raw_id, bool)
-        and isinstance(raw_id, (int, str))
-        and str(raw_id) == external_id
-    )
+    return connect_listing.subset_ids(external_ids)
 
 
 async def _verify_connect_opportunities(
-    client, policy, listing_url, headers, ids, deadline, clock, *, connection_id, log, unavailable
+    client, listing, ids, deadline, clock, *, connection_id, log, unavailable
 ):
     """Check each opportunity; None means fall back to the full listing.
 
@@ -228,7 +169,7 @@ async def _verify_connect_opportunities(
                 cause="light_deadline_before_request",
             )
         try:
-            url = policy.resolve(f"../opportunity/{external_id}/", relative_to=listing_url)
+            request = connect_listing.verify_subset_request(listing, external_id)
         except UnsafeProviderURL:
             return settle(
                 index,
@@ -246,8 +187,8 @@ async def _verify_connect_opportunities(
         try:
             response = await asyncio.wait_for(
                 client.get(
-                    url,
-                    headers=headers,
+                    request.url,
+                    headers=dict(request.headers),
                     follow_redirects=False,
                     timeout=request_timeout,
                 ),
@@ -269,7 +210,7 @@ async def _verify_connect_opportunities(
                 cause="light_deadline_after_response",
                 status=status,
             )
-        if _is_connect_no_access_404(response):
+        if connect_listing.is_no_access_answer(response):
             omitted = True
             continue
         if response.status_code == 404:
@@ -294,7 +235,7 @@ async def _verify_connect_opportunities(
                 return result
 
             return settle(index, failed, cause="light_http_status", status=response.status_code)
-        if not _is_requested_opportunity(response, external_id):
+        if not connect_listing.confirms_opportunity(response, external_id):
             # A changed response shape must cost a slow check, not every check.
             return settle(
                 index, lambda: None, cause="unrecognized_answer", status=response.status_code
@@ -323,51 +264,6 @@ def _status_result(status_code: int):
     return None
 
 
-def _decode_ocs_page(payload: Any) -> TenantListPage:
-    if not isinstance(payload, dict) or "results" not in payload or "next" not in payload:
-        raise MalformedTenantList("OCS response is incomplete")
-    rows, next_url = payload["results"], payload["next"]
-    if not isinstance(rows, list):
-        raise MalformedTenantList("OCS results are not a list")
-    if next_url is not None and (not isinstance(next_url, str) or not next_url):
-        raise MalformedTenantList("OCS next link is not a URL")
-    return TenantListPage(
-        tuple(descriptor(row, id_key="id", name_key="name") for row in rows), next_url
-    )
-
-
-_CONNECT_PAGINATION_KEYS = frozenset(
-    {
-        "next",
-        "previous",
-        "pagination",
-        "meta",
-        "has_more",
-        "next_page",
-        "count",
-        "page",
-        "page_size",
-        "limit",
-        "offset",
-    }
-)
-
-
-def _decode_connect_page(payload: Any) -> TenantListPage:
-    if (
-        not isinstance(payload, dict)
-        or "opportunities" not in payload
-        or _CONNECT_PAGINATION_KEYS.intersection(payload)
-    ):
-        raise MalformedTenantList("Connect response is incomplete or paginated")
-    rows = payload["opportunities"]
-    if not isinstance(rows, list):
-        raise MalformedTenantList("Connect opportunities are not a list")
-    return TenantListPage(
-        tuple(descriptor(row, id_key="id", name_key="name") for row in rows), None
-    )
-
-
 async def verify_provider(
     snapshot: CredentialRequestSnapshot,
     *,
@@ -392,7 +288,6 @@ async def verify_provider(
     if request is None:
         return ProviderVerificationResult.indeterminate(_INDETERMINATE)
     provider, list_request, decode_page = request
-    initial_url, headers = list_request.url, dict(list_request.headers)
     light_ids = _connect_light_ids(snapshot, external_ids)
 
     def log(cause, *, page=0, status=None, outcome="unavailable"):
@@ -413,8 +308,7 @@ async def verify_provider(
         return ProviderVerificationResult.unavailable(_UNAVAILABLE)
 
     try:
-        policy = ProviderURLPolicy(initial_url)
-        url = policy.resolve(initial_url)
+        ProviderURLPolicy(list_request.url)
     except UnsafeProviderURL:
         return ProviderVerificationResult.indeterminate(_INDETERMINATE)
 
@@ -442,9 +336,7 @@ async def verify_provider(
             if light_ids is not None:
                 light_result = await _verify_connect_opportunities(
                     client,
-                    policy,
-                    url,
-                    headers,
+                    list_request,
                     light_ids,
                     deadline,
                     clock,

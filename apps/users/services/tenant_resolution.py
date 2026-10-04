@@ -31,7 +31,6 @@ sign-in may take their access away (#561 G1).
 from __future__ import annotations
 
 import logging
-import time
 
 import httpx
 from allauth.socialaccount.models import SocialToken
@@ -52,11 +51,15 @@ from apps.users.services.oauth_scope import (
 )
 from apps.users.services.ocs_team import adetect_team_name_from_oauth
 from apps.users.services.tenant_listing import commcare as commcare_listing
+from apps.users.services.tenant_listing import connect as connect_listing
+from apps.users.services.tenant_listing import ocs as ocs_listing
 from apps.users.services.tenant_listing.paginator import list_tenants
 from apps.users.services.tenant_listing.types import (
     MalformedTenantList,
+    ProviderRequest,
     TenantDescriptor,
     TenantListError,
+    UnsafeListingOrigin,
     UnsafeNextURL,
     UpstreamStatus,
     UpstreamUnreachable,
@@ -67,14 +70,12 @@ from apps.users.services.upstream_denial import (
     credential_is_current,
 )
 from apps.workspaces import access_cache
-from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
 
 logger = logging.getLogger(__name__)
 
 _MAX_PAGES = 100
 _LISTING_BUDGET_SECONDS = 60.0
 _REQUEST_TIMEOUT_SECONDS = 30.0
-_OCS_UNSAFE_NEXT = "OCS returned an untrusted pagination link"
 
 
 async def _anewest_account(user, provider: str):
@@ -355,25 +356,15 @@ async def resolve_connect_opportunities(
     (``scope_key=""``); ``social_account`` only pins which identity holds it.
     """
     observed = await adiscovery_connection(user, "commcare_connect", access_token, social_account)
-    base_url = getattr(settings, "CONNECT_API_URL", "https://connect.dimagi.com")
-    url = f"{base_url.rstrip('/')}/export/opp_org_program_list/"
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
-    if resp.status_code in (401, 403):
+    try:
+        opportunities = await _fetch_connect_opportunities(access_token)
+    except ConnectAuthError as error:
         # Export-list permission can be denied while opportunity membership remains valid.
-        if resp.status_code == 401 and may_revoke:
-            await _record_discovery_denial(observed, access_token, resp.status_code, social_account)
-        raise ConnectAuthError(
-            f"Connect returned {resp.status_code} while listing opportunities — the "
-            f"access token is expired, revoked, or not authorized for this API",
-            status_code=resp.status_code,
-        )
-    resp.raise_for_status()
-
-    payload = resp.json()
-    if "opportunities" not in payload:  # shape-drift guard — never archive on drift
-        raise TenantResolutionError("Connect response missing 'opportunities' key")
-    opportunities = payload["opportunities"]
+        if error.status_code == 401 and may_revoke:
+            await _record_discovery_denial(
+                observed, access_token, error.status_code, social_account
+            )
+        raise
 
     conn = await _aoauth_connection(
         user,
@@ -392,8 +383,8 @@ async def resolve_connect_opportunities(
     for opp in opportunities:
         tenant, _ = await Tenant.objects.aupdate_or_create(
             provider="commcare_connect",
-            external_id=str(opp["id"]),
-            defaults={"canonical_name": opp.get("name")},
+            external_id=opp.external_id,
+            defaults={"canonical_name": opp.canonical_name},
         )
         fresh.append(tenant)
 
@@ -434,49 +425,14 @@ async def resolve_ocs_chatbots(
         )
         return []
     observed = await adiscovery_connection(user, "ocs", access_token, account)
-    team_name = (await adetect_team_name_from_oauth(access_token, base_url)) or team_slug
-
-    experiments: list[dict] = []
-    url: str | None = f"{base_url}/api/experiments/"
     try:
-        policy = ProviderURLPolicy(url)
-    except UnsafeProviderURL as error:
-        raise TenantResolutionError(f"OCS_URL is not a safe provider origin: {error}") from error
-    url = policy.base_url
-    seen: set[str] = set()
-    deadline = time.monotonic() + _LISTING_BUDGET_SECONDS
-    async with httpx.AsyncClient(timeout=30) as client:
-        while url:
-            if url in seen or len(seen) >= _MAX_PAGES or time.monotonic() > deadline:
-                raise TenantResolutionError("OCS experiment list did not finish")
-            seen.add(url)
-            resp = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {access_token}"},
-                follow_redirects=False,
-            )
-            if resp.status_code in (401, 403):
-                if may_revoke:
-                    await _record_discovery_denial(
-                        observed, access_token, resp.status_code, account
-                    )
-                raise OCSAuthError(
-                    f"OCS returned {resp.status_code} while listing experiments — the "
-                    f"access token is expired, revoked, or not authorized for this team",
-                    status_code=resp.status_code,
-                )
-            resp.raise_for_status()
-            payload = resp.json()
-            if "results" not in payload:  # shape-drift guard
-                raise TenantResolutionError("OCS response missing 'results' key")
-            experiments.extend(payload["results"])
-            next_url = payload.get("next")
-            if not next_url:
-                break
-            try:
-                url = policy.resolve(next_url, relative_to=url)
-            except UnsafeProviderURL:
-                raise TenantResolutionError(_OCS_UNSAFE_NEXT) from None
+        experiments = await _fetch_ocs_experiments(access_token, base_url)
+    except OCSAuthError as error:
+        if may_revoke:
+            await _record_discovery_denial(observed, access_token, error.status_code, account)
+        raise
+    # After the listing, whose origin check guards OCS_URL: the team lookup has none.
+    team_name = (await adetect_team_name_from_oauth(access_token, base_url)) or team_slug
 
     conn = await _aoauth_connection(
         user,
@@ -497,8 +453,8 @@ async def resolve_ocs_chatbots(
     for exp in experiments:
         tenant, _ = await Tenant.objects.aupdate_or_create(
             provider="ocs",
-            external_id=str(exp["id"]),
-            defaults={"canonical_name": exp.get("name") or str(exp["id"])},
+            external_id=exp.external_id,
+            defaults={"canonical_name": exp.canonical_name},
         )
         fresh.append(tenant)
 
@@ -541,49 +497,95 @@ async def _record_discovery_denial(connection, access_token, status, account=Non
     )
 
 
-async def _fetch_all_domains(access_token: str, server: CommCareServer) -> list[TenantDescriptor]:
-    """Every domain the token can see on ``server``, or a raise; never a partial list.
+async def _fetch_tenant_list(
+    label: str,
+    noun: str,
+    request: ProviderRequest,
+    decode_page,
+    auth_error: type[Exception],
+    *,
+    grant: str = "API",
+    setting: str = "",
+    max_pages: int = _MAX_PAGES,
+) -> list[TenantDescriptor]:
+    """Every tenant the credential can see, or a raise; never a partial list.
 
-    Raises CommCareAuthError on 401/403, httpx.HTTPStatusError on any other status,
+    Raises ``auth_error`` on 401/403, httpx.HTTPStatusError on any other status,
     the httpx error on a transport failure, and TenantResolutionError when the list
-    cannot be read to its end (shape drift, a next link off the server, a cycle, the
+    cannot be read to its end (shape drift, a next link off the origin, a cycle, the
     page or time limit, or a request cut off at the budget).
     """
-    request = commcare_listing.list_request(server.key, TenantConnection.OAUTH, access_token)
-    if request is None:
-        raise TenantResolutionError(f"No CommCare domain list for server {server.key!r}")
     try:
         async with httpx.AsyncClient() as client:
             return await list_tenants(
                 client,
                 request,
-                commcare_listing.decode_page,
+                decode_page,
                 budget_seconds=_LISTING_BUDGET_SECONDS,
-                max_pages=_MAX_PAGES,
+                max_pages=max_pages,
                 request_timeout=_REQUEST_TIMEOUT_SECONDS,
             )
     except UpstreamStatus as error:
         if error.status_code in (401, 403):
-            raise CommCareAuthError(
-                f"CommCare returned {error.status_code} while listing domains — the "
-                f"access token is expired, revoked, or not authorized for this API",
+            raise auth_error(
+                f"{label} returned {error.status_code} while listing {noun} — the "
+                f"access token is expired, revoked, or not authorized for this {grant}",
                 status_code=error.status_code,
             ) from None
         raise httpx.HTTPStatusError(
-            f"CommCare answered HTTP {error.status_code} while listing domains",
+            f"{label} answered HTTP {error.status_code} while listing {noun}",
             request=error.response.request,
             response=error.response,
         ) from None
     except UpstreamUnreachable as error:
         raise error.cause from None
-    except UnsafeNextURL:
-        # Following it would send this server's token to another origin.
-        raise TenantResolutionError("CommCare pagination left its server") from None
-    except MalformedTenantList as error:
+    except UnsafeListingOrigin as error:
         raise TenantResolutionError(
-            f"CommCare returned an unexpected domain list: {error}"
+            f"{setting or label} is not a safe provider origin: {error}"
         ) from None
+    except UnsafeNextURL:
+        # Following it would send the token to another origin.
+        raise TenantResolutionError(f"{label} pagination left its server") from None
+    except MalformedTenantList as error:
+        raise TenantResolutionError(f"{label} returned an unexpected list: {error}") from None
     except TenantListError as error:
         raise TenantResolutionError(
-            f"CommCare domain list did not finish ({type(error).__name__})"
+            f"{label} list did not finish ({type(error).__name__})"
         ) from None
+
+
+async def _fetch_all_domains(access_token: str, server: CommCareServer) -> list[TenantDescriptor]:
+    request = commcare_listing.list_request(server.key, TenantConnection.OAUTH, access_token)
+    if request is None:
+        raise TenantResolutionError(f"No CommCare domain list for server {server.key!r}")
+    return await _fetch_tenant_list(
+        "CommCare", "domains", request, commcare_listing.decode_page, CommCareAuthError
+    )
+
+
+async def _fetch_ocs_experiments(access_token: str, base_url: str) -> list[TenantDescriptor]:
+    request = ocs_listing.list_request(base_url, TenantConnection.OAUTH, access_token)
+    return await _fetch_tenant_list(
+        "OCS",
+        "experiments",
+        request,
+        ocs_listing.decode_page,
+        OCSAuthError,
+        grant="team",
+        setting="OCS_URL",
+    )
+
+
+async def _fetch_connect_opportunities(access_token: str) -> list[TenantDescriptor]:
+    base_url = getattr(settings, "CONNECT_API_URL", "https://connect.dimagi.com")
+    request = connect_listing.list_request(base_url, TenantConnection.OAUTH, access_token)
+    # One unpaginated export; the decoder rejects any page that says otherwise.
+    return await _fetch_tenant_list(
+        "Connect",
+        "opportunities",
+        request,
+        connect_listing.decode_page,
+        ConnectAuthError,
+        setting="CONNECT_API_URL",
+        max_pages=1,
+    )

@@ -146,6 +146,7 @@ async def test_ocs_archival_is_scoped_to_token_team(user):
     async def fake_get(*args, **kwargs):
         class R:
             status_code = 200
+            is_success = 200 <= status_code < 300
 
             def raise_for_status(self):
                 pass

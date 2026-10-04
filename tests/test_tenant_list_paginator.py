@@ -10,6 +10,8 @@ import httpx
 import pytest
 
 from apps.common.commcare_servers import COMMCARE_SERVERS
+from apps.users.services.api_key_providers.base import CredentialVerificationError
+from apps.users.services.api_key_providers.ocs import OCSStrategy
 from apps.users.services.tenant_listing import commcare as commcare_listing
 from apps.users.services.tenant_listing.paginator import list_tenants, paginate
 from apps.users.services.tenant_listing.types import (
@@ -20,7 +22,12 @@ from apps.users.services.tenant_listing.types import (
     TenantDescriptor,
     UpstreamStatus,
 )
-from apps.users.services.tenant_resolution import TenantResolutionError, _fetch_all_domains
+from apps.users.services.tenant_resolution import (
+    TenantResolutionError,
+    _fetch_all_domains,
+    _fetch_connect_opportunities,
+    _fetch_ocs_experiments,
+)
 
 LISTING = "https://provider.example/api/list/"
 REQUEST = ProviderRequest(LISTING, {"Authorization": "Bearer secret"})
@@ -190,3 +197,32 @@ async def test_discovery_abandons_a_request_that_would_outlive_its_budget(httpx_
             await _fetch_all_domains("tok", COMMCARE_SERVERS[""])
 
     assert time.monotonic() - started < 2
+
+
+@pytest.mark.asyncio
+async def test_an_unsafe_configured_ocs_url_never_receives_a_key(settings, httpx_mock):
+    settings.OCS_URL = "http://ocs.example.org"
+
+    with pytest.raises(CredentialVerificationError, match="OCS_URL is not a safe provider origin"):
+        await OCSStrategy.verify_and_discover({"api_key": "key"})
+
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setting", "fetch"),
+    [
+        ("OCS_URL", lambda: _fetch_ocs_experiments("tok", "http://ocs.example.org")),
+        ("CONNECT_API_URL", lambda: _fetch_connect_opportunities("tok")),
+    ],
+)
+async def test_an_unsafe_configured_url_never_receives_a_token(
+    settings, httpx_mock, setting, fetch
+):
+    settings.CONNECT_API_URL = "http://connect.example.org"
+
+    with pytest.raises(TenantResolutionError, match=f"{setting} is not a safe provider origin"):
+        await fetch()
+
+    assert httpx_mock.get_requests() == []
