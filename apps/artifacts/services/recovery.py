@@ -17,6 +17,7 @@ from django.db import IntegrityError
 
 from apps.artifacts.models import Artifact
 from apps.artifacts.services.graph_manifest import backfill_missing_semantic_query_manifest
+from apps.users.models import User
 from apps.workspaces.models import WorkspaceDataRecovery
 from apps.workspaces.services.data_recovery import artifact_data_state
 from apps.workspaces.services.reconciliation import (
@@ -69,7 +70,7 @@ async def current_artifact_data_state(artifact: Artifact) -> dict[str, Any]:
     return await artifact_data_state(artifact)
 
 
-async def admit_artifact_recovery(artifact: Artifact, user) -> RecoveryAdmission:
+async def admit_artifact_recovery(artifact: Artifact, user: User) -> RecoveryAdmission:
     """Start the repair the artifact's data state asks for, unless one already runs."""
     # The recovery task re-reads the artifact from the DB, so it needs the
     # manifest persisted rather than the in-memory copy the caller derived.
@@ -112,11 +113,13 @@ async def admit_artifact_recovery(artifact: Artifact, user) -> RecoveryAdmission
         await WorkspaceDataRecovery.objects.filter(id=recovery.id).aupdate(
             procrastinate_job_id=job_id
         )
+        recovery.procrastinate_job_id = job_id
     except Exception as exc:
         logger.exception("Failed to dispatch artifact data recovery %s", recovery.id)
+        recovery.state = WorkspaceDataRecovery.State.FAILED
+        recovery.error = str(exc)[:1000] or DISPATCH_FAILED_ERROR
         await WorkspaceDataRecovery.objects.filter(id=recovery.id).aupdate(
-            state=WorkspaceDataRecovery.State.FAILED,
-            error=str(exc)[:1000] or DISPATCH_FAILED_ERROR,
+            state=recovery.state, error=recovery.error
         )
         return RecoveryAdmission(Admission.FAILED, {}, recovery)
 

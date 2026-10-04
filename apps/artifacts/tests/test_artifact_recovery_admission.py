@@ -1,30 +1,22 @@
 """What POST .../recovery/ admits, dedupes and answers, pinned at the HTTP boundary.
 
-Patches only stable seams (the query surface in data_recovery, the shared manager
-and the queue app) so the pins hold wherever admission itself lives.
+Patches the query surface in data_recovery and the shared queue app, which stay put
+wherever admission lives. The race tests also patch the shared manager's acreate to
+make the insert conflict deterministic.
 """
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from django.contrib.auth.models import update_last_login
-from django.contrib.auth.signals import user_logged_in
-from django.db import IntegrityError, connection
-from django.test import AsyncClient
+from django.db import IntegrityError
 from procrastinate.contrib.django.models import ProcrastinateJob
 
-from apps.artifacts.models import Artifact, ArtifactType
-from apps.users.models import Tenant, TenantMembership, User
+from apps.artifacts.models import Artifact
+from apps.artifacts.services.recovery import Admission, admit_artifact_recovery
 from apps.workspaces.models import (
-    Workspace,
     WorkspaceDataRecovery,
-    WorkspaceMembership,
-    WorkspaceRole,
-    WorkspaceTenant,
 )
 from config.procrastinate import app
-from tests.tenant_access import usable_connection
 
 SURFACE = "apps.workspaces.services.data_recovery.artifact_query_surface"
 NEEDS_REBUILD = {
@@ -39,51 +31,8 @@ FAILED_TO_START = {"error": "Failed to start data recovery"}
 
 
 @pytest.fixture
-def drop_queued_rows(django_db_blocker):
-    # procrastinate_jobs is unmanaged: rows committed by transactional tests outlive them.
-    with django_db_blocker.unblock(), connection.cursor() as cursor:
-        cursor.execute("SELECT COALESCE(MAX(id), 0) FROM procrastinate_jobs")
-        (start,) = cursor.fetchone()
-    yield
-    with django_db_blocker.unblock(), connection.cursor() as cursor:
-        cursor.execute("DELETE FROM procrastinate_jobs WHERE id > %s", [start])
-
-
-@pytest.fixture
-def setup(db, drop_queued_rows):
-    tenant = Tenant.objects.create(
-        provider="commcare", external_id="admission-domain", canonical_name="Admission"
-    )
-    workspace = Workspace.objects.create(name="Admission")
-    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
-    user = User.objects.create_user(email="admission@example.com", password="pass")
-    TenantMembership.objects.create(
-        user=user, tenant=tenant, connection=usable_connection(user, tenant.provider)
-    )
-    WorkspaceMembership.objects.create(workspace=workspace, user=user, role=WorkspaceRole.MANAGE)
-    artifact = Artifact.objects.create(
-        workspace=workspace,
-        created_by=user,
-        title="Visits",
-        artifact_type=ArtifactType.STORY,
-        code="",
-        conversation_id="admission-thread",
-        data={"story_doc": {"schema_version": 1, "blocks": []}},
-        semantic_queries=[{"name": "visits", "measures": ["visits.count"]}],
-    )
-    client = AsyncClient()
-    user_logged_in.disconnect(update_last_login)
-    try:
-        client.force_login(user)
-    finally:
-        user_logged_in.connect(update_last_login)
-    return SimpleNamespace(
-        workspace=workspace,
-        user=user,
-        artifact=artifact,
-        client=client,
-        url=f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/recovery/",
-    )
+def setup(recovery_setup, drop_queued_rows):
+    return recovery_setup
 
 
 async def _recoveries(workspace) -> list[WorkspaceDataRecovery]:
@@ -93,15 +42,6 @@ async def _recoveries(workspace) -> list[WorkspaceDataRecovery]:
 async def _workspace_jobs(workspace) -> list[ProcrastinateJob]:
     ids = [str(r.id) for r in await _recoveries(workspace)]
     return [job async for job in ProcrastinateJob.objects.filter(args__recovery_id__in=ids)]
-
-
-async def _jobs_for(recovery) -> list[ProcrastinateJob]:
-    return [
-        job
-        async for job in ProcrastinateJob.objects.filter(
-            args__contains={"recovery_id": str(recovery.id)}
-        )
-    ]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -170,13 +110,13 @@ async def test_a_needed_repair_is_recorded_queued_and_answered_202(setup):
     assert recovery.source_type == "artifact"
     assert recovery.source_id == setup.artifact.id
     assert recovery.state == WorkspaceDataRecovery.State.PENDING
-    [job] = await _jobs_for(recovery)
+    [job] = await _workspace_jobs(setup.workspace)
     assert recovery.procrastinate_job_id == job.id
 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_a_second_post_joins_the_active_repair(setup):
+async def test_a_second_post_sees_the_active_repair_without_starting_another(setup):
     with patch(SURFACE, new=AsyncMock(return_value=NEEDS_REBUILD)):
         first = await setup.client.post(setup.url, data={})
         second = await setup.client.post(setup.url, data={})
@@ -257,3 +197,16 @@ async def test_a_dispatch_failure_fails_the_recorded_repair_and_answers_500(
     assert recovery.error == recorded
     assert recovery.procrastinate_job_id is None
     assert await _workspace_jobs(setup.workspace) == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_the_admission_returns_the_record_as_stored(setup):
+    artifact = await Artifact.objects.select_related("workspace").aget(id=setup.artifact.id)
+    with patch(SURFACE, new=AsyncMock(return_value=NEEDS_REBUILD)):
+        admitted = await admit_artifact_recovery(artifact, setup.user)
+
+    assert admitted.admission == Admission.STARTED
+    stored = await WorkspaceDataRecovery.objects.aget(id=admitted.recovery.id)
+    assert admitted.recovery.procrastinate_job_id == stored.procrastinate_job_id is not None
+    assert admitted.recovery.state == stored.state
