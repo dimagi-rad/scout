@@ -425,14 +425,14 @@ async def resolve_ocs_chatbots(
         )
         return []
     observed = await adiscovery_connection(user, "ocs", access_token, account)
-    team_name = (await adetect_team_name_from_oauth(access_token, base_url)) or team_slug
-
     try:
         experiments = await _fetch_ocs_experiments(access_token, base_url)
     except OCSAuthError as error:
         if may_revoke:
             await _record_discovery_denial(observed, access_token, error.status_code, account)
         raise
+    # After the listing, whose origin check guards OCS_URL: the team lookup has none.
+    team_name = (await adetect_team_name_from_oauth(access_token, base_url)) or team_slug
 
     conn = await _aoauth_connection(
         user,
