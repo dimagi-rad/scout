@@ -1,6 +1,7 @@
 const { Pool } = require('pg');
 const { PostgresDriver } = require('@cubejs-backend/postgres-driver');
 const { createHash } = require('node:crypto');
+const { readFileSync } = require('node:fs');
 const { createConnectionSlots, positiveIntegerFromEnv } = require('./connection-slots');
 
 const IDENTIFIER_RE = /^[a-z][a-z0-9_]*$/;
@@ -61,6 +62,10 @@ function boundedPoolConfig(maxPoolSize) {
   };
 }
 
+// Copied into the image by the Dockerfile; the public AWS RDS CA bundle.
+const DEFAULT_DB_SSL_CA_FILE = '/cube/conf/rds-global-bundle.pem';
+let dbSslCa = null;
+
 function sslConfigForUrl(rawUrl) {
   if (!rawUrl) {
     return false;
@@ -70,7 +75,10 @@ function sslConfigForUrl(rawUrl) {
   if (!host || host === 'localhost' || host === '127.0.0.1' || host === 'platform-db') {
     return false;
   }
-  return { rejectUnauthorized: false };
+  // Read once and fail startup if missing: a remote database must never be
+  // reached without verifying its certificate and hostname.
+  dbSslCa ??= readFileSync(process.env.SCOUT_DB_SSL_CA_FILE || DEFAULT_DB_SSL_CA_FILE, 'utf8');
+  return { ca: dbSslCa, rejectUnauthorized: true };
 }
 
 function connectionFromUrl(rawUrl) {

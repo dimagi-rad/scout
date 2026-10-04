@@ -12,6 +12,7 @@ COPY pinned-patch.js /cube/conf/pinned-patch.js
 COPY patch-local-cache.js /cube/conf/patch-local-cache.js
 COPY idle-orchestrator-storage.js /cube/conf/idle-orchestrator-storage.js
 COPY patch-orchestrator-storage.js /cube/conf/patch-orchestrator-storage.js
+COPY rds-global-bundle.pem /cube/conf/rds-global-bundle.pem
 COPY start-cube-with-validator.sh /start-cube-with-validator.sh
 
 WORKDIR /cube/conf
