@@ -174,7 +174,9 @@ Block config keys:
   `x_label`, `y_label`, `style`,
   or `recharts` for an explicit Recharts element tree. Compact graph configs
   render through Recharts; use `recharts` when the chart needs composition
-  beyond the compact `line`, `bar`, `area`, `pie`, or `donut` presets.
+  beyond the compact `line`, `bar`, `area`, `pie`, or `donut` presets. The
+  `recharts` root must be AreaChart, BarChart, ComposedChart, LineChart,
+  PieChart, or ScatterChart; put axes, grid and series inside it.
 - `table`: `title`, `columns`, `query`.
 - `stat`: `title`, `label`, `value_path`, `value_key`, `format`,
   `delta_path`, optional `prefix`, `suffix`, and `comparison`.

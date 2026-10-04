@@ -606,6 +606,39 @@ def test_graph_doc_allows_bounded_raw_recharts_composition():
     assert "recharts_color" not in codes
 
 
+@pytest.mark.parametrize(
+    "root_type",
+    ["AreaChart", "BarChart", "ComposedChart", "LineChart", "PieChart", "ScatterChart"],
+)
+def test_graph_doc_accepts_each_renderer_supported_recharts_root(root_type):
+    doc = graph_doc()
+    doc["blocks"][2]["config"]["recharts"] = {"type": root_type}
+
+    assert "recharts_root_type" not in {item.get("code") for item in validate_doc(doc)}
+
+
+@pytest.mark.parametrize("root_type", ["XAxis", "Line", "Legend", "Cell"])
+def test_graph_doc_rejects_recharts_root_the_renderer_cannot_mount(root_type):
+    doc = graph_doc()
+    doc["blocks"][2]["config"]["recharts"] = {"type": root_type, "props": {"dataKey": "date"}}
+
+    diagnostics = [item for item in validate_doc(doc) if item.get("code") == "recharts_root_type"]
+
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["block_id"] == doc["blocks"][2]["id"]
+    assert "ComposedChart" in diagnostics[0]["message"]
+
+
+def test_graph_doc_allows_chart_components_nested_below_the_root():
+    doc = graph_doc()
+    doc["blocks"][2]["config"]["recharts"] = {
+        "type": "ComposedChart",
+        "children": [{"type": "XAxis", "props": {"dataKey": "date"}}],
+    }
+
+    assert "recharts_root_type" not in {item.get("code") for item in validate_doc(doc)}
+
+
 def test_graph_doc_passes_cube_filter_operators_to_runtime():
     doc = graph_doc()
     query = doc["blocks"][1]["config"]["queries"]["visits_by_day"]
