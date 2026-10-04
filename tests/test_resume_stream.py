@@ -1,11 +1,14 @@
 """Streaming a background resume's answer to open chats (apps/chat/resume_stream.py)."""
 
+import logging
 import uuid
 from datetime import timedelta
 from typing import Annotated, TypedDict
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+from anthropic import APITimeoutError
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -301,3 +304,30 @@ async def test_old_streams_are_pruned():
 
     assert await resume_stream.aprune() == 1
     assert [row.text for row in await _rows(thread)] == ["new"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_flush_model_timeout_fails_the_flush_without_paging(caplog):
+    _ws, _user, thread = await _thread("flush-timeout")
+    thread = await Thread.objects.select_related("workspace", "user").aget(id=thread.id)
+    held = pending_requests.ClaimedRequest(
+        thread_id=str(thread.id),
+        request_id=uuid.uuid4(),
+        version=1,
+        text="visits?",
+        token=uuid.uuid4(),
+    )
+    timeout = APITimeoutError(request=httpx.Request("POST", "https://api.anthropic.com"))
+    agent = FakeAgent(during=AsyncMock(side_effect=timeout))
+
+    with (
+        patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
+        caplog.at_level(logging.WARNING, logger="apps.workspaces.tasks"),
+    ):
+        answered = await tasks._answer_flushed_request(thread, held)
+
+    assert answered is False
+    flush_logs = [r for r in caplog.records if r.name == "apps.workspaces.tasks"]
+    assert any("model request timed out" in r.getMessage() for r in flush_logs)
+    assert all(r.levelno < logging.ERROR for r in flush_logs)

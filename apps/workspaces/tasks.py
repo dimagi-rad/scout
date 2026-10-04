@@ -3792,9 +3792,9 @@ async def _resume_claimed_job(
                     timeout=timeout_s,
                 )
             except LLM_TIMEOUT_ERRORS as exc:
-                # Converted only here: the agent build above does its own I/O, and a
-                # stall there is not a slow answer.
-                raise _ModelRequestTimeout from exc
+                # Converted only here: the agent build above does its own I/O (the
+                # MCP tool list), and a stall there is not a slow answer.
+                raise _ModelRequestTimeout("model request timed out") from exc
             if langfuse_span is not None:
                 # The resume already succeeded; a tracing error must not mark it agent_failed.
                 try:
@@ -4146,23 +4146,33 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
         langfuse_handler = get_langfuse_callback(session_id=str(thread.id), user_id=str(user.id))
         if langfuse_handler is not None:
             config["callbacks"] = [langfuse_handler]
-        await asyncio.wait_for(
-            resume_stream.arun_streamed(
-                agent,
-                {
-                    "messages": [
-                        HumanMessage(content=FLUSH_NOTE, id=held.marker_id),
-                        HumanMessage(content=held.text, id=held.message_id),
-                    ],
-                    "workspace_id": str(workspace.id),
-                    "user_id": str(user.id),
-                    "thread_id": str(thread.id),
-                },
-                config,
-                thread.id,
-            ),
-            timeout=settings.AGENT_RESUME_TIMEOUT_S,
+        try:
+            await asyncio.wait_for(
+                resume_stream.arun_streamed(
+                    agent,
+                    {
+                        "messages": [
+                            HumanMessage(content=FLUSH_NOTE, id=held.marker_id),
+                            HumanMessage(content=held.text, id=held.message_id),
+                        ],
+                        "workspace_id": str(workspace.id),
+                        "user_id": str(user.id),
+                        "thread_id": str(thread.id),
+                    },
+                    config,
+                    thread.id,
+                ),
+                timeout=settings.AGENT_RESUME_TIMEOUT_S,
+            )
+        except LLM_TIMEOUT_ERRORS as exc:
+            raise _ModelRequestTimeout("model request timed out") from exc
+    except _ModelRequestTimeout as exc:
+        logger.warning(
+            "flush: model request timed out for the held request of thread %s",
+            thread.id,
+            exc_info=exc.__cause__,
         )
+        return False
     except Exception:
         # Settled after: unsent, it waits again (its one flush spent) for the user to send.
         logger.exception("flush: agent failed for the held request of thread %s", thread.id)

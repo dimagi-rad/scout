@@ -17,7 +17,8 @@ SUBAGENT_EFFORT = "low"
 # A connect/read timeout before the response starts surfaces as APITimeoutError (after
 # the SDK's retries); one between chunks of an open stream escapes the SDK unwrapped.
 # Treating these as model timeouts relies on no tool letting a bare httpx timeout
-# escape: ToolNode re-raises tool errors as they are, and today the MCP transport
+# escape: ToolNode's default handle_tool_errors converts only ToolInvocationError
+# and re-raises everything else (langgraph-prebuilt), and today the MCP transport
 # and cube_client wrap theirs. A tool or node that does raw httpx I/O would be
 # mislabelled as a slow model.
 LLM_TIMEOUT_ERRORS = (APITimeoutError, httpx.TimeoutException)
