@@ -55,7 +55,7 @@ from apps.common.capacity_pool import CapacityTaggingPool
 logger = logging.getLogger(__name__)
 
 # Connection-param keys that identify the base DB (NOT the per-schema options).
-_BASE_KEYS = ("host", "port", "dbname", "user", "password", "sslmode")
+_BASE_KEYS = ("host", "port", "dbname", "user", "password", "sslmode", "sslrootcert")
 
 _POOL_MIN_SIZE = 1
 # Bound each pool so a burst of concurrent queries can't exhaust managed-DB

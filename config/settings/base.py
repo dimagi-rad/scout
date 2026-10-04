@@ -11,6 +11,7 @@ from pathlib import Path
 import environ
 import sentry_sdk
 
+from apps.common.db_urls import enforce_django_db_tls
 from config.sentry import before_send, ignore_noisy_loggers
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -132,8 +133,12 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 
+# A remote host verifies the RDS certificate whatever DATABASE_URL's sslmode says,
+# and settings import fails if the CA bundle is missing (apps/common/db_urls.py).
 DATABASES = {
-    "default": env.db("DATABASE_URL", default="postgresql://localhost/scout"),
+    "default": enforce_django_db_tls(
+        env.db("DATABASE_URL", default="postgresql://localhost/scout")
+    ),
 }
 
 # Separate from the application DB to allow future migration to Snowflake etc.

@@ -4,7 +4,7 @@ from django.conf import settings
 from django.core.checks import Error, Warning
 
 from apps.chat.checkpointer import get_database_url
-from apps.common.db_urls import DEFAULT_PORT, parse_pg_url
+from apps.common.db_urls import DEFAULT_PORT, DatabaseTLSConfigError, parse_pg_url
 
 
 def same_database(django_db: dict, conninfo: str) -> bool:
@@ -36,7 +36,7 @@ def check_checkpointer_shares_default_database(app_configs, **kwargs):
     level, prefix = (Warning, "W") if settings.DEBUG else (Error, "E")
     try:
         matches = same_database(settings.DATABASES.get("default", {}), get_database_url())
-    except ValueError as exc:
+    except (ValueError, DatabaseTLSConfigError) as exc:
         return [
             level(
                 f"The chat checkpointer's database could not be resolved: {exc}",

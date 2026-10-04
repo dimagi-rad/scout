@@ -51,7 +51,8 @@ def test_managed_dsn_is_used_for_setup_and_executor_with_encoded_credentials(
         assert ctx.connection_params["dbname"] == "fixture"
         assert ctx.connection_params["user"] == "fixture@reader"
         assert ctx.connection_params["password"] == "synthetic:pass/word"
-        assert ctx.connection_params["sslmode"] == "require"
+        # managed.example is remote, so its ?sslmode=require is forced up.
+        assert ctx.connection_params["sslmode"] == "verify-full"
         connect.assert_called_once_with(**ctx.connection_params, autocommit=True)
 
 
