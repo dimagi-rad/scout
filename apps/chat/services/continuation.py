@@ -2,8 +2,8 @@
 
 The registered queue tasks in ``apps.workspaces.tasks`` are thin wrappers around
 these. Nothing here may import that module (it imports this one), so the two
-tasks this re-queues are reached by their registered names; their names and
-signatures are pinned by ``tests/test_workspace_task_registry.py``.
+tasks this re-queues are reached by their registered names, pinned by
+``tests/test_chat_continuation_task_names.py``.
 """
 
 import asyncio
