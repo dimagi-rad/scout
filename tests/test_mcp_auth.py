@@ -3,8 +3,8 @@
 The streamable-HTTP MCP server previously trusted any caller on the internal
 network — every tenant-scoped tool resolved context purely from the
 ``workspace_id`` argument with no principal check. A co-located process, an SSRF,
-or a dev port-forward could call ``teardown_schema(confirm=True, workspace_id=...)``
-to destroy or read any workspace's data.
+or a dev port-forward could call ``query(workspace_id=...)``
+to read any workspace's data.
 
 We add defense-in-depth: a shared secret (``MCP_SHARED_SECRET``) sent in the
 ``X-Scout-MCP-Secret`` header on every request. Wrong/missing secret -> 401. An

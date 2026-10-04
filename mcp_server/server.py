@@ -100,7 +100,6 @@ from apps.workspaces.services.pipeline_resolver import (
 )
 from apps.workspaces.services.query_state import synced_runs, workspace_query_surface
 from apps.workspaces.services.reconciliation import STALE_JOB_THRESHOLD, staleness_anchor
-from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.source_freshness import aworkspace_source_freshness
 from apps.workspaces.services.tenant_coverage import coverage_complete
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
@@ -2139,79 +2138,6 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 else None,
             },
             schema=vs.schema_name,
-        )
-        return tc["result"]
-
-
-@mcp.tool()
-async def teardown_schema(confirm: bool = False, workspace_id: str = "") -> dict:
-    """Drop all materialized data for this workspace.
-
-    NOT exposed to the agent (arch #237 / finding 00#2): this tool DROPs
-    physical schemas but updates no Django state and does not fail dependent
-    sibling workspaces, so it is filtered out of the agent's tool set
-    (``AGENT_EXCLUDED_MCP_TOOLS`` in ``apps/agents/graph/base.py``). It remains
-    defined for operator/HTTP callers only. Legitimate teardown for the agent's
-    workflow happens via the worker ``teardown_schema`` task (TTL expiry /
-    refresh), which performs the full state update + sibling-fail machinery.
-
-    Destructive — all tenant schemas and the workspace view schema are
-    permanently dropped. Schemas will be re-provisioned automatically on
-    the next materialization run. Metadata extracted during materialization
-    (CommCare app structure, field definitions) is stored separately and
-    is NOT affected.
-
-    Only call this when the user explicitly requests a data reset, or when
-    a failed materialization has left the schema in an unrecoverable state.
-
-    Args:
-        confirm: Must be True to execute. Defaults to False as a safety guard.
-        workspace_id: Workspace UUID (injected server-side by the agent graph).
-    """
-    async with tool_context("teardown_schema", workspace_id, confirm=confirm) as tc:
-        if not confirm:
-            tc["result"] = error_response(
-                VALIDATION_ERROR,
-                "Pass confirm=True to tear down the schema. "
-                "This will permanently drop all materialized data.",
-            )
-            return tc["result"]
-
-        if not workspace_id:
-            tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
-            return tc["result"]
-
-        workspace = await Workspace.objects.filter(id=workspace_id).afirst()
-        if workspace is None:
-            tc["result"] = error_response(NOT_FOUND, f"Workspace '{workspace_id}' not found")
-            return tc["result"]
-
-        mgr = SchemaManager()
-        dropped = []
-
-        vs = (
-            await WorkspaceViewSchema.objects.filter(
-                workspace=workspace,
-            )
-            .exclude(state=SchemaState.TEARDOWN)
-            .afirst()
-        )
-        if vs:
-            await mgr.ateardown_view_schema(vs)
-            dropped.append(vs.schema_name)
-
-        tenant_ids = [t.id async for t in workspace.tenants.all()]
-        async for ts in TenantSchema.objects.filter(
-            tenant_id__in=tenant_ids,
-        ).exclude(state=SchemaState.TEARDOWN):
-            schema_name = ts.schema_name
-            await mgr.ateardown(ts)
-            dropped.append(schema_name)
-
-        tc["result"] = success_response(
-            {"schemas_dropped": dropped},
-            schema="",
-            timing_ms=tc["timer"].elapsed_ms,
         )
         return tc["result"]
 

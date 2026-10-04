@@ -14,7 +14,7 @@ cannot express, including inspecting raw text, exploring columns without
 semantic members, and examining individual rows. The agent uses `list_tables`,
 `describe_table`, and `get_metadata` to inspect the available data first. It must
 explain why it used the fallback and distinguish its own calculations from
-canonical metrics. `teardown_schema` is not exposed to the agent.
+canonical metrics.
 
 ### Raw SQL validation
 
@@ -152,7 +152,6 @@ schemas.
   `WORKSPACE_ACCESS_DENIED`) and timing data.
 - **Audit log**: each tool call writes a line to the `mcp_server.audit` logger
   with the tool, workspace, user, thread, status and duration.
-- **Excluded tools**: `teardown_schema` is never given to the agent.
 
 On the Django side, the MCP client opens a circuit breaker after five
 consecutive connection failures and fails fast for 30 seconds

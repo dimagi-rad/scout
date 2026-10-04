@@ -36,53 +36,7 @@ class TestMcpToolNames:
         assert "list_datasets" in MCP_TOOL_NAMES
 
 
-class TestTeardownSchemaUnbound:
-    """The destructive MCP ``teardown_schema`` tool must NOT be exposed to the agent.
-
-    arch #237 / finding 00#2: the agent-facing ``teardown_schema`` MCP tool DROPs
-    physical schemas but updates no Django state (TenantSchema stays ACTIVE, runs
-    stay COMPLETED, sibling multi-tenant view schemas are never failed) and has no
-    role/membership check — only an LLM-suppliable ``confirm`` flag. It duplicates
-    the worker teardown task with none of its safety machinery, so it is unbound
-    from the agent: the LLM can no longer call it.
-    """
-
-    def test_teardown_schema_not_in_mcp_tool_names(self):
-
-        assert "teardown_schema" not in MCP_TOOL_NAMES
-
-    def test_teardown_schema_filtered_from_agent_tools(self):
-        """``_build_tools`` must drop the MCP ``teardown_schema`` tool even though
-        the MCP server still advertises it (operator/HTTP callers keep it)."""
-
-        def _fake_mcp_tool(name):
-            t = MagicMock()
-            t.name = name
-            return t
-
-        mcp_tools = [
-            _fake_mcp_tool("semantic_query"),
-            _fake_mcp_tool("query"),
-            _fake_mcp_tool("list_tables"),
-            _fake_mcp_tool("describe_table"),
-            _fake_mcp_tool("get_metadata"),
-            _fake_mcp_tool("teardown_schema"),
-        ]
-        workspace = SimpleNamespace(id="ws-1", system_prompt="")
-
-        tools = _build_tools(workspace, None, mcp_tools)
-        tool_names = {t.name for t in tools}
-
-        assert "teardown_schema" not in tool_names
-        # The non-destructive MCP tools survive. Raw SQL plus table inspection
-        # are the agent's fallback for what the semantic model cannot express
-        # (issue #406).
-        assert "semantic_query" in tool_names
-        assert "query" in tool_names
-        assert "list_tables" in tool_names
-        assert "describe_table" in tool_names
-        assert "get_metadata" in tool_names
-
+class TestAgentToolSurface:
     def test_parent_graph_exposes_artifact_manager_not_primitives(self):
 
         workspace = SimpleNamespace(id="ws-1", system_prompt="")
