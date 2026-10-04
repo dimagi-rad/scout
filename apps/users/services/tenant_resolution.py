@@ -31,6 +31,7 @@ sign-in may take their access away (#561 G1).
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 from allauth.socialaccount.models import SocialToken
@@ -59,6 +60,10 @@ from apps.workspaces import access_cache
 from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
 
 logger = logging.getLogger(__name__)
+
+_MAX_PAGES = 100
+_LISTING_BUDGET_SECONDS = 60.0
+_OCS_UNSAFE_NEXT = "OCS returned an untrusted pagination link"
 
 
 async def _anewest_account(user, provider: str):
@@ -422,9 +427,23 @@ async def resolve_ocs_chatbots(
 
     experiments: list[dict] = []
     url: str | None = f"{base_url}/api/experiments/"
+    try:
+        policy = ProviderURLPolicy(url)
+    except UnsafeProviderURL as error:
+        raise TenantResolutionError(f"OCS_URL is not a safe provider origin: {error}") from error
+    url = policy.base_url
+    seen: set[str] = set()
+    deadline = time.monotonic() + _LISTING_BUDGET_SECONDS
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
+            if url in seen or len(seen) >= _MAX_PAGES or time.monotonic() > deadline:
+                raise TenantResolutionError("OCS experiment list did not finish")
+            seen.add(url)
+            resp = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+                follow_redirects=False,
+            )
             if resp.status_code in (401, 403):
                 if may_revoke:
                     await _record_discovery_denial(
@@ -440,7 +459,13 @@ async def resolve_ocs_chatbots(
             if "results" not in payload:  # shape-drift guard
                 raise TenantResolutionError("OCS response missing 'results' key")
             experiments.extend(payload["results"])
-            url = payload.get("next")
+            next_url = payload.get("next")
+            if not next_url:
+                break
+            try:
+                url = policy.resolve(next_url, relative_to=url)
+            except UnsafeProviderURL:
+                raise TenantResolutionError(_OCS_UNSAFE_NEXT) from None
 
     conn = await _aoauth_connection(
         user,
@@ -516,9 +541,14 @@ async def _fetch_all_domains(access_token: str, domains_url: str) -> list[dict]:
     """
     results: list[dict] = []
     policy = ProviderURLPolicy(domains_url)
-    url: str | None = domains_url
+    url: str | None = policy.base_url
+    seen: set[str] = set()
+    deadline = time.monotonic() + _LISTING_BUDGET_SECONDS
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
+            if url in seen or len(seen) >= _MAX_PAGES or time.monotonic() > deadline:
+                raise TenantResolutionError("CommCare domain list did not finish")
+            seen.add(url)
             resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
             if resp.status_code in (401, 403):
                 raise CommCareAuthError(

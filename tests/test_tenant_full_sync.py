@@ -111,6 +111,20 @@ async def test_commcare_pagination_follows_relative_next(user, httpx_mock):
 
 
 @pytest.mark.asyncio
+async def test_commcare_pagination_cycle_raises(user, httpx_mock):
+    httpx_mock.add_response(
+        url=COMMCARE_DOMAIN_API,
+        json={
+            "objects": [{"domain_name": "a", "project_name": "A"}],
+            "meta": {"next": "/api/user_domains/v1/"},
+        },
+    )
+    with pytest.raises(TenantResolutionError):
+        await _fetch_all_domains("tok", COMMCARE_DOMAIN_API)
+    assert len(httpx_mock.get_requests()) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_ocs_archival_is_scoped_to_token_team(user):
     # user's token is scoped to team-a

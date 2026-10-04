@@ -114,3 +114,58 @@ async def test_verify_for_tenant_fails_when_experiment_missing(httpx_mock, setti
     )
     with pytest.raises(CredentialVerificationError, match="exp-1"):
         await OCSStrategy.verify_for_tenant({"api_key": "k"}, external_id="exp-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "next_url",
+    [
+        "https://evil.example.net/api/experiments/",
+        "https://ocs.example.com:8443/api/experiments/?cursor=xyz",
+    ],
+)
+async def test_verify_and_discover_rejects_foreign_next(httpx_mock, settings, next_url):
+    settings.OCS_URL = "https://ocs.example.com"
+    httpx_mock.add_response(
+        method="GET",
+        url="https://ocs.example.com/api/experiments/",
+        json={"results": [{"id": "exp-1", "name": "Bot One"}], "next": next_url},
+    )
+    with pytest.raises(CredentialVerificationError):
+        await OCSStrategy.verify_and_discover({"api_key": "secret-key"})
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 1
+    assert all(r.url.host == "ocs.example.com" for r in requests)
+
+
+@pytest.mark.asyncio
+async def test_verify_and_discover_detects_next_cycle(httpx_mock, settings):
+    settings.OCS_URL = "https://ocs.example.com"
+    httpx_mock.add_response(
+        method="GET",
+        url="https://ocs.example.com/api/experiments/",
+        json={
+            "results": [{"id": "exp-1", "name": "Bot One"}],
+            "next": "https://ocs.example.com/api/experiments/",
+        },
+    )
+    with pytest.raises(CredentialVerificationError):
+        await OCSStrategy.verify_and_discover({"api_key": "k"})
+    assert len(httpx_mock.get_requests()) == 1
+
+
+@pytest.mark.asyncio
+async def test_verify_and_discover_follows_relative_next(httpx_mock, settings):
+    settings.OCS_URL = "https://ocs.example.com"
+    httpx_mock.add_response(
+        method="GET",
+        url="https://ocs.example.com/api/experiments/",
+        json={"results": [{"id": "exp-1", "name": "One"}], "next": "?cursor=xyz"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://ocs.example.com/api/experiments/?cursor=xyz",
+        json={"results": [{"id": "exp-2", "name": "Two"}], "next": None},
+    )
+    descriptors = await OCSStrategy.verify_and_discover({"api_key": "k"})
+    assert [d.external_id for d in descriptors] == ["exp-1", "exp-2"]

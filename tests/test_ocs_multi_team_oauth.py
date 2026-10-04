@@ -373,7 +373,7 @@ async def test_two_team_user_covers_an_all_of_workspace(user, mocker):
             expires_at=timezone.now() + timedelta(hours=5),
         )
 
-        async def fake_get(url, headers=None, params=None):
+        async def fake_get(url, headers=None, params=None, **_):
             if "sessions" in url:
                 return _ocs_sessions([{"team": {"slug": team, "name": team.title()}}])
             return _ocs_sessions([{"id": chatbot_id, "name": chatbot_id}])

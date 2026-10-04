@@ -11,8 +11,12 @@ from apps.users.services.api_key_providers.base import (
     FormField,
     TenantDescriptor,
 )
+from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
 
 OCS_DEFAULT_URL = "https://www.openchatstudio.com"
+
+_MAX_EXPERIMENT_PAGES = 100
+_UNSAFE_NEXT = "OCS returned an untrusted pagination link"
 
 
 def _auth_header(api_key: str) -> dict[str, str]:
@@ -32,9 +36,20 @@ async def _list_experiments(api_key: str) -> list[dict]:
     headers = _auth_header(api_key)
     results: list[dict] = []
     url: str | None = _experiments_url()
+    try:
+        policy = ProviderURLPolicy(url)
+    except UnsafeProviderURL as error:
+        raise CredentialVerificationError(
+            f"OCS_URL is not a safe provider origin: {error}"
+        ) from error
+    url = policy.base_url
+    seen: set[str] = set()
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
-            resp = await client.get(url, headers=headers)
+            if url in seen or len(seen) >= _MAX_EXPERIMENT_PAGES:
+                raise CredentialVerificationError("OCS experiment list did not finish")
+            seen.add(url)
+            resp = await client.get(url, headers=headers, follow_redirects=False)
             if resp.status_code in (401, 403):
                 raise CredentialVerificationError(
                     f"OCS rejected the API key (HTTP {resp.status_code})"
@@ -45,7 +60,13 @@ async def _list_experiments(api_key: str) -> list[dict]:
                 )
             payload = resp.json()
             results.extend(payload.get("results", []))
-            url = payload.get("next")
+            next_url = payload.get("next")
+            if not next_url:
+                break
+            try:
+                url = policy.resolve(next_url, relative_to=url)
+            except UnsafeProviderURL:
+                raise CredentialVerificationError(_UNSAFE_NEXT) from None
     return results
 
 

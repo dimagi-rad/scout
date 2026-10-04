@@ -258,7 +258,7 @@ def _sessions_response(results):
 
 @pytest.mark.asyncio
 async def test_detect_team_from_sessions(mocker):
-    async def fake_get(url, headers=None, params=None):
+    async def fake_get(url, headers=None, params=None, **_):
         return _sessions_response([{"team": {"name": "Acme", "slug": "acme"}}])
 
     _mock_async_client(mocker, fake_get)
@@ -267,7 +267,7 @@ async def test_detect_team_from_sessions(mocker):
 
 @pytest.mark.asyncio
 async def test_detect_team_none_when_no_sessions(mocker):
-    async def fake_get(url, headers=None, params=None):
+    async def fake_get(url, headers=None, params=None, **_):
         return _sessions_response([])
 
     _mock_async_client(mocker, fake_get)
@@ -287,7 +287,7 @@ async def test_oauth_import_links_team_and_connection(user, mocker):
     await SocialToken.objects.acreate(account=account, token="tok")
     experiments = [{"id": "exp-1", "name": "Bot 1"}, {"id": "exp-2", "name": "Bot 2"}]
 
-    async def fake_get(url, headers=None, params=None):
+    async def fake_get(url, headers=None, params=None, **_):
         if "sessions" in url:
             return _sessions_response([{"team": {"slug": "team-a", "name": "Team A"}}])
         return _sessions_response(experiments)  # same envelope shape (results/next)
@@ -423,7 +423,7 @@ async def test_connecting_a_second_team_no_longer_evicts_the_first(user, mocker)
             expires_at=timezone.now() + timedelta(hours=5),
         )
 
-        async def fake_get(url, headers=None, params=None):
+        async def fake_get(url, headers=None, params=None, **_):
             if "sessions" in url:
                 return _sessions_response([{"team": {"slug": team, "name": team.title()}}])
             return _sessions_response([{"id": chatbot_id, "name": chatbot_id}])

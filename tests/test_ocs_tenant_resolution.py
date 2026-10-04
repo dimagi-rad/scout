@@ -8,7 +8,11 @@ import pytest
 from allauth.socialaccount.models import SocialAccount, SocialToken
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership
-from apps.users.services.tenant_resolution import OCSAuthError, resolve_ocs_chatbots
+from apps.users.services.tenant_resolution import (
+    OCSAuthError,
+    TenantResolutionError,
+    resolve_ocs_chatbots,
+)
 
 
 @pytest.mark.asyncio
@@ -139,3 +143,90 @@ async def test_teamless_identity_still_discovers_under_any_of_access(user, setti
         memberships = await resolve_ocs_chatbots(user, "access-tok", social_account=account)
 
     assert [tm.team_slug for tm in memberships] == [""]
+
+
+def _paged_get(pages: dict[str, dict], seen: list[tuple[str, dict]]):
+    async def fake_get(url, **kwargs):
+        seen.append((url, kwargs.get("headers", {})))
+
+        class R:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return pages[url]
+
+        return R()
+
+    return fake_get
+
+
+@pytest.fixture
+def ocs_account(user, settings):
+    settings.OCS_URL = "https://ocs.example.com"
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+
+
+async def _discover(user, pages):
+    account = await SocialAccount.objects.acreate(user=user, provider="ocs", uid="u1#team-a")
+    await SocialToken.objects.acreate(account=account, token="access-tok")
+    seen: list[tuple[str, dict]] = []
+    with (
+        patch("httpx.AsyncClient") as MockClient,
+        patch(
+            "apps.users.services.tenant_resolution.adetect_team_name_from_oauth",
+            new=AsyncMock(return_value="Team A"),
+        ),
+    ):
+        MockClient.return_value.__aenter__.return_value.get = AsyncMock(
+            side_effect=_paged_get(pages, seen)
+        )
+        try:
+            result = await resolve_ocs_chatbots(user, "access-tok", social_account=account)
+        except TenantResolutionError as exc:
+            return exc, seen
+    return result, seen
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_ocs_discovery_follows_same_origin_next(user, ocs_account):
+    first = "https://ocs.example.com/api/experiments/"
+    second = "https://ocs.example.com/api/experiments/?cursor=2"
+    pages = {
+        first: {"results": [{"id": "e1", "name": "One"}], "next": second},
+        second: {"results": [{"id": "e2", "name": "Two"}], "next": None},
+    }
+    result, seen = await _discover(user, pages)
+    assert len(result) == 2
+    assert [u for u, _ in seen] == [first, second]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "next_url",
+    [
+        "https://evil.example.net/api/experiments/",
+        "http://evil.example.net/api/experiments/?cursor=2",
+        "https://ocs.example.com:8443/api/experiments/",
+    ],
+)
+async def test_ocs_discovery_rejects_foreign_next(user, ocs_account, next_url):
+    first = "https://ocs.example.com/api/experiments/"
+    pages = {first: {"results": [{"id": "e1", "name": "One"}], "next": next_url}}
+    result, seen = await _discover(user, pages)
+    assert isinstance(result, TenantResolutionError)
+    assert [u for u, _ in seen] == [first]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_ocs_discovery_detects_next_cycle(user, ocs_account):
+    first = "https://ocs.example.com/api/experiments/"
+    pages = {first: {"results": [{"id": "e1", "name": "One"}], "next": first}}
+    result, seen = await _discover(user, pages)
+    assert isinstance(result, TenantResolutionError)
+    assert len(seen) == 1
