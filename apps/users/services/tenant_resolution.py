@@ -60,6 +60,9 @@ from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
 
 logger = logging.getLogger(__name__)
 
+_OCS_MAX_EXPERIMENT_PAGES = 100
+_OCS_UNSAFE_NEXT = "OCS returned an untrusted pagination link"
+
 
 async def _anewest_account(user, provider: str):
     """The user's most recently authorised identity for *provider*.
@@ -422,9 +425,21 @@ async def resolve_ocs_chatbots(
 
     experiments: list[dict] = []
     url: str | None = f"{base_url}/api/experiments/"
+    try:
+        policy = ProviderURLPolicy(url)
+    except UnsafeProviderURL:
+        raise TenantResolutionError(_OCS_UNSAFE_NEXT) from None
+    seen: set[str] = set()
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
+            if url in seen or len(seen) >= _OCS_MAX_EXPERIMENT_PAGES:
+                raise TenantResolutionError("OCS experiment list did not finish")
+            seen.add(url)
+            resp = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+                follow_redirects=False,
+            )
             if resp.status_code in (401, 403):
                 if may_revoke:
                     await _record_discovery_denial(
@@ -440,7 +455,13 @@ async def resolve_ocs_chatbots(
             if "results" not in payload:  # shape-drift guard
                 raise TenantResolutionError("OCS response missing 'results' key")
             experiments.extend(payload["results"])
-            url = payload.get("next")
+            next_url = payload.get("next")
+            if not next_url:
+                break
+            try:
+                url = policy.resolve(next_url, relative_to=url)
+            except UnsafeProviderURL:
+                raise TenantResolutionError(_OCS_UNSAFE_NEXT) from None
 
     conn = await _aoauth_connection(
         user,
