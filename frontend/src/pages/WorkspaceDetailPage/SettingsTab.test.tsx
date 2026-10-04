@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { workspaceApi, type WorkspaceDetail } from "@/api/workspaces"
-import { SettingsTab } from "./WorkspaceDetailPage"
+import { SettingsTab } from "./SettingsTab"
 
 vi.mock("@/api/workspaces", () => ({
   workspaceApi: { update: vi.fn().mockResolvedValue({}), delete: vi.fn() },
