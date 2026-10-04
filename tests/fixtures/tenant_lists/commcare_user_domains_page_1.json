@@ -1,0 +1,13 @@
+{
+  "meta": {
+    "limit": 2,
+    "next": "/api/user_domains/v1/?limit=2&offset=2",
+    "offset": 0,
+    "previous": null,
+    "total_count": 3
+  },
+  "objects": [
+    {"domain_name": "demo-clinic", "project_name": "Demo Clinic"},
+    {"domain_name": "field-survey", "project_name": "Field Survey"}
+  ]
+}

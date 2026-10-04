@@ -1,0 +1,26 @@
+{
+  "organizations": [{"slug": "acme-health", "name": "Acme Health"}],
+  "opportunities": [
+    {
+      "id": 101,
+      "name": "Malaria Visits",
+      "date_created": "2026-03-02T09:15:00Z",
+      "organization": "acme-health",
+      "end_date": "2026-12-31",
+      "is_active": true,
+      "program": 7,
+      "visit_count": 1204
+    },
+    {
+      "id": 102,
+      "name": "Nutrition Survey",
+      "date_created": "2026-05-11T14:40:00Z",
+      "organization": "acme-health",
+      "end_date": null,
+      "is_active": true,
+      "program": null,
+      "visit_count": 88
+    }
+  ],
+  "programs": [{"id": 7, "name": "Community Health", "organization": "acme-health"}]
+}

@@ -1,0 +1,12 @@
+{
+  "meta": {
+    "limit": 2,
+    "next": null,
+    "offset": 2,
+    "previous": "/api/user_domains/v1/?limit=2&offset=0",
+    "total_count": 3
+  },
+  "objects": [
+    {"domain_name": "late-page", "project_name": "Late Page"}
+  ]
+}

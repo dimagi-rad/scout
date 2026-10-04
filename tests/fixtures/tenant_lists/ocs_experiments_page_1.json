@@ -1,0 +1,18 @@
+{
+  "next": "{origin}/api/experiments/?cursor=cD0yMDI2",
+  "previous": null,
+  "results": [
+    {
+      "id": "0b8f3c1e-5d0a-4a52-9f6e-1c2d3e4f5a6b",
+      "name": "Onboarding Bot",
+      "url": "{origin}/api/experiments/0b8f3c1e-5d0a-4a52-9f6e-1c2d3e4f5a6b/",
+      "version_number": 3
+    },
+    {
+      "id": "7a9e2d4c-1b3f-4e5a-8c6d-0f1e2d3c4b5a",
+      "name": "Survey Bot",
+      "url": "{origin}/api/experiments/7a9e2d4c-1b3f-4e5a-8c6d-0f1e2d3c4b5a/",
+      "version_number": 1
+    }
+  ]
+}

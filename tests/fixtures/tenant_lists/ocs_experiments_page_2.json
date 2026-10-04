@@ -1,0 +1,12 @@
+{
+  "next": null,
+  "previous": "{origin}/api/experiments/?cursor=cj0xJnA9MjAyNg",
+  "results": [
+    {
+      "id": "c4d5e6f7-8a9b-4c0d-9e1f-2a3b4c5d6e7f",
+      "name": "Late Bot",
+      "url": "{origin}/api/experiments/c4d5e6f7-8a9b-4c0d-9e1f-2a3b4c5d6e7f/",
+      "version_number": 2
+    }
+  ]
+}
