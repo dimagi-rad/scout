@@ -184,17 +184,21 @@ def _ts_union(source: str, name: str) -> set[str]:
     return set(STRING.findall(match.group(1)))
 
 
-@pytest.mark.parametrize(
-    ("ts_name", "style_key"),
-    [
-        ("GraphPalette", "palette"),
-        ("GraphLegend", "legend"),
-        ("GraphGrid", "grid"),
-        ("GraphCurve", "curve"),
-        ("GraphOrientation", "orientation"),
-        ("GraphLabels", "labels"),
-    ],
-)
+STYLE_UNIONS = [
+    ("GraphPalette", "palette"),
+    ("GraphLegend", "legend"),
+    ("GraphGrid", "grid"),
+    ("GraphCurve", "curve"),
+    ("GraphOrientation", "orientation"),
+    ("GraphLabels", "labels"),
+]
+
+
+def test_every_style_key_has_a_compared_union():
+    assert {key for _, key in STYLE_UNIONS} == set(graph_doc.GRAPH_STYLE_KEYS)
+
+
+@pytest.mark.parametrize(("ts_name", "style_key"), STYLE_UNIONS)
 def test_graph_style_values_match(ts_name, style_key):
     assert _ts_union(_read("types.ts"), ts_name) == graph_doc.GRAPH_STYLE_KEYS[style_key]
 
@@ -212,6 +216,8 @@ def test_stat_comparison_values_match():
         r"export interface StatComparisonConfig \{(.*?)\n\}", _read("types.ts"), re.DOTALL
     )
     assert body
+    union_keys = re.findall(r'^\s+(\w+)\?: "', body.group(1), re.MULTILINE)
+    assert set(union_keys) == set(graph_doc.STAT_COMPARISON_KEYS)
     for key, values in graph_doc.STAT_COMPARISON_KEYS.items():
         field = re.search(rf"^\s+{key}\?: ((?:\"\w+\"(?: \| )?)+)$", body.group(1), re.MULTILINE)
         assert field, f"StatComparisonConfig.{key} union not found"
@@ -219,8 +225,10 @@ def test_stat_comparison_values_match():
 
 
 def test_date_presets_match():
-    source = (GRAPH_DIR / "runtime.ts").read_text()
-    start = _after(source, r"export function resolvePresetRange\([^)]*\)[^{]*(?=\{)")
+    source = _read("runtime.ts")
+    assert f'preset ??= "{date_context.DEFAULT_PRESET}"' in source
+    assert f'? "previous_year" : "{date_context.DEFAULT_COMPARISON}"' in source
+    start = _after(source, r"export function resolvePresetRange\b[\s\S]*?switch \(preset\) (?=\{)")
     body = _balanced(source, start)
     assert set(re.findall(r'case "(\w+)":', body)) == set(date_context.PRESETS)
     comparisons = _after(source, r"export const COMPARISON_PRESETS = (?=\[)")
