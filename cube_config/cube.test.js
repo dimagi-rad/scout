@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { readFileSync } = require('node:fs');
+const { X509Certificate, createHash } = require('node:crypto');
+const { mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
+const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { test } = require('node:test');
 const vm = require('node:vm');
@@ -408,4 +410,74 @@ test('an invalid tenant connection limit fails startup', () => {
   for (const value of ['0', '-1', '1.5', 'many', '9007199254740993']) {
     assert.throws(() => loadConfig(undefined, [], { SCOUT_CUBE_MAX_DRIVER_CONNECTIONS: value }), /positive safe integer/);
   }
+});
+
+const RDS_URL = 'postgresql://platform:secret@scout.abc123.us-east-1.rds.amazonaws.com:5432/agent_platform';
+const BUNDLE = join(__dirname, 'rds-global-bundle.pem');
+
+test('remote databases are reached only with a verified RDS certificate and hostname', () => {
+  const pools = [];
+  const config = loadConfig(undefined, pools, { DATABASE_URL: RDS_URL, SCOUT_DB_SSL_CA_FILE: BUNDLE });
+  const ca = readFileSync(BUNDLE, 'utf8');
+  const drivers = [config.driverFactory(context()), config.driverFactory({})];
+  for (const ssl of [pools[0].ssl, ...drivers.map((driver) => driver.config.ssl)]) {
+    assert.equal(ssl.rejectUnauthorized, true);
+    assert.equal(ssl.ca, ca);
+    assert.equal(ssl.checkServerIdentity, undefined);
+  }
+  assert.equal(drivers[0].config.host, 'scout.abc123.us-east-1.rds.amazonaws.com');
+});
+
+test('URL parameters cannot weaken the catalog pool TLS settings', () => {
+  for (const query of ['?sslmode=no-verify', '?sslmode=disable', '?ssl=0']) {
+    const pools = [];
+    loadConfig(undefined, pools, { DATABASE_URL: `${RDS_URL}${query}`, SCOUT_DB_SSL_CA_FILE: BUNDLE });
+    assert.equal(pools[0].connectionString, undefined);
+    assert.equal(pools[0].ssl.rejectUnauthorized, true);
+  }
+});
+
+test('a separate managed database URL is verified too', () => {
+  const config = loadConfig(undefined, [], { MANAGED_DATABASE_URL: RDS_URL, SCOUT_DB_SSL_CA_FILE: BUNDLE });
+  assert.equal(config.driverFactory(context()).config.ssl.rejectUnauthorized, true);
+});
+
+test('local databases connect without TLS', () => {
+  for (const host of ['localhost', '127.0.0.1', 'platform-db']) {
+    const pools = [];
+    const url = `postgresql://platform:secret@${host}:5432/agent_platform`;
+    const config = loadConfig(undefined, pools, { DATABASE_URL: url, SCOUT_DB_SSL_CA_FILE: '/nonexistent.pem' });
+    assert.equal(pools[0].ssl, false);
+    assert.equal(config.driverFactory(context()).config.ssl, false);
+  }
+});
+
+test('a missing CA bundle fails startup instead of connecting unverified', () => {
+  assert.throws(
+    () => loadConfig(undefined, [], { DATABASE_URL: RDS_URL, SCOUT_DB_SSL_CA_FILE: '/nonexistent.pem' }),
+    /ENOENT/
+  );
+});
+
+test('a CA file without certificates fails startup instead of trusting public roots', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'scout-ca-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const empty = join(dir, 'empty.pem');
+  writeFileSync(empty, '');
+  assert.throws(
+    () => loadConfig(undefined, [], { DATABASE_URL: RDS_URL, SCOUT_DB_SSL_CA_FILE: empty }),
+    /contains no certificates/
+  );
+});
+
+test('the image ships the RDS CA bundle at the default path', () => {
+  const dockerfile = readFileSync(join(__dirname, 'Dockerfile'), 'utf8');
+  assert.match(dockerfile, /^COPY rds-global-bundle\.pem \/cube\/conf\/rds-global-bundle\.pem$/m);
+  assert.match(readFileSync(join(__dirname, 'cube.js'), 'utf8'), /'\/cube\/conf\/rds-global-bundle\.pem'/);
+  // Pinned to https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem;
+  // a refresh must update this digest after checking it against upstream.
+  assert.equal(createHash('sha256').update(readFileSync(BUNDLE)).digest('hex'), 'fe45bbebf92ad3e27a583bbb2ddd1553c521ed4d49af5514dc0a40372ea5395c');
+  const pems = readFileSync(BUNDLE, 'utf8').match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g);
+  const subjects = pems.map((pem) => new X509Certificate(pem).subject);
+  assert.ok(subjects.some((subject) => subject.includes('CN=Amazon RDS us-east-1 Root CA RSA2048 G1')));
 });

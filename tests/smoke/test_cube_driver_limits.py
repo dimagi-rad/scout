@@ -1,4 +1,4 @@
-"""DB-free check that Cube drivers and orchestrators stay bounded inside the real image.
+"""DB-free checks that Cube drivers stay bounded and verify TLS inside the real image.
 
 Requires SCOUT_CUBE_COMPILER_CONTAINER naming an existing local Cube container. The
 script loads /cube/conf/cube.js in a separate Node process with an unreachable database,
@@ -113,3 +113,60 @@ def test_real_cube_drivers_are_bounded_and_return_slots():
         "slotReleased": True,
         "idleOrchestratorsExpire": True,
     }
+
+
+_VERIFY_TLS = r"""
+const assert = require('node:assert/strict');
+const { readFileSync } = require('node:fs');
+const pg = require('pg');
+const ConnectionParameters = require('pg/lib/connection-parameters');
+const poolOptions = [];
+const RealPool = pg.Pool;
+pg.Pool = class extends RealPool {
+  constructor(options) { super(options); poolOptions.push(options); }
+};
+const config = require('/cube/conf/cube.js');
+const ca = readFileSync('/cube/conf/rds-global-bundle.pem', 'utf8');
+const effective = [
+  ...poolOptions.map((options) => new ConnectionParameters(options).ssl),
+  config.driverFactory({}).config.ssl,
+];
+for (const ssl of effective) {
+  assert.equal(ssl.rejectUnauthorized, true);
+  assert.equal(ssl.ca, ca);
+}
+process.stdout.write(JSON.stringify({ verified: effective.length }));
+"""
+
+
+@pytest.mark.smoke
+def test_real_cube_image_verifies_remote_database_certificates():
+    container = os.environ.get("SCOUT_CUBE_COMPILER_CONTAINER")
+    if not container:
+        pytest.skip("Set SCOUT_CUBE_COMPILER_CONTAINER to a local Cube container.")
+    docker = shutil.which("docker")
+    assert docker, "The real Cube TLS smoke test requires Docker."
+    # .invalid never resolves, and building pools and drivers opens no connection.
+    remote = "postgresql://unused:unused@db.example.invalid:5432/unused?sslmode=no-verify"
+    result = subprocess.run(  # noqa: S603
+        [
+            docker,
+            "exec",
+            "-e",
+            f"DATABASE_URL={remote}",
+            "-e",
+            f"MANAGED_DATABASE_URL={remote}",
+            "-w",
+            "/cube/conf",
+            container,
+            "node",
+            "-e",
+            _VERIFY_TLS,
+        ],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"verified": 2}

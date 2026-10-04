@@ -1,6 +1,7 @@
 const { Pool } = require('pg');
 const { PostgresDriver } = require('@cubejs-backend/postgres-driver');
 const { createHash } = require('node:crypto');
+const { readFileSync } = require('node:fs');
 const { createConnectionSlots, positiveIntegerFromEnv } = require('./connection-slots');
 
 const IDENTIFIER_RE = /^[a-z][a-z0-9_]*$/;
@@ -61,6 +62,9 @@ function boundedPoolConfig(maxPoolSize) {
   };
 }
 
+const DEFAULT_DB_SSL_CA_FILE = '/cube/conf/rds-global-bundle.pem';
+let dbSslCa = null;
+
 function sslConfigForUrl(rawUrl) {
   if (!rawUrl) {
     return false;
@@ -70,7 +74,18 @@ function sslConfigForUrl(rawUrl) {
   if (!host || host === 'localhost' || host === '127.0.0.1' || host === 'platform-db') {
     return false;
   }
-  return { rejectUnauthorized: false };
+  // Read once and fail startup if missing: a remote database must never be
+  // reached without verifying its certificate and hostname.
+  if (dbSslCa === null) {
+    const caFile = process.env.SCOUT_DB_SSL_CA_FILE || DEFAULT_DB_SSL_CA_FILE;
+    const ca = readFileSync(caFile, 'utf8');
+    // An empty ca makes Node fall back to its public roots instead of failing.
+    if (!ca.includes('-----BEGIN CERTIFICATE-----')) {
+      throw new Error(`Database CA file ${caFile} contains no certificates`);
+    }
+    dbSslCa = ca;
+  }
+  return { ca: dbSslCa, rejectUnauthorized: true };
 }
 
 function connectionFromUrl(rawUrl) {
@@ -122,10 +137,11 @@ const managedDatabaseUrl = process.env.MANAGED_DATABASE_URL || appDatabaseUrl;
 // Pin search_path: the default "$user", public resolves differently for the
 // owner and for the role, so the grant check and the reads could otherwise
 // see different semantic_cubeschema tables.
+// Not connectionString: pg lets URL parameters such as ?sslmode=no-verify
+// replace the ssl option, which would bypass certificate verification.
 const catalogPoolOptions = {
-  connectionString: appDatabaseUrl,
+  ...connectionFromUrl(appDatabaseUrl),
   options: '-c search_path=public',
-  ssl: sslConfigForUrl(appDatabaseUrl),
   connectionTimeoutMillis: CATALOG_QUERY_TIMEOUT_MS,
   statement_timeout: CATALOG_QUERY_TIMEOUT_MS,
   query_timeout: CATALOG_QUERY_TIMEOUT_MS,

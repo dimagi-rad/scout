@@ -43,6 +43,8 @@ staticfiles/
 .env.deploy
 tests/smoke/.env
 *.pem
+# Public AWS RDS CA bundle, not a secret.
+!cube_config/rds-global-bundle.pem
 *.key
 
 # IDE
