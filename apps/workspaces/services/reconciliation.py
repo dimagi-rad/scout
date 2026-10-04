@@ -31,8 +31,8 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.data_operation import to_thread_fresh_db, workspace_data_lock_if_free
 from apps.workspaces.services.data_recovery import recovery_query_surface, workspace_recovery_error
-from apps.workspaces.services.failure_guidance import compose_failure_summary
 from apps.workspaces.services.load_activity import MATERIALIZE_TASK_NAME, REBUILD_VIEW_TASK_NAME
+from apps.workspaces.services.load_outcome import build_failure_summary_for_job
 from config.procrastinate import app
 
 logger = logging.getLogger(__name__)
@@ -577,17 +577,6 @@ async def _settle_orphaned_view_builds() -> int:
             )
             settled += 1
     return settled
-
-
-async def build_failure_summary_for_job(procrastinate_job_id: int) -> str:
-    """Read MaterializationRuns for this job and compose a user-facing summary."""
-    runs = [
-        r
-        async for r in MaterializationRun.objects.filter(
-            procrastinate_job_id=procrastinate_job_id,
-        )
-    ]
-    return compose_failure_summary(runs)
 
 
 async def build_agent_for_resume(workspace, user, conversation_id=None):
