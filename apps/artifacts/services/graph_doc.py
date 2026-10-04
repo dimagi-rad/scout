@@ -136,6 +136,15 @@ RECHARTS_COMPONENT_TYPES = {
     "YAxis",
 }
 
+RECHARTS_ROOT_TYPES = {
+    "AreaChart",
+    "BarChart",
+    "ComposedChart",
+    "LineChart",
+    "PieChart",
+    "ScatterChart",
+}
+
 RECHARTS_DATA_TYPES = {
     "AreaChart",
     "BarChart",
@@ -760,6 +769,7 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
                 config.get("recharts"),
                 block_id=block_id,
                 path="config.recharts",
+                root=True,
             )
         )
     if block_type == "graph" and "recharts" not in config:
@@ -846,6 +856,7 @@ def _recharts_diagnostics(
     *,
     block_id: str,
     path: str,
+    root: bool = False,
 ) -> list[dict[str, Any]]:
     if not isinstance(node, dict):
         return [
@@ -883,6 +894,15 @@ def _recharts_diagnostics(
                 f'Unsupported Recharts component "{node_type}"',
                 block_id=block_id,
                 code="recharts_type",
+            )
+        )
+    elif root and node_type not in RECHARTS_ROOT_TYPES:
+        diagnostics.append(
+            problem(
+                f"Recharts root must be one of {', '.join(sorted(RECHARTS_ROOT_TYPES))}, "
+                f'not "{node_type}"; wrap it in a chart such as ComposedChart',
+                block_id=block_id,
+                code="recharts_root_type",
             )
         )
 
