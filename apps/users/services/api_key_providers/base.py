@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple, NotRequired, TypedDict
+from typing import NotRequired, TypedDict
 
 from apps.common.commcare_servers import DEFAULT_SERVER
-
-
-class TenantDescriptor(NamedTuple):
-    """A tenant the credential grants access to."""
-
-    external_id: str
-    canonical_name: str
+from apps.users.services.tenant_listing.types import TenantDescriptor
 
 
 class FieldOption(TypedDict):
