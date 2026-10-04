@@ -19,30 +19,14 @@ from apps.chat import pending_requests, resume_stream
 from apps.chat.models import ResumeStreamChunk, Thread
 from apps.workspaces import tasks
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
+from tests.agent_doubles import DEFAULT_REPLY, FakeAgent
 from tests.test_pending_requests import _loading_chat, _member
 
 User = get_user_model()
-ANSWER = "There were forty-two visits last week, most of them in Kisumu."
 
 
 class _State(TypedDict):
     messages: Annotated[list, add_messages]
-
-
-def _graph(answer: str = ANSWER, *, fails: bool = False):
-    model = GenericFakeChatModel(messages=iter([AIMessage(content=answer)]))
-
-    async def agent(state: _State) -> dict:
-        reply = await model.ainvoke(state["messages"])
-        if fails:
-            raise RuntimeError("model down")
-        return {"messages": [reply]}
-
-    graph = StateGraph(_State)
-    graph.add_node("agent", agent)
-    graph.add_edge(START, "agent")
-    graph.add_edge("agent", END)
-    return graph.compile()
 
 
 def _graph_with_subagent(lead: str = ""):
@@ -111,6 +95,10 @@ async def _thread(slug):
     return ws, user, thread
 
 
+def _config(thread):
+    return {"configurable": {"thread_id": str(thread.id)}}
+
+
 async def _rows(thread):
     return [row async for row in ResumeStreamChunk.objects.filter(thread=thread).order_by("id")]
 
@@ -123,13 +111,13 @@ class TestRunStreamed:
 
         with patch.object(resume_stream, "FLUSH_CHARS", 10):
             final = await resume_stream.arun_streamed(
-                _graph(), {"messages": [HumanMessage("visits?")]}, {}, thread.id
+                FakeAgent(), {"messages": [HumanMessage("visits?")]}, _config(thread), thread.id
             )
 
-        assert final["messages"][-1].content == ANSWER
+        assert final["messages"][-1].content == DEFAULT_REPLY
         rows = await _rows(thread)
         assert len(rows) > 2
-        assert "".join(row.text for row in rows) == ANSWER
+        assert "".join(row.text for row in rows) == DEFAULT_REPLY
         assert [row.done for row in rows] == [False] * (len(rows) - 1) + [True]
         assert len({row.run for row in rows}) == 1
 
@@ -138,7 +126,10 @@ class TestRunStreamed:
 
         with pytest.raises(RuntimeError, match="model down"):
             await resume_stream.arun_streamed(
-                _graph(fails=True), {"messages": [HumanMessage("visits?")]}, {}, thread.id
+                FakeAgent(fails_after_reply=RuntimeError("model down")),
+                {"messages": [HumanMessage("visits?")]},
+                _config(thread),
+                thread.id,
             )
 
         rows = await _rows(thread)
@@ -151,10 +142,10 @@ class TestRunStreamed:
             ResumeStreamChunk.objects, "acreate", AsyncMock(side_effect=RuntimeError("db"))
         ):
             final = await resume_stream.arun_streamed(
-                _graph(), {"messages": [HumanMessage("visits?")]}, {}, thread.id
+                FakeAgent(), {"messages": [HumanMessage("visits?")]}, _config(thread), thread.id
             )
 
-        assert final["messages"][-1].content == ANSWER
+        assert final["messages"][-1].content == DEFAULT_REPLY
 
     async def test_a_subagents_own_answer_is_not_streamed(self):
         _ws, _user, thread = await _thread("stream-subagent")
@@ -192,12 +183,12 @@ class TestRunStreamed:
         )
 
         with patch(
-            "apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=_graph())
+            "apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=FakeAgent())
         ):
             await tasks._answer_flushed_request(thread, held)
 
         rows = await _rows(thread)
-        assert "".join(row.text for row in rows) == ANSWER
+        assert "".join(row.text for row in rows) == DEFAULT_REPLY
         assert rows[-1].done is True
 
     async def test_a_run_whose_writes_failed_still_ends_its_stream(self):

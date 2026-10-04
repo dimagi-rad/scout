@@ -3,9 +3,11 @@
 ``FakeAgent`` is a real compiled LangGraph over the app's ``AgentState``, its answer
 node named as the app names it, with a scripted model in place of Claude. So
 ``astream`` (resumes and the held-request flush, via apps/chat/resume_stream.py),
-``astream_events`` (live chat), ``ainvoke``, ``aget_state`` and ``aupdate_state``
-(synthetic failure messages) all keep LangGraph's own contract, and what a turn
-writes lands in a checkpoint the test can read back.
+``astream_events`` (live chat), ``aget_state`` and ``aupdate_state`` (synthetic
+failure messages) all keep LangGraph's own contract, and what a turn writes lands
+in a checkpoint the test can read back. There is deliberately no ``ainvoke``:
+nothing in the app runs a turn that way, and a test that did would skip the
+streamed path.
 
 It is one node and one model call with plain-text content: no tool loop, no
 subagent-tagged tokens, no Anthropic content blocks. test_resume_stream.py's
@@ -46,7 +48,8 @@ class FakeAgent:
     ``during`` runs inside the answer node once the input is checkpointed and
     before the model answers, with the node's state: raise to fail the turn,
     sleep to stall it, write to the database to race it. ``fails_to_start``
-    raises before the graph runs, so nothing of the turn is checkpointed.
+    raises before the graph runs, so nothing of the turn is checkpointed;
+    ``fails_after_reply`` raises once the answer has streamed, before it is saved.
     """
 
     def __init__(
@@ -55,10 +58,12 @@ class FakeAgent:
         *,
         during: Callable[[dict], Awaitable[None]] | None = None,
         fails_to_start: Exception | None = None,
+        fails_after_reply: Exception | None = None,
     ):
         self.reply = reply
         self.during = during
         self.fails_to_start = fails_to_start
+        self.fails_after_reply = fails_after_reply
         self.checkpointer = InMemorySaver()
         self.runs: list[AgentRun] = []
         self._graph = self._compile()
@@ -68,7 +73,10 @@ class FakeAgent:
             if self.during is not None:
                 await self.during(state)
             model = GenericFakeChatModel(messages=iter([AIMessage(content=self.reply)]))
-            return {"messages": [await model.ainvoke(state["messages"])]}
+            answered = await model.ainvoke(state["messages"])
+            if self.fails_after_reply is not None:
+                raise self.fails_after_reply
+            return {"messages": [answered]}
 
         graph = StateGraph(AgentState)
         graph.add_node(AGENT_NODE, answer)
@@ -79,27 +87,21 @@ class FakeAgent:
     def _record(self, input_state, config) -> None:
         self.runs.append(AgentRun(input_state=input_state, config=config or {}))
 
-    async def _iterate(self, stream):
+    async def _iterate(self, open_stream):
         # As LangGraph's own streams do, a run fails once iterated, not when created.
         if self.fails_to_start is not None:
             raise self.fails_to_start
-        async with aclosing(stream) as items:
+        async with aclosing(open_stream()) as items:
             async for item in items:
                 yield item
 
     def astream(self, input_state, config=None, **kwargs):
         self._record(input_state, config)
-        return self._iterate(self._graph.astream(input_state, config, **kwargs))
+        return self._iterate(lambda: self._graph.astream(input_state, config, **kwargs))
 
     def astream_events(self, input_state, config=None, **kwargs):
         self._record(input_state, config)
-        return self._iterate(self._graph.astream_events(input_state, config, **kwargs))
-
-    async def ainvoke(self, input_state, config=None, **kwargs):
-        self._record(input_state, config)
-        if self.fails_to_start is not None:
-            raise self.fails_to_start
-        return await self._graph.ainvoke(input_state, config, **kwargs)
+        return self._iterate(lambda: self._graph.astream_events(input_state, config, **kwargs))
 
     async def aget_state(self, config, **kwargs):
         return await self._graph.aget_state(config, **kwargs)

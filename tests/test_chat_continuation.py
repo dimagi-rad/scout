@@ -230,11 +230,7 @@ class TestFlush:
     async def test_a_reply_that_failed_after_the_request_landed_says_so(self):
         ws, _user, _client, thread = await _thread("cont-flush-fail")
         await _hold_without_load(thread, "visits?")
-
-        async def model_down(_state):
-            raise RuntimeError("model down")
-
-        agent = FakeAgent(during=model_down)
+        agent = FakeAgent(fails_after_reply=RuntimeError("model down"))
 
         with serving(agent):
             result = await flush_pending_requests(str(ws.id))
@@ -243,6 +239,9 @@ class TestFlush:
         _marker, request, apology = await agent.thread_messages(thread.id)
         assert request.content == "visits?"
         assert apology.content == FLUSH_FAILED_MESSAGE
+        text, done = await _streamed(thread)
+        assert text == DEFAULT_REPLY
+        assert done[-1] is True
         assert not await PendingRequest.objects.filter(thread=thread).aexists()
 
 
