@@ -25,6 +25,7 @@ from apps.agents.graph.state import (
     UNFINISHED_TURN_DESCRIPTIONS,
     model_cut_off_reason,
 )
+from apps.agents.llm_request import LLM_TIMEOUT_ERRORS
 from apps.agents.subagents.events import (
     reset_subagent_event_queue,
     set_subagent_event_queue,
@@ -310,6 +311,20 @@ def create_canvas_manager_tool(
             )
             return await _failure_result(
                 forwarder, messages, "STEP_LIMIT_REACHED", bool(unfinished_commits)
+            )
+        except LLM_TIMEOUT_ERRORS:
+            logger.warning(
+                "Canvas Manager model call timed out for workspace %s conversation %s",
+                workspace.id,
+                conversation_id,
+                exc_info=True,
+            )
+            return await _failure_result(
+                forwarder,
+                messages,
+                "MODEL_TIMEOUT",
+                bool(unfinished_commits),
+                detail="a model call timed out",
             )
         except Exception:
             logger.exception(

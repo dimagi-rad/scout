@@ -2,12 +2,15 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from anthropic import APITimeoutError
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 
 from apps.agents.subagents.events import reset_subagent_event_queue, set_subagent_event_queue
 from apps.agents.tools.artifact_manager_agent import (
+    ARTIFACT_MANAGER_MODEL_TIMEOUT_MESSAGE,
     ARTIFACT_MANAGER_TASK_REQUIRED_MESSAGE,
     _artifact_manager_failure_result,
     _extract_final_text,
@@ -921,3 +924,51 @@ async def test_artifact_manager_returns_failed_result_on_recursion_limit(monkeyp
         and item["event"]["data"]["phase"] == "failed"
         for item in queued
     )
+
+
+def _anthropic_request() -> httpx.Request:
+    return httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "timeout_error",
+    [
+        lambda: APITimeoutError(request=_anthropic_request()),
+        lambda: httpx.ReadTimeout("stream stalled", request=_anthropic_request()),
+    ],
+)
+async def test_artifact_manager_model_timeout_is_a_tool_error(monkeypatch, timeout_error):
+    """A model call that hits LLM_REQUEST_TIMEOUT_S inside the real nested graph
+    must come back as a result the parent can explain, not end the chat turn."""
+
+    class TimingOutModel:
+        def bind_tools(self, tools):
+            return self
+
+        async def ainvoke(self, messages):
+            raise timeout_error()
+
+    prefix = "apps.agents.tools.artifact_manager_agent"
+    monkeypatch.setattr("apps.agents.graph.nested.ChatAnthropic", lambda **kwargs: TimingOutModel())
+    monkeypatch.setattr(f"{prefix}.create_artifact_graph_tools", lambda *args, **kwargs: [])
+    queue = asyncio.Queue()
+    tool = create_artifact_manager_tool(
+        SimpleNamespace(id="workspace-1"),
+        SimpleNamespace(id="user-1"),
+        [],
+        conversation_id="thread-1",
+    )
+
+    result = await tool.ainvoke(
+        {"task": "create", "tool_call_id": "toolu_PARENT", "subagent_event_queue": queue}
+    )
+
+    assert result["status"] == "error"
+    assert result["message"] == ARTIFACT_MANAGER_MODEL_TIMEOUT_MESSAGE
+    statuses = [
+        item["event"]["data"]["phase"]
+        for item in (queue.get_nowait() for _ in range(queue.qsize()))
+        if item["event"]["type"] == "data-subagent-status"
+    ]
+    assert statuses[-1] == "failed"

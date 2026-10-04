@@ -22,6 +22,7 @@ from apps.agents.graph.state import (
     UNFINISHED_TURN_DESCRIPTIONS,
     model_cut_off_reason,
 )
+from apps.agents.llm_request import LLM_TIMEOUT_ERRORS
 from apps.agents.subagents.data_requirements import DATA_REQUIREMENTS, validate_data_requirements
 from apps.agents.subagents.events import (
     emit_subagent_event,
@@ -46,6 +47,10 @@ ARTIFACT_MANAGER_TASK_REQUIRED_MESSAGE = (
     "artifact_manager requires a non-empty task. Retry the same tool call with "
     "a complete, self-contained `task` string. Do not call artifact_manager "
     "with only `intent` or only `artifact_id`."
+)
+ARTIFACT_MANAGER_MODEL_TIMEOUT_MESSAGE = (
+    "Artifact Manager stopped before completion: a model call timed out. Changes it "
+    "already saved were kept; check the artifact's current state before retrying."
 )
 
 
@@ -333,6 +338,20 @@ def create_artifact_manager_tool(
                 messages,
                 final_text,
                 _recursion_failure_message(exc),
+            )
+        except LLM_TIMEOUT_ERRORS:
+            logger.warning(
+                "Artifact Manager model call timed out for workspace %s conversation %s",
+                workspace.id,
+                conversation_id,
+                exc_info=True,
+            )
+            return await _artifact_manager_failure_result(
+                parent_tool_call_id,
+                trace,
+                messages,
+                final_text,
+                ARTIFACT_MANAGER_MODEL_TIMEOUT_MESSAGE,
             )
         except Exception as exc:
             logger.exception(

@@ -2,7 +2,9 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from anthropic import APITimeoutError
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.errors import GraphRecursionError
@@ -632,3 +634,46 @@ async def test_canvas_manager_build_failure_resets_queue(monkeypatch):
 
     assert result["error_code"] == "CANVAS_MANAGER_FAILED"
     assert get_subagent_event_queue() is None
+
+
+def _anthropic_request() -> httpx.Request:
+    return httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "timeout_error",
+    [
+        lambda: APITimeoutError(request=_anthropic_request()),
+        lambda: httpx.ReadTimeout("stream stalled", request=_anthropic_request()),
+    ],
+)
+async def test_canvas_manager_model_timeout_is_a_tool_error(monkeypatch, timeout_error):
+    """A model call that hits LLM_REQUEST_TIMEOUT_S inside the real nested graph
+    must come back as a result the parent can explain, not end the chat turn."""
+
+    class TimingOutModel:
+        def bind_tools(self, tools):
+            return self
+
+        async def ainvoke(self, messages):
+            raise timeout_error()
+
+    prefix = "apps.agents.tools.canvas_manager_agent"
+    monkeypatch.setattr("apps.agents.graph.nested.ChatAnthropic", lambda **kwargs: TimingOutModel())
+    monkeypatch.setattr(f"{prefix}.create_canvas_tools", lambda *args, **kwargs: [])
+    queue = asyncio.Queue()
+    manager = create_canvas_manager_tool(SimpleNamespace(id="ws"), None, [], "thread")
+
+    result = await manager.ainvoke({"task": "Edit the canvas", "subagent_event_queue": queue})
+
+    assert result["status"] == "error"
+    assert result["error_code"] == "MODEL_TIMEOUT"
+    assert "a model call timed out" in result["message"]
+    assert get_subagent_event_queue() is None
+    statuses = [
+        item["event"]["data"]["phase"]
+        for item in (queue.get_nowait() for _ in range(queue.qsize()))
+        if item["event"]["type"] == "data-subagent-status"
+    ]
+    assert statuses[-1] == "failed"

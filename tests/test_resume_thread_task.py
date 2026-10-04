@@ -2,7 +2,9 @@ import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from anthropic import APITimeoutError
 from django.conf import settings as dj_settings
 from django.contrib.auth import get_user_model
 from django.test import override_settings
@@ -979,6 +981,84 @@ async def test_agent_timeout_marks_failed_and_persists_message():
     msg = (await mock_agent.thread_messages(tj.thread_id))[-1]
     assert isinstance(msg, AIMessage)
     assert msg.content == RESUME_TIMEOUT_MESSAGE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "timeout_error",
+    [
+        lambda: APITimeoutError(request=httpx.Request("POST", "https://api.anthropic.com")),
+        lambda: httpx.ReadTimeout("stalled", request=httpx.Request("POST", "https://x")),
+    ],
+)
+async def test_model_request_timeout_reports_the_resume_as_timed_out(caplog, timeout_error):
+    """LLM_REQUEST_TIMEOUT_S can fire before AGENT_RESUME_TIMEOUT_S; the user
+    must still get the "took too long" copy, not the generic failure, and the
+    expected timeout must not page."""
+    _, _, _, tj = await _make_thread_job_ready_to_resume(
+        email="model-timeout@b.c",
+        ws_name="W-model-timeout",
+        ext_id="t-model-timeout",
+        schema_name="s_model_timeout",
+        pj_id=10010,
+        tool_call="tc-model-timeout",
+    )
+    mock_agent = FakeAgent(during=AsyncMock(side_effect=timeout_error()))
+
+    with (
+        patch(
+            "apps.workspaces.tasks._build_agent_for_resume",
+            AsyncMock(return_value=mock_agent),
+        ),
+        patch(
+            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            AsyncMock(return_value=mock_agent),
+        ),
+        caplog.at_level(logging.WARNING, logger="apps.workspaces.tasks"),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["status"] == "agent_timeout"
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.FAILED
+    msg = (await mock_agent.thread_messages(tj.thread_id))[-1]
+    assert msg.content == RESUME_TIMEOUT_MESSAGE
+    resume_logs = [r for r in caplog.records if r.name == "apps.workspaces.tasks"]
+    assert any("model request timed out" in r.getMessage() for r in resume_logs)
+    assert all(r.levelno < logging.ERROR for r in resume_logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_agent_build_stall_is_a_failure_not_a_slow_answer():
+    """The build lists MCP tools over httpx; a stall there never reached the
+    model, so it must not be reported as the agent taking too long."""
+    _, _, _, tj = await _make_thread_job_ready_to_resume(
+        email="build-stall@b.c",
+        ws_name="W-build-stall",
+        ext_id="t-build-stall",
+        schema_name="s_build_stall",
+        pj_id=10011,
+        tool_call="tc-build-stall",
+    )
+    mock_agent = FakeAgent()
+    stall = httpx.ConnectTimeout("mcp stalled", request=httpx.Request("POST", "http://mcp"))
+
+    with (
+        patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(side_effect=stall)),
+        patch(
+            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            AsyncMock(return_value=mock_agent),
+        ),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["status"] == "agent_failed"
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.FAILED
+    msg = (await mock_agent.thread_messages(tj.thread_id))[-1]
+    assert msg.content == RESUME_EXCEPTION_MESSAGE
 
 
 @pytest.mark.asyncio

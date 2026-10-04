@@ -325,6 +325,13 @@ THREAD_TITLE_LLM_MODEL = env("THREAD_TITLE_LLM_MODEL", default="claude-haiku-4-5
 # exercise the timeout path.
 AGENT_RESUME_TIMEOUT_S = env.int("AGENT_RESUME_TIMEOUT_S", default=300)
 
+# Per-request cap on the agent's and subagents' Anthropic calls (connect and each
+# read; every call streams, so it resets per chunk). There is deliberately no whole-turn
+# cap: legitimate Artifact Manager runs are long, and a turn that keeps streaming
+# is not stuck. Prod's longest single generation since Aug was ~29s. The SDK still
+# retries a pre-response timeout twice, so a hung connection fails after ~3x this.
+LLM_REQUEST_TIMEOUT_S = env.float("LLM_REQUEST_TIMEOUT_S", default=120.0)
+
 # LangGraph checkpoint persistence uses a psycopg pool per Python process.
 # Keep these settings explicit because worker/process fan-out multiplies the
 # effective Postgres connection ceiling.

@@ -22,6 +22,7 @@ from django.utils import timezone
 from langchain_core.messages import HumanMessage
 from procrastinate.exceptions import AlreadyEnqueued
 
+from apps.agents.llm_request import LLM_TIMEOUT_ERRORS
 from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
 from apps.chat import pending_requests, resume_stream
 from apps.chat.constants import SYSTEM_RESUME_MARKER
@@ -181,6 +182,12 @@ RESUME_TIMEOUT_MESSAGE = (
     "Please re-ask your question."
 )
 RESUME_EXCEPTION_MESSAGE = "Sorry, something went wrong while preparing your answer. Please retry."
+
+
+class _ModelRequestTimeout(TimeoutError):
+    """A bounded model request timed out during a resume (LLM_REQUEST_TIMEOUT_S)."""
+
+
 logger = logging.getLogger(__name__)
 
 # Set on a recovery's result when the database refused it at its connection limit:
@@ -3779,24 +3786,39 @@ async def _resume_claimed_job(
             status=status,
         ) as langfuse_span:
             # Streamed, so a chat open on the thread shows the answer as it is written.
-            result = await asyncio.wait_for(
-                resume_stream.arun_streamed(agent, input_state, config, tj.thread_id),
-                timeout=timeout_s,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    resume_stream.arun_streamed(agent, input_state, config, tj.thread_id),
+                    timeout=timeout_s,
+                )
+            except LLM_TIMEOUT_ERRORS as exc:
+                # Converted only here: the agent build above does its own I/O (the
+                # MCP tool list), and a stall there is not a slow answer.
+                raise _ModelRequestTimeout("model request timed out") from exc
             if langfuse_span is not None:
                 # The resume already succeeded; a tracing error must not mark it agent_failed.
                 try:
                     langfuse_span.update(output=_final_message_content(result))
                 except Exception:
                     logger.warning("resume: failed to record Langfuse output", exc_info=True)
-    except TimeoutError:
+    except TimeoutError as exc:
         elapsed = time.monotonic() - start
-        logger.exception(
-            "resume: ainvoke timed out after %.2fs (limit=%ds, tj=%s)",
-            elapsed,
-            timeout_s,
-            thread_job_id,
-        )
+        if isinstance(exc, _ModelRequestTimeout):
+            # Expected once model requests are bounded, so below Sentry's ERROR level.
+            logger.warning(
+                "resume: model request timed out (resume elapsed=%.2fs, request limit=%gs, tj=%s)",
+                elapsed,
+                settings.LLM_REQUEST_TIMEOUT_S,
+                thread_job_id,
+                exc_info=exc.__cause__,
+            )
+        else:
+            logger.exception(
+                "resume: ainvoke timed out after %.2fs (limit=%ds, tj=%s)",
+                elapsed,
+                timeout_s,
+                thread_job_id,
+            )
         sentry_sdk.add_breadcrumb(
             category="resume",
             message="ainvoke_timeout",
@@ -4124,23 +4146,33 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
         langfuse_handler = get_langfuse_callback(session_id=str(thread.id), user_id=str(user.id))
         if langfuse_handler is not None:
             config["callbacks"] = [langfuse_handler]
-        await asyncio.wait_for(
-            resume_stream.arun_streamed(
-                agent,
-                {
-                    "messages": [
-                        HumanMessage(content=FLUSH_NOTE, id=held.marker_id),
-                        HumanMessage(content=held.text, id=held.message_id),
-                    ],
-                    "workspace_id": str(workspace.id),
-                    "user_id": str(user.id),
-                    "thread_id": str(thread.id),
-                },
-                config,
-                thread.id,
-            ),
-            timeout=settings.AGENT_RESUME_TIMEOUT_S,
+        try:
+            await asyncio.wait_for(
+                resume_stream.arun_streamed(
+                    agent,
+                    {
+                        "messages": [
+                            HumanMessage(content=FLUSH_NOTE, id=held.marker_id),
+                            HumanMessage(content=held.text, id=held.message_id),
+                        ],
+                        "workspace_id": str(workspace.id),
+                        "user_id": str(user.id),
+                        "thread_id": str(thread.id),
+                    },
+                    config,
+                    thread.id,
+                ),
+                timeout=settings.AGENT_RESUME_TIMEOUT_S,
+            )
+        except LLM_TIMEOUT_ERRORS as exc:
+            raise _ModelRequestTimeout("model request timed out") from exc
+    except _ModelRequestTimeout as exc:
+        logger.warning(
+            "flush: model request timed out for the held request of thread %s",
+            thread.id,
+            exc_info=exc.__cause__,
         )
+        return False
     except Exception:
         # Settled after: unsent, it waits again (its one flush spent) for the user to send.
         logger.exception("flush: agent failed for the held request of thread %s", thread.id)
