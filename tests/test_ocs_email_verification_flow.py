@@ -17,7 +17,6 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.messages.middleware import MessageMiddleware
 from django.contrib.sessions.middleware import SessionMiddleware
-from django.contrib.sites.models import Site
 
 from apps.users.providers.ocs.provider import OCSProvider
 from apps.users.services.email_proof import proven_emails, verified_social_email
@@ -26,16 +25,6 @@ from apps.users.signals import reconcile_existing_user_on_login
 User = get_user_model()
 
 VICTIM_EMAIL = "victim@dimagi.com"
-
-
-@pytest.fixture
-def ocs_app(db):
-    site, _ = Site.objects.get_or_create(
-        id=1, defaults={"domain": "testserver", "name": "Test Server"}
-    )
-    app = SocialApp.objects.create(provider=OCSProvider.id, name="OCS", client_id="x", secret="x")
-    app.sites.add(site)
-    return app
 
 
 @pytest.fixture

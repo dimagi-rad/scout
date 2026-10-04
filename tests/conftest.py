@@ -5,9 +5,12 @@ Pytest configuration and fixtures for Scout tests.
 import sys
 
 import pytest
+from allauth.socialaccount.models import SocialApp
 from django.contrib.auth import get_user_model
+from django.contrib.sites.models import Site
 
 from apps.users.models import Tenant, TenantMembership
+from apps.users.providers.ocs.provider import OCSProvider
 from apps.workspaces.models import (
     Workspace,
     WorkspaceMembership,
@@ -18,6 +21,16 @@ from tests.pipeline_doubles import no_candidate_ddl  # noqa: F401 (registers the
 from tests.production_settings import PRODUCTION_SETTINGS, load_production_settings
 from tests.tenant_access import grant_tenant_access, record_fresh_proof, usable_connection
 from tests.upstream_proofs import ProviderStub
+
+
+@pytest.fixture
+def ocs_app(db):
+    site, _ = Site.objects.get_or_create(
+        id=1, defaults={"domain": "testserver", "name": "Test Server"}
+    )
+    app = SocialApp.objects.create(provider=OCSProvider.id, name="OCS", client_id="x", secret="x")
+    app.sites.add(site)
+    return app
 
 
 @pytest.fixture
