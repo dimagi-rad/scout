@@ -14,11 +14,11 @@ from apps.users.signals import reconcile_existing_user_on_login
 User = get_user_model()
 
 
-def _sociallogin(user, extra_data):
+def _sociallogin(user, extra_data, provider="commcare_connect"):
     """Build a SocialLogin-shaped stub. Handler only touches .user and .account."""
     return SimpleNamespace(
         user=user,
-        account=SimpleNamespace(extra_data=extra_data, user=user),
+        account=SimpleNamespace(extra_data=extra_data, user=user, provider=provider),
     )
 
 

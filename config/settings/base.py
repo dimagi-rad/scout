@@ -208,8 +208,8 @@ SOCIALACCOUNT_AUTO_SIGNUP = True
 # Don't require email for OAuth signups (Connect doesn't provide one)
 SOCIALACCOUNT_EMAIL_REQUIRED = False
 SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
-# Trust Dimagi-operated providers to have verified the email. Required so
-# allauth's _lookup_by_email gate fires for these providers.
+# Link a social login to the existing account holding the same email, for emails
+# the provider verified (see VERIFIED_EMAIL under SOCIALACCOUNT_PROVIDERS).
 SOCIALACCOUNT_EMAIL_AUTHENTICATION = True
 SOCIALACCOUNT_EMAIL_VERIFICATION = "none"  # provider already verified
 SOCIALACCOUNT_STORE_TOKENS = True  # tokens reused for data materialization
@@ -251,9 +251,10 @@ SOCIALACCOUNT_PROVIDERS = {
         "OAUTH_PKCE_ENABLED": True,
         "VERIFIED_EMAIL": True,
     },
+    # No VERIFIED_EMAIL: allauth would apply it after the provider and mark every
+    # OCS email verified. OCSProvider honours the per-login email_verified claim.
     "ocs": {
         "OAUTH_PKCE_ENABLED": True,
-        "VERIFIED_EMAIL": True,
     },
 }
 
