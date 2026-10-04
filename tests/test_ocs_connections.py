@@ -246,6 +246,7 @@ async def test_resolve_oauth_ok_on_team_match(user, mocker):
 def _sessions_response(results):
     class R:
         status_code = 200
+        is_success = 200 <= status_code < 300
 
         def raise_for_status(self):
             pass
