@@ -182,6 +182,12 @@ RESUME_TIMEOUT_MESSAGE = (
     "Please re-ask your question."
 )
 RESUME_EXCEPTION_MESSAGE = "Sorry, something went wrong while preparing your answer. Please retry."
+
+
+class _ModelRequestTimeout(TimeoutError):
+    """A bounded model request timed out during a resume (LLM_REQUEST_TIMEOUT_S)."""
+
+
 logger = logging.getLogger(__name__)
 
 # Set on a recovery's result when the database refused it at its connection limit:
@@ -3786,9 +3792,9 @@ async def _resume_claimed_job(
                     timeout=timeout_s,
                 )
             except LLM_TIMEOUT_ERRORS as exc:
-                # Converted only here: the agent build above does its own httpx I/O
-                # (the MCP tool list), and a stall there is not a slow answer.
-                raise TimeoutError("model request timed out") from exc
+                # Converted only here: the agent build above does its own I/O, and a
+                # stall there is not a slow answer.
+                raise _ModelRequestTimeout from exc
             if langfuse_span is not None:
                 # The resume already succeeded; a tracing error must not mark it agent_failed.
                 try:
@@ -3797,14 +3803,14 @@ async def _resume_claimed_job(
                     logger.warning("resume: failed to record Langfuse output", exc_info=True)
     except TimeoutError as exc:
         elapsed = time.monotonic() - start
-        if isinstance(exc.__cause__, LLM_TIMEOUT_ERRORS):
+        if isinstance(exc, _ModelRequestTimeout):
             # Expected once model requests are bounded, so below Sentry's ERROR level.
             logger.warning(
-                "resume: model request timed out after %.2fs (request limit=%ss, tj=%s): %s",
+                "resume: model request timed out (resume elapsed=%.2fs, request limit=%gs, tj=%s)",
                 elapsed,
                 settings.LLM_REQUEST_TIMEOUT_S,
                 thread_job_id,
-                exc.__cause__.__class__.__name__,
+                exc_info=exc.__cause__,
             )
         else:
             logger.exception(

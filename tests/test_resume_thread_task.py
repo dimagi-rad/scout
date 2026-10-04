@@ -1055,6 +1055,10 @@ async def test_agent_build_stall_is_a_failure_not_a_slow_answer():
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
     assert result["status"] == "agent_failed"
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.FAILED
+    msg = (await mock_agent.thread_messages(tj.thread_id))[-1]
+    assert msg.content == RESUME_EXCEPTION_MESSAGE
 
 
 @pytest.mark.asyncio
