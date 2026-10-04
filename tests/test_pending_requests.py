@@ -44,6 +44,7 @@ from apps.workspaces.tasks import (
     REQUEST_STILL_WAITING_NOTE,
     resume_thread_after_materialization,
 )
+from tests.agent_doubles import FakeAgent
 from tests.tenant_access import ausable_connection
 
 User = get_user_model()
@@ -515,9 +516,7 @@ class TestClaim:
 
 
 def _resume_agent(*, raises=None):
-    agent = MagicMock()
-    agent.ainvoke = AsyncMock(side_effect=raises, return_value={"messages": []})
-    return agent
+    return FakeAgent(during=AsyncMock(side_effect=raises) if raises else None)
 
 
 @pytest.mark.asyncio
@@ -549,19 +548,17 @@ class TestResume:
         thread, tj = await self._loaded("resume-held")
         await pending_requests.ahold_message(thread.id, part_id="m1", text="visits?")
         await pending_requests.aadd_part(thread.id, part_id="m2", text="by month")
-        agent = _resume_agent()
         held_id = await _held_id(thread.id, 2)
 
-        async def lands(*_args, **_kwargs):
+        async def lands(_state):
             checkpoint.add(held_id)
-            return {"messages": []}
 
-        agent.ainvoke.side_effect = lands
+        agent = FakeAgent(during=lands)
 
         result = await self._resume(tj, agent)
 
         assert result["status"] == "resumed"
-        marker, request = agent.ainvoke.await_args.args[0]["messages"]
+        marker, request = agent.last_run.messages
         assert marker.content.startswith(SYSTEM_RESUME_MARKER)
         assert HELD_REQUEST_NOTE in marker.content
         assert "original request" not in marker.content
@@ -577,7 +574,7 @@ class TestResume:
 
         await self._resume(tj, agent)
 
-        marker, request = agent.ainvoke.await_args.args[0]["messages"]
+        marker, request = agent.last_run.messages
         assert "FAILED" in marker.content
         assert marker.content.endswith(HELD_REQUEST_NOTE)
         assert request.content == "visits?"
@@ -590,7 +587,7 @@ class TestResume:
 
         await self._resume(tj, agent)
 
-        _marker, request = agent.ainvoke.await_args.args[0]["messages"]
+        _marker, request = agent.last_run.messages
         assert request.content == "visits?"
 
     async def test_a_resume_that_fails_before_sending_leaves_it_waiting(self, checkpoint):
@@ -639,7 +636,7 @@ class TestResume:
         ):
             await self._resume(tj, agent)
 
-        [message] = agent.ainvoke.await_args.args[0]["messages"]
+        [message] = agent.last_run.messages
         assert REQUEST_STILL_WAITING_NOTE in message.content
         assert await PendingRequest.objects.filter(thread=thread).aexists()
 
@@ -650,7 +647,7 @@ class TestResume:
         with patch.object(pending_requests, "athread_has_user_turn", AsyncMock(return_value=True)):
             await self._resume(tj, agent)
 
-        [message] = agent.ainvoke.await_args.args[0]["messages"]
+        [message] = agent.last_run.messages
         assert "continue with the user's original request" in message.content
 
     async def test_a_chat_whose_request_was_discarded_is_not_asked_to_continue_it(self, checkpoint):
@@ -660,7 +657,7 @@ class TestResume:
         with patch.object(pending_requests, "athread_has_user_turn", AsyncMock(return_value=False)):
             await self._resume(tj, agent)
 
-        [message] = agent.ainvoke.await_args.args[0]["messages"]
+        [message] = agent.last_run.messages
         assert NO_REQUEST_NOTE in message.content
         assert "original request" not in message.content
 
@@ -878,17 +875,13 @@ async def test_messages_include_pending_for_a_thread_not_yet_created():
 
 
 def _flush_agent(checkpoint_ids, *, lands=True, raises=None):
-    agent = MagicMock()
-
-    async def invoke(input_state, _config):
+    async def during(state):
         if raises:
             raise raises
         if lands:
-            checkpoint_ids.update(m.id for m in input_state["messages"])
-        return {"messages": []}
+            checkpoint_ids.update(m.id for m in state["messages"])
 
-    agent.ainvoke = AsyncMock(side_effect=invoke)
-    return agent
+    return FakeAgent(during=during)
 
 
 async def _thread(slug, **member_kwargs):
@@ -966,7 +959,7 @@ class TestFlush:
         result = await self._flush(ws, agent)
 
         assert result == {"status": "flushed", "sent": 1}
-        marker, request = agent.ainvoke.await_args.args[0]["messages"]
+        marker, request = agent.last_run.messages
         assert marker.content.startswith(SYSTEM_RESUME_MARKER)
         assert marker.content == tasks.FLUSH_NOTE
         assert request.content == "visits?"
@@ -982,7 +975,7 @@ class TestFlush:
             result = await tasks.flush_pending_requests(str(ws.id))
 
         assert result == {"status": "load_pending", "sent": 0}
-        agent.ainvoke.assert_not_awaited()
+        assert agent.runs == []
         assert await PendingRequest.objects.filter(thread=thread).aexists()
 
     async def test_a_request_its_own_load_will_send_is_left_to_it(self, checkpoint):
@@ -994,7 +987,7 @@ class TestFlush:
         agent = _flush_agent(checkpoint)
 
         assert (await self._flush(ws, agent))["sent"] == 0
-        agent.ainvoke.assert_not_awaited()
+        assert agent.runs == []
 
     async def test_a_workspace_hold_waits_for_the_chats_own_resume(self, checkpoint):
         ws, _user, _client, thread = await _thread("flush-own-coming")
@@ -1026,7 +1019,7 @@ class TestFlush:
         agent = _flush_agent(checkpoint)
 
         assert (await self._flush(ws, agent))["sent"] == 0
-        agent.ainvoke.assert_not_awaited()
+        assert agent.runs == []
 
     async def test_holding_it_for_a_workspace_load_hands_it_to_the_flush(self, checkpoint):
         ws, _user, _client, thread = await _thread("flush-handed")
@@ -1040,7 +1033,7 @@ class TestFlush:
         agent = _flush_agent(checkpoint)
 
         assert (await self._flush(ws, agent))["sent"] == 1
-        _marker, request = agent.ainvoke.await_args.args[0]["messages"]
+        _marker, request = agent.last_run.messages
         assert request.content == "visits?\n\nby month"
 
     async def test_one_that_failed_is_not_retried_until_it_changes(self, checkpoint):
@@ -1051,14 +1044,14 @@ class TestFlush:
         again = _flush_agent(checkpoint)
         await self._flush(ws, again)
 
-        again.ainvoke.assert_not_awaited()
+        assert again.runs == []
         pending = await PendingRequest.objects.aget(thread=thread)
         assert pending.state == PendingRequest.State.WAITING
         assert pending.flush_attempts == 1
 
         await pending_requests.aadd_part(thread.id, part_id="m-more", text="by month")
         await self._flush(ws, again)
-        again.ainvoke.assert_awaited_once()
+        assert len(again.runs) == 1
 
     async def test_the_oldest_request_goes_first(self, checkpoint):
         ws, user, _client, older = await _thread("flush-order")
@@ -1074,13 +1067,12 @@ class TestFlush:
     async def test_a_reply_that_failed_after_the_message_landed_says_so(self, checkpoint):
         ws, _user, _client, thread = await _thread("flush-landed-failed")
         await _hold_without_load(thread)
-        agent = MagicMock()
 
-        async def lands_then_fails(input_state, _config):
-            checkpoint.update(m.id for m in input_state["messages"])
+        async def lands_then_fails(state):
+            checkpoint.update(m.id for m in state["messages"])
             raise RuntimeError("model down")
 
-        agent.ainvoke = AsyncMock(side_effect=lands_then_fails)
+        agent = FakeAgent(during=lands_then_fails)
 
         with patch(
             "apps.workspaces.tasks._persist_synthetic_thread_message", AsyncMock()

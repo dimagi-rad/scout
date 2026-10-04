@@ -33,6 +33,7 @@ from apps.workspaces.services.schema_manager import NoActiveTenantSchema
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 from mcp_server.services.materializer import MaterializationCancelled
+from tests.agent_doubles import FakeAgent
 from tests.pipeline_doubles import completed_pipeline_run
 from tests.tenant_access import agrant_tenant_access, grant_tenant_access
 
@@ -147,13 +148,13 @@ async def test_queued_materialization_downgrade_reaches_resume_as_authorization_
         for failure in thread_job.materialization_preflight_failures
     )
 
-    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    agent = FakeAgent()
     with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
         resumed = await workspaces_tasks.resume_thread_after_materialization.func(
             None, str(thread_job.id)
         )
 
-    body = agent.ainvoke.await_args.args[0]["messages"][0].content
+    body = agent.last_run.messages[0].content
     await thread_job.arefresh_from_db()
     assert resumed["terminal_state"] == ThreadJob.State.FAILED
     assert thread_job.state == ThreadJob.State.FAILED
@@ -1655,11 +1656,11 @@ async def test_manager_who_lost_tenant_access_gets_reconnect_guidance_on_resume(
         ErrorCode.WORKSPACE_TENANT_UNREACHABLE
     ]
 
-    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    agent = FakeAgent()
     with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
         await workspaces_tasks.resume_thread_after_materialization.func(None, str(thread_job.id))
 
-    body = agent.ainvoke.await_args.args[0]["messages"][0].content
+    body = agent.last_run.messages[0].content
     await thread_job.arefresh_from_db()
     assert "Settings → Connections" in body
     assert "read-write or manage" not in body.lower()
@@ -1964,10 +1965,10 @@ async def test_preflight_reason_survives_core_wrapper_and_resume(
         "expired": "Sign-in expired before loading",
     }[reason]
     assert expected in failure["error"]
-    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    agent = FakeAgent()
     with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
         await workspaces_tasks.resume_thread_after_materialization(None, str(tj.id))
-    body = agent.ainvoke.await_args.args[0]["messages"][0].content
+    body = agent.last_run.messages[0].content
     await tj.arefresh_from_db()
     assert expected in body
     assert expected in tj.error_summary
