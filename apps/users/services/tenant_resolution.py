@@ -60,7 +60,7 @@ from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
 
 logger = logging.getLogger(__name__)
 
-_OCS_MAX_EXPERIMENT_PAGES = 100
+_MAX_PAGES = 100
 _OCS_UNSAFE_NEXT = "OCS returned an untrusted pagination link"
 
 
@@ -433,7 +433,7 @@ async def resolve_ocs_chatbots(
     seen: set[str] = set()
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
-            if url in seen or len(seen) >= _OCS_MAX_EXPERIMENT_PAGES:
+            if url in seen or len(seen) >= _MAX_PAGES:
                 raise TenantResolutionError("OCS experiment list did not finish")
             seen.add(url)
             resp = await client.get(
@@ -538,9 +538,13 @@ async def _fetch_all_domains(access_token: str, domains_url: str) -> list[dict]:
     """
     results: list[dict] = []
     policy = ProviderURLPolicy(domains_url)
-    url: str | None = domains_url
+    url: str | None = policy.base_url
+    seen: set[str] = set()
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
+            if url in seen or len(seen) >= _MAX_PAGES:
+                raise TenantResolutionError("CommCare domain list did not finish")
+            seen.add(url)
             resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
             if resp.status_code in (401, 403):
                 raise CommCareAuthError(
