@@ -2,16 +2,14 @@
 
 import pytest
 
+from apps.agents.graph.nested import NESTED_MCP_TOOL_NAMES
 from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
 from apps.agents.prompts.base_system import (
     BASE_SYSTEM_PROMPT,
     HEADLESS_BASE_SYSTEM_PROMPT,
     READ_ONLY_BASE_SYSTEM_PROMPT,
 )
-from apps.agents.tools.artifact_manager_agent import (
-    ARTIFACT_MANAGER_SYSTEM_PROMPT,
-    NESTED_MCP_TOOL_NAMES,
-)
+from apps.agents.tools.artifact_manager_agent import ARTIFACT_MANAGER_SYSTEM_PROMPT
 from apps.agents.tools.canvas_manager_agent import CANVAS_MANAGER_SYSTEM_PROMPT
 
 

@@ -35,7 +35,7 @@ async def test_canvas_manager_receives_the_current_reporting_clock(monkeypatch):
             return AIMessage(content="Done")
 
     prefix = "apps.agents.tools.canvas_manager_agent"
-    monkeypatch.setattr(f"{prefix}.ChatAnthropic", lambda **kwargs: Model())
+    monkeypatch.setattr("apps.agents.graph.nested.ChatAnthropic", lambda **kwargs: Model())
     monkeypatch.setattr(f"{prefix}.create_canvas_tools", lambda *args, **kwargs: [])
     monkeypatch.setattr(f"{prefix}.agent_date_context", lambda: "\nReporting clock: 2026-09-24 UTC")
     graph = _build_canvas_manager_graph(SimpleNamespace(id="workspace"), None, [], None)
@@ -354,9 +354,7 @@ async def test_real_nested_graph_step_limit_preserves_partial_commit_and_closes_
             )
 
     model = LoopingModel()
-    monkeypatch.setattr(
-        "apps.agents.tools.canvas_manager_agent.ChatAnthropic", lambda **kwargs: model
-    )
+    monkeypatch.setattr("apps.agents.graph.nested.ChatAnthropic", lambda **kwargs: model)
     monkeypatch.setattr(
         "apps.agents.tools.canvas_manager_agent.create_canvas_tools",
         lambda *args, **kwargs: [canvas_apply, canvas_commit],
