@@ -304,7 +304,9 @@ def test_read_mutations_leave_existing_content_and_jobs_unchanged(
     retry_dispatch = AsyncMock(return_value=992)
     materialization_cancel = AsyncMock(return_value=1)
     job_cancel = AsyncMock(return_value=1)
-    monkeypatch.setattr("apps.artifacts.views.adefer_recover_workspace_data", recovery_dispatch)
+    monkeypatch.setattr(
+        "apps.artifacts.services.recovery.adefer_recover_workspace_data", recovery_dispatch
+    )
     monkeypatch.setattr(
         "apps.workspaces.api.materialization_views.adefer_materialize_workspace", retry_dispatch
     )
