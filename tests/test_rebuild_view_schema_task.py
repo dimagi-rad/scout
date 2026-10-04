@@ -17,9 +17,9 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.query_state import semantic_layer_state
 from apps.workspaces.tasks import (
     _defer_cube_promotion,
-    _semantic_layer_state,
     rebuild_workspace_view_schema,
 )
 
@@ -200,7 +200,7 @@ async def test_rebuild_defers_inflight_promotion_without_model_error(workspace, 
     assert model.metadata["last_build"]["status"] == "deferred"
     assert model.metadata["last_build"]["ok"] is False
     assert result["cube_schema"]["status"] == "deferred"
-    assert (await _semantic_layer_state(workspace))[0] == "unavailable"
+    assert (await semantic_layer_state(workspace))[0] == "unavailable"
     cube.assert_not_called()
 
 
@@ -278,4 +278,4 @@ async def test_first_model_build_can_be_deferred_without_fabricating_catalog(wor
     outcome = await _defer_cube_promotion(workspace)
     assert outcome["status"] == "deferred"
     assert not await SemanticModel.objects.filter(workspace=workspace).aexists()
-    assert await _semantic_layer_state(workspace) == ("unknown", "")
+    assert await semantic_layer_state(workspace) == ("unknown", "")

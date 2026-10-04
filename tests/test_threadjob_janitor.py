@@ -250,7 +250,7 @@ async def test_janitor_persists_synthetic_message_on_stuck_running():
         ),
         patch("apps.workspaces.services.reconciliation.app.configure_task") as configure_resume,
         patch(
-            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            "apps.chat.services.agent_execution.build_agent_for_resume",
             new=AsyncMock(return_value=mock_agent),
         ),
     ):

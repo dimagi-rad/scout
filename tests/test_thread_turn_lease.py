@@ -24,6 +24,12 @@ from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.chat import turn_lease
 from apps.chat.models import Thread, ThreadJob
+from apps.chat.services.continuation import (
+    RESUME_BUSY_MAX_ATTEMPTS,
+    RESUME_LOST_LEASE_SUMMARY,
+    RESUME_THREAD_BUSY_SUMMARY,
+    persist_synthetic_failure_message,
+)
 from apps.chat.stream import langgraph_to_ui_stream
 from apps.chat.turn_lease import aacquire_turn_lease, atry_acquire_turn_lease
 from apps.chat.views import _TurnStreamingResponse
@@ -39,15 +45,9 @@ from apps.workspaces.models import (
 from apps.workspaces.services.reconciliation import (
     RESUME_TASK_NAME,
     _resume_in_flight,
-    persist_synthetic_failure_message,
     reconcile_stale_thread_job,
 )
-from apps.workspaces.tasks import (
-    RESUME_BUSY_MAX_ATTEMPTS,
-    RESUME_LOST_LEASE_SUMMARY,
-    RESUME_THREAD_BUSY_SUMMARY,
-    resume_thread_after_materialization,
-)
+from apps.workspaces.tasks import resume_thread_after_materialization
 from tests.agent_doubles import FakeAgent
 from tests.tenant_access import ausable_connection
 
@@ -396,7 +396,10 @@ class TestResume:
 
         with (
             requeue,
-            patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
+            patch(
+                "apps.chat.services.continuation.build_agent_for_resume",
+                AsyncMock(return_value=agent),
+            ),
         ):
             result = await resume_thread_after_materialization(
                 None, thread_job_id=str(tj.id), busy_attempt=2
@@ -425,7 +428,10 @@ class TestResume:
         requeue, configured = _requeue_capture()
         persist = AsyncMock()
 
-        with requeue, patch("apps.workspaces.tasks._persist_synthetic_failure_message", persist):
+        with (
+            requeue,
+            patch("apps.chat.services.continuation.persist_synthetic_failure_message", persist),
+        ):
             result = await resume_thread_after_materialization(
                 None, thread_job_id=str(tj.id), busy_attempt=RESUME_BUSY_MAX_ATTEMPTS
             )
@@ -461,7 +467,9 @@ class TestResume:
             seen_during_invoke.append(await atry_acquire_turn_lease(tj.thread_id))
 
         agent = FakeAgent(during=try_the_lease)
-        with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+        with patch(
+            "apps.chat.services.continuation.build_agent_for_resume", AsyncMock(return_value=agent)
+        ):
             result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
         assert result["status"] == "resumed"
@@ -474,7 +482,9 @@ class TestResume:
         await _expire(tj.thread_id)
         agent = FakeAgent()
 
-        with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+        with patch(
+            "apps.chat.services.continuation.build_agent_for_resume", AsyncMock(return_value=agent)
+        ):
             result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
         assert result["status"] == "resumed"
@@ -500,7 +510,7 @@ class TestSyntheticFailureMessage:
         await atry_acquire_turn_lease(tj.thread_id)
         build = AsyncMock()
 
-        with patch("apps.workspaces.services.reconciliation.build_agent_for_resume", build):
+        with patch("apps.chat.services.agent_execution.build_agent_for_resume", build):
             await persist_synthetic_failure_message(tj, "failed")
 
         build.assert_not_awaited()
@@ -512,7 +522,7 @@ class TestSyntheticFailureMessage:
         agent = MagicMock(aupdate_state=AsyncMock())
 
         with patch(
-            "apps.workspaces.services.reconciliation.build_agent_for_resume",
+            "apps.chat.services.agent_execution.build_agent_for_resume",
             AsyncMock(return_value=agent),
         ):
             await persist_synthetic_failure_message(tj, "failed")
@@ -528,10 +538,9 @@ class TestSyntheticFailureMessage:
         async def hang(*_args, **_kwargs):
             await asyncio.sleep(30)
 
-        reconciliation = "apps.workspaces.services.reconciliation"
         with (
-            patch(f"{reconciliation}.build_agent_for_resume", side_effect=hang),
-            patch(f"{reconciliation}.SYNTHETIC_MESSAGE_TIMEOUT_SECONDS", 0.1),
+            patch("apps.chat.services.agent_execution.build_agent_for_resume", side_effect=hang),
+            patch("apps.chat.services.continuation.SYNTHETIC_MESSAGE_TIMEOUT_SECONDS", 0.1),
         ):
             async with asyncio.timeout(5):
                 await persist_synthetic_failure_message(tj, "failed", holds_turn_lease=True)
@@ -577,9 +586,9 @@ class TestResumeDeadline:
         persist = AsyncMock()
         with (
             override_settings(AGENT_RESUME_TIMEOUT_S=0),
-            patch("apps.workspaces.tasks.RESUME_SETUP_BUDGET_SECONDS", 0.2),
-            patch("apps.workspaces.tasks._build_agent_for_resume", side_effect=hang),
-            patch("apps.workspaces.tasks._persist_synthetic_failure_message", persist),
+            patch("apps.chat.services.continuation.RESUME_SETUP_BUDGET_SECONDS", 0.2),
+            patch("apps.chat.services.continuation.build_agent_for_resume", side_effect=hang),
+            patch("apps.chat.services.continuation.persist_synthetic_failure_message", persist),
         ):
             result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -602,8 +611,11 @@ class TestResumeDeadline:
         persist = AsyncMock()
         with (
             patch.object(turn_lease, "TURN_LEASE_HEARTBEAT_SECONDS", 0.05),
-            patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
-            patch("apps.workspaces.tasks._persist_synthetic_failure_message", persist),
+            patch(
+                "apps.chat.services.continuation.build_agent_for_resume",
+                AsyncMock(return_value=agent),
+            ),
+            patch("apps.chat.services.continuation.persist_synthetic_failure_message", persist),
             pytest.raises(asyncio.CancelledError),
         ):
             await asyncio.create_task(

@@ -7,8 +7,8 @@ from apps.agents.graph.state import (
     reject_truncated_tool_calls,
     unfinished_turn_reason,
 )
+from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.message_converter import langchain_messages_to_ui
-from apps.workspaces.tasks import SYSTEM_RESUME_MARKER
 
 
 def test_system_resume_markers_are_filtered():
