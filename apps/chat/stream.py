@@ -40,6 +40,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from apps.agents.graph.base import FIXED_MESSAGE_NODES, INJECTED_TOOL_PARAMS
 from apps.agents.graph.state import TRUNCATED_TOOL_CALLS_NODE
+from apps.agents.llm_request import LLM_TIMEOUT_ERRORS
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     SUBAGENT_TOOL_NAMES,
@@ -594,7 +595,18 @@ async def langgraph_to_ui_stream(
             )
         else:
             ref = _error_ref(exc)
-            logger.exception("Error during agent streaming [ref=%s]", ref)
+            if isinstance(exc, LLM_TIMEOUT_ERRORS):
+                # Expected once requests are bounded: keep it out of ERROR-level
+                # Sentry. Not auto-retried; the request already ran its retries.
+                logger.warning(
+                    "Model request timed out during agent streaming [ref=%s]: %s",
+                    ref,
+                    exc.__class__.__name__,
+                )
+                failure = "The model took too long to respond."
+            else:
+                logger.exception("Error during agent streaming [ref=%s]", ref)
+                failure = "An error occurred while processing your request."
             if reasoning_started:
                 yield _sse({"type": "reasoning-end", "id": reasoning_id})
                 reasoning_started = False
@@ -605,7 +617,7 @@ async def langgraph_to_ui_stream(
                 {
                     "type": "text-delta",
                     "id": text_id,
-                    "delta": "\n\nAn error occurred while processing your request.",
+                    "delta": f"\n\n{failure}",
                 }
             )
             if text_started:
@@ -618,7 +630,7 @@ async def langgraph_to_ui_stream(
             yield _sse(
                 {
                     "type": "error",
-                    "errorText": f"An error occurred while processing your request. Ref: {ref}",
+                    "errorText": f"{failure} Ref: {ref}",
                 }
             )
     else:

@@ -10,7 +10,7 @@ import logging
 
 import httpx
 import pytest
-from anthropic import APIStatusError, RateLimitError
+from anthropic import APIStatusError, APITimeoutError, RateLimitError
 
 from apps.chat import stream
 
@@ -113,3 +113,27 @@ async def test_generic_error_still_reported_to_sentry(caplog):
     assert "retryable-error" not in joined
     # logger.exception -> ERROR record (Sentry captures this).
     assert any(r.levelno == logging.ERROR for r in caplog.records if r.name == STREAM_LOGGER)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "timeout_error",
+    [
+        lambda: APITimeoutError(request=_response(200).request),
+        lambda: httpx.ReadTimeout("stream stalled", request=_response(200).request),
+    ],
+)
+async def test_model_timeout_is_a_terminal_error_without_paging(caplog, timeout_error):
+    """A bounded model request that times out ends the turn with a native error
+    (not an auto-retry: the SDK already retried) and logs below Sentry's level."""
+    with caplog.at_level(logging.WARNING, logger=STREAM_LOGGER):
+        chunks = await _collect(timeout_error())
+    joined = "".join(chunks)
+
+    assert "The model took too long to respond." in joined
+    assert '"type": "error"' in joined
+    assert "retryable-error" not in joined
+    assert any('"type": "finish"' in c for c in chunks)
+    levels = {r.levelno for r in caplog.records if r.name == STREAM_LOGGER}
+    assert logging.WARNING in levels
+    assert logging.ERROR not in levels
