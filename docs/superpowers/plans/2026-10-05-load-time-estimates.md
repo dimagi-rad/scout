@@ -2,7 +2,7 @@
 
 **Goal:** Show approximate workspace loading times based only on successful history.
 
-**Architecture:** A workspace timing ledger retains whole-load and accumulated phase durations independently of tenant schema retirement. Its workspace/success/start index bounds historical reads to ten rows. Historical successful chat jobs provide whole-load samples between the earliest run and the resume claim; failed/partial run groups are excluded. Optional estimate fields preserve old API clients. Formatting stays pure and polling supplies elapsed time.
+**Architecture:** A workspace timing ledger retains whole-load and accumulated phase durations independently of tenant schema retirement. Its workspace/success/start index bounds historical reads to ten rows. A one-time migration seeds retained successful full chat loads from a bounded recent queue sample; pruned and partial jobs are excluded. Polling reads only the indexed timing ledger. Optional estimate fields preserve old API clients. Formatting stays pure and polling supplies elapsed time.
 
 **Tech stack:** Django async ORM, PostgreSQL, React, TypeScript, pytest, Vitest.
 

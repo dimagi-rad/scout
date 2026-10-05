@@ -24,7 +24,7 @@ from apps.workspaces.services.failure_guidance import (
 )
 from apps.workspaces.services.load_phases import LoadPhase
 from apps.workspaces.services.load_progress import aworkspace_load_progress, progress_payload
-from apps.workspaces.services.load_time_estimates import aload_time_estimate
+from apps.workspaces.services.load_time_estimates import aload_time_estimates
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -205,11 +205,7 @@ async def active_jobs_view(request, workspace_id):
     estimate_job_ids = {
         j.procrastinate_job_id for j in jobs if j.state == ThreadJob.State.PENDING
     } | {load["procrastinate_job_id"] for load in workspace_loads}
-    estimates = {
-        job_id: await aload_time_estimate(workspace.id, job_id)
-        for job_id in estimate_job_ids
-        if job_id is not None
-    }
+    estimates = await aload_time_estimates(workspace.id, estimate_job_ids - {None})
     for load in workspace_loads:
         load["time_estimate"] = estimates.get(load["procrastinate_job_id"])
 

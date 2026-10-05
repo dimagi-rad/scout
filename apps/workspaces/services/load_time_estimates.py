@@ -4,12 +4,12 @@ import logging
 from statistics import median
 
 from django.core.cache import cache
-from django.db.models import Count, Min, Q
+from django.db.models import F
 from django.utils import timezone
 from procrastinate.contrib.django.models import ProcrastinateJob
 
-from apps.chat.models import ThreadJob
 from apps.workspaces.models import MaterializationRun, WorkspaceLoadTiming
+from apps.workspaces.task_dispatch import MATERIALIZE_WORKSPACE
 
 logger = logging.getLogger(__name__)
 HISTORY_LIMIT = 10
@@ -117,68 +117,14 @@ async def _history(workspace_id, only_unserved):
             workspace_id=workspace_id,
             only_unserved=only_unserved,
             succeeded=True,
-            completed_at__isnull=False,
+            completed_at__gt=F("started_at"),
         ).order_by("-started_at")[:HISTORY_LIMIT]
     ]
-    if not only_unserved and len(samples) < HISTORY_LIMIT:
-        # The resume claim follows workspace model publication. Tenant completion
-        # alone omits that final preparation, so it cannot be a whole-load sample.
-        jobs = [
-            job
-            async for job in ThreadJob.objects.filter(
-                thread__workspace_id=workspace_id,
-                job_type=ThreadJob.JobType.MATERIALIZATION,
-                state=ThreadJob.State.COMPLETED,
-                started_at__isnull=False,
-                materialization_preflight_failures=[],
-            )
-            .exclude(
-                procrastinate_job_id__in=WorkspaceLoadTiming.objects.filter(
-                    workspace_id=workspace_id,
-                ).values("job_id")
-            )
-            .order_by("-created_at")[:HISTORY_LIMIT]
-        ]
-        partial_jobs = {
-            job_id
-            async for job_id in ProcrastinateJob.objects.filter(
-                id__in=[job.procrastinate_job_id for job in jobs],
-                args__only_unserved=True,
-            ).values_list("id", flat=True)
-        }
-        runs = {
-            row["procrastinate_job_id"]: row
-            async for row in MaterializationRun.objects.filter(
-                procrastinate_job_id__in=[job.procrastinate_job_id for job in jobs],
-            )
-            .values("procrastinate_job_id")
-            .annotate(
-                start=Min("started_at"),
-                failures=Count(
-                    "id",
-                    filter=(
-                        ~Q(state=MaterializationRun.RunState.COMPLETED)
-                        | Q(completed_at__isnull=True)
-                    ),
-                ),
-            )
-        }
-        for job in jobs:
-            run = runs.get(job.procrastinate_job_id)
-            if run and not run["failures"] and job.procrastinate_job_id not in partial_jobs:
-                samples.append((run["start"], (job.started_at - run["start"]).total_seconds(), {}))
-    samples = sorted(samples, key=lambda sample: sample[0], reverse=True)[:HISTORY_LIMIT]
-    samples = [sample for sample in samples if sample[1] > 0]
     await cache.aset(key, samples, HISTORY_CACHE_SECONDS)
     return samples
 
 
-async def aload_time_estimate(workspace_id, job_id, *, now=None):
-    current = await WorkspaceLoadTiming.objects.filter(
-        workspace_id=workspace_id,
-        job_id=job_id,
-    ).afirst()
-    samples = await _history(workspace_id, current.only_unserved if current else False)
+def _estimate(samples, current, now):
     if not samples:
         return None
     phases = {}
@@ -186,7 +132,6 @@ async def aload_time_estimate(workspace_id, job_id, *, now=None):
         for phase, seconds in durations.items():
             if seconds > 0:
                 phases.setdefault(phase, []).append(seconds)
-    now = now or timezone.now()
     return {
         "usual_seconds": median(sample[1] for sample in samples),
         "elapsed_seconds": max(
@@ -197,3 +142,38 @@ async def aload_time_estimate(workspace_id, job_id, *, now=None):
         "sample_count": len(samples),
         "phase_seconds": {phase: median(seconds) for phase, seconds in phases.items()},
     }
+
+
+async def aload_time_estimates(workspace_id, job_ids, *, now=None):
+    if not job_ids:
+        return {}
+    current_by_job = {
+        timing.job_id: timing
+        async for timing in WorkspaceLoadTiming.objects.filter(
+            workspace_id=workspace_id,
+            job_id__in=job_ids,
+        )
+    }
+    mode_by_job = {job_id: timing.only_unserved for job_id, timing in current_by_job.items()}
+    missing = set(job_ids) - current_by_job.keys()
+    if missing:
+        async for job_id, mode in ProcrastinateJob.objects.filter(
+            id__in=missing,
+            task_name=MATERIALIZE_WORKSPACE,
+            args__workspace_id=str(workspace_id),
+        ).values_list("id", "args__only_unserved"):
+            mode_by_job[job_id] = bool(mode)
+    histories = {mode: await _history(workspace_id, mode) for mode in set(mode_by_job.values())}
+    now = now or timezone.now()
+    return {
+        job_id: _estimate(
+            histories.get(mode_by_job.get(job_id), []),
+            current_by_job.get(job_id),
+            now,
+        )
+        for job_id in job_ids
+    }
+
+
+async def aload_time_estimate(workspace_id, job_id, *, now=None):
+    return (await aload_time_estimates(workspace_id, {job_id}, now=now))[job_id]
