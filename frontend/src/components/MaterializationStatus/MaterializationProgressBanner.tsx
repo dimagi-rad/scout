@@ -4,6 +4,8 @@ import type { ActiveJob, LoadPhase, WorkspaceLoad } from "@/api/jobs"
 import { useRetryableAction } from "@/hooks/useRetryableAction"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 
+import { formatTimeEstimate } from "./timeEstimate"
+
 const CANCEL_FAILED = "Cancel failed — try again"
 
 const PHASE_TITLES: Record<LoadPhase, string> = {
@@ -63,6 +65,7 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
     job?.state === "running" ? "answering" : (progress?.phase ?? null)
   const phaseTitle = phase ? (PHASE_TITLES[phase] ?? null) : null
   const answering = phase === "answering"
+  const timeText = answering ? null : formatTimeEstimate(active?.time_estimate)
   const isDeterminate = percent != null && !phaseTitle
 
   // Count line: "27,000 of 50,000 rows" when a total is known, else "27,000
@@ -163,6 +166,15 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
           >
             {countText}
           </div>
+
+          {timeText && (
+            <div
+              className="text-xs text-blue-700/70 dark:text-blue-300/70 mt-0.5"
+              data-testid="materialization-banner-time-estimate"
+            >
+              {timeText}
+            </div>
+          )}
 
           {/* Determinate fill when a total is known; otherwise an indeterminate
               sweep — keyset-paginated sources report no total to fill against. */}

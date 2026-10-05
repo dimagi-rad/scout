@@ -28,6 +28,13 @@ export interface JobProgress {
   phase?: LoadPhase | null
 }
 
+export interface LoadTimeEstimate {
+  usual_seconds: number
+  elapsed_seconds: number | null
+  sample_count: number
+  phase_seconds: Record<string, number>
+}
+
 export interface ActiveJob {
   thread_job_id: string
   thread_id: string
@@ -38,6 +45,7 @@ export interface ActiveJob {
   tool_call_id: string
   job_type: "materialization"
   state: JobState
+  time_estimate?: LoadTimeEstimate | null
   progress: JobProgress | null
   /** Position of the source being loaded within its load ("Source 2 of 4");
    *  null when the run is not part of a tracked load. */
@@ -55,6 +63,7 @@ export interface WorkspaceLoad {
   source_total: number
   state: "started" | "discovering" | "loading" | "transforming"
   started_at: string
+  time_estimate?: LoadTimeEstimate | null
   progress: JobProgress | null
 }
 
