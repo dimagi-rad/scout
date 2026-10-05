@@ -15,7 +15,7 @@ interface OcsTeam {
   name: string
 }
 
-type StopReason = "mismatch" | "cancelled" | "failed" | "incomplete" | "user"
+type StopReason = "mismatch" | "cancelled" | "failed" | "incomplete" | "user" | "idle"
 
 interface OcsTeamFlow {
   mode: "all" | "one"
@@ -59,6 +59,8 @@ function stopMessage(stopped: NonNullable<OcsTeamFlow["stopped"]>): string {
       return `Connecting "${team}" didn't finish.`
     case "user":
       return `Stopped before "${team}".`
+    case "idle":
+      return `Paused before "${team}".`
   }
 }
 
@@ -88,7 +90,11 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
   useEffect(() => {
     if (!next) return
     const timer = window.setTimeout(() => {
-      startTeam(next).catch(() => setError("Couldn't start the next team."))
+      startTeam(next).catch(() => {
+        // Clearing `next` locally keeps a failing start from retrying in a loop.
+        setError("Couldn't start the next team.")
+        setState((prev) => prev && { ...prev, next: null })
+      })
     }, CHAIN_CONTINUE_DELAY_MS)
     return () => window.clearTimeout(timer)
   }, [next, startTeam])
