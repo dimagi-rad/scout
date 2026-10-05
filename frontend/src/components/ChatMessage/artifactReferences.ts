@@ -48,11 +48,9 @@ export function isFailedOutput(output: unknown): boolean {
 export function isUnsuccessfulHelperOutcome(output: unknown): boolean {
   // A data-model handoff can follow a published write: keep its card open
   // without suppressing the link to the artifact that was already created.
-  return isFailedOutput(output) || (
-    output !== null && typeof output === "object" && "status" in output
+  return output !== null && typeof output === "object" && "status" in output
     && typeof output.status === "string"
-    && ["blocked", "needs_data_model", "invalid_data_requirements"].includes(output.status)
-  )
+    && !["done", "created", "updated", "replaced", "checked"].includes(output.status)
 }
 
 export function getSubagentToolData(part: { type: string; data?: unknown }) {

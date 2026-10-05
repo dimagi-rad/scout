@@ -1,6 +1,6 @@
 import type { UIMessage } from "ai"
 import { afterEach, expect, it, vi } from "vitest"
-import { messageArtifacts, turnArtifactOwners } from "./artifactReferences"
+import { isUnsuccessfulHelperOutcome, messageArtifacts, turnArtifactOwners } from "./artifactReferences"
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -29,4 +29,11 @@ it("does not reparse unchanged history during streaming updates", () => {
   }] } as UIMessage
   expect(messageArtifacts(updated).get("a")?.version).toBe(2)
   expect(parse).toHaveBeenCalledTimes(2)
+})
+
+it.each(["failed", "partial", "needs_review", "unknown"])("keeps unknown helper status %s open", (status) => {
+  expect(isUnsuccessfulHelperOutcome({ status })).toBe(true)
+})
+it.each(["done", "created", "updated", "replaced", "checked"])("accepts successful helper status %s", (status) => {
+  expect(isUnsuccessfulHelperOutcome({ status })).toBe(false)
 })
