@@ -607,7 +607,7 @@ def query_diagnostics(
     if (require_time_dimension or "date_range" in query) and not time_dimension:
         diagnostics.append(
             problem(
-                f"{path} is bound to a date range but has no time_dimension",
+                f"{path} has or is bound to a date range but has no time_dimension",
                 block_id=block_id,
                 code="query_window_without_time_dimension",
             )

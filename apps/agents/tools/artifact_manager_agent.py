@@ -71,8 +71,9 @@ class ArtifactManagerInput(BaseModel):
     subagent_event_queue: Any | None = None
 
 
-ARTIFACT_MANAGER_SYSTEM_PROMPT = (
-    """
+ARTIFACT_MANAGER_SYSTEM_PROMPT = "".join(
+    (
+        """
 You are Scout's Artifact Manager subagent. Your only job is to create, inspect,
 repair, and validate semantic story artifacts. Be concise and deterministic.
 
@@ -164,9 +165,9 @@ How to build data-backed blocks:
 - Filters use `field`, `operator`, and values. Do not use `member`.
 - If a query has `date_range` or uses comparison, include
   `time_dimension`.
-"""
-    + RECENT_PERIOD_QUERY_GUIDANCE
-    + """- Time-bucketed rows expose the bucket as `date`.
+""",
+        RECENT_PERIOD_QUERY_GUIDANCE,
+        """- Time-bucketed rows expose the bucket as `date`.
 - Member result keys are snake_case: `visits.count` -> `visits_count`.
 - Graph artifacts do not support transform/bucketing config. If a derived
   category is missing, return the data-model prerequisite to the parent as
@@ -240,9 +241,10 @@ Final response: return a compact JSON object in text with keys:
 `status`, `artifact_id`, `artifact_version`, `touched_blocks`, `diagnostics`,
 `runtime_summary`, and `message`. Include `data_requirements` only when the
 parent must prepare missing analytical capabilities.
-"""
-    + "\nData requirements JSON Schema:\n"
-    + json.dumps(DATA_REQUIREMENTS.json_schema())
+""",
+        "\nData requirements JSON Schema:\n",
+        json.dumps(DATA_REQUIREMENTS.json_schema()),
+    )
 )
 
 
