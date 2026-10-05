@@ -1,5 +1,5 @@
 === system block 0 {"cache_control": {"type": "ephemeral"}} ===
-<<select_base_system_prompt(write_capable=True, interactive=True)>>
+<<BASE_SYSTEM_PROMPT>>
 <<ARTIFACT_PROMPT_ADDITION>>
 
 ## Workspace Instructions
@@ -69,23 +69,23 @@ No data has been loaded yet, and no load is running. Call `run_materialization` 
 <<agent_date_context>>
 === ainvoke kwargs {"cache_control": {"type": "ephemeral"}} ===
 === bound tools ===
-cancel_materialization(request) required=[request]
-describe_dataset(request) required=[request]
-describe_table(request) required=[request]
-get_lineage(request) required=[request]
-get_materialization_status(request) required=[request]
-get_metadata(request) required=[request]
-get_schema_status(request) required=[request]
-list_datasets(request) required=[request]
-list_tables(request) required=[request]
-list_workspaces(request) required=[request]
-query(request) required=[request]
-run_materialization(request) required=[request]
-semantic_catalog(request) required=[request]
-semantic_query(request) required=[request]
-save_learning(category,description,tables) required=[category,description,tables]
-artifact_manager(artifact_id,task) required=[task]
-save_as_recipe(description,name,prompt,variables) required=[description,name,prompt,variables]
+cancel_materialization(request) required=[request] schema=b96a94f21d78
+describe_dataset(request) required=[request] schema=50c4fc8af7cb
+describe_table(request) required=[request] schema=1c66fb868f38
+get_lineage(request) required=[request] schema=29ae35ebd994
+get_materialization_status(request) required=[request] schema=6af44107551a
+get_metadata(request) required=[request] schema=139891f5160c
+get_schema_status(request) required=[request] schema=2dfcb312258b
+list_datasets(request) required=[request] schema=eb818fb6000e
+list_tables(request) required=[request] schema=d92ecf15983c
+list_workspaces(request) required=[request] schema=8c8c394a9700
+query(request) required=[request] schema=db873af7707e
+run_materialization(request) required=[request] schema=5b21fe595215
+semantic_catalog(request) required=[request] schema=32cb2fa03290
+semantic_query(request) required=[request] schema=b0a54297f1a8
+save_learning(category,description,tables) required=[category,description,tables] schema=bef4557d3503
+artifact_manager(artifact_id,task) required=[task] schema=13e2526c174f
+save_as_recipe(description,name,prompt,variables) required=[description,name,prompt,variables] schema=4f6f96329d85
 === nodes ===
 __end__
 __start__

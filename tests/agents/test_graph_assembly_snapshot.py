@@ -10,6 +10,7 @@ Regenerate after an intended change with ``UPDATE_GRAPH_SNAPSHOTS=1 uv run pytes
 tests/agents/test_graph_assembly_snapshot.py`` and review the diff.
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -30,7 +31,11 @@ from apps.agents.prompts.artifact_prompt import (
     ARTIFACT_PROMPT_ADDITION,
     ARTIFACT_READ_ONLY_PROMPT_ADDITION,
 )
-from apps.agents.prompts.base_system import select_base_system_prompt
+from apps.agents.prompts.base_system import (
+    BASE_SYSTEM_PROMPT,
+    HEADLESS_BASE_SYSTEM_PROMPT,
+    READ_ONLY_BASE_SYSTEM_PROMPT,
+)
 from apps.knowledge.models import KnowledgeEntry
 from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, WorkspaceTenant, WorkspaceViewSchema
@@ -92,20 +97,18 @@ def _tool_line(schema) -> str:
     parameters = function.get("parameters", {})
     properties = ",".join(sorted(parameters.get("properties", {})))
     required = ",".join(sorted(parameters.get("required", [])))
-    return f"{function['name']}({properties}) required=[{required}]"
+    # The description and parameter types are model input too; a digest keeps lines short.
+    digest = hashlib.sha256(
+        json.dumps([function.get("description", ""), parameters], sort_keys=True).encode()
+    ).hexdigest()[:12]
+    return f"{function['name']}({properties}) required=[{required}] schema={digest}"
 
 
 def _with_markers(text: str) -> str:
     fragments = [
-        (
-            select_base_system_prompt(write_capable=write_capable, interactive=interactive),
-            f"<<select_base_system_prompt(write_capable={write_capable}, "
-            f"interactive={interactive})>>",
-        )
-        for write_capable in (True, False)
-        for interactive in (True, False)
-    ]
-    fragments += [
+        (BASE_SYSTEM_PROMPT, "<<BASE_SYSTEM_PROMPT>>"),
+        (HEADLESS_BASE_SYSTEM_PROMPT, "<<HEADLESS_BASE_SYSTEM_PROMPT>>"),
+        (READ_ONLY_BASE_SYSTEM_PROMPT, "<<READ_ONLY_BASE_SYSTEM_PROMPT>>"),
         (ARTIFACT_PROMPT_ADDITION, "<<ARTIFACT_PROMPT_ADDITION>>"),
         (ARTIFACT_READ_ONLY_PROMPT_ADDITION, "<<ARTIFACT_READ_ONLY_PROMPT_ADDITION>>"),
     ]
