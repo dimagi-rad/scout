@@ -22,6 +22,7 @@ from apps.workspaces.services.failure_guidance import (
     BLOCKS_IMMEDIATE_RETRY,
     summary_failures,
 )
+from apps.workspaces.services.load_phases import LoadPhase
 from apps.workspaces.services.load_progress import aworkspace_load_progress, progress_payload
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
@@ -38,6 +39,17 @@ RECONCILE_THROTTLE_SECONDS = 30
 
 
 def _job_to_dict(job: ThreadJob, run_progress: dict | None, load: dict | None = None) -> dict:
+    if job.state == ThreadJob.State.RUNNING:
+        # RUNNING means the resume claimed the job: loading is over and the agent
+        # is replying, so the run's last phase would be stale.
+        run_progress = {
+            **(run_progress or {}),
+            "phase": LoadPhase.ANSWERING,
+            "message": "The agent is answering from the new data",
+            "source": None,
+            "rows_loaded": 0,
+            "rows_total": None,
+        }
     return {
         "thread_job_id": str(job.id),
         "thread_id": str(job.thread_id),

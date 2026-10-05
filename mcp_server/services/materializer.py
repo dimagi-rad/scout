@@ -59,11 +59,12 @@ from apps.knowledge.services.column_note_generator import sync_column_notes
 from apps.transformations.models import TransformationAsset, TransformationRunStatus
 from apps.transformations.services.commcare_staging import upsert_system_assets
 from apps.transformations.services.connect_staging import upsert_connect_assets
-from apps.transformations.services.executor import run_transformation_pipeline
+from apps.transformations.services.executor import PhaseCallback, run_transformation_pipeline
 from apps.transformations.services.staging_identity import StagingModelMigrationRequired
 from apps.users.services.upstream_denial import record_upstream_denial
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
 from apps.workspaces.services.load_generations import pipeline_fingerprint
+from apps.workspaces.services.load_phases import LoadPhase
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from mcp_server.event_time import normalize_event_time
@@ -170,6 +171,29 @@ def run_pipeline(
                     "rows_total": None,
                 }
             )
+
+    def report_phase(phase: LoadPhase, message: str) -> None:
+        if progress_updater is None:
+            return
+        try:
+            progress_updater(
+                {
+                    "run_id": run_id_holder["id"],
+                    "step": step,
+                    "total_steps": total_steps,
+                    "source": None,
+                    "message": message,
+                    "phase": phase,
+                    "rows_loaded": 0,
+                    "rows_total": None,
+                }
+            )
+        except MaterializationCancelled:
+            # The COMPLETED compare-and-swap after the transforms honours the cancel.
+            pass
+        except Exception:
+            # A lost progress write must not fail the transforms it describes.
+            logger.warning("Could not record load phase %s", phase, exc_info=True)
 
     def make_on_page(
         source_name: str,
@@ -552,7 +576,10 @@ def run_pipeline(
         report("Running transforms...")
         try:
             transform_result = _run_transform_phase(
-                schema_name, tenant=tenant_membership.tenant, assets=asset_snapshot
+                schema_name,
+                tenant=tenant_membership.tenant,
+                assets=asset_snapshot,
+                phase_callback=report_phase,
             )
         except Exception as e:
             logger.exception("Transform phase failed for schema %s", schema_name)
@@ -1328,7 +1355,9 @@ def _drop_transform_outputs(schema_name: str, pipeline: PipelineConfig) -> list[
     return dropped
 
 
-def _run_transform_phase(schema_name: str, tenant=None, assets=None) -> dict:
+def _run_transform_phase(
+    schema_name: str, tenant=None, assets=None, phase_callback: PhaseCallback | None = None
+) -> dict:
     """Run the transformation pipeline's SYSTEM + TENANT stages for this tenant.
 
     No ``workspace`` is passed because materialization is tenant-scoped: a tenant
@@ -1345,6 +1374,7 @@ def _run_transform_phase(schema_name: str, tenant=None, assets=None) -> dict:
         tenant=tenant,
         schema_name=schema_name,
         asset_snapshot=assets,
+        phase_callback=phase_callback,
     )
 
     result = {

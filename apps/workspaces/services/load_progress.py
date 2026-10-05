@@ -47,6 +47,8 @@ def progress_payload(progress: dict | None) -> dict | None:
         "source": progress.get("source"),
         "step": progress.get("step"),
         "total_steps": progress.get("total_steps"),
+        # A named step after the sources load (``LoadPhase``); None while loading.
+        "phase": progress.get("phase"),
     }
 
 

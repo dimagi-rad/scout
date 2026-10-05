@@ -91,6 +91,7 @@ from apps.workspaces.services.load_outcome import (
 from apps.workspaces.services.load_outcome import (
     unreachable_tenant_error as _unreachable_tenant_error,
 )
+from apps.workspaces.services.load_phases import LoadPhase
 from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from apps.workspaces.services.query_state import (
     included_tenant_snapshot_state as _included_tenant_snapshot_state,
@@ -702,6 +703,11 @@ async def materialize_workspace_core(
     view_schema_outcome: dict | None = None
     workspace_tenant_count = await workspace.workspace_tenants.acount()
     if workspace_tenant_count > 1:
+        await _apublish_phase(
+            job_id,
+            LoadPhase.COMBINING_SITES,
+            f"Joining {workspace_tenant_count} sources into one view",
+        )
         try:
             view_schema = await _to_thread_fresh_db(SchemaManager().build_view_schema, workspace)
             tenant_coverage = (
@@ -779,6 +785,9 @@ async def materialize_workspace_core(
         or (view_schema_outcome is not None and view_schema_outcome.get("ok"))
     )
     if cube_build_allowed:
+        await _apublish_phase(
+            job_id, LoadPhase.BUILDING_MODEL, "Preparing the tables and measures questions use"
+        )
         try:
             cube_schema = await run_data_thread(build_and_promote_cube_schema, workspace)
             cube_schema_outcome = {
@@ -813,6 +822,7 @@ async def materialize_workspace_core(
             await _to_thread_fresh_db(record_cube_schema_build_failure, workspace, skip_reason)
             cube_schema_outcome = {"ok": False, "error": skip_reason}
 
+    await _apublish_phase(job_id, LoadPhase.FINISHING, "Updating views that share these sources")
     # Tenant data schemas (t_<id>) are SHARED. Re-materializing drops & recreates
     # raw_* tables, cascade-dropping the namespaced views in every OTHER workspace's
     # view schema (leaving them ACTIVE but empty). Rebuild each sibling multi-tenant
@@ -857,6 +867,36 @@ async def materialize_workspace_core(
             workspace.id, all_results, user_id, partial=only_unserved
         ),
     }
+
+
+async def _apublish_phase(job_id: int | None, phase: LoadPhase, message: str) -> None:
+    """Show a post-load phase on the job's progress card; never fails the load.
+
+    Written to the job's latest run, which the active-jobs poll reads last-wins,
+    so the card keeps moving after the runs themselves are COMPLETED.
+    """
+    if job_id is None:
+        return
+    try:
+        run = (
+            await MaterializationRun.objects.filter(procrastinate_job_id=job_id)
+            .order_by("-started_at")
+            .only("id", "progress")
+            .afirst()
+        )
+        if run is None:
+            return
+        progress = {
+            **(run.progress or {}),
+            "phase": phase,
+            "message": message,
+            "source": None,
+            "rows_loaded": 0,
+            "rows_total": None,
+        }
+        await MaterializationRun.objects.filter(id=run.id).aupdate(progress=progress)
+    except Exception:
+        logger.warning("Could not record load phase %s for job %s", phase, job_id, exc_info=True)
 
 
 async def await_in_progress_materializations(
