@@ -610,7 +610,7 @@ describe("bound dates override query-local ranges", () => {
     expect(mockedPost.mock.calls[0][1]).toMatchObject({
       filters: [{ field: "visits.visit_date", operator: "inDateRange", values: ["2026-06-01", "2026-06-30"] }],
     })
-    expect(mockedPost.mock.calls[0][1]).not.toHaveProperty("date_range", query.date_range)
+    expect(mockedPost.mock.calls[0][1]).toHaveProperty("date_range", undefined)
   })
 
   it("uses comparison bounds for both queries", async () => {
@@ -634,7 +634,7 @@ describe("bound dates override query-local ranges", () => {
       expect.objectContaining({ filters: [{ field: "visits.visit_date", operator: "inDateRange", values: ["2026-05-01", "2026-05-31"] }] }),
     ])
     for (const call of mockedPost.mock.calls) {
-      expect(call[1]).not.toHaveProperty("date_range", { last: 24, unit: "week" })
+      expect(call[1]).toHaveProperty("date_range", undefined)
     }
   })
 })
