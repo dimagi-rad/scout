@@ -162,4 +162,35 @@ describe("OcsTeamsPanel", () => {
     )
     expect(postOAuthStart).not.toHaveBeenCalled()
   })
+
+  it("stops the chain when a hop can't start", async () => {
+    vi.useFakeTimers()
+    const running = {
+      mode: "all" as const,
+      connected: [],
+      remaining: teams.slice(1),
+      finished: false,
+      stopped: null,
+    }
+    serve({ known: true, teams, flow: running, next: "beta" })
+    await renderPanel()
+    vi.mocked(postOAuthStart).mockRejectedValueOnce(new Error("offline"))
+    vi.mocked(api.post).mockResolvedValue({
+      known: true,
+      teams,
+      flow: {
+        ...running,
+        stopped: { reason: "user", team: { slug: "beta", name: "Beta" }, got: null },
+      },
+      next: null,
+    })
+
+    await act(async () => {
+      vi.advanceTimersByTime(CHAIN_CONTINUE_DELAY_MS)
+    })
+
+    expect(api.post).toHaveBeenCalledWith("/api/auth/ocs/teams/stop/")
+    expect(screen.getByTestId("ocs-teams-error")).toBeInTheDocument()
+    expect(screen.getByTestId("ocs-teams-connect-all")).toHaveTextContent("Resume")
+  })
 })

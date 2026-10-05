@@ -90,10 +90,16 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
   useEffect(() => {
     if (!next) return
     const timer = window.setTimeout(() => {
-      startTeam(next).catch(() => {
-        // Clearing `next` locally keeps a failing start from retrying in a loop.
-        setError("Couldn't start the next team.")
+      startTeam(next).catch(async () => {
+        // Stopped server-side too, so a reload can't retry it in a loop.
         setState((prev) => prev && { ...prev, next: null })
+        try {
+          const stopped = parseState(await api.post("/api/auth/ocs/teams/stop/"))
+          if (stopped) setState(stopped)
+        } catch {
+          // The server's idle timeout stops it anyway.
+        }
+        setError("Couldn't start the next team.")
       })
     }, CHAIN_CONTINUE_DELAY_MS)
     return () => window.clearTimeout(timer)
