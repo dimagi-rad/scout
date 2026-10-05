@@ -388,7 +388,7 @@ export function normalizeGraphSeries(series: unknown, yKey?: string, dataLabel?:
   }
   if (series !== undefined && series !== null) {
     const invalid = () => new Error("series must be an array of data-key strings or objects; use series_by for long-format data")
-    if (!Array.isArray(series) || series.length === 0) throw invalid()
+    if (!Array.isArray(series)) throw invalid()
     return series.map((item): GraphSeries => {
       if (typeof item === "string" && item.trim()) return { data_key: item, label: item }
       if (isRecord(item)) {

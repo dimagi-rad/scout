@@ -24,6 +24,7 @@ import {
   collectResultKeyRefs,
   prepareCompactGraph,
   normalizeGraphSeries,
+  type CompactGraphConfig,
   type RechartsNode,
 } from "./recharts"
 import {
@@ -454,15 +455,18 @@ function GraphComponent({ block, config, engine }: BlockComponentProps) {
       if ("series_by" in config) throw new Error("series_by is supported only on compact charts")
       tree = config.recharts
     } else {
-      const hasConfiguredSeries = config.series !== null && config.series !== undefined
-        && !(Array.isArray(config.series) && config.series.length === 0)
-      const inferred = "series_by" in config || hasConfiguredSeries ? [] : inferSeries(config, rows, xKey)
-      const prepared = prepareCompactGraph({
-        ...chartConfig,
-        ...("series" in config ? { series: config.series } : {}),
-        ...(inferred.length > 0 ? { series: inferred } : {}),
-        ...("series_by" in config ? { series_by: config.series_by } : {}),
-      }, rows)
+      let compactConfig: CompactGraphConfig
+      if ("series_by" in config) {
+        compactConfig = {
+          ...chartConfig,
+          series_by: config.series_by,
+          ...("series" in config ? { series: config.series } : {}),
+        }
+      } else {
+        const series = inferSeries(config, rows, xKey)
+        compactConfig = { ...chartConfig, ...(series.length > 0 ? { series } : {}) }
+      }
+      const prepared = prepareCompactGraph(compactConfig, rows)
       tree = prepared.tree
       chartRows = prepared.rows
     }
