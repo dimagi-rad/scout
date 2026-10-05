@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { Fragment, useState } from "react"
 import type { UIMessage } from "ai"
 import { isToolUIPart, getToolName } from "ai"
 import Markdown from "react-markdown"
@@ -153,6 +153,7 @@ function extractArtifactId(part: any): string | null {
 function extractArtifactIdFromOutput(rawOutput: unknown): string | null {
   const output = parseOutput(rawOutput)
   if (output == null) return null
+  if (typeof output === "object" && "status" in output && ["error", "denied"].includes(String(output.status))) return null
   if (typeof output === "object" && !Array.isArray(output)) {
     if (
       "artifact_id" in output
@@ -510,14 +511,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   const hasOutput = part.state === "output-available" || part.state === "output-error"
   const hasChildren = childParts.length > 0
   const isSubagentCard = toolName in SUBAGENT_TOOL_LABELS && !isNested
-  const hasSubagentActivity = subagentEvents.length > 0
   const isErrored = part.state === "output-error"
-  const activeArtifactId = useAppStore((s) => s.activeArtifactId)
-  const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
-  const artifactId =
-    isSubagentCard && hasOutput && part.output != null && !isErrored
-      ? extractArtifactIdFromOutput(part.output)
-      : null
 
   // Scope the job to THIS tool-call card via toolCallId, else the progress block
   // and Stop button would render on every historical run_materialization card.
@@ -543,7 +537,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   // stays expanded while it has an active job or failure card for THIS card,
   // independent of the SSE stream.
   const autoExpanded =
-    (toolName in SUBAGENT_TOOL_LABELS && (hasChildren || hasSubagentActivity || isLoading))
+    (isSubagentCard && isLoading)
     || (isNested && (isLoading || isErrored))
     || (
       AUTO_EXPAND_TOOLS.has(toolName)
@@ -554,10 +548,11 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
       )
       && (isActiveMessage || toolName === "run_materialization")
     )
-  const [override, setOverride] = useState<{ whenLatest: boolean; value: boolean } | null>(null)
-  const effectiveOverride = override?.whenLatest === isLatest ? override.value : null
+  const expansionKey = isSubagentCard ? String(isLoading) : String(isLatest)
+  const [override, setOverride] = useState<{ key: string; value: boolean } | null>(null)
+  const effectiveOverride = override?.key === expansionKey ? override.value : null
   const expanded = effectiveOverride ?? autoExpanded
-  const toggleExpanded = () => setOverride({ whenLatest: isLatest, value: !expanded })
+  const toggleExpanded = () => setOverride({ key: expansionKey, value: !expanded })
 
   const richOutput =
     hasOutput && part.output != null && !isErrored && !isSubagentCard
@@ -613,6 +608,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
           onClick={toggleExpanded}
           className="flex flex-1 items-center gap-2 px-3 py-1.5 hover:bg-muted/50 transition-colors"
           data-testid={`tool-call-${toolName}`}
+          aria-expanded={expanded}
         >
           {expanded ? (
             <ChevronDown className="w-3 h-3 text-muted-foreground shrink-0" />
@@ -656,15 +652,6 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
           </button>
         )}
       </div>
-      {artifactId && (
-        <div className="border-t border-sky-100 px-3 py-2">
-          <ChatArtifactButton
-            artifactId={artifactId}
-            isActive={activeArtifactId === artifactId}
-            onOpen={openArtifact}
-          />
-        </div>
-      )}
       {expanded && (
         isSubagentCard
         ||
@@ -792,13 +779,17 @@ export function ChatReasoningPart({ part, index, isLatest, isActiveMessage }: { 
 
 interface ChatArtifactButtonProps {
   artifactId: string
+  artifactVersion?: number
   isActive?: boolean
   onOpen?: (artifactId: string) => void
 }
 
-export function ChatArtifactButton({ artifactId, isActive = false, onOpen }: ChatArtifactButtonProps) {
+export function ChatArtifactButton({ artifactId, artifactVersion, isActive = false, onOpen }: ChatArtifactButtonProps) {
   return (
     <button
+      type="button"
+      data-testid={`chat-artifact-${artifactId}`}
+      data-artifact-version={artifactVersion}
       onClick={() => onOpen?.(artifactId)}
       className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm my-1 transition-colors hover:bg-muted ${
         isActive
@@ -892,6 +883,42 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
     }
   }
 
+  const artifacts = new Map<string, { id: string; version?: number; afterIndex: number }>()
+  const parentIndices = new Map<string, number>()
+  message.parts.forEach((part, index) => {
+    if (isToolUIPart(part) && !(part as ChatToolPartShape).parentToolCallId) {
+      parentIndices.set(part.toolCallId, index)
+    }
+  })
+  message.parts.forEach((part, index) => {
+    const child = getSubagentToolData(part)
+    const tool = isToolUIPart(part) ? part as ChatToolPartShape : null
+    if (tool?.state !== "output-available" && part.type !== "data-subagent-tool-output") return
+    const rawOutput = child?.output ?? tool?.output
+    const id = extractArtifactIdFromOutput(rawOutput)
+    if (!id) return
+    const output = parseOutput(rawOutput) as { artifact_version?: unknown; artifact?: { version?: unknown } }
+    const rawVersion = output.artifact_version ?? output.artifact?.version
+    const version = typeof rawVersion === "number" ? rawVersion : undefined
+    const parentId = child?.parentToolCallId ?? tool?.parentToolCallId
+    const afterIndex = parentId ? parentIndices.get(parentId) : index
+    if (afterIndex === undefined) return
+    const previous = artifacts.get(id)
+    if (previous && (previous.version ?? 0) > (version ?? 0)) return
+    artifacts.set(id, { id, version, afterIndex })
+  })
+  const renderArtifacts = (index: number) => [...artifacts.values()]
+    .filter((artifact) => artifact.afterIndex === index)
+    .map((artifact) => (
+      <ChatArtifactButton
+        key={artifact.id}
+        artifactId={artifact.id}
+        artifactVersion={artifact.version}
+        isActive={activeArtifactId === artifact.id}
+        onOpen={openArtifact}
+      />
+    ))
+
   return (
     <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}>
       <div className="max-w-[90%]">
@@ -911,18 +938,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
               return null
             }
             if (isArtifactToolPart(part)) {
-              const artifactId = extractArtifactId(part)
-              if (artifactId && part.state === "output-available") {
-                const isActive = activeArtifactId === artifactId
-                return (
-                  <ChatArtifactButton
-                    key={i}
-                    artifactId={artifactId}
-                    isActive={isActive}
-                    onOpen={openArtifact}
-                  />
-                )
-              }
+              if (extractArtifactId(part)) return <Fragment key={i}>{renderArtifacts(i)}</Fragment>
             }
 
             const toolCallId = toolPart.toolCallId
@@ -930,7 +946,12 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
               toolCallId && recentTerminationsByToolCallId
                 ? recentTerminationsByToolCallId[toolCallId] ?? null
                 : null
-            return <ChatToolCallPart key={i} part={toolPart} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} childParts={toolCallId ? childToolPartsByParent.get(toolCallId) ?? [] : []} subagentEvents={toolCallId ? subagentEventsByParent.get(toolCallId) ?? [] : []} subagentTimeline={toolCallId ? subagentTimelineByParent.get(toolCallId) ?? [] : []} />
+            return (
+              <Fragment key={i}>
+                <ChatToolCallPart part={toolPart} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} childParts={toolCallId ? childToolPartsByParent.get(toolCallId) ?? [] : []} subagentEvents={toolCallId ? subagentEventsByParent.get(toolCallId) ?? [] : []} subagentTimeline={toolCallId ? subagentTimelineByParent.get(toolCallId) ?? [] : []} />
+                {renderArtifacts(i)}
+              </Fragment>
+            )
           }
 
           return null

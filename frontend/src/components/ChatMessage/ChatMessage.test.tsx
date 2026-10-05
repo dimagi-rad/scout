@@ -172,6 +172,8 @@ describe("ChatMessage live tool cards (arch #246)", () => {
     expect(screen.getByText("Artifact Manager")).toBeInTheDocument()
     expect(screen.queryByText("subagent")).not.toBeInTheDocument()
     expect(screen.queryByText("1 call")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("subagent-activity-log")).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId("tool-call-artifact_manager"))
     expect(screen.getByTestId("subagent-activity-log")).toBeInTheDocument()
     expect(screen.getByText("I inspected the artifact blocks.")).toBeInTheDocument()
     expect(screen.getByTestId("tool-call-children-artifact_manager")).toBeInTheDocument()
@@ -243,6 +245,7 @@ describe("ChatMessage live tool cards (arch #246)", () => {
 
     render(<ChatMessage message={msg} isActiveMessage={false} />)
 
+    fireEvent.click(screen.getByTestId("tool-call-artifact_manager"))
     const before = screen.getByText("Before the dataset lookup.")
     const tool = screen.getByTestId("tool-call-describe_dataset")
     const after = screen.getByText("After the dataset lookup.")
@@ -311,5 +314,62 @@ describe("ChatMessage live tool cards (arch #246)", () => {
     expect(screen.queryByText("subagent")).not.toBeInTheDocument()
     expect(screen.getByText("working")).toBeInTheDocument()
     expect(screen.getByText("Starting Artifact Manager...")).toBeInTheDocument()
+  })
+})
+
+function helperMessage(state = "output-available"): UIMessage {
+  return {
+    id: "helpers", role: "assistant", parts: [
+      { type: "tool-artifact_manager", toolCallId: "parent", state,
+        input: { task: "Create charts" }, output: { status: "done", artifact_id: "a", artifact_version: 1 } },
+      ...[
+        { status: "created", artifact: { id: "a", version: 1 } },
+        { status: "updated", artifact: { id: "a", version: 2 } },
+        { status: "created", artifact: { id: "b", version: 1 } },
+        { status: "error", artifact: { id: "failed", version: 1 } },
+      ].map((output, i) => ({ type: "data-subagent-tool-output", data: {
+        parentToolCallId: "parent", toolCallId: `child-${i}`, toolName: "artifact_write", output,
+      } })),
+      { type: "text", text: "Your charts are ready." },
+    ],
+  } as unknown as UIMessage
+}
+
+describe("helper artifacts in the assistant flow", () => {
+  it("shows each published artifact after the collapsed helper, retaining its latest version", () => {
+    render(<ChatMessage message={helperMessage()} isActiveMessage={false} />)
+    const helper = screen.getByTestId("tool-call-artifact_manager")
+    expect(helper).toHaveAttribute("aria-expanded", "false")
+    const a = screen.getByTestId("chat-artifact-a")
+    const b = screen.getByTestId("chat-artifact-b")
+    expect(a).toHaveAttribute("data-artifact-version", "2")
+    expect(screen.getAllByText("View Artifact")).toHaveLength(2)
+    expect(screen.queryByTestId("chat-artifact-failed")).not.toBeInTheDocument()
+    expect(helper.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(b.compareDocumentPosition(screen.getByText("Your charts are ready.")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    fireEvent.click(b)
+    expect(useAppStore.getState().activeArtifactId).toBe("b")
+    fireEvent.click(helper)
+    expect(helper).toHaveAttribute("aria-expanded", "true")
+  })
+
+  it("keeps running helpers open, collapses at completion, and allows reopening", () => {
+    const { rerender } = render(<ChatMessage message={helperMessage("input-available")} isActiveMessage={true} />)
+    const helper = screen.getByTestId("tool-call-artifact_manager")
+    expect(helper).toHaveAttribute("aria-expanded", "true")
+    fireEvent.click(helper)
+    fireEvent.click(helper)
+    rerender(<ChatMessage message={helperMessage()} isActiveMessage={true} />)
+    expect(helper).toHaveAttribute("aria-expanded", "false")
+    fireEvent.click(helper)
+    expect(helper).toHaveAttribute("aria-expanded", "true")
+  })
+
+  it("deduplicates artifacts referenced by multiple parent calls", () => {
+    const message = helperMessage()
+    message.parts.push({ ...message.parts[0], toolCallId: "other", output: { status: "done", artifact_id: "a", artifact_version: 3 } } as unknown as UIMessage["parts"][number])
+    render(<ChatMessage message={message} isActiveMessage={false} />)
+    expect(screen.getAllByTestId("chat-artifact-a")).toHaveLength(1)
+    expect(screen.getByTestId("chat-artifact-a")).toHaveAttribute("data-artifact-version", "3")
   })
 })
