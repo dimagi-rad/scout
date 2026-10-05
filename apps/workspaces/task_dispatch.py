@@ -24,6 +24,7 @@ from config.procrastinate import app
 
 _PREFIX = "apps.workspaces.tasks."
 
+DROP_ABANDONED_CANDIDATE = _PREFIX + "drop_abandoned_candidate"
 DROP_FAILED_REFRESH_SCHEMA = _PREFIX + "drop_failed_refresh_schema"
 FLUSH_PENDING_REQUESTS = _PREFIX + "flush_pending_requests"
 MATERIALIZE_WORKSPACE = _PREFIX + "materialize_workspace"
@@ -32,9 +33,11 @@ REBUILD_WORKSPACE_VIEW_SCHEMA = _PREFIX + "rebuild_workspace_view_schema"
 RECOVER_WORKSPACE_DATA = _PREFIX + "recover_workspace_data"
 REFRESH_TENANT_SCHEMA = _PREFIX + "refresh_tenant_schema"
 RESUME_THREAD_AFTER_MATERIALIZATION = _PREFIX + "resume_thread_after_materialization"
+TEARDOWN_SCHEMA = _PREFIX + "teardown_schema"
 TEARDOWN_VIEW_SCHEMA = _PREFIX + "teardown_view_schema_task"
 
 DISPATCHED_TASK_NAMES = (
+    DROP_ABANDONED_CANDIDATE,
     DROP_FAILED_REFRESH_SCHEMA,
     FLUSH_PENDING_REQUESTS,
     MATERIALIZE_WORKSPACE,
@@ -43,6 +46,7 @@ DISPATCHED_TASK_NAMES = (
     RECOVER_WORKSPACE_DATA,
     REFRESH_TENANT_SCHEMA,
     RESUME_THREAD_AFTER_MATERIALIZATION,
+    TEARDOWN_SCHEMA,
     TEARDOWN_VIEW_SCHEMA,
 )
 
@@ -125,6 +129,28 @@ async def adefer_rebuild_workspace_semantic_model(*, workspace_id: str) -> int:
 
 def defer_teardown_view_schema(*, view_schema_id: str) -> int:
     return _task(TEARDOWN_VIEW_SCHEMA).defer(view_schema_id=view_schema_id)
+
+
+async def adefer_teardown_view_schema(*, view_schema_id: str) -> int:
+    return await _task(TEARDOWN_VIEW_SCHEMA).defer_async(view_schema_id=view_schema_id)
+
+
+async def adefer_teardown_schema(*, schema_id: str) -> int:
+    return await _task(TEARDOWN_SCHEMA).defer_async(schema_id=schema_id)
+
+
+def configure_teardown_schema(*, schedule_in: dict | None = None) -> JobDeferrer:
+    """A deferrer the caller fills: promotion queues it inside its own transaction,
+    and a retirement retry adds the next attempt."""
+    return _task(TEARDOWN_SCHEMA, schedule_in=schedule_in)
+
+
+def configure_drop_abandoned_candidate(
+    *, queueing_lock: str, schedule_in: dict | None = None
+) -> JobDeferrer:
+    """A deferrer the caller fills: a first drop and its re-queue write different
+    arguments, and the first may be queued inside the caller's transaction."""
+    return _task(DROP_ABANDONED_CANDIDATE, queueing_lock=queueing_lock, schedule_in=schedule_in)
 
 
 def defer_refresh_tenant_schema(

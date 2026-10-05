@@ -28,7 +28,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services import publication, thread_job_dispatch
+from apps.workspaces.services import load_candidates, publication, retirement, thread_job_dispatch
 from apps.workspaces.services.load_generations import (
     INTENT_RECONCILE_MISSING,
     capture_load_intent,
@@ -254,6 +254,101 @@ async def test_a_refresh_queues_semantic_rebuilds_for_single_tenant_workspaces(w
     assert [_row(job) for job in await _aqueued(workspace_id=str(workspace.id))] == [
         _expected("rebuild_workspace_semantic_model", {"workspace_id": str(workspace.id)})
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_the_ttl_sweep_queues_tenant_and_view_teardowns(workspace, tenant):
+    stale = timezone.now() - timedelta(days=365)
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="t_enqueue_ttl", state=SchemaState.ACTIVE, last_accessed_at=stale
+    )
+    vs = await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace,
+        schema_name="ws_enqueue_ttl",
+        state=SchemaState.ACTIVE,
+        last_accessed_at=stale,
+    )
+
+    await retirement.expire_inactive_schemas()
+
+    assert [_row(job) for job in await _aqueued(schema_id=str(schema.id))] == [
+        _expected("teardown_schema", {"schema_id": str(schema.id)})
+    ]
+    assert [_row(job) for job in await _aqueued(view_schema_id=str(vs.id))] == [
+        _expected("teardown_view_schema_task", {"view_schema_id": str(vs.id)})
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_deferred_retirement_queues_its_next_attempt_with_backoff(tenant):
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="t_enqueue_retire", state=SchemaState.TEARDOWN
+    )
+
+    before = timezone.now()
+    await retirement._retry_retirement(schema, [], 1, "tenant lock T is held")
+    after = timezone.now()
+
+    [job] = await _aqueued(schema_id=str(schema.id))
+    assert _row(job) == _expected("teardown_schema", {"schema_id": str(schema.id), "attempt": 2})
+    _assert_scheduled_in(job, 600, before, after)
+
+
+@pytest.mark.django_db
+def test_an_abandoned_candidate_queues_one_drop_pinned_to_its_attempt(workspace, tenant):
+    candidate = TenantSchema.objects.create(
+        tenant=tenant,
+        schema_name="t_enqueue_candidate",
+        state=SchemaState.FAILED,
+        load_workspace_id=workspace.id,
+        load_job_id=11,
+        load_generation=1,
+    )
+    [listed] = load_candidates._failed_workspace_candidates(tenant.id).filter(id=candidate.id)
+
+    before = timezone.now()
+    retirement._queue_candidate_drop_sync(listed, delay=900)
+    after = timezone.now()
+
+    [job] = _queued(schema_id=str(candidate.id))
+    assert _row(job) == _expected(
+        "drop_abandoned_candidate",
+        {
+            "schema_id": str(candidate.id),
+            "last_attempt_at": listed.last_attempt_at.isoformat(),
+            "load_job_id": 11,
+        },
+        queueing_lock=f"drop_abandoned_candidate:{candidate.id}",
+    )
+    _assert_scheduled_in(job, 900, before, after)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_busy_candidate_drop_requeues_itself_under_its_lock():
+    schema_id = "6f0c1c8e-0000-4000-8000-000000000001"
+
+    before = timezone.now()
+    await retirement._requeue_candidate_drop(
+        schema_id, 900, 2, "2026-10-01T00:00:00+00:00", 11, busy_count=3
+    )
+    after = timezone.now()
+
+    [job] = await _aqueued(schema_id=schema_id)
+    assert _row(job) == _expected(
+        "drop_abandoned_candidate",
+        {
+            "schema_id": schema_id,
+            "attempt": 2,
+            "last_attempt_at": "2026-10-01T00:00:00+00:00",
+            "load_job_id": 11,
+            "busy_count": 3,
+        },
+        queueing_lock=f"drop_abandoned_candidate:{schema_id}",
+    )
+    _assert_scheduled_in(job, 900, before, after)
 
 
 @pytest.mark.asyncio

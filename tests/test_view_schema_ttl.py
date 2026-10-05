@@ -41,7 +41,7 @@ async def test_expire_inactive_schemas_also_expires_stale_view_schemas(
     await vs.asave(update_fields=["last_accessed_at"])
 
     with patch(
-        "apps.workspaces.tasks.teardown_view_schema_task.defer_async",
+        "apps.workspaces.services.retirement.adefer_teardown_view_schema",
         new_callable=AsyncMock,
     ) as mock_defer:
         await expire_inactive_schemas()
