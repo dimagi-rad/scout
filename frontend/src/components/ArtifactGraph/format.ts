@@ -24,7 +24,9 @@ export function formatValue(value: unknown, format?: string, field?: FieldMetada
   if ((dateOnly || dateTime) && typeof value === "string") {
     const calendarDate = parseIsoDateLocal(value)
     if (!calendarDate) return value
-    const date = dateOnly || !value.includes("T") ? calendarDate : new Date(value)
+    const timestamp = value.replace(/^(\d{4})-(\d{1,2})-(\d{1,2})[T ]/, (_match, year: string, month: string, day: string) =>
+      `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T`)
+    const date = dateOnly || /^\d{4}-\d{1,2}-\d{1,2}$/.test(value) ? calendarDate : new Date(timestamp)
     if (Number.isNaN(date.getTime())) return value
     return dateOnly ? date.toLocaleDateString() : date.toLocaleString()
   }
@@ -118,7 +120,7 @@ function safeNumericString(value: string): boolean {
 }
 
 function parseIsoDateLocal(value: string): Date | null {
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|T)/)
+  const match = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:$|[T ])/)
   if (!match) return null
   const [, year, month, day] = match.map(Number)
   const date = new Date(0)

@@ -55,3 +55,12 @@ it("treats date-only datetime values as local calendar dates", () => {
   expect(formatValue("2026-06-24", "datetime"))
     .toBe(new Date(2026, 5, 24).toLocaleString())
 })
+
+it.each(["2025-05-26 14:30:00", "2025-5-26"])("preserves supported calendar date input %s", (value) => {
+  expect(formatValue(value, "date")).toBe(new Date(2025, 4, 26).toLocaleDateString())
+})
+
+it("preserves the time in SQL-style timestamp buckets", () => {
+  expect(formatValue("2025-05-26 14:30:00", undefined, { field_type: "time_dimension", granularity: "hour" }))
+    .toBe(new Date(2025, 4, 26, 14, 30).toLocaleString())
+})
