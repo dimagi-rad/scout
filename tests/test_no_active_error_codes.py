@@ -8,7 +8,7 @@ so nothing downstream could tell "load the data" from "fix the query".
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from apps.agents.graph.base import (
+from apps.agents.graph.run_policy import (
     ESCALATION_MESSAGE,
     READ_ONLY_ESCALATION_MESSAGE,
     READ_ONLY_SEMANTIC_ESCALATION_MESSAGE,

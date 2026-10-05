@@ -20,7 +20,7 @@ import pytest
 from anthropic import APIStatusError
 from langchain_core.messages import AIMessage
 
-from apps.agents.graph.base import ESCALATION_MESSAGE
+from apps.agents.graph.run_policy import ESCALATION_MESSAGE
 from apps.chat import stream
 
 

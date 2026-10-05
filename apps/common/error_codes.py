@@ -9,7 +9,7 @@ Every error that crosses a boundary carries both. Neither is derived from the
 other. Recovering a category by substring-matching a message is a bug: Scout has
 already been burned by it once, when matching ``'"code": "NOT_FOUND"'`` in tool
 output broke the moment FastMCP's JSON separators changed (see
-``apps/agents/graph/base.py`` and finding 06#1).
+``apps/agents/graph/run_policy.py`` and finding 06#1).
 
 These began as string constants in ``mcp_server.envelope``, which still re-exports
 them so the ~30 ``error_response(...)`` call sites in ``mcp_server/server.py``

@@ -10,7 +10,7 @@ import json
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from apps.agents.graph.base import _should_escalate, _workspace_access_denial
+from apps.agents.graph.run_policy import _should_escalate, _workspace_access_denial
 
 
 def _err_tool_message(
