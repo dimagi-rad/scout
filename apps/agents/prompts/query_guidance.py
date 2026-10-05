@@ -1,7 +1,6 @@
 """Shared semantic date-window instructions for artifact agents."""
 
-RECENT_PERIOD_QUERY_GUIDANCE = """
-- For "most recent 24 weeks, oldest first", use a query like
+RECENT_PERIOD_QUERY_GUIDANCE = """- For "most recent 24 weeks, oldest first", use a query like
   `{"measures":["visits.count"],"time_dimension":"visits.visit_date","granularity":"week",
   "date_range":{"last":24,"unit":"week"},"order_by":[{"field":"visits.visit_date","direction":"asc"}],"limit":500}`.
   Counted windows support day/week/month/quarter/year, including the current calendar
