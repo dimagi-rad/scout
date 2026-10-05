@@ -165,9 +165,14 @@ const AUTO_EXPAND_TOOLS = new Set([
   "get_metadata",
 ])
 
+const HELPER_TEXT_LABELS = Object.entries(SUBAGENT_TOOL_LABELS).map(([toolName, label]) => {
+  const escapedName = toolName.replaceAll("_", " ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return { pattern: new RegExp(`\\b${escapedName}\\b`, "gi"), label }
+})
+
 function readableHelperText(text: string): string {
-  for (const [toolName, label] of Object.entries(SUBAGENT_TOOL_LABELS)) {
-    text = text.replace(new RegExp(`\\b${toolName.replaceAll("_", " ")}\\b`, "gi"), label)
+  for (const { pattern, label } of HELPER_TEXT_LABELS) {
+    text = text.replace(pattern, label)
   }
   return text
 }
