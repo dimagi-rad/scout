@@ -7,6 +7,7 @@ import {
   categoryAxisWidth,
   CHART_PALETTES,
   compileCompactGraphConfig,
+  prepareCompactGraph,
   formatAxisTick,
   truncateCategoryLabel,
 } from "./recharts"
@@ -211,5 +212,32 @@ describe("horizontal bar category axis", () => {
     }>
     const tick = axis.props.tick({ payload: { value: "Clinic" } })
     expect(tick.props.children).toContain("<Clinic>")
+  })
+})
+
+
+describe("dimension series rendering", () => {
+  it.each([["bar", true, "Bar"], ["bar", false, "Bar"], ["area", true, "Area"], ["line", false, "Line"]])("prepares %s with stacked=%s", (chartType, stacked, kind) => {
+    const { rows, tree } = prepareCompactGraph({
+      chart_type: String(chartType), stacked: Boolean(stacked),
+      x_key: "week", y_key: "visits_count", series_by: "segment",
+    }, [{ week: "May 26", segment: "Top user", visits_count: "3" }, { week: "May 26", segment: "Everyone else", visits_count: 7 }])
+    expect(rows).toHaveLength(1)
+    const series = tree.children?.filter((node) => node.type === kind) ?? []
+    expect(series.map((s) => s.props?.name)).toEqual(["Top user", "Everyone else"])
+    expect(series.map((s) => s.props?.stackId)).toEqual(stacked ? ["stack", "stack"] : [undefined, undefined])
+    expect(new Set(series.map((s) => s.props?.fill ?? s.props?.stroke)).size).toBe(2)
+    expect(tree.children?.some((node) => node.type === "Legend")).toBe(true)
+    expect(tree.children?.find((node) => node.type === "YAxis")?.props?.allowDecimals).toBe(false)
+    expect(() => buildRechartsTree(tree, rows)).not.toThrow()
+  })
+
+  it("rejects string series with corrective guidance", () => {
+    expect(() => prepareCompactGraph({ series: "segment", y_key: "count" }, [])).toThrow("series_by")
+  })
+
+  it.each([{ series_by: null }, { series: ["count"] }, { chart_type: "pie" }, { y_key: undefined }])("rejects incomplete or ambiguous dimension config", (changes) => {
+    const base = { chart_type: "bar", x_key: "week", y_key: "count", series_by: "segment" }
+    expect(() => prepareCompactGraph({ ...base, ...changes }, [])).toThrow()
   })
 })

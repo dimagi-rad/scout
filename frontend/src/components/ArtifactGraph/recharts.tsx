@@ -23,6 +23,7 @@ import {
   YAxis,
 } from "recharts"
 
+import { pivotSeriesRows } from "./seriesPivot"
 import { formatValue } from "./format"
 import type { Row } from "./types"
 
@@ -180,6 +181,7 @@ export interface CompactGraphConfig {
   x_key?: string
   y_key?: string
   series?: unknown
+  series_by?: unknown
   data_label?: string
   y_format?: string
   stacked?: boolean
@@ -191,6 +193,37 @@ export interface CompactGraphConfig {
   orientation?: string
   x_label?: string
   y_label?: string
+}
+
+export function prepareCompactGraph(config: CompactGraphConfig, rows: Row[]): { rows: Row[]; tree: RechartsNode } {
+  if (!("series_by" in config)) {
+    if ("series" in config && (config.series === undefined || (Array.isArray(config.series) && config.series.length === 0))) {
+      throw new Error("series must be a non-empty array; use series_by for long-format data")
+    }
+    return { rows, tree: compileCompactGraphConfig(config) }
+  }
+  if (
+    typeof config.series_by !== "string" || !config.series_by.trim()
+    || !config.x_key?.trim() || !config.y_key?.trim()
+    || "series" in config
+    || !["bar", "area", "line"].includes(config.chart_type ?? "line")
+  ) {
+    throw new Error("series_by requires x_key and y_key on a compact bar, area or line chart; do not combine with series")
+  }
+  const pivot = pivotSeriesRows(rows, {
+    xKey: config.x_key,
+    yKey: config.y_key,
+    seriesBy: config.series_by,
+    fillMissing: config.chart_type === "bar" || (config.chart_type === "area" && config.stacked === true),
+  })
+  return {
+    rows: pivot.rows,
+    tree: compileCompactGraphConfig({
+      ...config,
+      series: pivot.series.length ? pivot.series : undefined,
+      y_format: config.y_format ?? inferSeriesFormat([{ data_key: config.y_key }]),
+    }),
+  }
 }
 
 export function compileCompactGraphConfig(config: CompactGraphConfig): RechartsNode {
@@ -353,23 +386,23 @@ export function compileCompactGraphConfig(config: CompactGraphConfig): RechartsN
 }
 
 export function normalizeGraphSeries(series: unknown, yKey?: string, dataLabel?: string): GraphSeries[] {
-  if (Array.isArray(series) && series.length > 0) {
-    return series
-      .map((item): GraphSeries | undefined => {
-        if (typeof item === "string") return { data_key: item, label: item }
-        if (isRecord(item)) {
-          const dataKey = stringValue(item.data_key) ?? stringValue(item.y_key) ?? stringValue(item.key)
-          return dataKey
-            ? {
-                data_key: dataKey,
-                label: stringValue(item.label) ?? stringValue(item.name) ?? dataKey,
-                color: safeColor(stringValue(item.color)),
-              }
-            : undefined
+  if (series !== undefined) {
+    const invalid = () => new Error("series must be an array of data-key strings or objects; use series_by for long-format data")
+    if (!Array.isArray(series) || series.length === 0) throw invalid()
+    return series.map((item): GraphSeries => {
+      if (typeof item === "string" && item.trim()) return { data_key: item, label: item }
+      if (isRecord(item)) {
+        const dataKey = item.data_key || item.y_key || item.key
+        if (typeof dataKey !== "string" || !dataKey.trim()) throw invalid()
+        if (["label", "name"].some((key) => key in item && typeof item[key] !== "string")) throw invalid()
+        return {
+          data_key: dataKey,
+          label: stringValue(item.label) ?? stringValue(item.name) ?? dataKey,
+          color: safeColor(stringValue(item.color)),
         }
-        return undefined
-      })
-      .filter(isGraphSeries)
+      }
+      throw invalid()
+    })
   }
   if (yKey) return [{ data_key: yKey, label: dataLabel ?? yKey }]
   return []
@@ -598,9 +631,7 @@ function resolveDataProp(type: string, value: unknown, rows: Row[]): unknown {
   throw new Error(`Recharts ${type} props.data must be an array; omit props.data to use block rows`)
 }
 
-function isGraphSeries(value: GraphSeries | undefined): value is GraphSeries {
-  return Boolean(value)
-}
+
 
 const CATEGORY_TICK_FONT_SIZE = 11
 const CATEGORY_TICK_CHAR_WIDTH = 6.2

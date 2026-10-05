@@ -559,3 +559,24 @@ describe("ArtifactGraphRenderer", () => {
     })
   })
 })
+
+it("presents invalid series as a chart error without crashing the artifact", async () => {
+  const graph = artifact()
+  const doc = graph.data.story_doc as { blocks: Array<{ config: Record<string, unknown> }> }
+  doc.blocks[3].config.series = "segment"
+  mockedPost.mockResolvedValue({ columns: ["date", "visits_count"], rows: [["2026-06-24", 12]], row_count: 1 })
+  render(<ArtifactGraphRenderer artifact={graph} workspaceId="workspace-1" />)
+  expect(await screen.findByText(/Chart config error:.*series_by/)).toBeInTheDocument()
+  expect(screen.getByRole("heading", { name: "Visits" })).toBeInTheDocument()
+})
+
+it("renders dimension series without checking generated keys against the source rows", async () => {
+  const graph = artifact()
+  const doc = graph.data.story_doc as { blocks: Array<{ config: Record<string, unknown> }> }
+  doc.blocks[3].config = { title: "Long format", chart_type: "bar", x_key: "date", y_key: "visits_count", series_by: "segment", stacked: true }
+  mockedPost.mockResolvedValue({ columns: ["date", "segment", "visits_count"], rows: [["2026-06-24", "Top user", 12], ["2026-06-24", "Others", 8]], row_count: 2 })
+  const { container } = render(<ArtifactGraphRenderer artifact={graph} workspaceId="workspace-1" />)
+  await waitFor(() => expect(container.querySelector('[data-block-type="graph"]')).toBeInTheDocument())
+  expect(screen.queryByText(/Not in the data:/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/Chart config error:/)).not.toBeInTheDocument()
+})

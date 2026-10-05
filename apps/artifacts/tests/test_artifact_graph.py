@@ -1732,3 +1732,54 @@ def test_graph_doc_checks_every_series_key_against_query(series):
     doc = graph_doc()
     doc["blocks"][2]["config"]["series"] = series
     assert any(item.get("code") == "missing_result_key:absent" for item in validate_doc(doc))
+
+
+@pytest.mark.parametrize("chart_type", ["bar", "area", "line"])
+def test_graph_doc_accepts_dimension_series(chart_type):
+    doc = graph_doc()
+    doc["blocks"][1]["config"]["queries"]["visits_by_day"]["dimensions"] = ["visits.segment"]
+    doc["blocks"][2]["config"] = {
+        "chart_type": chart_type,
+        "x_key": "date",
+        "y_key": "visits_count",
+        "series_by": "visits_segment",
+        "stacked": chart_type != "line",
+    }
+    assert validate_doc(doc) == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"series_by": None},
+        {"series_by": []},
+        {"series_by": ""},
+        {"series": ["visits_count"]},
+        {"y_key": None},
+        {"x_key": None},
+        {"chart_type": "pie"},
+        {"chart_type": "donut"},
+        {"recharts": {"type": "BarChart"}},
+    ],
+)
+def test_graph_doc_rejects_invalid_dimension_series(changes):
+    doc = graph_doc()
+    doc["blocks"][2]["config"] = {
+        "chart_type": "bar",
+        "x_key": "date",
+        "y_key": "visits_count",
+        "series_by": "visits_segment",
+        **changes,
+    }
+    assert any(item.get("code") == "graph_series_by" for item in validate_doc(doc))
+
+
+def test_graph_doc_checks_series_by_against_bound_query():
+    doc = graph_doc()
+    doc["blocks"][2]["config"] = {
+        "chart_type": "bar",
+        "x_key": "date",
+        "y_key": "visits_count",
+        "series_by": "absent",
+    }
+    assert any(item.get("code") == "missing_result_key:absent" for item in validate_doc(doc))
