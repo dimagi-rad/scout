@@ -4,7 +4,10 @@ import { describe, expect, it, vi } from "vitest"
 import { api } from "@/api/client"
 import { OnboardingWizard } from "./OnboardingWizard"
 
-vi.mock("@/api/client", () => ({ api: { get: vi.fn(), post: vi.fn() } }))
+vi.mock("@/api/client", () => ({
+  api: { get: vi.fn(), post: vi.fn() },
+  getCsrfToken: () => "tok",
+}))
 
 function providers(status: string | null) {
   return {

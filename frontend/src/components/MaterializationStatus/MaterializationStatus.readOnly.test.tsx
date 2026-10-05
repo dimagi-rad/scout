@@ -52,6 +52,8 @@ describe("source position and teammates' loads", () => {
       <MaterializationProgressBanner
         job={{
           ...job,
+          // A running job is replying; sources load while it is pending.
+          state: "pending",
           progress: {
             percent: null,
             rows_loaded: 0,

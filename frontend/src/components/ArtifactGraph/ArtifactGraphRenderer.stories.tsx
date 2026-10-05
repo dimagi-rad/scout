@@ -143,3 +143,26 @@ export const LongCategoryLabels: Story = {
     },
   },
 }
+
+export const LongFormatStackedBars: Story = {
+  args: {
+    artifact: {
+      id: "long-format-demo", title: "Weekly submissions", type: "story", code: "",
+      version: 1, semantic_queries: [],
+      data: { story_doc: { schema_version: 1, blocks: [
+        { id: "title", type: "title", config: { text: "Weekly submissions", subtitle: "Synthetic data · long-format rows" } },
+        { id: "chart", type: "graph", inputs: { data: { value: [
+          { week: "2026-05-26", segment: "Top user", submissions_count: 35 },
+          { week: "2026-05-26", segment: "All other users", submissions_count: 65 },
+          { week: "2026-06-02", segment: "Top user", submissions_count: 42 },
+          { week: "2026-06-02", segment: "All other users", submissions_count: 78 },
+          { week: "2026-06-09", segment: "Top user", submissions_count: 28 },
+          { week: "2026-06-09", segment: "All other users", submissions_count: 52 },
+        ] } }, config: {
+          chart_type: "bar", x_key: "week", y_key: "submissions_count", series_by: "segment",
+          stacked: true, height: 360, style: { legend: "bottom" },
+        } },
+      ] } },
+    },
+  },
+}

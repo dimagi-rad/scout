@@ -116,3 +116,12 @@ def test_unknown_repair_is_not_presented_as_authorized_recovery(prompt):
     assert "repair could not be determined" in prose
     assert "diagnostics" in prose
     assert "do not guess" in prose
+
+
+def test_artifact_prompts_explain_long_format_series_and_visual_verification():
+    for prompt in (ARTIFACT_PROMPT_ADDITION, ARTIFACT_MANAGER_SYSTEM_PROMPT):
+        assert '"series_by": "visits_segment"' in prompt
+        assert '"stacked": true' in prompt
+        assert "wide-format" in prompt
+        assert "validated schema" in prompt
+        assert "Other" in prompt

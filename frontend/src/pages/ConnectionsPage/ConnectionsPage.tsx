@@ -2,7 +2,12 @@ import { useState, useEffect, useCallback, useMemo } from "react"
 import { api } from "@/api/client"
 import { refreshUserTenants } from "@/api/userTenantsCache"
 import { CONNECTIONS_PATH } from "@/lib/routes"
-import { oauthConnectUrl, type OAuthProvider, type OAuthProviderStatus } from "@/lib/oauth"
+import {
+  oauthConnectUrl,
+  startOAuthOnClick,
+  type OAuthProvider,
+  type OAuthProviderStatus,
+} from "@/lib/oauth"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -366,7 +371,10 @@ export function ConnectionsPage() {
                             asChild
                             data-testid={`connect-another-${provider.id}`}
                           >
-                            <a href={connectUrlFor(provider)}>Connect another team</a>
+                            <a
+                              href={connectUrlFor(provider)}
+                              onClick={startOAuthOnClick}
+                            >Connect another team</a>
                           </Button>
                         )}
                       {provider.status !== "connected" && copy.action && (
@@ -376,7 +384,10 @@ export function ConnectionsPage() {
                           asChild
                           data-testid={`connect-${provider.id}`}
                         >
-                          <a href={connectUrlFor(provider)}>{copy.action}</a>
+                          <a
+                            href={connectUrlFor(provider)}
+                            onClick={startOAuthOnClick}
+                          >{copy.action}</a>
                         </Button>
                       )}
                       {canDisconnect && !isConfirmingDisconnect && (
@@ -534,7 +545,10 @@ export function ConnectionsPage() {
                                   asChild
                                   data-testid={`connection-reconnect-${conn.connection_id}`}
                                 >
-                                  <a href={connectUrlFor(oauthProvider)}>Reconnect</a>
+                                  <a
+                                    href={connectUrlFor(oauthProvider)}
+                                    onClick={startOAuthOnClick}
+                                  >Reconnect</a>
                                 </Button>
                               ) : null
                             }

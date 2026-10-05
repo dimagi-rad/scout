@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -25,10 +26,13 @@ from apps.transformations.models import (
     TransformationScope,
 )
 from apps.transformations.services.dbt_project import write_dbt_project
+from apps.workspaces.services.load_phases import LoadPhase
 from apps.workspaces.services.schema_manager import dbt_role_name
 from mcp_server.services.dbt_runner import generate_profiles_yml, run_dbt, run_dbt_test
 
 logger = logging.getLogger(__name__)
+
+PhaseCallback = Callable[[LoadPhase, str], None]
 
 
 class TransformStageError(RuntimeError):
@@ -99,8 +103,12 @@ def run_transformation_pipeline(
     workspace=None,
     progress_callback=None,
     asset_snapshot: list[TransformationAsset] | None = None,
+    phase_callback: PhaseCallback | None = None,
 ) -> TransformationRun:
     """Execute system → tenant → workspace; a supplied snapshot is tenant-only.
+
+    ``phase_callback`` receives a plain-language phase per stage and before its
+    data tests, for the chat's load progress card.
 
     ``asset_snapshot`` lets a load run exactly the assets it fingerprinted, so a
     concurrent edit cannot relabel or mix this load's transform stages. An asset
@@ -145,6 +153,7 @@ def run_transformation_pipeline(
 
     test_failures: list[TestFailure] = []
     try:
+        staged = []
         for stage_name, scope, filters in stages:
             assets = (
                 [asset for asset in asset_snapshot if asset.scope == scope]
@@ -154,9 +163,17 @@ def run_transformation_pipeline(
             if not assets:
                 logger.info("Stage '%s': no assets, skipping", stage_name)
                 continue
+            staged.append((stage_name, assets))
+        for index, (stage_name, assets) in enumerate(staged, start=1):
             if progress_callback:
                 progress_callback(f"Running {stage_name} transforms ({len(assets)} models)...")
-            test_failures.extend(_run_stage(run, assets, schema_name, stage_name))
+            if phase_callback:
+                noun = "model" if len(assets) == 1 else "models"
+                phase_callback(
+                    LoadPhase.BUILDING_TABLES,
+                    f"Stage {index} of {len(staged)} · {len(assets)} {noun}",
+                )
+            test_failures.extend(_run_stage(run, assets, schema_name, stage_name, phase_callback))
 
         if test_failures:
             # The models built, so this is not FAILED — but it is not a clean
@@ -180,7 +197,9 @@ def run_transformation_pipeline(
     return run
 
 
-def _run_stage(run, assets, schema_name, stage_name) -> list[TestFailure]:
+def _run_stage(
+    run, assets, schema_name, stage_name, phase_callback: PhaseCallback | None = None
+) -> list[TestFailure]:
     asset_runs = {}
     for asset in assets:
         ar = TransformationAssetRun.objects.create(
@@ -191,7 +210,7 @@ def _run_stage(run, assets, schema_name, stage_name) -> list[TestFailure]:
         asset_runs[asset.name] = ar
 
     try:
-        return _execute_stage(asset_runs, assets, schema_name, stage_name)
+        return _execute_stage(asset_runs, assets, schema_name, stage_name, phase_callback)
     except Exception:
         # Mark any asset runs still in RUNNING as FAILED so they don't stay orphaned.
         now = datetime.now(UTC)
@@ -204,7 +223,9 @@ def _run_stage(run, assets, schema_name, stage_name) -> list[TestFailure]:
         raise
 
 
-def _execute_stage(asset_runs, assets, schema_name, stage_name) -> list[TestFailure]:
+def _execute_stage(
+    asset_runs, assets, schema_name, stage_name, phase_callback: PhaseCallback | None = None
+) -> list[TestFailure]:
     with tempfile.TemporaryDirectory() as tmpdir:
         project_dir = Path(tmpdir) / "project"
         profiles_dir = Path(tmpdir) / "profiles"
@@ -239,6 +260,8 @@ def _execute_stage(asset_runs, assets, schema_name, stage_name) -> list[TestFail
 
         test_results = {}
         if result.get("success") and any(a.test_yaml for a in assets):
+            if phase_callback:
+                phase_callback(LoadPhase.CHECKING_QUALITY, "Running data tests on the new tables")
             test_results = run_dbt_test(
                 dbt_project_dir=str(project_dir),
                 profiles_dir=str(profiles_dir),

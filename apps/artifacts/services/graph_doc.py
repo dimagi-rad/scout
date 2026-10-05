@@ -80,6 +80,7 @@ CONFIG_KEYS = {
         "x_key",
         "y_key",
         "series",
+        "series_by",
         "data_label",
         "recharts",
         "query",
@@ -778,6 +779,28 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
                 require_time_dimension=_has_input_binding(block, "date_range"),
             )
         )
+    if block_type == "graph" and "series_by" in config:
+        valid_fields = all(
+            isinstance(config.get(key), str) and config[key].strip()
+            for key in ("series_by", "x_key", "y_key")
+        )
+        if (
+            not valid_fields
+            or "series" in config
+            or "recharts" in config
+            or not _is_choice(config.get("chart_type", "line"), {"bar", "area", "line"})
+        ):
+            diagnostics.append(
+                problem(
+                    "config.series_by requires non-empty series_by, x_key and y_key fields on a "
+                    "compact bar, area or line chart. Use either series_by for long-format rows "
+                    "or series for wide-format rows; do not combine them or use recharts.",
+                    block_id=block_id,
+                    code="graph_series_by",
+                )
+            )
+    if block_type == "graph" and "series" in config:
+        diagnostics.extend(_compact_series_diagnostics(config["series"], block_id=block_id))
     if block_type == "graph" and "recharts" in config:
         diagnostics.extend(
             _recharts_diagnostics(
@@ -804,9 +827,6 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
                 path="config.style",
                 block_id=block_id,
             )
-        )
-        diagnostics.extend(
-            _compact_series_color_diagnostics(config.get("series"), block_id=block_id)
         )
     if block_type == "stat":
         diagnostics.extend(
@@ -1012,15 +1032,36 @@ def _recharts_diagnostics(
     return diagnostics
 
 
-def _compact_series_color_diagnostics(
+def _compact_series_diagnostics(
     series: Any,
     *,
     block_id: str,
 ) -> list[dict[str, Any]]:
-    if not isinstance(series, list):
-        return []
+    guidance = (
+        "config.series must be a non-empty array of data-key strings or objects with "
+        "data_key (aliases: y_key, key) and optional string label/name. "
+        "For long-format rows use series_by with the dimension column and y_key with the measure."
+    )
+    if not isinstance(series, list) or not series:
+        return [problem(guidance, block_id=block_id, code="graph_series")]
     diagnostics: list[dict[str, Any]] = []
     for index, item in enumerate(series):
+        key = item
+        if isinstance(item, dict):
+            key = item.get("data_key") or item.get("y_key") or item.get("key")
+        valid = isinstance(key, str) and bool(key.strip())
+        if isinstance(item, dict):
+            valid = valid and all(
+                isinstance(item[field], str) for field in ("label", "name") if field in item
+            )
+        if not valid:
+            diagnostics.append(
+                problem(
+                    f"config.series[{index}] is invalid. {guidance}",
+                    block_id=block_id,
+                    code="graph_series",
+                )
+            )
         if not isinstance(item, dict) or "color" not in item:
             continue
         if not _is_choice(item.get("color"), SAFE_RECHARTS_COLORS):
@@ -1217,6 +1258,8 @@ def _referenced_data_keys(block: dict[str, Any]) -> list[str]:
             keys.append(config["x_key"])
         if isinstance(config.get("y_key"), str):
             keys.append(config["y_key"])
+        if isinstance(config.get("series_by"), str):
+            keys.append(config["series_by"])
         series = config.get("series")
         if isinstance(series, list):
             for item in series:

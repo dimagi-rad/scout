@@ -6,7 +6,10 @@ import { refreshUserTenants } from "@/api/userTenantsCache"
 import { useAppStore } from "@/store/store"
 import { ConnectionsPage } from "./ConnectionsPage"
 
-vi.mock("@/api/client", () => ({ api: { get: vi.fn(), post: vi.fn(), delete: vi.fn() } }))
+vi.mock("@/api/client", () => ({
+  api: { get: vi.fn(), post: vi.fn(), delete: vi.fn() },
+  getCsrfToken: () => "tok",
+}))
 vi.mock("@/api/userTenantsCache", () => ({ refreshUserTenants: vi.fn() }))
 
 describe("ConnectionsPage", () => {
@@ -343,6 +346,35 @@ describe("ConnectionsPage", () => {
       expect(screen.getByTestId("provider-access-ocs")).toHaveTextContent(
         "Open Chat Studio isn't granting access for team dimagi-dev.",
       )
+    })
+
+    it("reconnects with a CSRF-token POST instead of allauth's GET confirmation page", async () => {
+      const submit = vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(() => {})
+      renderWith([
+        {
+          connection_id: "c1",
+          provider: "ocs",
+          credential_type: "oauth",
+          scope_key: "acme",
+          scope_label: "acme",
+          status: "expired",
+          access_state: "expired",
+          chatbots: [],
+          archived_chatbots: [],
+        },
+      ])
+
+      fireEvent.click(await screen.findByTestId("connection-reconnect-c1"))
+
+      await waitFor(() => expect(submit).toHaveBeenCalledTimes(1))
+      const form = submit.mock.contexts[0] as HTMLFormElement
+      expect(new URL(form.action).pathname).toBe("/accounts/ocs/login/")
+      expect(Object.fromEntries(new FormData(form).entries())).toEqual({
+        process: "connect",
+        next: "/settings/connections",
+        csrfmiddlewaretoken: "tok",
+      })
+      submit.mockRestore()
     })
 
     it("tells an expired sign-in to reconnect, and stays quiet for a healthy team", async () => {

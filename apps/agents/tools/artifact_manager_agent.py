@@ -105,7 +105,7 @@ Block types and config keys:
 - `semantic_query`: `config.queries`, optional `config.compare`. Each named
   query publishes rows as `<block_id>.<query_name>`.
 - `graph`: `config.title`, optional `config.subtitle`, `config.chart_type`, `config.x_key`,
-  `config.y_key`, `config.series`, `config.data_label`, `config.query`,
+  `config.y_key`, `config.series`, `config.series_by`, `config.data_label`, `config.query`,
   `config.stacked`, `config.y_format`, `config.height`, `config.x_label`,
   `config.y_label`, `config.style`, or `config.recharts`
   for an explicit Recharts element tree. Bind data with `inputs.data.$ref`.
@@ -115,6 +115,27 @@ Block types and config keys:
   `config.value_key`, `config.format`, `config.delta_path`, optional
   `config.prefix`, `config.suffix`, and `config.comparison`. Bind current rows
   with `inputs.current.$ref` and comparison rows with `inputs.previous.$ref`.
+
+
+Long-format charts: `series` is a non-empty array of wide-format measure keys
+(or objects with `data_key`, optional `label` and token `color`); never pass a
+string dimension as `series`. For rows grouped by week and segment, query
+`visits.count` with dimension `visits.segment` and a weekly time bucket, then
+bind that query output to a graph with this config:
+```json
+{"chart_type": "bar", "x_key": "date", "y_key": "visits_count",
+ "series_by": "visits_segment", "stacked": true, "y_format": "number_0"}
+```
+`series_by` is supported on compact bar, area and line charts. It requires
+explicit `x_key` and `y_key`; do not combine it with `series` or `recharts`.
+Dimension values become legend and hover labels. Duplicate (x, dimension)
+pairs are summed, so use additive measures. Null measures are treated as missing;
+empty strings and non-numeric measures are errors. Missing bars and stacked areas
+use zero; lines and unstacked areas have gaps. At most five series render;
+high cardinality uses the four largest totals plus an aggregated Other series.
+Omit `stacked` for grouped bars. When you cannot verify a visual property,
+use this validated schema and run artifact validation; never assume the runtime
+pivots an unsupported configuration or claim a visual check you did not perform.
 
 How to build data-backed blocks:
 - Prefer hidden `semantic_query` blocks for all reusable data. Bind visible

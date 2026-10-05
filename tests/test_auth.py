@@ -148,7 +148,7 @@ class TestDjangoAllauthConfiguration:
     def test_socialaccount_login_on_get_disabled(self, settings):
         """SOCIALACCOUNT_LOGIN_ON_GET=False requires a POST (with CSRF token) to
         initiate OAuth, closing login-CSRF on GET (arch #258, finding 14#2).
-        allauth renders a short "Continue with <provider>" interstitial on GET."""
+        The SPA POSTs with its token; a bare GET gets allauth's "Continue" page."""
         assert settings.SOCIALACCOUNT_LOGIN_ON_GET is False
 
     def test_site_id_configured(self, settings):

@@ -166,7 +166,7 @@ describe("WorkspacesPage", () => {
     })
     renderPage()
     expect(screen.getByTestId("workspaces-no-access-banner")).toHaveTextContent(
-      "You don't have access to 1 workspace.",
+      "1 workspace needs a reconnect to restore access.",
     )
     expect(screen.getByTestId("workspaces-no-access-connections")).toHaveAttribute(
       "href",
@@ -174,6 +174,31 @@ describe("WorkspacesPage", () => {
     )
     expect(screen.getByTestId("workspace-no-access-lost")).toHaveTextContent("No access")
     expect(screen.queryByTestId("workspace-no-access-ok")).toBeNull()
+  })
+
+  it("counts only workspaces a reconnect restores", () => {
+    useAppStore.setState({
+      domains: [
+        { ...ws("expired", "Expired", "2026-01-01T00:00:00Z"), has_access: false, needs_reconnect: true },
+        { ...ws("expired2", "Expired 2", "2026-01-02T00:00:00Z"), has_access: false, needs_reconnect: true },
+        { ...ws("dropped", "Dropped", "2026-01-03T00:00:00Z"), has_access: false, needs_reconnect: false },
+      ],
+    })
+    renderPage()
+    expect(screen.getByTestId("workspaces-no-access-banner")).toHaveTextContent(
+      "2 workspaces need a reconnect to restore access.",
+    )
+    expect(screen.getByTestId("workspace-no-access-dropped")).toHaveTextContent("No access")
+  })
+
+  it("hides the banner when no lost workspace can be reconnected", () => {
+    useAppStore.setState({
+      domains: [
+        { ...ws("dropped", "Dropped", "2026-01-03T00:00:00Z"), has_access: false, needs_reconnect: false },
+      ],
+    })
+    renderPage()
+    expect(screen.queryByTestId("workspaces-no-access-banner")).toBeNull()
   })
 
   it("opens a workspace inside the embed", async () => {
