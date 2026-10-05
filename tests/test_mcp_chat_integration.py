@@ -23,7 +23,7 @@ from django.test import AsyncClient
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 
-from apps.agents.graph.base import _build_tools
+from apps.agents.graph.tool_binding import _build_tools
 from apps.chat.models import Thread
 from apps.chat.stream import (
     TOOL_OUTPUT_MAX_CHARS,

@@ -4,13 +4,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from apps.agents.graph.base import (
-    SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
-    _make_injecting_tool_node,
-    human_turn_count,
-)
 from apps.agents.graph.state import AgentState
-from apps.agents.subagents.events import HUMAN_TURN_PARAM
+from apps.agents.graph.tool_binding import _make_injecting_tool_node, human_turn_count
+from apps.agents.subagents.events import HUMAN_TURN_PARAM, SUBAGENT_EVENT_QUEUE_CONFIG_KEY
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 
 
@@ -23,7 +19,7 @@ def test_make_injecting_tool_node_injects_thread_id_and_tool_call_id(monkeypatch
     """The injecting wrapper copies state values + the LangChain tool_call_id
     into the tool call args for any MCP tool."""
     monkeypatch.setattr(
-        "apps.agents.graph.base.MCP_TOOL_NAMES",
+        "apps.agents.graph.tool_binding.MCP_TOOL_NAMES",
         {"run_materialization"},
     )
 
@@ -76,7 +72,7 @@ def test_make_injecting_tool_node_injects_subagent_queue_for_artifact_manager(mo
     so child events do not rely on ContextVar propagation inside ToolNode.
     """
     monkeypatch.setattr(
-        "apps.agents.graph.base.LOCAL_CONTEXT_TOOL_NAMES",
+        "apps.agents.graph.tool_binding.LOCAL_CONTEXT_TOOL_NAMES",
         {"artifact_manager"},
     )
 
@@ -116,7 +112,7 @@ def test_make_injecting_tool_node_synthesizes_missing_artifact_task(monkeypatch)
     """
 
     monkeypatch.setattr(
-        "apps.agents.graph.base.LOCAL_CONTEXT_TOOL_NAMES",
+        "apps.agents.graph.tool_binding.LOCAL_CONTEXT_TOOL_NAMES",
         {"artifact_manager"},
     )
 
@@ -172,7 +168,7 @@ def test_make_injecting_tool_node_synthesizes_missing_artifact_task(monkeypatch)
 def test_make_injecting_tool_node_warns_on_missing_tool_call_id(monkeypatch, caplog):
     """A tool call without an id should produce a warning, not crash."""
     monkeypatch.setattr(
-        "apps.agents.graph.base.MCP_TOOL_NAMES",
+        "apps.agents.graph.tool_binding.MCP_TOOL_NAMES",
         {"run_materialization"},
     )
     base_node = MagicMock()
@@ -186,7 +182,7 @@ def test_make_injecting_tool_node_warns_on_missing_tool_call_id(monkeypatch, cap
     ai_msg = AIMessage(content="", tool_calls=[tool_call])
     state = {"messages": [ai_msg], "workspace_id": "ws-1"}
 
-    with caplog.at_level(logging.WARNING, logger="apps.agents.graph.base"):
+    with caplog.at_level(logging.WARNING, logger="apps.agents.graph.tool_binding"):
         asyncio.run(node(state))
 
     assert any("has no id" in r.message for r in caplog.records)

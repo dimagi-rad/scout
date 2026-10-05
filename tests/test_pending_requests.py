@@ -20,7 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
 from procrastinate.exceptions import AlreadyEnqueued
 
-from apps.agents.graph.base import human_turn_count
+from apps.agents.graph.tool_binding import human_turn_count
 from apps.chat import pending_requests, turn_lease
 from apps.chat.constants import MAX_MESSAGE_LENGTH, SYSTEM_RESUME_MARKER
 from apps.chat.message_converter import langchain_messages_to_ui

@@ -65,7 +65,7 @@ class ArtifactManagerInput(BaseModel):
     )
     artifact_id: str | None = Field(default=None, description="Existing artifact id, if any.")
     # Injected by the parent graph. Hidden from the model-facing schema in
-    # apps.agents.graph.base._llm_tool_schemas.
+    # apps.agents.graph.tool_binding._llm_tool_schemas.
     tool_call_id: str | None = None
     subagent_event_queue: Any | None = None
 
