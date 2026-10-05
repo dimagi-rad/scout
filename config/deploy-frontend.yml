@@ -2,15 +2,13 @@
 # nginx serving React SPA, proxies /api/ and /admin/ to Django
 #
 # Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
-#
-# Staging deploys from this file too, via `-d staging` — see the .staging.yml overlay.
 
 service: scout-frontend
 
 image: scout/frontend
 
-# Stopped rollback containers pin their images. Kamal counts these per service
-# across both destinations; the default of 5 helped fill the shared host disk.
+# Stopped rollback containers pin their images. Kamal counts these per
+# service; the default of 5 helped fill the host disk.
 retain_containers: 3
 
 servers:
@@ -53,8 +51,6 @@ proxy:
     path: /
     timeout: 3
 
-# Production only — see the gate comment in config/deploy.yml.
-#<% unless ENV["KAMAL_DESTINATION"] %>
 logging:
   driver: awslogs
   options:
@@ -62,4 +58,3 @@ logging:
     awslogs-group: /scout/frontend
     awslogs-create-group: "false"
     tag: "{{.Name}}"
-#<% end %>

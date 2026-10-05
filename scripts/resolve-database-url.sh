@@ -34,6 +34,6 @@ RDS_SECRET=$(aws secretsmanager get-secret-value \
 DB_PASSWORD=$(echo "$RDS_SECRET" | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
 DB_PASSWORD_ENCODED=$(python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "$DB_PASSWORD")
 
-# Second environments share the RDS instance/master role but use their own
-# database — set SCOUT_DB_NAME (e.g. agent_platform_staging) to target it.
+# Set SCOUT_DB_NAME to target another database on the same instance (e.g.
+# postgres for admin tasks).
 echo "postgresql://platform:${DB_PASSWORD_ENCODED}@${SCOUT_RDS_ENDPOINT}:5432/${SCOUT_DB_NAME:-agent_platform}"

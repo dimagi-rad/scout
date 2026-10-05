@@ -4,7 +4,7 @@
 // anything: every run is green and production stays behind main (G10).
 // This only alerts. It never dispatches a deploy: a run is usually cancelled on
 // purpose (host trouble, a held migration), and an unattended redeploy drains
-// workers on a host shared with staging.
+// production workers.
 const { WAITING, findLiveRun, listMainRuns } = require('./deploy-supersede.cjs');
 const { findOpenIssue, fileOrComment } = require('./deploy-failure-issue.cjs');
 

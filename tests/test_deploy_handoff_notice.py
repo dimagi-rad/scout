@@ -12,12 +12,11 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _notice(destination):
-    filename = "deploy-staging.yml" if destination == "staging" else "deploy.yml"
-    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / filename).read_text())
+def _notice():
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "deploy.yml").read_text())
     steps = workflow["jobs"]["deploy"]["steps"]
     matching = [step for step in steps if step.get("name") == "Report interrupted backend handoff"]
-    assert len(matching) == 1, f"{destination} must report an interrupted backend handoff"
+    assert len(matching) == 1, "deploy.yml must report an interrupted backend handoff"
     assert (
         next(step for step in steps if step.get("name") == "Drain old workers")["id"]
         == "drain_workers"
@@ -56,7 +55,6 @@ def _condition_value(expression, *, failed, cancelled, drain, worker):
     return value(ast.parse(expression, mode="eval").body)
 
 
-@pytest.mark.parametrize("destination", ["production", "staging"])
 @pytest.mark.parametrize(
     ("failed", "cancelled", "drain", "worker", "expected"),
     [
@@ -72,10 +70,8 @@ def _condition_value(expression, *, failed, cancelled, drain, worker):
         (False, True, "success", "cancelled", True),
     ],
 )
-def test_notice_only_runs_for_an_interrupted_handoff(
-    destination, failed, cancelled, drain, worker, expected
-):
-    notice = _notice(destination)
+def test_notice_only_runs_for_an_interrupted_handoff(failed, cancelled, drain, worker, expected):
+    notice = _notice()
     assert (
         _condition_value(
             notice["if"], failed=failed, cancelled=cancelled, drain=drain, worker=worker
@@ -84,9 +80,8 @@ def test_notice_only_runs_for_an_interrupted_handoff(
     )
 
 
-@pytest.mark.parametrize("destination", ["production", "staging"])
-def test_notice_emits_annotation_and_summary_without_running_remote_commands(destination, tmp_path):
-    notice = _notice(destination)
+def test_notice_emits_annotation_and_summary_without_running_remote_commands(tmp_path):
+    notice = _notice()
     summary = tmp_path / "summary.md"
     result = subprocess.run(  # noqa: S603 - checked-in notice, no credentials and no external commands in PATH
         ["/bin/bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", notice["run"]],
@@ -99,10 +94,10 @@ def test_notice_emits_annotation_and_summary_without_running_remote_commands(des
     assert result.returncode == 0, result.stderr
     assert "::error title=Backend handoff interrupted::" in result.stdout
     guidance = summary.read_text()
-    assert destination in guidance
+    assert "production" in guidance
     assert "may be draining or stopped" in guidance
     assert "queued jobs may be paused" in guidance
-    assert f".scout-worker-drains-v1/{destination}/" in guidance
+    assert ".scout-worker-drains-v1/production/" in guidance
     assert "Inspect worker state, in-flight jobs, and pending receipts" in guidance
     assert "roll forward" in guidance
     assert "kamal lock status" in guidance

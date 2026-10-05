@@ -54,10 +54,6 @@ repo's CloudFormation template.
 The frontend nginx container reverse-proxies `/api/`, `/admin/`, `/accounts/`, `/static/` and
 `/health/` to the API. MCP is not proxied; the API and worker reach it over the internal network.
 
-Each config is the production definition. Staging deploys from the same files with
-`-d staging`, which deep-merges the matching `config/<name>.staging.yml` overlay over
-it — see [Second environment (staging)](#second-environment-staging).
-
 ## Automated Deployment (CI/CD)
 
 The GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push to `main`:
@@ -69,18 +65,18 @@ The GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push 
    backend images before interrupting any worker
 3. Deploys Cube → graceful old-worker drain → API migration/health → MCP →
    worker → frontend; prebuilt images use `--skip-push`
-4. Uses worker-only `kamal redeploy` to preserve stopped-worker drain evidence
-   across the co-located destinations; see the retention guidance below
+4. Uses worker-only `kamal redeploy` to preserve stopped workers that pending
+   drain receipts reference; see the retention guidance below
 
-The workflows pin Kamal **2.12.0**, whose destination labels, image validation,
+The workflow pins Kamal **2.12.0**, whose destination labels, image validation,
 health polling and worker boot behavior have been verified. Revalidate those
 contracts before upgrading the deployment tool.
 
 API, MCP, and worker share the `scout/api` repository and code layers, but Kamal
 adds a different `service` label to each image. Their exact versions must therefore
 be distinct: `production-api-<sha>`, `production-mcp-<sha>`, and
-`production-worker-<sha>` (with `staging-` in place of `production-` for staging).
-This prevents one role or destination from replacing the image another is pulling.
+`production-worker-<sha>`. This prevents one role from replacing the image another
+is pulling.
 `IMAGE_TAG` remains the plain commit SHA for Sentry releases; it is not the backend
 image version. Deploy and rollback by the exact version, not a shared `latest` alias.
 
@@ -131,20 +127,8 @@ The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
 The RDS master password is auto-managed by AWS (referenced via `SCOUT_RDS_SECRET_ARN`).
 `DATABASE_URL` is resolved at deploy time by `scripts/resolve-database-url.sh`.
 
-Connect staging is a separate OAuth provider and does not use the production `CONNECT_OAUTH_*`
-AWS secrets above. Store its application credentials as
-`SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID` and
-`SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET` in the GitHub `staging` environment.
-The staging workflow maps them to `STAGING_CONNECT_OAUTH_*` inside the API
-container; production continues to use the AWS-backed `CONNECT_OAUTH_*` values.
-Store a random signing key as `SCOUT_STAGING_CUBEJS_API_SECRET` in the same
-environment. The workflow shares it only among staging's API, worker, MCP, and
-Cube containers so semantic-query security contexts are accepted end to end.
-Production uses the AWS Secrets Manager value `SCOUT_CUBEJS_API_SECRET`, which
-the production workflow validates before building and Kamal resolves through
-`.kamal/secrets-common`. Generate the two values independently (for example,
-`openssl rand -hex 32`) so a staging credential can never sign a production
-Cube security context.
+The Cube signing key `SCOUT_CUBEJS_API_SECRET` is validated by the workflow before
+building and resolved by Kamal through `.kamal/secrets-common`.
 
 ### Enabling CommCare HQ (EU) sign-in
 
@@ -156,15 +140,14 @@ project spaces can still be connected with an API key. To turn EU sign-in on:
 1. Register an OAuth2 application on `eu.commcarehq.org` the same way the www
    application was registered: a confidential client with the authorization-code
    grant (HQ admin access is needed). Redirect URIs:
-   `https://scout.dimagi.com/accounts/commcare_eu/login/callback/` and
-   `https://scout-staging.dimagi.com/accounts/commcare_eu/login/callback/`.
+   `https://scout.dimagi.com/accounts/commcare_eu/login/callback/`.
 2. Store the client ID and secret in AWS Secrets Manager as
    `COMMCARE_EU_OAUTH_CLIENT_ID` and `COMMCARE_EU_OAUTH_CLIENT_SECRET`, next to
    `COMMCARE_OAUTH_*`, and add them to the secrets table above.
 3. In the same PR as the next deploy, add both names to the
    `kamal secrets fetch` list and the `extract` lines in `.kamal/secrets-common`,
-   and to the API role's `env.secret` list in `config/deploy.yml` and
-   `config/deploy.staging.yml`, next to `COMMCARE_OAUTH_*`. Do this only once
+   and to the API role's `env.secret` list in `config/deploy.yml`, next to
+   `COMMCARE_OAUTH_*`. Do this only once
    the secrets exist, because fetching a missing secret fails the deploy.
 4. Deploy. The API entrypoint runs `setup_oauth_apps`, which creates the
    `commcare_eu` SocialApp, and "CommCare HQ (EU)" appears on the Connections
@@ -238,177 +221,31 @@ hidden source maps, uploads them to Sentry tagged with the release (git SHA), th
 deletes them from `dist/` so they don't ship to browsers. The auth token is passed as a
 BuildKit secret (`--secret id=sentry_auth_token`) and never lands in an image layer.
 
-## Second environment (staging)
+## Retired staging environment
 
-A staging environment (`scout-staging.dimagi.com`) runs **co-located on the
-production EC2 host** for testing branches. It reuses every AWS Secrets Manager
-value, the ECR repos, and the RDS *instance* — but has **its own database**
-(`agent_platform_staging`) and its own Docker network (`scout_staging_shared`),
-so its data and internal services are isolated from production.
+A staging stack used to run co-located on the production host (`-d staging`
+overlays, the `scout_staging_shared` network and the `agent_platform_staging`
+database). It was shut down and its configuration removed (#808). Two traces stay
+on purpose:
 
-Staging has no config files of its own. It deploys the production configs with
-`-d staging`, and Kamal deep-merges `config/<name>.staging.yml` over the base — those
-overlays hold only what differs (network, hostnames, Sentry environment, the API's
-worker count and secret list). Hashes merge key by key; arrays such as `env.secret`
-are replaced wholesale. Secrets resolve from `.kamal/secrets-common`, which Kamal
-reads for every destination.
+- The `agent_platform_staging` database remains on the shared RDS instance until
+  it is dropped as a separate, signed-off step. PostgreSQL roles are
+  cluster-scoped, so tenant `<schema>_ro` / `<schema>_dbt` roles and
+  `scout_cube_catalog` may still hold grants in that database; a `DROP ROLE`
+  during schema teardown can log "objects depend on it … in database
+  agent_platform_staging" until it is gone.
+- The drain helper still tolerates (but never signals) a leftover
+  staging-labelled worker, and the disk guard keeps trimming stopped ones, so
+  stale containers on the host cannot block or fill a production deploy.
 
-One thing is *not* isolated: PostgreSQL roles are cluster-scoped, not per-database.
-The `<schema>_ro` / `<schema>_dbt` roles `SchemaManager` mints are named
-deterministically from `(provider, external_id)`, so a tenant provisioned in both
-environments shares a single role object. Expect `DROP ROLE` during schema teardown
-to fail with "objects depend on it … in database agent_platform_staging" (or vice
-versa) and leave a dangling role — the teardown swallows and logs it, so it is
-noise rather than breakage, but it is why staging role errors can appear in
-production logs.
+## Migration-safe backend handoff
 
-The same applies to `scout_cube_catalog`, the `NOLOGIN` role Cube uses to read
-`semantic_cubeschema` (semantic migration 0005). Both databases grant `SELECT` on
-their own table to the one role, and reversing the migration in one environment
-revokes only that database's grant. Cube caps its connections to the shared
-instance at 21 per environment (24 briefly, while switching to the role). `cube_config/README.md` has the breakdown.
-
-Notes: it runs the API with 2 uvicorn workers (not 4) and no Redis (LocMemCache)
-to limit its footprint on the shared t3.medium, and uses Docker's `json-file` log
-driver so `kamal app logs` works directly.
-
-### One-time setup
-
-1. **Create the database** on the existing RDS instance (uses the prod master
-   role; run from a machine with AWS access):
-   ```bash
-   source .env.deploy
-   DATABASE_URL=$(SCOUT_DB_NAME=postgres ./scripts/resolve-database-url.sh)
-   psql "$DATABASE_URL" -c "CREATE DATABASE agent_platform_staging;"
-   ```
-2. **DNS**: add an A record `scout-staging.dimagi.com` → the EC2 Elastic IP
-   (`SCOUT_EC2_IP` in `.env.deploy`). Kamal's proxy issues the TLS cert once the
-   record resolves.
-3. **OAuth**: most providers reuse the production OAuth client IDs, so register
-   the staging callback URLs
-   (`https://scout-staging.dimagi.com/accounts/<provider>/login/callback/`) with
-   those providers. Connect is the exception: create a confidential authorization
-   code application on `https://connect-staging.dimagi.com/o/applications/` with
-   callback URL
-   `https://scout-staging.dimagi.com/accounts/commcare_connect/login/callback/`,
-   then store its credentials in the two GitHub `staging` environment secrets
-   documented above. `setup_oauth_apps` runs automatically for the staging domain
-   in the API container's entrypoint.
-
-### Deploying from GitHub Actions
-
-Run the **Deploy Scout (Staging)** workflow and pick the branch to deploy from the
-ref dropdown. It builds and pushes the frontend and all three role-qualified
-backend images before draining workers. Kamal builds Cube from
-`cube_config/Dockerfile` into the otherwise-unused `scout/mcp` repository;
-backend role images use `scout/api` with distinct versions. It deploys
-Cube → graceful old-worker drain → API migration/health gate → MCP → worker →
-frontend. In addition to the production
-deploy secrets, the GitHub `staging` environment must contain the two
-Connect-staging OAuth secrets and `SCOUT_STAGING_CUBEJS_API_SECRET` documented above.
-
-Cube's npm dependencies are locked in `cube_config/package-lock.json` and the
-image installs them with `npm ci`, so deploys don't re-resolve from the registry.
-To change them, edit `cube_config/package.json` and regenerate the lockfile
-inside the base image so the npm version matches (`docker run --rm -v
-"$PWD/cube_config:/w" -w /tmp cubejs/cube:<tag> sh -c 'mkdir p && cp /w/package.json p/
-&& cd p && npm install --package-lock-only && cp package-lock.json /w/'`).
-Bumping the `cubejs/cube` base image tag additionally requires re-auditing the pinned patch hashes (see `cube_config/README.md`).
-
-Tests are not a gate — staging is for trying work in progress. The workflow is
-`workflow_dispatch`-only, so nothing reaches staging unless someone asks for it.
-
-Branch deploys depend on a GitHub **environment named `staging`** existing in repo
-settings (Settings → Environments). The job declares `environment: staging` purely
-to change its OIDC token's `sub` claim to `repo:dimagi-rad/scout:environment:staging`,
-which is what `scout-github-deploy` trusts for non-main refs — production's trust
-stays pinned to `refs/heads/main`. Leave the environment's *Deployment branches*
-setting on "All branches" so any work-in-progress branch can deploy; add required
-reviewers there if staging ever needs an approval step. Without the environment,
-every branch deploy fails at `AssumeRoleWithWebIdentity` with "not authorized to
-perform sts:AssumeRoleWithWebIdentity".
-
-Frontend images are tagged `staging-<sha>` rather than `<sha>`: the image bakes in
-`nginx.staging-kamal.conf` and `SENTRY_ENVIRONMENT` at build time, so sharing a tag
-with production would mean whichever environment deployed a given commit last wins.
-Backend versions are `staging-api-<sha>`, `staging-mcp-<sha>`, and
-`staging-worker-<sha>` so each role's service label stays attached to its own image.
-Staging frontend builds skip the Sentry sourcemap upload, so a staging deploy can't
-overwrite the artifacts of a production release with the same SHA — errors still
-report to Sentry under the `staging` environment.
-
-### Deploying from your machine
-
-```bash
-git checkout codex/semantic-model-work
-source .env.deploy && source config/staging.env
-export IMAGE_TAG=$(git rev-parse HEAD)
-```
-
-Choose **one** sequence below. Each runs in a fail-fast subshell: a failed drain,
-migration, or health gate stops that sequence before later services deploy.
-
-First-time setup:
-
-```bash
-(
-set -e
-kamal build push -d staging --version="staging-api-$IMAGE_TAG"
-kamal build push -c config/deploy-mcp.yml -d staging --version="staging-mcp-$IMAGE_TAG"
-kamal build push -c config/deploy-worker.yml -d staging --version="staging-worker-$IMAGE_TAG"
-kamal setup -c config/deploy-cube.yml -d staging --version="cube-$IMAGE_TAG"
-ssh -T "scout@$SCOUT_EC2_IP" bash -s -- staging 600 < scripts/drain-workers.sh
-kamal setup -d staging --skip-push --version="staging-api-$IMAGE_TAG"
-kamal setup -c config/deploy-mcp.yml -d staging --skip-push --version="staging-mcp-$IMAGE_TAG"
-kamal redeploy -c config/deploy-worker.yml -d staging --skip-push --version="staging-worker-$IMAGE_TAG"
-kamal setup -c config/deploy-frontend.yml -d staging --version="staging-$IMAGE_TAG"
-)
-```
-
-Subsequent deploys:
-
-```bash
-(
-set -e
-kamal build push -d staging --version="staging-api-$IMAGE_TAG"
-kamal build push -c config/deploy-mcp.yml -d staging --version="staging-mcp-$IMAGE_TAG"
-kamal build push -c config/deploy-worker.yml -d staging --version="staging-worker-$IMAGE_TAG"
-kamal deploy -c config/deploy-cube.yml -d staging --version="cube-$IMAGE_TAG"
-ssh -T "scout@$SCOUT_EC2_IP" bash -s -- staging 600 < scripts/drain-workers.sh
-kamal deploy -d staging --skip-push --version="staging-api-$IMAGE_TAG"
-kamal deploy -c config/deploy-mcp.yml -d staging --skip-push --version="staging-mcp-$IMAGE_TAG"
-kamal redeploy -c config/deploy-worker.yml -d staging --skip-push --version="staging-worker-$IMAGE_TAG"
-kamal deploy -c config/deploy-frontend.yml -d staging --version="staging-$IMAGE_TAG"
-)
-```
-
-Omitting `-d staging` deploys **production** — the base configs are the production
-definition.
-
-The frontend commands carry an explicit `--version`. Without it Kamal versions the
-build as the bare git SHA and pushes it as `scout/frontend:<sha>` — the same tag
-production uses — but with `nginx.staging-kamal.conf` baked in. A later production
-`kamal rollback`, host reboot, or re-pull of that version would then serve a
-frontend proxying to `scout-staging-web`, putting production traffic on the staging
-API. Backend commands also need explicit role/destination versions: their code is
-environment-agnostic, but Kamal's image service labels differ by role.
-
-Use GitHub Actions for normal deployments. These manual frontend builds do not
-provide the workflow's Sentry build inputs or source-map upload configuration.
-
-Migrations run automatically against the staging database when the API container
-starts. Logs: `kamal app logs -d staging`.
-
-### Migration-safe backend handoff
-
-Run only one deployment on the shared host at a time, including manual commands.
-The current production and staging workflows share the `scout-deploy-host`
-concurrency group with `cancel-in-progress: false` and `queue: max`. This
-serializes both destinations without replacing the other destination's pending
-run; GitHub supports up to 100 pending runs. A production run whose commit is
+Run only one deployment on the host at a time, including manual commands.
+The production workflow uses the `scout-deploy-host` concurrency group with
+`cancel-in-progress: false` and `queue: max`. This serializes runs without
+replacing a pending run; GitHub supports up to 100 pending runs. A production run whose commit is
 already included in a newer queued production run skips its tests and deploy, so
-a burst of merges deploys once instead of once per commit (a staging run never
-counts as newer). A production run also skips when a newer commit is already
+a burst of merges deploys once instead of once per commit. A production run also skips when a newer commit is already
 live, so re-running an old run cannot roll production back (redeploying the
 live commit still works). A skipped run shows green but deployed nothing and
 reports nothing itself. If you cancel a queued production run, run `Deploy Scout
@@ -419,8 +256,8 @@ has been ahead of production for 45 minutes with no production run queued or
 running, unless main's own run already failed and that issue is still open. It
 only alerts and never starts a deploy, because a cancelled run was usually
 cancelled on purpose. Manual shell commands and workflows dispatched from
-older branch revisions are outside this updated group: check
-both destinations before starting those, and do not overlap them with Actions.
+older branch revisions are outside this updated group: check that no deploy
+is running before starting those, and do not overlap them with Actions.
 See [GitHub's concurrency queue contract](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
 
 Backend images are built and pushed before drain, using Kamal's role-specific
@@ -437,12 +274,12 @@ deadline. The readiness script requires an exact HTTP 200, not a redirect or
 another curl-success status.
 Step timeouts do not prove that a remote operation stopped; inspect the host
 before retrying an interrupted handoff.
-The workflow drains **all active old worker versions** for the selected
-destination before starting the new API. It also validates active containers
+The workflow drains **all active old production worker versions** before
+starting the new API. It also validates active containers
 across the `scout-worker` service before any signal and while waiting: missing
 or unsupported role/destination labels block the handoff rather than producing
-a misleading empty inventory. Valid workers belonging to the other destination
-are observed only and never signalled or given drain receipts.
+a misleading empty inventory. Leftover workers labelled for the retired staging
+destination are observed only and never signalled or given drain receipts.
 Procrastinate's first `SIGTERM` stops
 claiming jobs and lets running jobs finish. The drain helper sends that signal
 once per container/process start and waits up to 10 minutes for clean exit.
@@ -455,13 +292,13 @@ worker deploy succeeds, it emits an explicit error annotation and recovery steps
 in the run summary. **Workers may remain stopped and queued jobs may remain
 paused after that failed rollout.** Inspect worker state, in-flight jobs, and
 pending receipts; resolve the failed gate and roll forward through the complete
-destination-specific workflow once the worker/job state is safe. The notice
+production workflow once the worker/job state is safe. The notice
 does not restart old workers or remove drain receipts. A runner that is abruptly
 lost may not emit the notice, so inspect the handoff whenever a run ends there.
 
 A timeout, cancellation or lost runner can leave a Kamal deployment lock behind.
-Inspect it with `kamal lock status`, using the same `-c` config and `-d` destination
-as the interrupted step (production omits `-d`). Kamal 2.12 scopes these locks by
+Inspect it with `kamal lock status`, using the same `-c` config as the
+interrupted step. Kamal 2.12 scopes these locks by
 service and destination; the Actions concurrency group is a separate lock.
 Before using `kamal lock release` with those same arguments, confirm that no
 deployment or remote operation is still active and that the lock is genuinely
@@ -483,7 +320,7 @@ status. The 120-second Docker start period does not shorten Kamal's deadline.
 If drain times out, **stop the deployment**. Existing jobs may still finish, but
 queued jobs wait. Inspect the worker's logs and state, then retry the same
 workflow after it finishes. A private pending receipt on the deployment host at
-`.scout-worker-drains-v1/<destination>/<container-id>-<process-start>` is
+`.scout-worker-drains-v1/production/<container-id>-<process-start>` is
 created **before** the signal. Its root is anchored to the `scout` account's
 passwd-defined home, independent of the caller's working directory; only that
 deployment account may run the helper. It is separate from Kamal's own `.kamal`
@@ -519,13 +356,13 @@ and [per-role boot environment upload](https://github.com/basecamp/kamal/blob/v2
 
 Unlike `deploy`,
 this omits Kamal 2.12's **service-wide** pruning, which could erase a stopped
-worker referenced by the other destination's pending receipts. Instead, the
-pre-deploy disk guard (`scripts/host-disk-guard.sh prune-workers`) removes stopped
-workers beyond the newest three per destination, and only when **no** receipt
-exists in either destination and no legacy receipt path is present; otherwise it
-leaves every stopped worker in place and warns (see [Host disk full](#host-disk-full)).
-Any other worker cleanup is deliberate and destination-aware: do it only
-after checking receipts and worker/job state in **both** environments. Do not
+worker referenced by a pending receipt. Instead, the pre-deploy disk guard
+(`scripts/host-disk-guard.sh prune-workers`) removes stopped workers beyond the
+newest three (per destination label, so leftover staging workers are trimmed
+too), and only when **no** receipt exists and no legacy receipt path is present;
+otherwise it leaves every stopped worker in place and warns (see
+[Host disk full](#host-disk-full)). Any other worker cleanup is deliberate: do it
+only after checking receipts and worker/job state. Do not
 use service-wide worker `kamal prune`, or remove a receipt-referenced container,
 to work around a blocked drain. ECR lifecycle policies are unchanged.
 
@@ -544,15 +381,6 @@ and inspect saved custom datasets for stale ID literals: an `ELSE 'Other'` rule
 can otherwise conceal that every old label stopped matching. Unknown source
 provenance is not evidence that a dataset uses positional IDs; resolve its source
 contract before choosing a refresh or relabeling operation.
-
-> Always `source config/staging.env` before staging commands — it points
-> `DATABASE_URL` at the staging database. A plain `source .env.deploy` (prod)
-> would deploy staging containers against the **production** database.
->
-> Use a fresh terminal session with no staging overrides for **production**
-> commands. Re-sourcing `.env.deploy` does not clear staging's exported database,
-> Cube signing secret, or OAuth overrides. Clearing only `SCOUT_DB_NAME` is not
-> sufficient to make a reused staging session safe for production.
 
 ## Manual Deployment
 
@@ -585,9 +413,6 @@ For deploying from your local machine (e.g., debugging or first-time setup):
 4. **Ruby + Kamal**: `gem install kamal`
 
 ### Steps
-
-Start in a fresh terminal session with no staging environment overrides; do not
-reuse the session used for staging commands above.
 
 ```bash
 # 1. Generate .env.deploy from CloudFormation outputs
@@ -646,7 +471,7 @@ kamal deploy -c config/deploy-frontend.yml --version="$IMAGE_TAG"
 
 Prefer the production GitHub Actions workflow for routine deploys, including the
 frontend's required Sentry build configuration. For compatible rollback, use the
-exact stored version for the selected service and destination and the publisher
+exact stored version for the selected service and the publisher
 restrictions above. Existing unqualified versions
 are not renamed. ECR policies are unchanged; worker host retention follows the
 receipt-aware procedure above rather than automatic service-wide pruning.
@@ -715,7 +540,7 @@ historical streams are preserved with their 30-day retention — no data is lost
 
 ### Host disk full
 
-Production and staging share one host (a 50 GB root volume, per `infra/scout-stack.yml`), and every deploy pulls several ~1 GB images.
+Production runs on one host (a 50 GB root volume, per `infra/scout-stack.yml`), and every deploy pulls several ~1 GB images.
 Stopped Kamal rollback containers pin their images, so the disk fills if pruning
 stops. In September 2026 it did: the first pull of every deploy failed with
 `no space left on device`, Kamal's end-of-deploy prune therefore never ran, and
@@ -791,14 +616,15 @@ opens (or comments on) the same issue to say production is behind main.
 > volume. The Elastic IP re-associates, but everything on disk is gone.
 > `UserData` reinstalls `scout`'s `authorized_keys` and recreates the `scout_shared` /
 > `scout_staging_shared` networks, so CI can reconnect and `kamal deploy` restores the containers
-> — **that is the whole reason those lines exist; do not remove them.** Before they were added,
+> — **that is the whole reason those lines exist; do not remove them.** (The staging network is
+> unused since #808, but editing `UserData` restarts the instance, so it stays until some other
+> instance change is due.) Before they were added,
 > recovery required a human with the EC2 keypair to copy the key across by hand.
 >
 > **Do not run this command unless:**
 > 1. you know the current instance may be replaced or restarted and that is acceptable right now;
-> 2. the co-located staging stack going down with it is acceptable;
-> 3. you have the EC2 keypair to hand, in case `UserData` fails part-way; and
-> 4. you are prepared to re-run `kamal deploy` for every destination afterwards.
+> 2. you have the EC2 keypair to hand, in case `UserData` fails part-way; and
+> 3. you are prepared to re-run `kamal deploy` for every service afterwards.
 >
 > To find out **before** you commit, create a change set instead of updating directly and inspect
 > the `Replacement` column for `EC2Instance`. `Conditional` needs further inspection;

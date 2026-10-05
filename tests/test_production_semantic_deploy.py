@@ -46,12 +46,12 @@ def test_production_workflow_requires_and_deploys_cube_before_dependents():
     assert workflow.index("- name: Deploy Cube") < workflow.index("- name: Deploy MCP")
 
 
-def test_kamal_uses_the_environment_aware_cube_secret_resolver():
+def test_kamal_uses_the_cube_secret_resolver():
     secrets_file = (REPO_ROOT / ".kamal" / "secrets-common").read_text()
     assert "CUBEJS_API_SECRET=$(scripts/resolve-cube-secret.sh)" in secrets_file
 
 
-def test_cube_secret_resolver_fetches_production_secret_from_aws(tmp_path):
+def _run_cube_secret_resolver(tmp_path, extra_env=None):
     fake_kamal = tmp_path / "kamal"
     fake_kamal.write_text(
         "#!/bin/sh\n"
@@ -64,9 +64,9 @@ def test_cube_secret_resolver_fetches_production_secret_from_aws(tmp_path):
         "fi\n"
     )
     fake_kamal.chmod(0o755)
-    env = {"PATH": str(tmp_path)}
+    env = {"PATH": str(tmp_path), **(extra_env or {})}
 
-    result = subprocess.run(  # noqa: S603 - fixed repository script and test PATH
+    return subprocess.run(  # noqa: S603 - fixed repository script and test PATH
         [REPO_ROOT / "scripts" / "resolve-cube-secret.sh"],
         check=True,
         capture_output=True,
@@ -74,21 +74,16 @@ def test_cube_secret_resolver_fetches_production_secret_from_aws(tmp_path):
         text=True,
     )
 
+
+def test_cube_secret_resolver_fetches_production_secret_from_aws(tmp_path):
+    assert _run_cube_secret_resolver(tmp_path).stdout == "production-secret"
+
+
+def test_cube_secret_resolver_ignores_the_retired_staging_override(tmp_path):
+    # Staging (#808) injected SCOUT_CUBEJS_API_SECRET directly; production must
+    # never take its signing key from the process environment.
+    result = _run_cube_secret_resolver(tmp_path, {"SCOUT_CUBEJS_API_SECRET": "stale"})
     assert result.stdout == "production-secret"
-
-
-def test_cube_secret_resolver_prefers_staging_override_without_kamal():
-    env = {"PATH": "", "SCOUT_CUBEJS_API_SECRET": "staging-secret"}
-
-    result = subprocess.run(  # noqa: S603 - fixed repository script, no shell
-        [REPO_ROOT / "scripts" / "resolve-cube-secret.sh"],
-        check=True,
-        capture_output=True,
-        env=env,
-        text=True,
-    )
-
-    assert result.stdout == "staging-secret"
 
 
 def test_production_services_agree_on_the_all_of_access_rule():

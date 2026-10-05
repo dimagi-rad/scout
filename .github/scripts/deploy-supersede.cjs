@@ -1,7 +1,6 @@
 // Decides whether a production deploy run should stand aside. Runs wait in one
 // concurrency group and each takes ~22 minutes, so a burst of merges queued hours
-// of redundant redeploys. Only deploy.yml runs are considered: a staging run for
-// the other destination on the shared host is never treated as a substitute.
+// of redundant redeploys. Only deploy.yml runs are considered.
 const WAITING = new Set(['queued', 'pending', 'waiting', 'requested']);
 // Superseded runs (deploy job skipped) are among the candidates, so this must
 // reach past a burst of them; each lookup is one API call.

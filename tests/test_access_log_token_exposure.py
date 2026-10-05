@@ -17,11 +17,10 @@ import pytest
 from tests.kamal_config import load_config as _load
 
 
-@pytest.mark.parametrize("destination", [None, "staging"])
-def test_api_uvicorn_disables_access_log(destination):
+def test_api_uvicorn_disables_access_log():
     """The API container's uvicorn command must disable the access log so OAuth
     codes in the request line never reach CloudWatch."""
-    cfg = _load("deploy.yml", destination)
+    cfg = _load("deploy.yml")
     cmd = cfg["servers"]["web"]["cmd"]
     assert "uvicorn" in cmd
     assert "--no-access-log" in cmd, (
@@ -31,11 +30,10 @@ def test_api_uvicorn_disables_access_log(destination):
     )
 
 
-@pytest.mark.parametrize("destination", [None, "staging"])
 @pytest.mark.parametrize("name", ["deploy.yml", "deploy-mcp.yml", "deploy-worker.yml"])
-def test_no_uvicorn_access_log_anywhere(name, destination):
+def test_no_uvicorn_access_log_anywhere(name):
     """No container should run uvicorn with the access log enabled."""
-    cfg = _load(name, destination)
+    cfg = _load(name)
     for server in cfg.get("servers", {}).values():
         cmd = server.get("cmd", "")
         if "uvicorn" in cmd:

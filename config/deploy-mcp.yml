@@ -2,15 +2,13 @@
 # Reached by API via Docker network at scout-mcp-web:8100
 #
 # Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
-#
-# Staging deploys from this file too, via `-d staging` — see the .staging.yml overlay.
 
 service: scout-mcp
 
 image: scout/api
 
-# Stopped rollback containers pin their images. Kamal counts these per service
-# across both destinations; the default of 5 helped fill the shared host disk.
+# Stopped rollback containers pin their images. Kamal counts these per
+# service; the default of 5 helped fill the host disk.
 retain_containers: 3
 
 servers:
@@ -39,11 +37,10 @@ env:
     SENTRY_RELEASE: "<%= ENV.fetch('IMAGE_TAG', '') %>"
     # All-of workspace access (#380). The API, worker and MCP server all evaluate
     # access, so change it in all three deploy files together; "False" rolls back.
-    # The staging overlays don't set it, so staging inherits this value.
     WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT: "True"
     # Upstream access freshness (#548, closes #307 and #383). Same rule as above:
     # all three services evaluate access, so change it in all three files together;
-    # "False" rolls back. The staging overlays don't set it, so staging inherits it.
+    # "False" rolls back.
     UPSTREAM_ACCESS_FRESHNESS_ENFORCED: "True"
   secret:
     - DATABASE_URL
@@ -62,8 +59,6 @@ ssh:
 builder:
   arch: amd64
 
-# Production only — see the gate comment in config/deploy.yml.
-#<% unless ENV["KAMAL_DESTINATION"] %>
 logging:
   driver: awslogs
   options:
@@ -71,6 +66,5 @@ logging:
     awslogs-group: /scout/mcp
     awslogs-create-group: "false"
     tag: "{{.Name}}"
-#<% end %>
 
 # No proxy — MCP is internal only, reached by API via Docker network
