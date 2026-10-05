@@ -1004,3 +1004,28 @@ def test_summary_omits_links_after_failed_write_or_check_even_when_model_claims_
     if status == "error":
         assert summary["artifact_id"] is None
     assert "ui_path" not in summary
+
+
+@pytest.mark.asyncio
+async def test_aborted_manager_run_omits_ui_path_from_earlier_successful_write():
+    result = await _artifact_manager_failure_result(
+        "parent",
+        _SubagentTraceRecorder(),
+        [
+            ToolMessage(
+                name="artifact_write",
+                tool_call_id="write",
+                content=json.dumps(
+                    {
+                        "status": "created",
+                        "artifact": {"id": "saved", "version": 1},
+                        "ui_path": "/workspaces/workspace/artifacts/saved",
+                    }
+                ),
+            )
+        ],
+        "",
+        "The manager timed out.",
+    )
+    assert result["status"] == "error"
+    assert "ui_path" not in result

@@ -401,6 +401,7 @@ async def _artifact_manager_failure_result(
     result.pop("data_requirements", None)
     result.pop("requirement_errors", None)
     result.pop("subagent_message", None)
+    result.pop("ui_path", None)
     await _emit_subagent_event(
         _subagent_error_event(parent_tool_call_id, result["message"]),
         trace,
