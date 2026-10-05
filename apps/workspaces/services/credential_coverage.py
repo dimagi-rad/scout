@@ -696,6 +696,7 @@ def _removed_pairs_queryset(unmembered):
         "provider_metadata__team_name",
         "connection__credential_type",
         "connection_id",
+        "archived_reason",
     )
 
 
@@ -708,14 +709,19 @@ def _gaps_by_pair(readiness, removed_pairs) -> dict[tuple[int, str], MissingTena
         (user_id, str(tenant_id)): not str(team_slug or "").strip()
         and not str(team_name or "").strip()
         and credential_type != TenantConnection.API_KEY
-        for user_id, tenant_id, team_slug, team_name, credential_type, _conn in removed_pairs
+        for user_id, tenant_id, team_slug, team_name, credential_type, *_ in removed_pairs
     }
-    # Deleting a connection nulls its tombstones' link (SET_NULL), whatever archived
-    # them; (user, tenant) is unique, so each pair has at most one tombstone.
+    # Deleting a connection nulls its tombstones' link (SET_NULL). A pre-team row may
+    # never have had one (#379), and a reconnect choosing its team still restores it,
+    # so without the disconnect stamp that row is not counted as deleted.
     disconnected = {
         (user_id, str(tenant_id))
-        for user_id, tenant_id, *_rest, connection_id in removed_pairs
+        for user_id, tenant_id, *_, connection_id, reason in removed_pairs
         if connection_id is None
+        and (
+            reason == TenantMembership.ARCHIVED_DISCONNECTED
+            or not removed[(user_id, str(tenant_id))]
+        )
     }
     return {
         (item.user_id, item.tenant_id): _missing_tenant(item, removed, disconnected)

@@ -222,3 +222,19 @@ def test_any_of_rule_needs_one_reconnectable_source(settings, client, user):
 
     assert entry["has_access"] is False
     assert entry["needs_reconnect"] is True
+
+
+@pytest.mark.django_db
+def test_pre_team_tombstone_that_never_had_a_connection_still_needs_reconnect(client, user):
+    """A team-less row archived with no connection (#379) is restored by reconnecting
+    OCS with its team, so it is not mistaken for one the member deleted."""
+    ws = _ocs_workspace(user, "bot-never", ocs_team_connection(user, "acme"), team_slug="")
+    TenantMembership.objects.filter(user=user).update(connection=None, archived_at=timezone.now())
+
+    client.force_login(user)
+    entry = _entry(client.get("/api/workspaces/"), ws.id)
+
+    assert [t["recovery"] for t in entry["missing_tenants"]] == [
+        CoverageRecovery.LEGACY_TEAM_UNKNOWN
+    ]
+    assert entry["needs_reconnect"] is True

@@ -276,7 +276,9 @@ def disconnect_provider_view(request, provider_id):
     # Remove the provider's OAuth connection and archive the chatbots it served
     # (their conversations/data are retained and restored if reconnected).
     TenantMembership.objects.filter(connection__in=oauth_conns).update(
-        archived_at=timezone.now(), connection=None
+        archived_at=timezone.now(),
+        archived_reason=TenantMembership.ARCHIVED_DISCONNECTED,
+        connection=None,
     )
     oauth_conns.delete()
 
