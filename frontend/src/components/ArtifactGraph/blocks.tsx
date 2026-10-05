@@ -454,7 +454,8 @@ function GraphComponent({ block, config, engine }: BlockComponentProps) {
       if ("series_by" in config) throw new Error("series_by is supported only on compact charts")
       tree = config.recharts
     } else {
-      const inferred = "series_by" in config || "series" in config ? [] : inferSeries(config, rows, xKey)
+      const hasConfiguredSeries = "series" in config && !(Array.isArray(config.series) && config.series.length === 0)
+      const inferred = "series_by" in config || hasConfiguredSeries ? [] : inferSeries(config, rows, xKey)
       const prepared = prepareCompactGraph({
         ...chartConfig,
         ...("series" in config ? { series: config.series } : {}),

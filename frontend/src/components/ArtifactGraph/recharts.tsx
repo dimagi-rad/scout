@@ -23,8 +23,8 @@ import {
   YAxis,
 } from "recharts"
 
-import { pivotSeriesRows } from "./seriesPivot"
 import { formatValue } from "./format"
+import { pivotSeriesRows } from "./seriesPivot"
 import type { Row } from "./types"
 
 export interface RechartsNode {
@@ -382,6 +382,10 @@ export function compileCompactGraphConfig(config: CompactGraphConfig, measureKey
 }
 
 export function normalizeGraphSeries(series: unknown, yKey?: string, dataLabel?: string): GraphSeries[] {
+  // Stored wide-format artifacts used empty arrays to request measure inference.
+  if (Array.isArray(series) && series.length === 0) {
+    return yKey ? [{ data_key: yKey, label: dataLabel ?? yKey }] : []
+  }
   if (series !== undefined) {
     const invalid = () => new Error("series must be an array of data-key strings or objects; use series_by for long-format data")
     if (!Array.isArray(series) || series.length === 0) throw invalid()
@@ -390,7 +394,6 @@ export function normalizeGraphSeries(series: unknown, yKey?: string, dataLabel?:
       if (isRecord(item)) {
         const dataKey = item.data_key || item.y_key || item.key
         if (typeof dataKey !== "string" || !dataKey.trim()) throw invalid()
-        if (["label", "name"].some((key) => key in item && typeof item[key] !== "string")) throw invalid()
         return {
           data_key: dataKey,
           label: stringValue(item.label) ?? stringValue(item.name) ?? dataKey,
