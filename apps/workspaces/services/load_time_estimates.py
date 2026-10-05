@@ -1,0 +1,199 @@
+"""Bounded successful workspace-load history and approximate progress timing."""
+
+import logging
+from statistics import median
+
+from django.core.cache import cache
+from django.db.models import Count, Min, Q
+from django.utils import timezone
+from procrastinate.contrib.django.models import ProcrastinateJob
+
+from apps.chat.models import ThreadJob
+from apps.workspaces.models import MaterializationRun, WorkspaceLoadTiming
+
+logger = logging.getLogger(__name__)
+HISTORY_LIMIT = 10
+HISTORY_CACHE_SECONDS = 60
+
+
+def _cache_key(workspace_id, only_unserved):
+    return f"load_time_history:{workspace_id}:{int(only_unserved)}"
+
+
+def _close_phase(timing, now):
+    durations = dict(timing.phase_seconds)
+    seconds = max(0, (now - timing.phase_started_at).total_seconds())
+    durations[timing.phase] = durations.get(timing.phase, 0) + seconds
+    return durations
+
+
+async def astart_load_timing(workspace_id, job_id, *, only_unserved=False):
+    try:
+        # A retried queue job starts a new attempt; failed attempts are never samples.
+        await WorkspaceLoadTiming.objects.aupdate_or_create(
+            job_id=job_id,
+            defaults={
+                "workspace_id": workspace_id,
+                "only_unserved": only_unserved,
+                "started_at": timezone.now(),
+                "completed_at": None,
+                "succeeded": False,
+                "phase": "loading",
+                "phase_started_at": timezone.now(),
+                "phase_seconds": {},
+            },
+        )
+    except Exception:
+        logger.warning("Could not start load timing", exc_info=True)
+
+
+async def atransition_load_phase(job_id, phase, *, now=None):
+    if job_id is None:
+        return
+    try:
+        timing = await WorkspaceLoadTiming.objects.filter(job_id=job_id, completed_at=None).afirst()
+        if timing is None or timing.phase == phase:
+            return
+        now = now or timezone.now()
+        await WorkspaceLoadTiming.objects.filter(pk=timing.pk).aupdate(
+            phase=phase,
+            phase_started_at=now,
+            phase_seconds=_close_phase(timing, now),
+        )
+    except Exception:
+        logger.warning("Could not record load phase timing", exc_info=True)
+
+
+def transition_load_phase(job_id, phase):
+    if job_id is None:
+        return
+    try:
+        timing = WorkspaceLoadTiming.objects.filter(job_id=job_id, completed_at=None).first()
+        if timing is None or timing.phase == phase:
+            return
+        now = timezone.now()
+        WorkspaceLoadTiming.objects.filter(pk=timing.pk).update(
+            phase=phase,
+            phase_started_at=now,
+            phase_seconds=_close_phase(timing, now),
+        )
+    except Exception:
+        logger.warning("Could not record load phase timing", exc_info=True)
+
+
+async def afinish_load_timing(job_id, succeeded, *, now=None, require_runs=False):
+    try:
+        if succeeded and require_runs:
+            runs = MaterializationRun.objects.filter(procrastinate_job_id=job_id)
+            succeeded = (
+                await runs.aexists()
+                and not await runs.exclude(
+                    state=MaterializationRun.RunState.COMPLETED,
+                    completed_at__isnull=False,
+                ).aexists()
+            )
+        timing = await WorkspaceLoadTiming.objects.filter(job_id=job_id, completed_at=None).afirst()
+        if timing is None:
+            return
+        now = now or timezone.now()
+        await WorkspaceLoadTiming.objects.filter(pk=timing.pk).aupdate(
+            completed_at=now,
+            succeeded=succeeded,
+            phase_seconds=_close_phase(timing, now),
+        )
+        await cache.adelete(_cache_key(timing.workspace_id, timing.only_unserved))
+    except Exception:
+        logger.warning("Could not finish load timing", exc_info=True)
+
+
+async def _history(workspace_id, only_unserved):
+    key = _cache_key(workspace_id, only_unserved)
+    cached = await cache.aget(key)
+    if cached is not None:
+        return cached
+    samples = [
+        (row.started_at, (row.completed_at - row.started_at).total_seconds(), row.phase_seconds)
+        async for row in WorkspaceLoadTiming.objects.filter(
+            workspace_id=workspace_id,
+            only_unserved=only_unserved,
+            succeeded=True,
+            completed_at__isnull=False,
+        ).order_by("-started_at")[:HISTORY_LIMIT]
+    ]
+    if not only_unserved and len(samples) < HISTORY_LIMIT:
+        # The resume claim follows workspace model publication. Tenant completion
+        # alone omits that final preparation, so it cannot be a whole-load sample.
+        jobs = [
+            job
+            async for job in ThreadJob.objects.filter(
+                thread__workspace_id=workspace_id,
+                job_type=ThreadJob.JobType.MATERIALIZATION,
+                state=ThreadJob.State.COMPLETED,
+                started_at__isnull=False,
+                materialization_preflight_failures=[],
+            )
+            .exclude(
+                procrastinate_job_id__in=WorkspaceLoadTiming.objects.filter(
+                    workspace_id=workspace_id,
+                ).values("job_id")
+            )
+            .order_by("-created_at")[:HISTORY_LIMIT]
+        ]
+        partial_jobs = {
+            job_id
+            async for job_id in ProcrastinateJob.objects.filter(
+                id__in=[job.procrastinate_job_id for job in jobs],
+                args__only_unserved=True,
+            ).values_list("id", flat=True)
+        }
+        runs = {
+            row["procrastinate_job_id"]: row
+            async for row in MaterializationRun.objects.filter(
+                procrastinate_job_id__in=[job.procrastinate_job_id for job in jobs],
+            )
+            .values("procrastinate_job_id")
+            .annotate(
+                start=Min("started_at"),
+                failures=Count(
+                    "id",
+                    filter=(
+                        ~Q(state=MaterializationRun.RunState.COMPLETED)
+                        | Q(completed_at__isnull=True)
+                    ),
+                ),
+            )
+        }
+        for job in jobs:
+            run = runs.get(job.procrastinate_job_id)
+            if run and not run["failures"] and job.procrastinate_job_id not in partial_jobs:
+                samples.append((run["start"], (job.started_at - run["start"]).total_seconds(), {}))
+    samples = sorted(samples, key=lambda sample: sample[0], reverse=True)[:HISTORY_LIMIT]
+    samples = [sample for sample in samples if sample[1] > 0]
+    await cache.aset(key, samples, HISTORY_CACHE_SECONDS)
+    return samples
+
+
+async def aload_time_estimate(workspace_id, job_id, *, now=None):
+    current = await WorkspaceLoadTiming.objects.filter(
+        workspace_id=workspace_id,
+        job_id=job_id,
+    ).afirst()
+    samples = await _history(workspace_id, current.only_unserved if current else False)
+    if not samples:
+        return None
+    phases = {}
+    for _, _, durations in samples:
+        for phase, seconds in durations.items():
+            if seconds > 0:
+                phases.setdefault(phase, []).append(seconds)
+    now = now or timezone.now()
+    return {
+        "usual_seconds": median(sample[1] for sample in samples),
+        "elapsed_seconds": max(
+            0, ((current.completed_at or now) - current.started_at).total_seconds()
+        )
+        if current
+        else None,
+        "sample_count": len(samples),
+        "phase_seconds": {phase: median(seconds) for phase, seconds in phases.items()},
+    }

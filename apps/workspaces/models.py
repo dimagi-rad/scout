@@ -532,3 +532,29 @@ class TenantMetadata(models.Model):
 
     def __str__(self) -> str:
         return f"Metadata for {self.tenant}"
+
+
+class WorkspaceLoadTiming(models.Model):
+    """Workspace load duration, retained when its tenant schemas are retired."""
+
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE)
+    workspace_id: uuid.UUID
+    job_id = models.BigIntegerField(unique=True)
+    only_unserved = models.BooleanField(default=False)
+    started_at = models.DateTimeField(default=timezone.now)
+    completed_at = models.DateTimeField(null=True)
+    succeeded = models.BooleanField(default=False)
+    phase = models.CharField(max_length=32, default="loading")
+    phase_started_at = models.DateTimeField(default=timezone.now)
+    phase_seconds = models.JSONField(default=dict)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["workspace", "only_unserved", "succeeded", "-started_at"],
+                name="workspace_load_timing_history",
+            )
+        ]
+
+    def __str__(self):
+        return f"Load timing for job {self.job_id}"

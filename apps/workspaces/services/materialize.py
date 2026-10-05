@@ -92,6 +92,12 @@ from apps.workspaces.services.load_outcome import (
     unreachable_tenant_error as _unreachable_tenant_error,
 )
 from apps.workspaces.services.load_phases import LoadPhase
+from apps.workspaces.services.load_time_estimates import (
+    afinish_load_timing,
+    astart_load_timing,
+    atransition_load_phase,
+    transition_load_phase,
+)
 from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from apps.workspaces.services.query_state import (
     included_tenant_snapshot_state as _included_tenant_snapshot_state,
@@ -877,6 +883,7 @@ async def _apublish_phase(job_id: int | None, phase: LoadPhase, message: str) ->
     """
     if job_id is None:
         return
+    await atransition_load_phase(job_id, phase)
     try:
         run = (
             await MaterializationRun.objects.filter(procrastinate_job_id=job_id)
@@ -963,6 +970,7 @@ async def materialize_workspace(
     preflight_failures = None
     result = None
     try:
+        await astart_load_timing(workspace_id, job_id, only_unserved=only_unserved)
         result = await materialize_workspace_core(
             workspace_id,
             user_id,
@@ -973,6 +981,14 @@ async def materialize_workspace(
         preflight_failures = _resume_records(result)
         return result
     finally:
+        succeeded = (
+            isinstance(result, dict)
+            and result.get("all_succeeded", False)
+            and (result.get("cube_schema") or {}).get("ok", False)
+            and not result.get("denied_mid_run")
+            and (result.get("view_schema") is None or result["view_schema"].get("ok", False))
+        )
+        await afinish_load_timing(job_id, bool(succeeded), require_runs=True)
         reported_publication = isinstance(result, dict) and "view_schema" in result
         outcome = result.get("view_schema") if reported_publication else None
         # None means a single-source workspace needed no view publication.
@@ -1071,11 +1087,17 @@ def _run_pipeline_with_progress(
     # Pool thread's connection is unreachable by the worker's async-ORM cleanup
     # and may have died since the last job here — close it so the first use reopens.
     close_old_connections()
+    previous_phase = None
 
     def updater(progress: dict) -> None:
+        nonlocal previous_phase
         run_id = progress.get("run_id")
         if run_id is None:
             return
+        phase = progress.get("phase") or "loading"
+        if phase != previous_phase:
+            transition_load_phase(job_id, phase)
+            previous_phase = phase
         MaterializationRun.objects.filter(id=run_id).update(progress=progress)
         current_state = (
             MaterializationRun.objects.filter(id=run_id).values_list("state", flat=True).first()

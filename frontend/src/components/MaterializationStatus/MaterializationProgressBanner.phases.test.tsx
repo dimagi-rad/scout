@@ -69,3 +69,27 @@ describe("post-load phases", () => {
     expect(screen.getByTestId("materialization-banner-rows")).toHaveTextContent("Preparing…")
   })
 })
+
+describe("load time estimate", () => {
+  const time_estimate = {
+    usual_seconds: 240, elapsed_seconds: 120, sample_count: 5, phase_seconds: {},
+  }
+  it("shows approximate timing on an active job", () => {
+    renderJob({ time_estimate })
+    expect(screen.getByTestId("materialization-banner-time-estimate"))
+      .toHaveTextContent("About 2 min left")
+  })
+  it("hides load timing while writing the answer", () => {
+    renderJob({ state: "running", time_estimate })
+    expect(screen.queryByTestId("materialization-banner-time-estimate")).toBeNull()
+  })
+  it("shows timing for another member's workspace load", () => {
+    render(<MaterializationProgressBanner workspaceId={WORKSPACE_ID} load={{
+      tenant_id: "tenant", tenant_name: "Site", source_index: 1, source_total: 1,
+      state: "loading", started_at: "2026-01-01T00:00:00Z", progress: baseProgress,
+      time_estimate,
+    }} />)
+    expect(screen.getByTestId("materialization-banner-time-estimate"))
+      .toHaveTextContent("About 2 min left")
+  })
+})

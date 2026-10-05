@@ -24,6 +24,7 @@ from apps.workspaces.services.failure_guidance import (
 )
 from apps.workspaces.services.load_phases import LoadPhase
 from apps.workspaces.services.load_progress import aworkspace_load_progress, progress_payload
+from apps.workspaces.services.load_time_estimates import aload_time_estimate
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,12 @@ RECENT_TERMINATION_WINDOW = timedelta(minutes=30)
 RECONCILE_THROTTLE_SECONDS = 30
 
 
-def _job_to_dict(job: ThreadJob, run_progress: dict | None, load: dict | None = None) -> dict:
+def _job_to_dict(
+    job: ThreadJob,
+    run_progress: dict | None,
+    load: dict | None = None,
+    time_estimate: dict | None = None,
+) -> dict:
     if job.state == ThreadJob.State.RUNNING:
         # RUNNING means the resume claimed the job: loading is over and the agent
         # is replying, so the run's last phase would be stale.
@@ -56,6 +62,7 @@ def _job_to_dict(job: ThreadJob, run_progress: dict | None, load: dict | None = 
         "job_type": job.job_type,
         "state": job.state,
         "progress": progress_payload(run_progress),
+        "time_estimate": time_estimate if job.state == ThreadJob.State.PENDING else None,
         "source_index": load["source_index"] if load else None,
         "source_total": load["source_total"] if load else None,
         "tenant_name": load["tenant_name"] if load else None,
@@ -195,6 +202,17 @@ async def active_jobs_view(request, workspace_id):
         if load["procrastinate_job_id"] is not None
     }
 
+    estimate_job_ids = {
+        j.procrastinate_job_id for j in jobs if j.state == ThreadJob.State.PENDING
+    } | {load["procrastinate_job_id"] for load in workspace_loads}
+    estimates = {
+        job_id: await aload_time_estimate(workspace.id, job_id)
+        for job_id in estimate_job_ids
+        if job_id is not None
+    }
+    for load in workspace_loads:
+        load["time_estimate"] = estimates.get(load["procrastinate_job_id"])
+
     cutoff = timezone.now() - RECENT_TERMINATION_WINDOW
     terminated_jobs = [
         j
@@ -232,6 +250,7 @@ async def active_jobs_view(request, workspace_id):
                     j,
                     runs_by_job.get(j.procrastinate_job_id),
                     loads_by_job.get(j.procrastinate_job_id),
+                    estimates.get(j.procrastinate_job_id),
                 )
                 for j in jobs
             ],
