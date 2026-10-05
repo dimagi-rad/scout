@@ -43,9 +43,9 @@ from langgraph.prebuilt import ToolNode
 from mcp.client.session import ClientSession
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from apps.agents.graph.base import MCP_TOOL_NAMES, _make_injecting_tool_node
 from apps.agents.graph.prompt_context import _fetch_semantic_model_context
 from apps.agents.graph.state import AgentState
+from apps.agents.graph.tool_binding import MCP_TOOL_NAMES, _make_injecting_tool_node
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     Workspace,

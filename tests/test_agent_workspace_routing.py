@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock
 import pytest
 from langchain_core.messages import AIMessage
 
-from apps.agents.graph.base import _make_injecting_tool_node
 from apps.agents.graph.state import AgentState
+from apps.agents.graph.tool_binding import _make_injecting_tool_node
 
 
 def test_agent_state_has_workspace_id_field():

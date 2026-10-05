@@ -12,11 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from apps.agents.graph.base import (
-    ESCALATION_METADATA_KEY,
-    MODEL_STOPPED_MESSAGES,
-    build_agent_graph,
-)
+from apps.agents.graph.base import build_agent_graph
+from apps.agents.graph.run_policy import ESCALATION_METADATA_KEY, MODEL_STOPPED_MESSAGES
 from apps.chat.stream import langgraph_to_ui_stream
 
 THINKING = {"type": "thinking", "thinking": "", "signature": "sig"}

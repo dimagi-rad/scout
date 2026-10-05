@@ -8,15 +8,12 @@ loops and a panic-loop detector escalates after repeated schema errors.
 
 from __future__ import annotations
 
-import copy
-import json
 import logging
 from typing import TYPE_CHECKING, Any, Literal
 
 from django.conf import settings
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -24,6 +21,19 @@ from apps.agents.graph.prompt_context import (
     PROMPT_CACHE_CONTROL,
     _build_cached_system_message,
     _build_system_prompt,
+)
+from apps.agents.graph.run_policy import (
+    ESCALATION_MESSAGE,
+    ESCALATION_METADATA_KEY,
+    ESCALATION_TRIGGER_COUNT,
+    HEADLESS_ESCALATION_MESSAGE,
+    MODEL_STOPPED_MESSAGES,
+    READ_ONLY_ESCALATION_MESSAGE,
+    READ_ONLY_SEMANTIC_ESCALATION_MESSAGE,
+    SEMANTIC_ESCALATION_MESSAGE,
+    _schema_escalation_message,
+    _should_escalate,
+    _workspace_access_denial,
 )
 from apps.agents.graph.state import (
     TRUNCATED_TOOL_CALLS_NODE,
@@ -35,21 +45,13 @@ from apps.agents.graph.state import (
     truncated_tool_calls,
     unfinished_turn_reason,
 )
-from apps.agents.llm_request import MAIN_AGENT_EFFORT, chat_model_kwargs
-from apps.agents.subagents.events import (
-    HUMAN_TURN_PARAM,
-    SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
-    SUBAGENT_TOOL_NAMES,
-    reset_subagent_event_queue,
-    set_subagent_event_queue,
+from apps.agents.graph.tool_binding import (
+    INJECTED_TOOL_PARAMS,
+    _build_tools,
+    _llm_tool_schemas,
+    _make_injecting_tool_node,
 )
-from apps.agents.tool_results import compact_tool_results
-from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
-from apps.agents.tools.learning_tool import create_save_learning_tool
-from apps.agents.tools.materialization_tool import create_materialization_tool
-from apps.agents.tools.recipe_tool import create_recipe_tool
-from apps.chat.constants import SYSTEM_RESUME_MARKER
-from apps.common.error_codes import ErrorCode
+from apps.agents.llm_request import MAIN_AGENT_EFFORT, chat_model_kwargs
 from apps.semantic.services.date_context import agent_date_context
 from apps.workspaces.access import aresolve_workspace_access_ex
 from apps.workspaces.models import WorkspaceRole
@@ -62,62 +64,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# MCP tools that require a context ID (tenant_id) injected from state
-MCP_TOOL_NAMES = frozenset(
-    {
-        "list_tables",
-        "describe_table",
-        "query",
-        "get_metadata",
-        "list_workspaces",
-        "list_datasets",
-        "semantic_catalog",
-        "describe_dataset",
-        "semantic_query",
-        "run_materialization",
-        "get_schema_status",
-        "get_lineage",
-        # workspace_id is injected into these so an LLM-supplied run_id is scoped
-        # to the calling workspace (arch #253, 01#6).
-        "get_materialization_status",
-        "cancel_materialization",
-    }
-)
-
-LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager", "canvas_manager"})
-ARTIFACT_READ_TOOL_NAMES = frozenset({"artifact_graph_overview", "get_artifact_semantic_queries"})
-
-AGENT_WRITE_MCP_TOOLS = frozenset({"run_materialization", "cancel_materialization"})
-
-# Context params the graph injects into every MCP tool call server-side. They
-# are hidden from the LLM-facing tool schema (so the model never sets them) and
-# must also be stripped from any tool input surfaced to the UI (they carry
-# internal ids, not arguments the user typed). ``tool_call_id`` is injected
-# per-call from the LangChain tool_call's own id; the rest come from agent
-# state. Kept here as the single source of truth so the SSE stream's
-# input-redaction stays in lockstep with what the graph injects.
-INJECTED_TOOL_PARAMS = frozenset(
-    {
-        "workspace_id",
-        "user_id",
-        "thread_id",
-        "tool_call_id",
-        SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
-        HUMAN_TURN_PARAM,
-    }
-)
-
-
-def human_turn_count(messages: list) -> int:
-    """Messages the user actually typed; resume notices are synthetic HumanMessages."""
-    return sum(
-        1
-        for message in messages
-        if isinstance(message, HumanMessage)
-        and not str(message.content).startswith(SYSTEM_RESUME_MARKER)
-    )
-
-
 # The node whose model call writes the answer; resume streaming tails its tokens.
 AGENT_NODE = "agent"
 
@@ -126,388 +72,9 @@ AGENT_NODE = "agent"
 # SDK's 21,333-token guard for non-streamed requests does not apply.
 DEFAULT_MAX_TOKENS = 16_000
 
-# Panic-loop circuit breaker: if the last N tool messages all carry one of these
-# error codes, route to the escalation node so the turn ends with an explicit ask
-# instead of burning the recursion budget. These are bare ``error.code`` values
-# from the MCP envelope, matched against the parsed JSON field — NOT a substring
-# search: substring-matching ``'"code": "NOT_FOUND"'`` only worked under
-# FastMCP's indent=2 and would silently break under compact separators (06#1).
-# Single source of truth shared with base_system.py's "When the Schema is Broken".
-ESCALATION_ERROR_CODES = frozenset(
-    {
-        ErrorCode.NOT_FOUND,
-        ErrorCode.VALIDATION_ERROR,
-        # semantic_query and the SQL tools reported these as VALIDATION_ERROR
-        # until #251, so they keep escalating as they did.
-        ErrorCode.DATA_NOT_LOADED,
-        ErrorCode.SEMANTIC_MODEL_UNAVAILABLE,
-    }
-)
-ESCALATION_TRIGGER_COUNT = 3
-ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS = 2_000
-
-
-def _tool_message_error(content: Any) -> dict | None:
-    """Extract the MCP envelope ``error`` object from a ToolMessage's content.
-
-    Content may be a JSON string, a list of content blocks (the
-    langchain_mcp_adapters shape), or already-parsed structures. Reads the
-    structured ``error`` rather than a whitespace-sensitive substring (06#1).
-    Returns None when the content isn't a recognizable error envelope.
-    """
-    if isinstance(content, list):
-        for block in content:
-            text = None
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text")
-            elif isinstance(block, str):
-                text = block
-            if text:
-                error = _tool_message_error(text)
-                if error is not None:
-                    return error
-        return None
-    if isinstance(content, dict):
-        envelope = content
-    elif isinstance(content, str):
-        try:
-            envelope = json.loads(content)
-        except (ValueError, TypeError):
-            return None
-    else:
-        return None
-    if not isinstance(envelope, dict) or envelope.get("success") is not False:
-        return None
-    error = envelope.get("error")
-    return error if isinstance(error, dict) else None
-
-
-def _schema_escalation_message(messages: list, *, write_capable: bool, interactive: bool) -> str:
-    """The escalation text for the streak ``_should_escalate`` matched.
-
-    Only a streak whose every result is a missing data model gets the rebuild text:
-    a reload fixes anything else, and parallel results arrive in no fixed order.
-    """
-    codes = {_tool_message_error_code(m.content) for m in _escalation_streak(messages)}
-    if codes == {ErrorCode.SEMANTIC_MODEL_UNAVAILABLE}:
-        return (
-            SEMANTIC_ESCALATION_MESSAGE if write_capable else READ_ONLY_SEMANTIC_ESCALATION_MESSAGE
-        )
-    if not write_capable:
-        return READ_ONLY_ESCALATION_MESSAGE
-    if not interactive:
-        return HEADLESS_ESCALATION_MESSAGE
-    return ESCALATION_MESSAGE
-
-
-def _tool_message_error_code(content: Any) -> str | None:
-    """The envelope ``error.code`` of a ToolMessage's content, if any."""
-    code = (_tool_message_error(content) or {}).get("code")
-    return code if isinstance(code, str) else None
-
-
-def _workspace_access_denial(messages: list) -> str | None:
-    """The authorizer's message when the latest tool round denied workspace access.
-
-    The denial holds for every remaining tool call this turn, so the graph ends
-    the turn on it with the remedy instead of letting the agent retry. The whole
-    trailing run of tool results is one round (parallel calls), and a successful
-    sibling in that round must not hide the denial.
-    """
-    batch = []
-    for message in reversed(messages):
-        if not isinstance(message, ToolMessage):
-            break
-        batch.append(message)
-    error = next(
-        (
-            e
-            for e in (_tool_message_error(m.content) for m in batch)
-            if e and e.get("code") == ErrorCode.WORKSPACE_ACCESS_DENIED
-        ),
-        None,
-    )
-    if error is None:
-        return None
-    message = error.get("message")
-    return message if isinstance(message, str) and message else ACCESS_DENIED_MESSAGE
-
-
-ACCESS_DENIED_MESSAGE = "I can no longer read this workspace's data."
-
-ESCALATION_MESSAGE = (
-    "I've encountered repeated schema errors — the tables I expected to "
-    "find aren't queryable. The data may need to be re-materialized. "
-    "Would you like me to run materialization?"
-)
-
-# A headless run has nobody to answer the interactive question.
-HEADLESS_ESCALATION_MESSAGE = (
-    "I've encountered repeated schema errors — the tables I expected to "
-    "find aren't queryable. The data may need to be re-materialized before "
-    "this run can complete."
-)
-
-READ_ONLY_ESCALATION_MESSAGE = (
-    "I've encountered repeated schema errors — the tables I expected to "
-    "find aren't queryable. The data may need to be refreshed, which a "
-    "workspace member with write access can do."
-)
-
-# A missing data model is fixed by rebuilding it, not by reloading the data.
-SEMANTIC_ESCALATION_MESSAGE = (
-    "I've encountered repeated errors — this workspace's data model (its semantic "
-    "datasets) isn't available, so its data can't be queried yet. The data model "
-    "needs to be rebuilt; that does not reload any data."
-)
-
-READ_ONLY_SEMANTIC_ESCALATION_MESSAGE = (
-    "I've encountered repeated errors — this workspace's data model (its semantic "
-    "datasets) isn't available, so its data can't be queried yet. A workspace member "
-    "with write access can rebuild the data model; that does not reload any data."
-)
-
-# Marks the escalation node's message so headless callers (recipe runs) can tell
-# an ended-on-escalation turn from a real answer without matching its prose.
-ESCALATION_METADATA_KEY = "scout_escalation"
-
-# A refusal, a max_tokens cut-off, or a turn with only thinking would otherwise
-# end the chat with a blank reply and a clean finish.
-MODEL_STOPPED_MESSAGES = {
-    "refusal": "The model declined to answer this request. Try rephrasing it.",
-    "max_tokens": "The model stopped before finishing its answer; try again.",
-    "empty": "The model stopped before answering; try again.",
-}
-
 # Graph nodes that end a turn with a fixed AIMessage instead of an LLM call, so
 # the chat stream must emit their text itself.
 FIXED_MESSAGE_NODES = frozenset({"escalate", "model_stopped"})
-
-
-def _escalation_streak(messages: list) -> list[ToolMessage]:
-    """The newest ESCALATION_TRIGGER_COUNT tool results of the turn, across rounds."""
-    streak: list[ToolMessage] = []
-    for msg in reversed(messages):
-        if isinstance(msg, ToolMessage):
-            streak.append(msg)
-            if len(streak) >= ESCALATION_TRIGGER_COUNT:
-                break
-        elif isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-            continue
-        else:
-            break
-    return streak
-
-
-def _should_escalate(messages: list) -> bool:
-    """Detect a panic loop: last N trailing tool messages all returned an
-    escalation error code. A successful tool call in between resets the streak.
-    Matches the structured ``error.code`` (06#1), not a substring.
-    """
-    streak = _escalation_streak(messages)
-    if len(streak) < ESCALATION_TRIGGER_COUNT:
-        return False
-
-    for tm in streak:
-        code = _tool_message_error_code(tm.content)
-        if code not in ESCALATION_ERROR_CODES:
-            return False
-    return True
-
-
-def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:
-    """Build LLM tool definitions with the injected context-ID params omitted from
-    the schema, so the LLM can't supply (and hallucinate) values that are injected
-    from state. Non-MCP tools are returned unchanged.
-    """
-    hidden = set(hidden_params)
-    result: list = []
-    for tool in tools:
-        schema = tool.get_input_schema().model_json_schema()
-        props = schema.get("properties", {})
-        to_hide = hidden & set(props)
-
-        if not to_hide:
-            result.append(tool)
-            continue
-
-        if tool.name not in MCP_TOOL_NAMES and tool.name not in LOCAL_CONTEXT_TOOL_NAMES:
-            result.append(tool)
-            continue
-
-        # Build a trimmed schema dict for bind_tools
-        trimmed_props = {k: v for k, v in props.items() if k not in to_hide}
-        trimmed_required = [r for r in schema.get("required", []) if r not in to_hide]
-        result.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "parameters": {
-                        "type": "object",
-                        "properties": trimmed_props,
-                        "required": trimmed_required,
-                    },
-                },
-            }
-        )
-    return result
-
-
-def _message_text(message: Any) -> str:
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                if isinstance(block.get("text"), str):
-                    parts.append(block["text"])
-                elif isinstance(block.get("content"), str):
-                    parts.append(block["content"])
-            elif isinstance(block, str):
-                parts.append(block)
-        return "\n".join(parts)
-    return str(content) if content is not None else ""
-
-
-def _artifact_manager_task_is_missing(args: Any) -> bool:
-    if not isinstance(args, dict):
-        return True
-    task = args.get("task")
-    return not isinstance(task, str) or not task.strip()
-
-
-def _latest_human_text(messages: list[Any]) -> str:
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            text = _message_text(msg).strip()
-            if text:
-                return text
-    return ""
-
-
-def _synthesize_artifact_manager_task(messages: list[Any]) -> str:
-    """Build a bounded fallback task when the LLM emits an empty tool call.
-
-    Anthropic can still produce an empty argument object despite a required
-    schema. For artifact work, the user's latest request is enough context: the
-    Artifact Manager subagent owns data discovery, semantic query verification,
-    graph construction, and validation.
-    """
-
-    user_request = _latest_human_text(messages)
-    if len(user_request) > ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS:
-        user_request = user_request[:ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS].rstrip()
-        user_request += "..."
-    if not user_request:
-        user_request = "Create or update the semantic story artifact requested in this thread."
-
-    return (
-        "Create or update a semantic story artifact for the user's latest request. "
-        "Treat this as a complete delegated artifact task. Do your own dataset "
-        "discovery and semantic-query verification inside the Artifact Manager; "
-        "use live semantic data, hidden semantic_query blocks, validated graph/table/stat "
-        "bindings, and publish only after artifact_write validation succeeds.\n\n"
-        f"User request:\n{user_request}"
-    )
-
-
-def _make_injecting_tool_node(
-    base_tool_node: ToolNode,
-    injections: dict[str, str],
-) -> Any:
-    """Wrap a ToolNode so MCP tool calls get context IDs from agent state.
-
-    Copies the last AI message and injects state values into every MCP tool
-    call's args before execution. ``injections`` maps tool-arg-name →
-    state-field-name, so the MCP server always gets correct IDs regardless of
-    what the LLM generated.
-    """
-
-    async def injecting_node(
-        state: AgentState,
-        config: RunnableConfig | None = None,
-    ) -> dict[str, Any]:
-        messages = list(state["messages"])
-        last_msg = messages[-1]
-        event_queue = None
-        if isinstance(config, dict):
-            event_queue = (config.get("configurable") or {}).get(SUBAGENT_EVENT_QUEUE_CONFIG_KEY)
-
-        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-            modified_msg = copy.copy(last_msg)
-            persistable_msg = copy.copy(last_msg)
-            modified_calls = []
-            persistable_calls = []
-            persistable_changed = False
-            for tc in last_msg.tool_calls:
-                tc_id = tc.get("id") or ""
-                if tc["name"] in MCP_TOOL_NAMES:
-                    extra = {k: state.get(v, "") for k, v in injections.items()}
-                    if not tc_id:
-                        logger.warning(
-                            "MCP tool call '%s' has no id; tool_call_id will be empty — "
-                            "background-job attribution will fail",
-                            tc["name"],
-                        )
-                    extra["tool_call_id"] = tc_id
-                    tc = {**tc, "args": {**tc["args"], **extra}}
-                    persistable_tc = copy.deepcopy(tc)
-                    persistable_tc["args"] = {
-                        k: v
-                        for k, v in persistable_tc.get("args", {}).items()
-                        if k not in INJECTED_TOOL_PARAMS
-                    }
-                elif tc["name"] in LOCAL_CONTEXT_TOOL_NAMES:
-                    args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
-                    if tc["name"] == "artifact_manager" and _artifact_manager_task_is_missing(args):
-                        task = _synthesize_artifact_manager_task(messages)
-                        args = {**args, "task": task}
-                        logger.warning(
-                            "artifact_manager tool call had empty task; synthesized "
-                            "fallback task from latest user request (tool_call_id=%s)",
-                            tc_id,
-                        )
-                        persistable_changed = True
-                    persistable_tc = {**tc, "args": dict(args)}
-                    extra = {"tool_call_id": tc_id}
-                    if tc["name"] in SUBAGENT_TOOL_NAMES:
-                        extra[SUBAGENT_EVENT_QUEUE_CONFIG_KEY] = event_queue
-                    if tc["name"] == "canvas_manager":
-                        extra[HUMAN_TURN_PARAM] = human_turn_count(messages)
-                    tc = {**tc, "args": {**args, **extra}}
-                else:
-                    persistable_tc = tc
-                modified_calls.append(tc)
-                persistable_calls.append(persistable_tc)
-            modified_msg.tool_calls = modified_calls
-            if persistable_changed:
-                persistable_msg.tool_calls = persistable_calls
-            messages = [*messages[:-1], modified_msg]
-
-        token = set_subagent_event_queue(event_queue)
-        try:
-            result = compact_tool_results(
-                await base_tool_node.ainvoke({"messages": messages}, config=config),
-                MCP_TOOL_NAMES,
-            )
-            if (
-                "persistable_msg" in locals()
-                and persistable_changed
-                and getattr(persistable_msg, "id", None)
-                and isinstance(result, dict)
-            ):
-                result_messages = list(result.get("messages", []))
-                return {**result, "messages": [persistable_msg, *result_messages]}
-            return result
-        finally:
-            reset_subagent_event_queue(token)
-
-    injecting_node.__annotations__["config"] = RunnableConfig | None
-    return injecting_node
 
 
 async def build_agent_graph(
@@ -776,85 +343,13 @@ async def build_agent_graph(
     return compiled
 
 
-def _build_tools(
-    workspace: Workspace,
-    user: User | None,
-    mcp_tools: list,
-    conversation_id: str | None = None,
-    interactive: bool = True,
-    job_id: int | None = None,
-    canvas_write: bool = False,
-    write_capable: bool = False,
-) -> list:
-    """Build the tool list: MCP data tools plus local artifact/recipe/learning
-    tools, and a blocking materialization tool in headless mode.
-    """
-    # Write-capable MCP tools are dropped for read-only roles. In headless mode
-    # also drop the interactive fire-and-ack
-    # ``run_materialization``: it requires a real chat Thread + checkpointer +
-    # async resume that a headless run does not have. It is replaced below by the
-    # blocking materialize tool, which runs the pipeline inline and returns when
-    # data is ready.
-    excluded: set[str] = set()
-    if not write_capable:
-        excluded.update(AGENT_WRITE_MCP_TOOLS)
-    if not interactive:
-        excluded.add("run_materialization")
-    tools = [t for t in mcp_tools if getattr(t, "name", None) not in excluded]
-    from apps.agents.tools.artifact_manager_agent import (  # noqa: PLC0415 — cycle
-        create_artifact_manager_tool,
-    )
-    from apps.agents.tools.canvas_manager_agent import (  # noqa: PLC0415 — cycle
-        create_canvas_manager_tool,
-    )
-    from apps.agents.tools.canvas_tool import create_canvas_read_tool  # noqa: PLC0415 — cycle
-
-    if write_capable:
-        tools.append(create_save_learning_tool(workspace, user))
-        tools.append(
-            create_artifact_manager_tool(
-                workspace,
-                user,
-                mcp_tools or [],
-                conversation_id=conversation_id,
-            )
-        )
-    else:
-        tools.extend(
-            item
-            for item in create_artifact_graph_tools(workspace, user, conversation_id)
-            if item.name in ARTIFACT_READ_TOOL_NAMES
-        )
-    if interactive and conversation_id:
-        # The canvas is thread-bound; headless (recipe) runs have no thread.
-        # The parent keeps a read-only canvas_read for cheap draft questions;
-        # all canvas writes are delegated to the Canvas Manager subagent,
-        # which read-only workspace members do not get at all.
-        tools.append(create_canvas_read_tool(workspace, user, conversation_id))
-        # build_agent_graph already folds write_capable into canvas_write; checking
-        # both keeps a direct caller that forgets write_capable from failing open.
-        if canvas_write and write_capable:
-            tools.append(
-                create_canvas_manager_tool(
-                    workspace,
-                    user,
-                    mcp_tools or [],
-                    conversation_id=conversation_id,
-                )
-            )
-    if write_capable:
-        tools.append(create_recipe_tool(workspace, user))
-    if not interactive and write_capable:
-        tools.append(create_materialization_tool(workspace, user, job_id))
-    return tools
-
-
 __all__ = [
     "ESCALATION_MESSAGE",
     "ESCALATION_METADATA_KEY",
     "ESCALATION_TRIGGER_COUNT",
     "FIXED_MESSAGE_NODES",
     "HEADLESS_ESCALATION_MESSAGE",
+    "INJECTED_TOOL_PARAMS",
     "READ_ONLY_ESCALATION_MESSAGE",
     "READ_ONLY_SEMANTIC_ESCALATION_MESSAGE",
     "SEMANTIC_ESCALATION_MESSAGE",

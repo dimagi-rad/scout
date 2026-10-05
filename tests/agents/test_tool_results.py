@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
-from apps.agents.graph.base import _make_injecting_tool_node
 from apps.agents.graph.nested import _make_nested_tool_node
+from apps.agents.graph.tool_binding import _make_injecting_tool_node
 from apps.agents.tool_results import (
     FULL_RESULT_BUDGET_BYTES,
     TOOL_RESULT_BUDGET_BYTES,

@@ -11,7 +11,8 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
-from apps.agents.graph.base import MODEL_STOPPED_MESSAGES, build_agent_graph
+from apps.agents.graph.base import build_agent_graph
+from apps.agents.graph.run_policy import MODEL_STOPPED_MESSAGES
 from apps.agents.graph.state import (
     TRUNCATED_TOOL_CALL_MESSAGE,
     reject_truncated_tool_calls,

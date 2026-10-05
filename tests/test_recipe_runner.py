@@ -18,7 +18,7 @@ from langchain_core.tools import StructuredTool
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from apps.agents.graph.base import HEADLESS_ESCALATION_MESSAGE
+from apps.agents.graph.run_policy import HEADLESS_ESCALATION_MESSAGE
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.recipes.services.runner import RecipeRunner
 from mcp_server.server import mcp as scout_mcp

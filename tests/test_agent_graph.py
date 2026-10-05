@@ -5,13 +5,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from apps.agents.graph.base import (
+from apps.agents.graph.prompt_context import _build_system_prompt, _fetch_semantic_model_context
+from apps.agents.graph.tool_binding import (
     INJECTED_TOOL_PARAMS,
     MCP_TOOL_NAMES,
     _build_tools,
     _llm_tool_schemas,
 )
-from apps.agents.graph.prompt_context import _build_system_prompt, _fetch_semantic_model_context
 from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 
 

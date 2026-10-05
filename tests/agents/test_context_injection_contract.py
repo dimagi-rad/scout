@@ -1,7 +1,7 @@
 """Guardrail for the MCP context-injection contract (arch-review finding 07#0).
 
 The agent graph's injecting tool node (`_make_injecting_tool_node` in
-`apps.agents.graph.base`) adds ``workspace_id``, ``user_id``, ``thread_id`` and
+`apps.agents.graph.tool_binding`) adds ``workspace_id``, ``user_id``, ``thread_id`` and
 ``tool_call_id`` to the args of **every** MCP tool call. The read tools
 (``list_tables``, ``query``, ``semantic_query``, …) declare ``workspace_id``,
 ``user_id`` and ``thread_id`` (the last two carry the actor into the MCP audit
@@ -28,7 +28,7 @@ regression fails loudly here instead.
 import pytest
 from langchain_core.tools import StructuredTool
 
-from apps.agents.graph.base import MCP_TOOL_NAMES
+from apps.agents.graph.tool_binding import MCP_TOOL_NAMES
 from mcp_server.server import mcp
 
 # The exact arg set the injecting node writes onto every MCP tool call. Mirrors

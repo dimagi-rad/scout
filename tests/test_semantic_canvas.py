@@ -14,7 +14,7 @@ import pytest
 from django.db import connections, transaction
 from langchain_core.messages import AIMessage, ToolMessage
 
-from apps.agents.graph.base import _build_tools
+from apps.agents.graph.tool_binding import _build_tools
 from apps.agents.tools.canvas_manager_agent import create_canvas_manager_tool
 from apps.agents.tools.canvas_tool import (
     can_write_canvas,
