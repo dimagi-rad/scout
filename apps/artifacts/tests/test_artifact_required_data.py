@@ -258,6 +258,10 @@ async def test_required_source_already_loaded_only_rebuilds_view(required_setup)
         return {"cube_schema": {"ok": True}}
 
     with (
+        # The fixture models coverage without creating physical managed views.
+        patch.object(
+            SchemaManager, "reconcile_view_publication", return_value={"status": "consistent"}
+        ),
         patch(
             "apps.workspaces.services.publication.rebuild_workspace_view_schema",
             new=AsyncMock(side_effect=rebuild),
