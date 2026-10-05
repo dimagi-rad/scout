@@ -25,10 +25,9 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.data_operation import DataLockTimeout
 from apps.workspaces.services.publication import rebuild_dependent_view_schemas
+from apps.workspaces.services.retirement import _RETIRE_MAX_ATTEMPTS, _RETIRE_RETRY_BASE_SECONDS
 from apps.workspaces.services.schema_manager import SchemaManager, SchemaStillReferenced
 from apps.workspaces.tasks import (
-    _RETIRE_MAX_ATTEMPTS,
-    _RETIRE_RETRY_BASE_SECONDS,
     expire_inactive_schemas,
     teardown_schema,
     teardown_view_schema_task,
@@ -53,7 +52,7 @@ async def test_expire_inactive_schemas_marks_stale_schema_for_teardown(active_sc
     await active_schema.asave(update_fields=["last_accessed_at"])
 
     with patch(
-        "apps.workspaces.tasks.teardown_schema.defer_async", new_callable=AsyncMock
+        "apps.workspaces.services.retirement.adefer_teardown_schema", new_callable=AsyncMock
     ) as mock_defer:
         await expire_inactive_schemas()
 
@@ -89,7 +88,9 @@ async def test_resurrected_schema_survives_immediate_expire_sweep(tenant):
         ts = await sync_to_async(mgr.provision)(tenant)
 
     # Now run the janitor immediately, as production did 60s after materialization.
-    with patch("apps.workspaces.tasks.teardown_schema.defer_async", new_callable=AsyncMock):
+    with patch(
+        "apps.workspaces.services.retirement.adefer_teardown_schema", new_callable=AsyncMock
+    ):
         await expire_inactive_schemas()
 
     await ts.arefresh_from_db()
@@ -130,7 +131,7 @@ async def test_teardown_schema_marks_expired_on_success(active_schema):
     active_schema.state = SchemaState.TEARDOWN
     await active_schema.asave(update_fields=["state"])
 
-    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+    with patch("apps.workspaces.services.retirement.SchemaManager") as MockManager:
         MockManager.return_value.retire_tenant_schema.return_value = None
 
         await teardown_schema(schema_id=str(active_schema.id))
@@ -159,7 +160,9 @@ async def test_expire_inactive_schemas_does_not_stale_runs_before_drop(active_sc
         result={"sources": {"cases": {"state": "completed", "rows": 1}}},
     )
 
-    with patch("apps.workspaces.tasks.teardown_schema.defer_async", new_callable=AsyncMock):
+    with patch(
+        "apps.workspaces.services.retirement.adefer_teardown_schema", new_callable=AsyncMock
+    ):
         await expire_inactive_schemas()
 
     await active_schema.arefresh_from_db()
@@ -199,7 +202,7 @@ async def test_teardown_schema_marks_runs_stale_on_success(active_schema):
         state=MaterializationRun.RunState.FAILED,
     )
 
-    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+    with patch("apps.workspaces.services.retirement.SchemaManager") as MockManager:
         MockManager.return_value.retire_tenant_schema.return_value = None
 
         await teardown_schema(schema_id=str(active_schema.id))
@@ -219,7 +222,7 @@ async def test_teardown_schema_rolls_back_to_active_on_failure(active_schema):
     active_schema.state = SchemaState.TEARDOWN
     await active_schema.asave(update_fields=["state"])
 
-    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+    with patch("apps.workspaces.services.retirement.SchemaManager") as MockManager:
         MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("DB error")
 
         with pytest.raises(RuntimeError):
@@ -255,7 +258,7 @@ async def test_teardown_schema_leaves_runs_terminal_when_drop_fails(active_schem
         result={"sources": {"cases": {"state": "completed", "rows": 1}}},
     )
 
-    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+    with patch("apps.workspaces.services.retirement.SchemaManager") as MockManager:
         MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("DB error")
 
         with pytest.raises(RuntimeError):
@@ -291,14 +294,16 @@ async def test_expire_then_failed_teardown_keeps_data_visible(active_schema):
 
     # Step 1: the periodic janitor flips the schema to TEARDOWN and dispatches
     # teardown_schema (dispatch is mocked; we invoke the task directly below).
-    with patch("apps.workspaces.tasks.teardown_schema.defer_async", new_callable=AsyncMock):
+    with patch(
+        "apps.workspaces.services.retirement.adefer_teardown_schema", new_callable=AsyncMock
+    ):
         await expire_inactive_schemas()
 
     await active_schema.arefresh_from_db()
     assert active_schema.state == SchemaState.TEARDOWN
 
     # Step 2: the DROP fails transiently. The schema reverts to ACTIVE.
-    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+    with patch("apps.workspaces.services.retirement.SchemaManager") as MockManager:
         MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("lock conflict")
         with pytest.raises(RuntimeError):
             await teardown_schema(schema_id=str(active_schema.id))
@@ -353,7 +358,7 @@ async def test_teardown_schema_fails_dependent_multitenant_view_schemas(
         workspace=ws_c, schema_name="ws_teardown_c", state=SchemaState.ACTIVE
     )
 
-    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+    with patch("apps.workspaces.services.retirement.SchemaManager") as MockManager:
         MockManager.return_value.retire_tenant_schema.return_value = None
         await teardown_schema(schema_id=str(active_schema.id))
 
@@ -389,7 +394,7 @@ async def test_teardown_schema_does_not_clobber_non_active_view_schema(active_sc
         workspace=ws_b, schema_name="ws_teardown_b2", state=SchemaState.TEARDOWN
     )
 
-    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+    with patch("apps.workspaces.services.retirement.SchemaManager") as MockManager:
         MockManager.return_value.retire_tenant_schema.return_value = None
         await teardown_schema(schema_id=str(active_schema.id))
 
@@ -434,7 +439,7 @@ async def test_teardown_schema_rebuilds_dependent_views_when_surviving_active_sc
     )
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
         patch(
             "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
@@ -500,7 +505,7 @@ async def test_teardown_schema_aborts_when_row_resurrected_to_active(active_sche
     # teardown was queued (which would have required it to be TEARDOWN at enqueue).
     assert active_schema.state == SchemaState.ACTIVE
 
-    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+    with patch("apps.workspaces.services.retirement.SchemaManager") as MockManager:
         await teardown_schema(schema_id=str(active_schema.id))
 
     # The drop never happened — the manager was never asked to teardown.
@@ -523,7 +528,7 @@ async def test_teardown_schema_aborts_does_not_stale_runs(active_schema):
         result={"sources": {"cases": {"state": "completed", "rows": 1}}},
     )
 
-    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+    with patch("apps.workspaces.services.retirement.SchemaManager") as MockManager:
         await teardown_schema(schema_id=str(active_schema.id))
 
     MockManager.return_value.retire_tenant_schema.assert_not_called()
@@ -540,7 +545,7 @@ async def test_teardown_schema_still_drops_when_state_is_teardown(active_schema)
     active_schema.state = SchemaState.TEARDOWN
     await active_schema.asave(update_fields=["state"])
 
-    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+    with patch("apps.workspaces.services.retirement.SchemaManager") as MockManager:
         MockManager.return_value.retire_tenant_schema.return_value = None
         await teardown_schema(schema_id=str(active_schema.id))
 
@@ -559,7 +564,7 @@ async def test_teardown_view_schema_aborts_when_row_resurrected_to_active(db, us
         workspace=workspace, schema_name="ws_cas_active", state=SchemaState.ACTIVE
     )
 
-    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+    with patch("apps.workspaces.services.retirement.SchemaManager") as MockManager:
         await teardown_view_schema_task(view_schema_id=str(vs.id))
 
     MockManager.return_value.teardown_view_schema.assert_not_called()
@@ -578,7 +583,7 @@ async def test_teardown_view_schema_still_drops_when_state_is_teardown(db, user)
         workspace=workspace, schema_name="ws_cas_teardown", state=SchemaState.TEARDOWN
     )
 
-    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+    with patch("apps.workspaces.services.retirement.SchemaManager") as MockManager:
         MockManager.return_value.teardown_view_schema.return_value = None
         await teardown_view_schema_task(view_schema_id=str(vs.id))
 
@@ -605,7 +610,7 @@ async def test_teardown_preserves_view_that_excluded_the_source(active_schema, t
             "excluded_tenants": [{"tenant_id": str(tenant.id)}],
         },
     )
-    with patch("apps.workspaces.tasks.SchemaManager"):
+    with patch("apps.workspaces.services.retirement.SchemaManager"):
         await teardown_schema(schema_id=str(active_schema.id))
     await view.arefresh_from_db()
     assert view.state == SchemaState.ACTIVE
@@ -633,8 +638,8 @@ async def test_failed_retirement_of_a_superseded_schema_is_retried(active_schema
     await _superseded_teardown_schema(active_schema, tenant)
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
     ):
         MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("dropped")
         retry.return_value.defer_async = AsyncMock(return_value=1)
@@ -653,8 +658,8 @@ async def test_retirement_stops_retrying_after_the_attempt_cap(active_schema, te
     await _superseded_teardown_schema(active_schema, tenant)
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
     ):
         MockManager.return_value.retire_tenant_schema.side_effect = RuntimeError("still broken")
         retry.return_value.defer_async = AsyncMock(return_value=1)
@@ -683,8 +688,8 @@ async def test_lock_contention_keeps_the_only_schema_in_teardown_and_retries(
     await active_schema.asave(update_fields=["state"])
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
     ):
         MockManager.return_value.retire_tenant_schema.side_effect = failure
         retry.return_value.defer_async = AsyncMock(return_value=1)
@@ -707,9 +712,9 @@ async def test_a_tenant_lock_timeout_reschedules_instead_of_stranding(active_sch
         yield
 
     with (
-        patch("apps.workspaces.tasks.tenant_data_lock_if_free", never_granted),
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.tenant_data_lock_if_free", never_granted),
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await teardown_schema(schema_id=str(active_schema.id))
@@ -732,8 +737,8 @@ async def test_a_busy_tenant_lock_defers_retirement_without_waiting_and_spends_a
 
     with (
         try_tenant_data_lock(active_schema.tenant_id) as held,
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
     ):
         assert held
         retry.return_value.defer_async = AsyncMock(return_value=1)
@@ -759,9 +764,9 @@ async def test_a_busy_tenant_lock_gives_up_at_the_retirement_attempt_cap(active_
         yield False
 
     with (
-        patch("apps.workspaces.tasks.tenant_data_lock_if_free", busy_lock),
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
-        caplog.at_level(logging.ERROR, logger="apps.workspaces.tasks"),
+        patch("apps.workspaces.services.retirement.tenant_data_lock_if_free", busy_lock),
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
+        caplog.at_level(logging.ERROR, logger="apps.workspaces.services.retirement"),
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await teardown_schema(schema_id=str(active_schema.id), attempt=_RETIRE_MAX_ATTEMPTS - 1)
@@ -781,8 +786,8 @@ async def test_an_unlisted_leftover_object_gives_up_at_once(active_schema):
     await active_schema.asave(update_fields=["state"])
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
     ):
         MockManager.return_value.retire_tenant_schema.side_effect = SchemaStillReferenced(
             active_schema.schema_name,
@@ -810,9 +815,9 @@ async def test_a_schema_deleted_while_waiting_for_t_is_a_no_op(active_schema):
         yield True
 
     with (
-        patch("apps.workspaces.tasks.tenant_data_lock_if_free", delete_while_waiting),
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.tenant_data_lock_if_free", delete_while_waiting),
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await teardown_schema(schema_id=str(active_schema.id))
@@ -832,8 +837,8 @@ async def test_a_statement_timeout_during_retirement_retries_instead_of_resurrec
     await active_schema.asave(update_fields=["state"])
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
     ):
         MockManager.return_value.retire_tenant_schema.side_effect = psycopg.errors.QueryCanceled(
             "canceling statement due to statement timeout"
@@ -856,8 +861,8 @@ async def test_a_dependent_that_is_not_a_view_schema_gives_up_at_once(active_sch
     await active_schema.asave(update_fields=["state"])
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
     ):
         MockManager.return_value.retire_tenant_schema.side_effect = SchemaStillReferenced(
             active_schema.schema_name,
@@ -884,8 +889,8 @@ async def test_retirement_never_rebuilds_an_expired_dependent_view_schema(
     )
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
         patch(
             "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
             new_callable=AsyncMock,
@@ -919,8 +924,8 @@ async def test_a_query_bug_taking_t_is_not_retried_as_contention(active_schema):
         yield
 
     with (
-        patch("apps.workspaces.tasks.tenant_data_lock_if_free", buggy_session),
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.tenant_data_lock_if_free", buggy_session),
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
         pytest.raises(psycopg.errors.UndefinedFunction),
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)
@@ -941,8 +946,8 @@ async def test_an_interface_error_taking_t_reschedules_instead_of_crashing(activ
         yield
 
     with (
-        patch("apps.workspaces.tasks.tenant_data_lock_if_free", broken_session),
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.tenant_data_lock_if_free", broken_session),
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await teardown_schema(schema_id=str(active_schema.id))
@@ -966,7 +971,7 @@ async def test_a_dropped_orm_connection_while_waiting_for_t_reschedules(active_s
             "arefresh_from_db",
             AsyncMock(side_effect=DjangoInterfaceError("connection already closed")),
         ),
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await teardown_schema(schema_id=str(active_schema.id))
@@ -988,7 +993,7 @@ async def test_an_orm_query_bug_while_re_reading_the_row_surfaces(active_schema)
             "arefresh_from_db",
             AsyncMock(side_effect=DjangoProgrammingError("column does not exist")),
         ),
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
         pytest.raises(DjangoProgrammingError),
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)

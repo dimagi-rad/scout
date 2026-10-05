@@ -53,8 +53,8 @@ async def test_expire_logs_decision_with_last_accessed_at(active_schema, caplog)
     await active_schema.asave(update_fields=["last_accessed_at"])
 
     with (
-        patch("apps.workspaces.tasks.teardown_schema.defer_async", new_callable=AsyncMock),
-        caplog.at_level(logging.INFO, logger="apps.workspaces.tasks"),
+        patch("apps.workspaces.services.retirement.adefer_teardown_schema", new_callable=AsyncMock),
+        caplog.at_level(logging.INFO, logger="apps.workspaces.services.retirement"),
     ):
         await expire_inactive_schemas()
 
@@ -73,8 +73,8 @@ async def test_teardown_logs_successful_drop(active_schema, caplog):
     await active_schema.asave(update_fields=["state"])
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
-        caplog.at_level(logging.INFO, logger="apps.workspaces.tasks"),
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        caplog.at_level(logging.INFO, logger="apps.workspaces.services.retirement"),
     ):
         MockManager.return_value.retire_tenant_schema.return_value = None
         await teardown_schema(schema_id=str(active_schema.id))
@@ -106,8 +106,8 @@ async def test_teardown_logs_dependent_view_schema_failure_count(
     )
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
-        caplog.at_level(logging.INFO, logger="apps.workspaces.tasks"),
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        caplog.at_level(logging.INFO, logger="apps.workspaces.services.retirement"),
     ):
         MockManager.return_value.retire_tenant_schema.return_value = None
         await teardown_schema(schema_id=str(active_schema.id))

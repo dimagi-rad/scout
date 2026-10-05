@@ -230,7 +230,7 @@ async def test_expiry_partial_rebuild_and_correct_source_restore(published_sourc
     await _assert_recovery(setup)
     # Retirement is refused while these views still read the schema: the
     # last-good views keep serving and their provenance stays intact.
-    with patch("apps.workspaces.tasks.teardown_schema.configure") as retry:
+    with patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry:
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await teardown_schema.func(str(setup.schemas[0].id))
     retry.return_value.defer_async.assert_awaited_once_with(

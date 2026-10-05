@@ -112,7 +112,7 @@ async def test_siblings_read_last_good_through_a_shared_load_until_they_rebuild(
             return_value=MagicMock(id="cube", content_hash="hash"),
         ),
         patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retire,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retire,
         patch(
             "apps.workspaces.tasks._included_tenant_snapshot_state", AsyncMock(return_value="safe")
         ),
@@ -130,7 +130,7 @@ async def test_siblings_read_last_good_through_a_shared_load_until_they_rebuild(
     assert await sync_to_async(read_as_readonly)(view_a, shared_view) == ["s2"]
     assert await sync_to_async(read_as_readonly)(view_b, shared_view) == ["s1"]
 
-    with patch("apps.workspaces.tasks.teardown_schema.configure") as retry:
+    with patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry:
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await workspaces_tasks.teardown_schema(schema_id=str(old_shared.id))
     await old_shared.arefresh_from_db()
@@ -165,7 +165,7 @@ async def test_a_reverted_retirement_rebuilds_siblings_back_onto_the_active_sche
 
     # TTL expiry: the first attempt finds both siblings reading S and moves them off it.
     with (
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retry,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
         patch.object(workspaces_tasks.rebuild_workspace_view_schema, "defer_async", AsyncMock()),
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)

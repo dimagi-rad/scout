@@ -32,9 +32,9 @@ from apps.workspaces.services.load_generations import begin_load_generation
 from apps.workspaces.services.refresh_requests import (
     fail_claimed_refresh_candidate,
 )
+from apps.workspaces.services.retirement import promote_and_queue_retirement
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.tasks import (
-    _promote_and_queue_retirement,
     _to_thread_fresh_db,
     refresh_tenant_schema,
 )
@@ -305,7 +305,7 @@ async def test_real_pipeline_defers_refresh_promotion_to_owned_worker_cas(
         ),
         patch("apps.workspaces.tasks.get_registry", return_value=registry),
         patch(
-            "apps.workspaces.tasks.promote_candidate_schema",
+            "apps.workspaces.services.retirement.promote_candidate_schema",
             side_effect=observe_owned_promotion,
         ),
         patch(
@@ -313,7 +313,7 @@ async def test_real_pipeline_defers_refresh_promotion_to_owned_worker_cas(
             new_callable=AsyncMock,
         ) as semantic_rebuild,
         patch(
-            "apps.workspaces.tasks.teardown_schema.configure",
+            "apps.workspaces.services.retirement.configure_teardown_schema",
             return_value=teardown_deferrer,
         ),
     ):
@@ -361,7 +361,7 @@ async def test_refresh_task_schedules_old_schema_teardown(
         ),
         patch("apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run),
         patch(
-            "apps.workspaces.tasks.teardown_schema.configure",
+            "apps.workspaces.services.retirement.configure_teardown_schema",
             return_value=deferrer,
         ) as mock_configure,
     ):
@@ -417,7 +417,7 @@ async def test_refresh_cancellation_drains_writer_then_fails_owned_candidate(
         patch("apps.workspaces.tasks.SchemaManager.create_physical_schema", blocked_create),
         patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
         patch(
-            "apps.workspaces.tasks.fail_claimed_refresh_candidate",
+            "apps.workspaces.services.retirement.fail_claimed_refresh_candidate",
             wraps=fail_claimed_refresh_candidate,
             side_effect=DatabaseError("Cleanup database unavailable") if cleanup_fails else None,
         ),
@@ -624,7 +624,9 @@ async def test_refresh_loads_into_new_schema_not_old_active(
             return_value=_mock_registry(),
         ),
         patch("apps.workspaces.tasks.run_pipeline", side_effect=fake_run_pipeline),
-        patch("apps.workspaces.tasks.teardown_schema.configure", return_value=deferrer),
+        patch(
+            "apps.workspaces.services.retirement.configure_teardown_schema", return_value=deferrer
+        ),
     ):
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
@@ -741,7 +743,7 @@ def _refresh_patches(**overrides):
         ),
         "registry": patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry()),
         "pipeline": patch("apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run),
-        "retire": patch("apps.workspaces.tasks.teardown_schema.configure"),
+        "retire": patch("apps.workspaces.services.retirement.configure_teardown_schema"),
     }
     patches.update(overrides)
     return patches
@@ -900,7 +902,7 @@ async def test_a_refresh_cancelled_during_promotion_ends_its_load(
             stack.enter_context(p)
         stack.enter_context(
             patch(
-                "apps.workspaces.tasks._promote_and_queue_retirement",
+                "apps.workspaces.services.retirement.promote_and_queue_retirement",
                 side_effect=asyncio.CancelledError,
             )
         )
@@ -1139,7 +1141,7 @@ async def test_refresh_cancelled_during_failure_cleanup_finishes_drop(
     targets = {
         "create": "apps.workspaces.tasks.SchemaManager.create_physical_schema",
         "pipeline": "apps.workspaces.tasks.run_pipeline",
-        "promotion": "apps.workspaces.tasks._promote_and_queue_retirement",
+        "promotion": "apps.workspaces.services.retirement.promote_and_queue_retirement",
     }
     patches = _refresh_patches()
     with contextlib.ExitStack() as stack:
@@ -1147,7 +1149,9 @@ async def test_refresh_cancelled_during_failure_cleanup_finishes_drop(
             stack.enter_context(p)
         stack.enter_context(patch(targets[failure], side_effect=RuntimeError("failed")))
         stack.enter_context(
-            patch("apps.workspaces.tasks.fail_claimed_refresh_candidate", blocked_fail)
+            patch(
+                "apps.workspaces.services.retirement.fail_claimed_refresh_candidate", blocked_fail
+            )
         )
         teardown = stack.enter_context(patch("apps.workspaces.tasks.SchemaManager.teardown"))
         work = asyncio.create_task(
@@ -1224,15 +1228,15 @@ async def test_refresh_abnormal_abort_settles_only_unpublished_candidate(
         pass
 
     def abort_after_promotion(*args, **kwargs):
-        result = _promote_and_queue_retirement(*args, **kwargs)
+        result = promote_and_queue_retirement(*args, **kwargs)
         assert result.promoted
         raise WorkerAborted
 
     targets = {
         "create": "apps.workspaces.tasks.SchemaManager.create_physical_schema",
         "pipeline": "apps.workspaces.tasks.run_pipeline",
-        "promotion": "apps.workspaces.tasks._promote_and_queue_retirement",
-        "promotion_committed": "apps.workspaces.tasks._promote_and_queue_retirement",
+        "promotion": "apps.workspaces.services.retirement.promote_and_queue_retirement",
+        "promotion_committed": "apps.workspaces.services.retirement.promote_and_queue_retirement",
     }
     patches = _refresh_patches()
     with contextlib.ExitStack() as stack:

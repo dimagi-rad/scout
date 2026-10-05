@@ -30,7 +30,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.services import load_outcome
+from apps.workspaces.services import load_outcome, retirement
 from apps.workspaces.services.data_operation import (
     LockOrderError,
     tenant_data_lock,
@@ -95,8 +95,8 @@ async def _loads(pipeline: _Pipeline):
             return_value=MagicMock(id="cube", content_hash="hash"),
         ),
         patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
-        patch("apps.workspaces.tasks.teardown_schema.configure") as retire,
-        patch("apps.workspaces.tasks._queue_candidate_drop_sync") as drop,
+        patch("apps.workspaces.services.retirement.configure_teardown_schema") as retire,
+        patch("apps.workspaces.services.retirement._queue_candidate_drop_sync") as drop,
     ):
         retire.return_value.defer_async = AsyncMock(return_value=1)
         yield drop
@@ -283,7 +283,7 @@ async def test_a_promotion_whose_retirement_cannot_be_queued_is_rolled_back(
     async with _loads(pipeline):
         await _run(workspace, user)
         [last_good] = await _active_schemas(tenant)
-        with patch("apps.workspaces.tasks.teardown_schema.configure") as retire:
+        with patch("apps.workspaces.services.retirement.configure_teardown_schema") as retire:
             retire.return_value.defer.side_effect = RuntimeError("queue unavailable")
             result = await _run(workspace, user)
 
@@ -441,7 +441,7 @@ async def test_a_candidate_drop_defers_without_waiting_while_a_writer_holds_t(wo
     with (
         try_tenant_data_lock(tenant.id) as held,
         patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
-        patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as retry,
+        patch("apps.workspaces.services.retirement.configure_drop_abandoned_candidate") as retry,
     ):
         assert held
         retry.return_value.defer_async = AsyncMock(return_value=1)
@@ -449,7 +449,7 @@ async def test_a_candidate_drop_defers_without_waiting_while_a_writer_holds_t(wo
 
     teardown.assert_not_called()
     retry.assert_called_once_with(
-        schedule_in={"seconds": workspaces_tasks._CANDIDATE_DROP_DELAY_SECONDS},
+        schedule_in={"seconds": retirement._CANDIDATE_DROP_DELAY_SECONDS},
         queueing_lock=f"drop_abandoned_candidate:{candidate.id}",
     )
     retry.return_value.defer_async.assert_awaited_once_with(
@@ -465,7 +465,7 @@ async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenan
             "apps.workspaces.tasks.SchemaManager.teardown",
             side_effect=psycopg.OperationalError("server closed the connection"),
         ),
-        patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as retry,
+        patch("apps.workspaces.services.retirement.configure_drop_abandoned_candidate") as retry,
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id), attempt=2)
@@ -484,7 +484,7 @@ async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenan
         retry.reset_mock()
         await workspaces_tasks.drop_abandoned_candidate(
             schema_id=str(candidate.id),
-            attempt=workspaces_tasks._CANDIDATE_DROP_MAX_ATTEMPTS - 1,
+            attempt=retirement._CANDIDATE_DROP_MAX_ATTEMPTS - 1,
         )
         retry.return_value.defer_async.assert_not_awaited()
 
@@ -770,7 +770,7 @@ async def test_a_publish_queues_the_demoted_schemas_teardown(workspace, tenant, 
     async with _loads(pipeline):
         await _run(workspace, user)
         [first] = await _active_schemas(tenant)
-        with patch("apps.workspaces.tasks.teardown_schema.configure") as retire:
+        with patch("apps.workspaces.services.retirement.configure_teardown_schema") as retire:
             await _run(workspace, user)
 
     retire.assert_called_once_with(schedule_in={"seconds": 30 * 60})
@@ -912,7 +912,7 @@ async def test_a_drop_that_hits_a_query_bug_surfaces_instead_of_retrying(workspa
             "apps.workspaces.tasks.SchemaManager.teardown",
             side_effect=psycopg.errors.UndefinedColumn("no such column"),
         ),
-        patch("apps.workspaces.tasks.drop_abandoned_candidate.configure") as retry,
+        patch("apps.workspaces.services.retirement.configure_drop_abandoned_candidate") as retry,
         pytest.raises(psycopg.errors.UndefinedColumn),
     ):
         await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id))
@@ -985,7 +985,7 @@ async def test_an_abort_while_queuing_drops_still_settles_the_candidate(workspac
     async with _loads(pipeline):
         with (
             patch(
-                "apps.workspaces.tasks._defer_abandoned_candidate_drops",
+                "apps.workspaces.services.retirement.defer_abandoned_candidate_drops",
                 side_effect=asyncio.CancelledError,
             ),
             pytest.raises(asyncio.CancelledError),
@@ -1016,7 +1016,7 @@ async def test_abandoning_a_candidate_is_undone_if_its_drop_cannot_be_queued(
             load_config_fingerprint="old",
         )
         with patch(
-            "apps.workspaces.tasks._queue_candidate_drop_sync",
+            "apps.workspaces.services.retirement._queue_candidate_drop_sync",
             side_effect=RuntimeError("queue unavailable"),
         ):
             await _run(workspace, user)

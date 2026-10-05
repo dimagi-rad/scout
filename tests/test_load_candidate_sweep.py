@@ -22,7 +22,7 @@ from apps.workspaces.models import (
     TenantLoadGeneration,
     TenantSchema,
 )
-from apps.workspaces.services import load_candidates
+from apps.workspaces.services import load_candidates, retirement
 from apps.workspaces.services.data_operation import (
     LockOrderError,
     tenant_data_lock,
@@ -60,7 +60,7 @@ async def _ledger(tenant, *, requested, published, loading=0):
 
 
 async def _sweep():
-    with patch.object(workspaces_tasks.drop_abandoned_candidate, "configure") as configure:
+    with patch.object(retirement, "configure_drop_abandoned_candidate") as configure:
         configure.return_value.defer_async = AsyncMock(return_value=1)
         counts = await workspaces_tasks.sweep_workspace_load_candidates()
     queued = {
@@ -126,7 +126,7 @@ async def test_a_drop_already_queued_is_not_queued_again(tenant, workspace):
     await _ledger(tenant, requested=2, published=2)
     await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=2)
 
-    with patch.object(workspaces_tasks.drop_abandoned_candidate, "configure") as configure:
+    with patch.object(retirement, "configure_drop_abandoned_candidate") as configure:
         configure.return_value.defer_async = AsyncMock(side_effect=AlreadyEnqueued("queued"))
         counts = await workspaces_tasks.sweep_workspace_load_candidates()
 
@@ -207,7 +207,7 @@ async def test_a_drop_never_waits_on_a_loading_tenant(tenant, workspace):
     async def drop_while_loading():
         with (
             patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None) as teardown,
-            patch.object(workspaces_tasks.drop_abandoned_candidate, "configure") as retry,
+            patch.object(retirement, "configure_drop_abandoned_candidate") as retry,
         ):
             retry.return_value.defer_async = AsyncMock(return_value=1)
             await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id))
@@ -240,7 +240,7 @@ async def test_a_busy_tenant_requeues_the_drop_without_spending_its_retries(tena
     candidate = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=1)
 
     async def drop_while_loading():
-        with patch.object(workspaces_tasks.drop_abandoned_candidate, "configure") as retry:
+        with patch.object(retirement, "configure_drop_abandoned_candidate") as retry:
             retry.return_value.defer_async = AsyncMock(side_effect=AlreadyEnqueued("queued"))
             # A drop the sweep queued meanwhile covers this one: no error.
             await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id), attempt=4)
@@ -257,9 +257,9 @@ async def test_a_writer_queued_drop_that_is_already_queued_is_not_an_error(tenan
     candidate = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=1)
     [listed] = await sync_to_async(_listed_with_last_attempt)(candidate.id)
 
-    with patch.object(workspaces_tasks.drop_abandoned_candidate, "configure") as configure:
+    with patch.object(retirement, "configure_drop_abandoned_candidate") as configure:
         configure.return_value.defer.side_effect = AlreadyEnqueued("queued")
-        await sync_to_async(workspaces_tasks._queue_candidate_drop_sync)(listed, delay=900)
+        await sync_to_async(retirement._queue_candidate_drop_sync)(listed, delay=900)
 
     assert configure.call_args.kwargs == {
         "queueing_lock": f"drop_abandoned_candidate:{candidate.id}",
@@ -291,7 +291,7 @@ async def test_prolonged_busy_drop_warns_without_spending_error_budget(tenant, w
     candidate = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=1)
 
     async def drop_while_loading():
-        with patch.object(workspaces_tasks.drop_abandoned_candidate, "configure") as retry:
+        with patch.object(retirement, "configure_drop_abandoned_candidate") as retry:
             retry.return_value.defer_async = AsyncMock(return_value=1)
             await workspaces_tasks.drop_abandoned_candidate(
                 schema_id=str(candidate.id), attempt=4, busy_count=95
@@ -316,8 +316,8 @@ async def test_duplicate_sync_defer_preserves_outer_transaction(tenant, workspac
     def enqueue_twice():
         with transaction.atomic():
             TenantSchema.objects.filter(id=candidate.id).update(load_config_fingerprint="")
-            workspaces_tasks._queue_candidate_drop_sync(listed, delay=900)
-            workspaces_tasks._queue_candidate_drop_sync(listed, delay=900)
+            retirement._queue_candidate_drop_sync(listed, delay=900)
+            retirement._queue_candidate_drop_sync(listed, delay=900)
             # A real unique violation must be rolled back to the inner savepoint.
             TenantSchema.objects.filter(id=candidate.id).update(load_job_id=42)
 
@@ -334,7 +334,7 @@ async def test_committed_settlement_is_reported_when_abandonment_scan_fails(
     orphan = await _candidate(tenant, workspace, state=SchemaState.PROVISIONING, generation=2)
 
     with patch.object(
-        workspaces_tasks,
+        retirement,
         "unresumable_workspace_candidates",
         side_effect=RuntimeError("scan failed"),
     ):
