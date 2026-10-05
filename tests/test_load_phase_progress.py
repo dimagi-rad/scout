@@ -76,9 +76,13 @@ async def _progress(client, ws):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_post_load_phase_reaches_the_card_after_the_run_completed():
-    ws, _run, client = await _job_with_run()
+    ws, run, client = await _job_with_run()
 
     await _apublish_phase(JOB_ID, LoadPhase.BUILDING_MODEL, "Preparing the data model")
+    await run.arefresh_from_db()
+    # The stored record keeps the finished load's counts for the MCP status tool.
+    assert run.progress["rows_loaded"] == 900
+    assert run.progress["message"] == "Loading cases..."
 
     progress = await _progress(client, ws)
     assert progress["phase"] == "building_model"
@@ -109,6 +113,7 @@ async def test_phase_is_written_to_the_jobs_latest_run():
     await second.arefresh_from_db()
     assert "phase" not in first.progress
     assert second.progress["phase"] == "combining_sites"
+    assert second.progress["total_steps"] == 4
     assert (await _progress(client, ws))["phase"] == "combining_sites"
 
 

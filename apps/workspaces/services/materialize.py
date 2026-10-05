@@ -886,14 +886,9 @@ async def _apublish_phase(job_id: int | None, phase: LoadPhase, message: str) ->
         )
         if run is None:
             return
-        progress = {
-            **(run.progress or {}),
-            "phase": phase,
-            "message": message,
-            "source": None,
-            "rows_loaded": 0,
-            "rows_total": None,
-        }
+        # Own keys, so the finished run's counts and message stay what the MCP
+        # status tool reports; ``progress_payload`` overlays them for the card.
+        progress = {**(run.progress or {}), "phase": phase, "phase_message": message}
         await MaterializationRun.objects.filter(id=run.id).aupdate(progress=progress)
     except Exception:
         logger.warning("Could not record load phase %s for job %s", phase, job_id, exc_info=True)

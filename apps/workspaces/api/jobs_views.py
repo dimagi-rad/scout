@@ -45,10 +45,7 @@ def _job_to_dict(job: ThreadJob, run_progress: dict | None, load: dict | None = 
         run_progress = {
             **(run_progress or {}),
             "phase": LoadPhase.ANSWERING,
-            "message": "The agent is answering from the new data",
-            "source": None,
-            "rows_loaded": 0,
-            "rows_total": None,
+            "phase_message": "The agent is answering from the new data",
         }
     return {
         "thread_job_id": str(job.id),
