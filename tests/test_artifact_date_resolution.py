@@ -288,6 +288,7 @@ def test_invalid_query_local_range_has_diagnostics(date_range):
 
 def test_query_local_range_requires_time_dimension():
     doc = story()
+    doc["blocks"][1].pop("inputs")
     query = doc["blocks"][1]["config"]["queries"]["sessions"]
     query.pop("time_dimension")
     query["date_range"] = {"last": 24, "unit": "week"}

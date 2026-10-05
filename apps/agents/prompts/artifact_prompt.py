@@ -220,7 +220,7 @@ Rules:
   `granularity`, `date_range`, `filters`, `order_by`, `limit`.
 - Never use raw Cube keys like `timeDimensions`, `dateRange`, `order`,
   `segments`, `timezone`, or filter key `member`.
-- A query bound to `date_range` or `compare` must include `time_dimension`.
+- A query with `date_range` or bound to `compare` must include `time_dimension`.
 """
     + RECENT_PERIOD_QUERY_GUIDANCE
     + """- Time-bucketed rows expose the bucket as `date`; member result keys are

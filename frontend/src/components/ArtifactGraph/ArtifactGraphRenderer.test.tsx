@@ -588,3 +588,53 @@ describe("malformed query-local ranges", () => {
     expect(() => buildSemanticQueryInput(query)).toThrow("date_range must be an object")
   })
 })
+
+
+describe("bound dates override query-local ranges", () => {
+  beforeEach(() => mockedPost.mockReset())
+
+  it.each(["semantic_query", "graph", "table"])("uses bound dates for %s", async (type) => {
+    mockedPost.mockResolvedValue({ rows: [] })
+    const query = {
+      measures: ["visits.count"], time_dimension: "visits.visit_date", granularity: "week",
+      date_range: { last: 24, unit: "week" },
+    }
+    const doc = artifact()
+    doc.data.story_doc = { schema_version: 1, blocks: [{
+      id: "q", type,
+      inputs: { date_range: { value: { start: "2026-06-01", end: "2026-06-30" } } },
+      config: type === "semantic_query" ? { queries: { visits: query } } : { query },
+    }] }
+    render(<ArtifactGraphRenderer artifact={doc} workspaceId="workspace-1" />)
+    await waitFor(() => expect(mockedPost).toHaveBeenCalled())
+    expect(mockedPost.mock.calls[0][1]).toMatchObject({
+      filters: [{ field: "visits.visit_date", operator: "inDateRange", values: ["2026-06-01", "2026-06-30"] }],
+    })
+    expect(mockedPost.mock.calls[0][1]).not.toHaveProperty("date_range", query.date_range)
+  })
+
+  it("uses comparison bounds for both queries", async () => {
+    mockedPost.mockResolvedValue({ rows: [] })
+    const doc = artifact()
+    doc.data.story_doc = { schema_version: 1, blocks: [{
+      id: "q", type: "semantic_query",
+      inputs: { compare: { value: {
+        current: { start: "2026-06-01", end: "2026-06-30" },
+        previous: { start: "2026-05-01", end: "2026-05-31" },
+      } } },
+      config: { compare: true, queries: { visits: {
+        measures: ["visits.count"], time_dimension: "visits.visit_date", granularity: "week",
+        date_range: { last: 24, unit: "week" },
+      } } },
+    }] }
+    render(<ArtifactGraphRenderer artifact={doc} workspaceId="workspace-1" />)
+    await waitFor(() => expect(mockedPost).toHaveBeenCalledTimes(2))
+    expect(mockedPost.mock.calls.map((call) => call[1])).toEqual([
+      expect.objectContaining({ filters: [{ field: "visits.visit_date", operator: "inDateRange", values: ["2026-06-01", "2026-06-30"] }] }),
+      expect.objectContaining({ filters: [{ field: "visits.visit_date", operator: "inDateRange", values: ["2026-05-01", "2026-05-31"] }] }),
+    ])
+    for (const call of mockedPost.mock.calls) {
+      expect(call[1]).not.toHaveProperty("date_range", { last: 24, unit: "week" })
+    }
+  })
+})

@@ -615,6 +615,7 @@ def query_diagnostics(
         try:
             date_range = query["date_range"]
             if isinstance(date_range, dict) and ("last" in date_range or "unit" in date_range):
+                # Counted windows need the runtime clock; a fixed anchor can reject valid counts.
                 validate_period_range(date_range)
             else:
                 resolve_date_range(date_range, {"today": "2000-01-01"})

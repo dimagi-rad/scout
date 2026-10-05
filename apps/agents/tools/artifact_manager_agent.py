@@ -141,7 +141,7 @@ How to build data-backed blocks:
 - Query specs support only `measures`, `dimensions`, `time_dimension`,
   `granularity`, `date_range`, `filters`, `order_by`, and `limit`.
 - Filters use `field`, `operator`, and values. Do not use `member`.
-- If a query is bound to `date_range` or uses comparison, include
+- If a query has `date_range` or uses comparison, include
   `time_dimension`.
 """
     + RECENT_PERIOD_QUERY_GUIDANCE
