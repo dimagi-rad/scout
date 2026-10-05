@@ -1,7 +1,7 @@
 import type { GraphSeries } from "./recharts"
 import type { Row } from "./types"
 
-export const MAX_DIMENSION_SERIES = 5
+const MAX_DIMENSION_SERIES = 5
 
 interface PivotOptions {
   xKey: string
