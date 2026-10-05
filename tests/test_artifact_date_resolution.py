@@ -235,3 +235,86 @@ async def test_comparison_checks_previous_period_keys_independently(monkeypatch)
     assert len(result["key_warnings"]) == 1
     assert result["key_warnings"][0]["query_key"] == "q.sessions_previous"
     assert result["key_warnings"][0]["expected_key"] == "sessions_count"
+
+
+@pytest.mark.parametrize("block_type", ["semantic_query", "graph", "table"])
+def test_query_local_recent_periods_validate_and_resolve(block_type):
+    query = {
+        "measures": ["sessions.count"],
+        "time_dimension": "sessions.created_at",
+        "granularity": "week",
+        "date_range": {"last": 24, "unit": "week"},
+        "limit": 500,
+    }
+    doc = {
+        "schema_version": 1,
+        "blocks": [
+            {
+                "id": "q",
+                "type": block_type,
+                "config": {"queries": {"sessions": query}}
+                if block_type == "semantic_query"
+                else {"query": query},
+            }
+        ],
+    }
+    assert not [
+        d
+        for d in validate_doc(doc)
+        if d["code"].startswith("query_") or d["code"] == "unknown_query_key"
+    ]
+    queries, _ = resolve_artifact_queries(doc, CONTEXT)
+    assert queries[0]["filters"] == [
+        {
+            "field": "sessions.created_at",
+            "operator": "inDateRange",
+            "values": ["2026-04-06", "2026-09-16"],
+        }
+    ]
+    assert queries[0]["limit"] == 500
+
+
+@pytest.mark.parametrize(
+    "date_range", [None, "last 24 weeks", {"last": 0, "unit": "week"}, {"last": 2, "unit": []}]
+)
+def test_invalid_query_local_range_has_diagnostics(date_range):
+    doc = story()
+    doc["blocks"][1].pop("inputs")
+    doc["blocks"][1]["config"]["queries"]["sessions"]["date_range"] = date_range
+    assert "query_date_range" in {d["code"] for d in validate_doc(doc)}
+    with pytest.raises(DateContextError):
+        resolve_artifact_queries(doc, CONTEXT)
+
+
+def test_query_local_range_requires_time_dimension():
+    doc = story()
+    query = doc["blocks"][1]["config"]["queries"]["sessions"]
+    query.pop("time_dimension")
+    query["date_range"] = {"last": 24, "unit": "week"}
+    assert "query_window_without_time_dimension" in {d["code"] for d in validate_doc(doc)}
+
+
+@pytest.mark.parametrize(
+    ("date_range", "expected"),
+    [
+        ({"preset": "last_7_days"}, ["2026-09-10", "2026-09-16"]),
+        ({"start": "2026-08-01", "end": "2026-08-31"}, ["2026-08-01", "2026-08-31"]),
+    ],
+)
+def test_query_local_existing_range_forms(date_range, expected):
+    doc = story()
+    doc["blocks"][1].pop("inputs")
+    doc["blocks"][1]["config"]["queries"]["sessions"]["date_range"] = date_range
+    assert not [d for d in validate_doc(doc) if d["severity"] == "error"]
+    queries, _ = resolve_artifact_queries(doc, CONTEXT)
+    assert queries[0]["filters"][0]["values"] == expected
+
+
+@pytest.mark.parametrize("compare", [False, True])
+def test_bound_dates_override_query_local_range(compare):
+    doc = story(compare=compare)
+    doc["blocks"][1]["config"]["queries"]["sessions"]["date_range"] = {"last": 24, "unit": "week"}
+    queries, _ = resolve_artifact_queries(doc, CONTEXT)
+    assert queries[0]["filters"][0]["values"] == ["2026-08-18", "2026-09-16"]
+    if compare:
+        assert queries[1]["filters"][0]["values"] == ["2026-07-19", "2026-08-17"]

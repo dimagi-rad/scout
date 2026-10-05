@@ -1109,3 +1109,39 @@ def test_cube_security_context_is_workspace_and_schema_scoped(workspace, semanti
     assert security_context["schemaName"] == "tenant_schema"
     assert security_context["readonlyRole"] == "tenant_schema_ro"
     assert security_context["userId"] == "user-1"
+
+
+def test_recent_weeks_compile_to_date_filter_with_ascending_long_format(
+    monkeypatch, workspace, semantic_model
+):
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
+    compiled = query_service._compile_semantic_query(
+        workspace,
+        {
+            "measures": ["visits.count"],
+            "dimensions": ["visits.username"],
+            "time_dimension": "visits.visit_date",
+            "granularity": "week",
+            "date_range": {"last": 24, "unit": "week"},
+            "query_context": {"as_of": "2026-09-16T00:30:00Z", "timezone": "America/New_York"},
+            "limit": 500,
+        },
+    )
+    assert compiled["cube_query"] == {
+        "measures": ["visits.count"],
+        "dimensions": ["visits.username"],
+        "timeDimensions": [{"dimension": "visits.visit_date", "granularity": "week"}],
+        "filters": [
+            {
+                "member": "visits.visit_date",
+                "operator": "inDateRange",
+                "values": ["2026-04-06", "2026-09-15"],
+            }
+        ],
+        "order": [["visits.visit_date", "asc"]],
+        "timezone": "America/New_York",
+        "limit": 500,
+    }
+    assert "date_range" not in compiled["query"]

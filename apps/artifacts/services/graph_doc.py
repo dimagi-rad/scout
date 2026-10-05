@@ -19,7 +19,9 @@ from apps.semantic.services.date_context import (
     DEFAULT_PRESET,
     PRESETS,
     DateContextError,
+    resolve_date_range,
     validate_date_filter,
+    validate_period_range,
 )
 
 CURRENT_SCHEMA_VERSION = 1
@@ -42,6 +44,7 @@ ALLOWED_QUERY_KEYS = {
     "measures",
     "dimensions",
     "time_dimension",
+    "date_range",
     "granularity",
     "filters",
     "order_by",
@@ -600,7 +603,7 @@ def query_diagnostics(
                 code="query_time_dimension",
             )
         )
-    if require_time_dimension and not time_dimension:
+    if (require_time_dimension or "date_range" in query) and not time_dimension:
         diagnostics.append(
             problem(
                 f"{path} is bound to a date range but has no time_dimension",
@@ -608,6 +611,17 @@ def query_diagnostics(
                 code="query_window_without_time_dimension",
             )
         )
+    if "date_range" in query:
+        try:
+            date_range = query["date_range"]
+            if isinstance(date_range, dict) and ("last" in date_range or "unit" in date_range):
+                validate_period_range(date_range)
+            else:
+                resolve_date_range(date_range, {"today": "2000-01-01"})
+        except DateContextError as exc:
+            diagnostics.append(
+                problem(f"{path}.date_range: {exc}", block_id=block_id, code="query_date_range")
+            )
     granularity = query.get("granularity")
     if granularity is not None and not _is_choice(granularity, ALLOWED_GRANULARITIES):
         diagnostics.append(

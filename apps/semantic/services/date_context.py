@@ -18,6 +18,7 @@ PRESETS = ("last_7_days", "last_30_days", "last_90_days", "month_to_date", "toda
 COMPARISONS = ("previous_period", "previous_year")
 DEFAULT_PRESET = "last_30_days"
 DEFAULT_COMPARISON = "previous_period"
+PERIOD_UNITS = {"day", "week", "month", "quarter", "year"}
 
 
 class DateContextError(ValueError):
@@ -66,11 +67,16 @@ def calendar_date(value) -> date:
 def resolve_date_range(value, context: dict) -> dict:
     if not isinstance(value, dict):
         raise DateContextError(
-            "date_range must be {preset: ...} or {start: YYYY-MM-DD, end: YYYY-MM-DD}."
+            "date_range must be {preset: ...}, {last: N, unit: day|week|month|quarter|year}, "
+            "or {start: YYYY-MM-DD, end: YYYY-MM-DD}."
         )
     # Explicit bounds are already resolved, including custom and comparison
     # windows. A preset annotation must never override these visible dates.
-    if "start" in value or "end" in value:
+    if "last" in value or "unit" in value:
+        validate_period_range(value)
+        end = calendar_date(context.get("today") if isinstance(context, dict) else None)
+        start = _period_start(end, value["last"], value["unit"])
+    elif "start" in value or "end" in value:
         start, end = calendar_date(value.get("start")), calendar_date(value.get("end"))
     else:
         preset = value.get("preset")
@@ -90,6 +96,36 @@ def resolve_date_range(value, context: dict) -> dict:
     if start > end:
         raise DateContextError("Date range start must be on or before its end.")
     return {"start": start.isoformat(), "end": end.isoformat()}
+
+
+def validate_period_range(value: dict) -> None:
+    count, unit = value.get("last"), value.get("unit")
+    if (
+        set(value) != {"last", "unit"}
+        or type(count) is not int
+        or count < 1
+        or not isinstance(unit, str)
+        or unit not in PERIOD_UNITS
+    ):
+        raise DateContextError(
+            "Counted date_range must be {last: positive integer, unit: day|week|month|quarter|year}. "
+            "Do not mix it with presets or explicit bounds."
+        )
+
+
+def _period_start(end: date, count: int, unit: str) -> date:
+    """Include the current calendar bucket through today; Cube weeks start Monday."""
+    try:
+        if unit == "day":
+            return end - timedelta(days=count - 1)
+        if unit == "week":
+            return end - timedelta(days=end.weekday() + 7 * (count - 1))
+        width = {"month": 1, "quarter": 3, "year": 12}[unit]
+        month_index = (end.year - 1) * 12 + ((end.month - 1) // width) * width
+        month_index -= width * (count - 1)
+        return date(month_index // 12 + 1, month_index % 12 + 1, 1)
+    except (OverflowError, ValueError) as exc:
+        raise DateContextError("Date range is outside the supported calendar range.") from exc
 
 
 def comparison_range(value, comparison: str, context: dict) -> dict:

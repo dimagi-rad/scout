@@ -559,3 +559,24 @@ describe("ArtifactGraphRenderer", () => {
     })
   })
 })
+
+
+describe("query-local date ranges", () => {
+  beforeEach(() => mockedPost.mockReset())
+
+  it.each(["semantic_query", "graph", "table"])("preserves a counted range for %s blocks", async (type) => {
+    mockedPost.mockResolvedValue({ rows: [] })
+    const query = {
+      measures: ["visits.count"], time_dimension: "visits.visit_date", granularity: "week",
+      date_range: { last: 24, unit: "week" }, limit: 500,
+    }
+    const doc = artifact()
+    doc.data.story_doc = { schema_version: 1, blocks: [{
+      id: "q", type,
+      config: type === "semantic_query" ? { queries: { visits: query } } : { query },
+    }] }
+    render(<ArtifactGraphRenderer artifact={doc} workspaceId="workspace-1" />)
+    await waitFor(() => expect(mockedPost).toHaveBeenCalled())
+    expect(mockedPost.mock.calls[0][1]).toMatchObject(query)
+  })
+})

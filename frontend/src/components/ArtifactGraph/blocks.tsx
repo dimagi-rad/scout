@@ -730,7 +730,7 @@ async function fetchBlockRows(
   }
   if (isSemanticQuerySpec(config.query)) {
     const range = asDateRange(inputs.date_range)
-    const rows = await ctx.runQuery({ ...config.query, date_range: range }, { signal })
+    const rows = await ctx.runQuery({ ...config.query, date_range: range ?? config.query.date_range }, { signal })
     return rows.filter(isRecord)
   }
   throw new Error('Provide a "data" input binding or an inline "query" in config')
@@ -778,8 +778,8 @@ async function evaluateSemanticQuery({
         outputs[name] = current
         outputs[`${name}_previous`] = previous
       } else {
-        buildSemanticQueryInput({ ...query, date_range: dateRange })
-        outputs[name] = await ctx.runQuery({ ...query, date_range: dateRange }, { signal })
+        buildSemanticQueryInput({ ...query, date_range: dateRange ?? query.date_range })
+        outputs[name] = await ctx.runQuery({ ...query, date_range: dateRange ?? query.date_range }, { signal })
       }
     }),
   )

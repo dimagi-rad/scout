@@ -8,8 +8,8 @@ reusable view, or any multi-metric answer that should be reopened later.
 
 ### Semantic graph artifacts
 
-Rolling dates are runtime controls, not fixed dates calculated by the model.
-Use date_filter with a supported preset (today, yesterday, last_7_days,
+Rolling dates are resolved by Scout, not calculated by the model.
+For the supported rolling presets use date_filter (today, yesterday, last_7_days,
 last_30_days, last_90_days, month_to_date) and bind every affected query's
 date_range input to range.value. For comparisons use period_selector, bind
 inputs.compare to period.pair, and set config.compare=true on semantic_query.
@@ -214,10 +214,20 @@ Rules:
 - Never write raw SQL in graph artifacts.
 - Never store query result rows in `data.story_doc`.
 - Query specs support only: `measures`, `dimensions`, `time_dimension`,
-  `granularity`, `filters`, `order_by`, `limit`.
+  `granularity`, `date_range`, `filters`, `order_by`, `limit`.
 - Never use raw Cube keys like `timeDimensions`, `dateRange`, `order`,
   `segments`, `timezone`, or filter key `member`.
 - A query bound to `date_range` or `compare` must include `time_dimension`.
+- For "most recent 24 weeks, oldest first", use a query like
+  `{"measures":["visits.count"],"time_dimension":"visits.visit_date","granularity":"week",
+  "date_range":{"last":24,"unit":"week"},"order_by":[{"field":"visits.visit_date","direction":"asc"}],"limit":500}`.
+  Counted windows support day/week/month/quarter/year, including the current calendar
+  period through today in Scout's reporting timezone; weeks start Monday. They are
+  anchored to today, not the latest data row, and preserve the requested window even
+  when periods have no data (they do not generate zero-filled rows). For completed
+  periods or a data-relative anchor, use explicit start/end dates. A bound date control
+  or comparison overrides query-local date_range. `limit` caps rows, not periods:
+  allow for all series and check truncation; never use limit=N to choose N periods.
 - Time-bucketed rows expose the bucket as `date`; member result keys are
   snake_case, e.g. `visits.count` becomes `visits_count`.
 - Graph artifacts do not support transform/bucketing config. If you need a

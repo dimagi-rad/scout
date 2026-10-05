@@ -263,3 +263,62 @@ def test_timestamp_conversion_outside_calendar_is_validation_error():
 def test_date_filter_invalid_timezone_is_validation_error():
     with pytest.raises(DateContextError, match="valid IANA timezone"):
         validate_date_filter({"operator": "afterDate", "values": ["2026-09-16"]}, "not/a/zone")
+
+
+@pytest.mark.parametrize(
+    ("unit", "count", "start"),
+    [
+        ("day", 8, "2026-09-09"),
+        ("week", 1, "2026-09-14"),
+        ("week", 24, "2026-04-06"),
+        ("month", 12, "2025-10-01"),
+        ("quarter", 4, "2025-10-01"),
+        ("year", 3, "2024-01-01"),
+    ],
+)
+def test_counted_calendar_periods_include_current_period(unit, count, start):
+    assert resolve_date_range({"last": count, "unit": unit}, query_context(CONTEXT)) == {
+        "start": start,
+        "end": "2026-09-16",
+    }
+
+
+@pytest.mark.parametrize(
+    ("instant", "zone", "unit", "count", "start", "end"),
+    [
+        ("2026-09-14T00:30:00Z", "America/New_York", "week", 2, "2026-08-31", "2026-09-13"),
+        ("2024-03-31T12:00:00Z", "UTC", "month", 2, "2024-02-01", "2024-03-31"),
+        ("2026-01-01T12:00:00Z", "UTC", "quarter", 2, "2025-10-01", "2026-01-01"),
+        ("2026-03-09T12:00:00Z", "America/New_York", "week", 2, "2026-03-02", "2026-03-09"),
+    ],
+)
+def test_counted_periods_use_calendar_boundaries(instant, zone, unit, count, start, end):
+    context = query_context({"as_of": instant, "timezone": zone})
+    assert resolve_date_range({"last": count, "unit": unit}, context) == {
+        "start": start,
+        "end": end,
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"last": 0, "unit": "week"},
+        {"last": -1, "unit": "week"},
+        {"last": True, "unit": "week"},
+        {"last": 2.5, "unit": "week"},
+        {"last": "24", "unit": "week"},
+        {"last": 24},
+        {"unit": "week"},
+        {"last": 2, "unit": []},
+        {"last": 2, "unit": "fortnight"},
+        {"last": 10**30, "unit": "day"},
+        {"last": 10**30, "unit": "month"},
+        {"last": 24, "unit": "week", "preset": "today"},
+        {"last": 24, "unit": "week", "start": "2026-01-01", "end": "2026-02-01"},
+        {"last": 24, "unit": "week", "typo": True},
+    ],
+)
+def test_invalid_counted_periods_fail_closed(value):
+    with pytest.raises(DateContextError):
+        resolve_date_range(value, query_context(CONTEXT))
