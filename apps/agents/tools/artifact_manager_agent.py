@@ -23,6 +23,7 @@ from apps.agents.graph.state import (
     model_cut_off_reason,
 )
 from apps.agents.llm_request import LLM_TIMEOUT_ERRORS
+from apps.agents.prompts.query_guidance import RECENT_PERIOD_QUERY_GUIDANCE
 from apps.agents.subagents.data_requirements import DATA_REQUIREMENTS, validate_data_requirements
 from apps.agents.subagents.events import (
     emit_subagent_event,
@@ -142,17 +143,9 @@ How to build data-backed blocks:
 - Filters use `field`, `operator`, and values. Do not use `member`.
 - If a query is bound to `date_range` or uses comparison, include
   `time_dimension`.
-- For "most recent 24 weeks, oldest first", use a query like
-  `{"measures":["visits.count"],"time_dimension":"visits.visit_date","granularity":"week",
-  "date_range":{"last":24,"unit":"week"},"order_by":[{"field":"visits.visit_date","direction":"asc"}],"limit":500}`.
-  Counted windows support day/week/month/quarter/year, including the current calendar
-  period through today in Scout's reporting timezone; weeks start Monday. They are
-  anchored to today, not the latest data row, and preserve the requested window even
-  when periods have no data (they do not generate zero-filled rows). For completed
-  periods or a data-relative anchor, use explicit start/end dates. A bound date control
-  or comparison overrides query-local date_range. `limit` caps rows, not periods:
-  allow for all series and check truncation; never use limit=N to choose N periods.
-- Time-bucketed rows expose the bucket as `date`.
+"""
+    + RECENT_PERIOD_QUERY_GUIDANCE
+    + """- Time-bucketed rows expose the bucket as `date`.
 - Member result keys are snake_case: `visits.count` -> `visits_count`.
 - Graph artifacts do not support transform/bucketing config. If a derived
   category is missing, return the data-model prerequisite to the parent as
