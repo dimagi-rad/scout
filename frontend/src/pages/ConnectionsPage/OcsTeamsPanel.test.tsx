@@ -49,7 +49,7 @@ describe("OcsTeamsPanel", () => {
   afterEach(() => vi.useRealTimers())
 
   it("asks for one reconnect when the team list is unknown", async () => {
-    serve({ known: false, teams: [], flow: null, next: null })
+    serve({ available: true, known: false, teams: [], flow: null, next: null })
     await renderPanel()
     expect(screen.getByTestId("ocs-teams-hint")).toBeInTheDocument()
     expect(screen.queryByTestId("ocs-teams-connect-all")).not.toBeInTheDocument()
@@ -63,7 +63,7 @@ describe("OcsTeamsPanel", () => {
   })
 
   it("offers each unconnected team pinned by slug", async () => {
-    serve({ known: true, teams, flow: null, next: null })
+    serve({ available: true, known: true, teams, flow: null, next: null })
     await renderPanel()
     expect(screen.queryByTestId("ocs-team-alpha")).not.toBeInTheDocument()
     const link = screen.getByTestId("ocs-team-connect-beta")
@@ -75,10 +75,11 @@ describe("OcsTeamsPanel", () => {
   })
 
   it("starts the chain, then continues to the first team after a pause", async () => {
-    serve({ known: true, teams, flow: null, next: null })
+    serve({ available: true, known: true, teams, flow: null, next: null })
     await renderPanel()
     vi.useFakeTimers()
     vi.mocked(api.post).mockResolvedValue({
+      available: true,
       known: true,
       teams,
       flow: {
@@ -116,9 +117,10 @@ describe("OcsTeamsPanel", () => {
       finished: false,
       stopped: null,
     }
-    serve({ known: true, teams, flow: running, next: "gamma" })
+    serve({ available: true, known: true, teams, flow: running, next: "gamma" })
     await renderPanel()
     vi.mocked(api.post).mockResolvedValue({
+      available: true,
       known: true,
       teams,
       flow: {
@@ -144,6 +146,7 @@ describe("OcsTeamsPanel", () => {
   it("explains a team OCS swapped and does not continue", async () => {
     vi.useFakeTimers()
     serve({
+      available: true,
       known: true,
       teams,
       flow: {
@@ -181,10 +184,11 @@ describe("OcsTeamsPanel", () => {
       finished: false,
       stopped: null,
     }
-    serve({ known: true, teams, flow: running, next: "beta" })
+    serve({ available: true, known: true, teams, flow: running, next: "beta" })
     await renderPanel()
     vi.mocked(postOAuthStart).mockRejectedValueOnce(new Error("offline"))
     vi.mocked(api.post).mockResolvedValue({
+      available: true,
       known: true,
       teams,
       flow: {
@@ -198,7 +202,7 @@ describe("OcsTeamsPanel", () => {
       vi.advanceTimersByTime(CHAIN_CONTINUE_DELAY_MS)
     })
 
-    expect(api.post).toHaveBeenCalledWith("/api/auth/ocs/teams/stop/")
+    expect(api.post).toHaveBeenCalledWith("/api/auth/ocs/teams/stop/", { reason: "failed" })
     expect(screen.getByTestId("ocs-teams-error")).toBeInTheDocument()
     expect(screen.getByTestId("ocs-teams-connect-all")).toHaveTextContent("Resume")
   })
@@ -213,7 +217,7 @@ describe("OcsTeamsPanel", () => {
       finished: false,
       stopped: null,
     }
-    serve({ known: true, teams, flow: running, next: "beta" })
+    serve({ available: true, known: true, teams, flow: running, next: "beta" })
     await renderPanel()
     vi.mocked(api.post).mockReturnValue(new Promise(() => {}))
 
@@ -231,6 +235,7 @@ describe("OcsTeamsPanel", () => {
   it("keeps a running chain's Stop when a reload fails", async () => {
     vi.useFakeTimers()
     serve({
+      available: true,
       known: true,
       teams,
       flow: {
@@ -253,12 +258,31 @@ describe("OcsTeamsPanel", () => {
 
     expect(screen.getByTestId("ocs-teams-error")).toBeInTheDocument()
     expect(screen.getByTestId("ocs-teams-stop")).toBeInTheDocument()
+
+    vi.mocked(api.get).mockClear()
+    await act(async () => {
+      vi.advanceTimersByTime(PENDING_RECHECK_MS)
+    })
+    expect(api.get).toHaveBeenCalledWith("/api/auth/ocs/teams/")
   })
 
   it("ignores a malformed flow instead of breaking the page", async () => {
-    serve({ known: true, teams, flow: { mode: "all" }, next: null } as unknown as OcsTeamsState)
+    serve({ available: true, known: true, teams, flow: { mode: "all" }, next: null } as unknown as OcsTeamsState)
     await renderPanel()
     expect(screen.queryByTestId("ocs-teams-flow")).not.toBeInTheDocument()
     expect(screen.getByTestId("ocs-team-beta")).toBeInTheDocument()
+  })
+
+  it("shows nothing when Scout doesn't request the teams scope", async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      available: false,
+      known: false,
+      teams: [],
+      flow: null,
+      next: null,
+    })
+    const { container } = render(<OcsTeamsPanel provider={provider} />)
+    await act(async () => {})
+    expect(container).toBeEmptyDOMElement()
   })
 })

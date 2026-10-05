@@ -15,7 +15,7 @@ interface OcsTeam {
   name: string
 }
 
-type StopReason = "mismatch" | "cancelled" | "failed" | "incomplete" | "user" | "idle"
+type StopReason = "mismatch" | "cancelled" | "failed" | "incomplete" | "user" | "idle" | "unknown"
 
 interface OcsTeamFlow {
   mode: "all" | "one"
@@ -29,6 +29,8 @@ interface OcsTeamFlow {
 
 /** GET /api/auth/ocs/teams/ */
 export interface OcsTeamsState {
+  /** False when Scout doesn't request the `teams` scope, so no list can arrive. */
+  available: boolean
   /** False until an OCS connect has returned the `teams` claim. */
   known: boolean
   teams: (OcsTeam & { connected: boolean })[]
@@ -42,8 +44,11 @@ export const CHAIN_CONTINUE_DELAY_MS = 1500
 /** How often to re-check a hop the server hasn't settled yet. */
 export const PENDING_RECHECK_MS = 5000
 
+const STOP_URL = "/api/auth/ocs/teams/stop/"
+const STOP_REASONS: readonly string[] = ["mismatch", "cancelled", "failed", "incomplete", "user", "idle"]
+
 const isTeam = (value: unknown): value is OcsTeam =>
-  typeof asRecord(value)?.slug === "string"
+  typeof asRecord(value)?.slug === "string" && typeof asRecord(value)?.name === "string"
 
 function parseFlow(value: unknown): OcsTeamFlow | null {
   const flow = asRecord(value)
@@ -58,7 +63,10 @@ function parseFlow(value: unknown): OcsTeamFlow | null {
     stopped:
       stopped && isTeam(stopped.team)
         ? {
-            reason: stopped.reason as StopReason,
+            // An unknown reason falls through to stopMessage's generic text.
+            reason: (STOP_REASONS.includes(String(stopped.reason))
+              ? stopped.reason
+              : "unknown") as StopReason,
             team: stopped.team,
             got: isTeam(stopped.got) ? stopped.got : null,
           }
@@ -70,6 +78,7 @@ function parseState(value: unknown): OcsTeamsState | null {
   const record = asRecord(value)
   if (!record || !Array.isArray(record.teams)) return null
   return {
+    available: record.available !== false,
     known: record.known === true,
     teams: record.teams
       .filter(isTeam)
@@ -133,7 +142,9 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
         // Stopped server-side too, so a reload can't retry it in a loop.
         setState((prev) => prev && { ...prev, next: null })
         try {
-          const stopped = parseState(await api.post("/api/auth/ocs/teams/stop/"))
+          const stopped = parseState(
+            await api.post(STOP_URL, { reason: "failed" }),
+          )
           if (stopped) setState(stopped)
         } catch {
           // The server's idle timeout stops it anyway.
@@ -147,9 +158,10 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
   const pendingSlug = state?.flow?.pending?.slug
   useEffect(() => {
     if (!pendingSlug) return
-    const timer = window.setTimeout(() => void load(), PENDING_RECHECK_MS)
-    return () => window.clearTimeout(timer)
-  }, [pendingSlug, state, load])
+    // An interval, not a timeout re-armed by `state`: a failed reload leaves state unchanged.
+    const timer = window.setInterval(() => void load(), PENDING_RECHECK_MS)
+    return () => window.clearInterval(timer)
+  }, [pendingSlug, load])
 
   async function post(path: string): Promise<OcsTeamsState | null> {
     setBusy(true)
@@ -173,7 +185,7 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
   async function stopChain() {
     // Cancel the hop timer now; it could fire while the POST is in flight.
     setState((prev) => prev && { ...prev, next: null })
-    const stopped = await post("/api/auth/ocs/teams/stop/")
+    const stopped = await post(STOP_URL)
     if (stopped) setState(stopped)
   }
 
@@ -196,6 +208,8 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
       </p>
     ) : null
   }
+
+  if (!state.available) return null
 
   if (!state.known) {
     return (
