@@ -457,6 +457,7 @@ function GraphComponent({ block, config, engine }: BlockComponentProps) {
     } else {
       let compactConfig: CompactGraphConfig
       if ("series_by" in config) {
+        // Preserve presence so ambiguous series configs fail just as they do on write.
         compactConfig = {
           ...chartConfig,
           series_by: config.series_by,

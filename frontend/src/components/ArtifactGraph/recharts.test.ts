@@ -9,6 +9,7 @@ import {
   compileCompactGraphConfig,
   prepareCompactGraph,
   formatAxisTick,
+  normalizeGraphSeries,
   truncateCategoryLabel,
 } from "./recharts"
 
@@ -239,6 +240,7 @@ describe("dimension series rendering", () => {
     const base = { chart_type: "bar", x_key: "week", y_key: "count", series_by: "segment" }
     expect(() => prepareCompactGraph({ ...base, ...changes }, [])).toThrow()
   })
+
   it("retains inferred count-axis semantics for dimension series", () => {
     const { tree } = prepareCompactGraph({ chart_type: "bar", x_key: "date", y_key: "visits_count", series_by: "segment" }, [{ date: "a", segment: "A", visits_count: 2 }])
     expect(tree.children?.find((node) => node.type === "YAxis")?.props).toMatchObject({ allowDecimals: false, domain: [0, "dataMax"] })
@@ -258,4 +260,18 @@ describe("dimension series rendering", () => {
     const tree = compileCompactGraphConfig({ chart_type: "bar", series: null, y_key: "count", data_label: "Visits" })
     expect(tree.children?.find((node) => node.type === "Bar")?.props).toMatchObject({ dataKey: "count", name: "Visits" })
   })
+
+  it.each([
+    ["count", 42],
+    [{ data_key: "count" }, {}],
+    [{ data_key: 42, y_key: "count" }],
+  ])("preserves valid legacy series entries and alias fallbacks (%j)", (...series) => {
+    const tree = compileCompactGraphConfig({ chart_type: "bar", series })
+    expect(tree.children?.filter((node) => node.type === "Bar").map((node) => node.props?.dataKey)).toEqual(["count"])
+  })
+
+  it.each([[42, {}], ["", "  "]])("preserves numeric-column inference for legacy arrays with no usable series (%j)", (...series) => {
+    expect(normalizeGraphSeries(series, "count")).toEqual([])
+  })
+
 })

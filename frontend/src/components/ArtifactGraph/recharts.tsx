@@ -389,18 +389,19 @@ export function normalizeGraphSeries(series: unknown, yKey?: string, dataLabel?:
   if (series !== undefined && series !== null) {
     const invalid = () => new Error("series must be an array of data-key strings or objects; use series_by for long-format data")
     if (!Array.isArray(series)) throw invalid()
-    return series.map((item): GraphSeries => {
-      if (typeof item === "string" && item.trim()) return { data_key: item, label: item }
+    // Older writes allowed malformed entries; keep their valid series usable.
+    return series.flatMap((item): GraphSeries[] => {
+      if (typeof item === "string" && item.trim()) return [{ data_key: item, label: item }]
       if (isRecord(item)) {
-        const dataKey = item.data_key || item.y_key || item.key
-        if (typeof dataKey !== "string" || !dataKey.trim()) throw invalid()
-        return {
+        const dataKey = stringValue(item.data_key) ?? stringValue(item.y_key) ?? stringValue(item.key)
+        if (!dataKey?.trim()) return []
+        return [{
           data_key: dataKey,
           label: stringValue(item.label) ?? stringValue(item.name) ?? dataKey,
           color: safeColor(stringValue(item.color)),
-        }
+        }]
       }
-      throw invalid()
+      return []
     })
   }
   if (yKey) return [{ data_key: yKey, label: dataLabel ?? yKey }]

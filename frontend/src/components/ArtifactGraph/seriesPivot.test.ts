@@ -75,6 +75,7 @@ describe("long-format series pivot", () => {
   it("rejects missing fields in any row", () => {
     expect(() => pivotSeriesRows([{ week: "a", segment: "A", count: 1 }, { week: "b", count: 2 }], options)).toThrow("segment")
   })
+
   it.each([true, false])("preserves null measures as missing combinations (fillMissing=%s)", (fillMissing) => {
     const result = pivotSeriesRows([
       { week: "a", segment: "A", count: null },

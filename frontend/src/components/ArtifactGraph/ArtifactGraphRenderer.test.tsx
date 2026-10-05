@@ -558,6 +558,7 @@ describe("ArtifactGraphRenderer", () => {
       values: ["2026-06-01", "2026-06-30"],
     })
   })
+
   it("presents invalid series as a chart error without crashing the artifact", async () => {
     const graph = artifact()
     const doc = graph.data.story_doc as { blocks: Array<{ config: Record<string, unknown> }> }
@@ -587,4 +588,16 @@ describe("ArtifactGraphRenderer", () => {
     render(<ArtifactGraphRenderer artifact={graph} workspaceId="workspace-1" />)
     expect(await screen.findByText(/Chart config error:.*series_by requires x_key/)).toBeInTheDocument()
   })
+
+  it("infers numeric columns for stored charts with all-invalid series entries", async () => {
+    const graph = artifact()
+    const doc = graph.data.story_doc as { blocks: Array<{ config: Record<string, unknown> }> }
+    doc.blocks[3].config.series = [{}]
+    mockedPost.mockResolvedValue({ columns: ["date", "visits_count"], rows: [["2026-06-24", 12]], row_count: 1 })
+    const { container } = render(<ArtifactGraphRenderer artifact={graph} workspaceId="workspace-1" />)
+    await waitFor(() => expect(container.querySelector('[data-block-type="graph"]')).toBeInTheDocument())
+    expect(screen.queryByText(/Chart config error:/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Not in the data:/)).not.toBeInTheDocument()
+  })
+
 })
