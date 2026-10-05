@@ -27,10 +27,14 @@ export interface OAuthProvider {
   connection_ids?: string[]
 }
 
-/** Start OAuth for an already signed-in user, returning to the app path `next`. */
-export function oauthConnectUrl(provider: OAuthProvider, next: string): string {
+/**
+ * Start OAuth for an already signed-in user, returning to the app path `next`.
+ * `team` pins an OCS connect to that team slug; the callback refuses any other team.
+ */
+export function oauthConnectUrl(provider: OAuthProvider, next: string, team?: string): string {
   const redirect = encodeURIComponent(`${BASE_PATH}${next}`)
-  return `${BASE_PATH}${provider.login_url}?process=connect&next=${redirect}`
+  const pin = team ? `&team=${encodeURIComponent(team)}` : ""
+  return `${BASE_PATH}${provider.login_url}?process=connect&next=${redirect}${pin}`
 }
 
 /**

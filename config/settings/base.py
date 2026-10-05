@@ -399,6 +399,9 @@ MCP_SHARED_SECRET = env("MCP_SHARED_SECRET", default="").strip()
 # one-off environments.
 CONNECT_API_URL = env("CONNECT_API_URL", default="https://connect.dimagi.com")
 OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
+# An OCS that predates open-chat-studio#4685 rejects the unknown `teams` scope with
+# invalid_scope, failing every OCS sign-in; turn this off when pointing at one.
+OCS_REQUEST_TEAMS_SCOPE = env.bool("OCS_REQUEST_TEAMS_SCOPE", default=True)
 
 
 # The default cache backs chat rate limiting, DRF throttles, and per-user

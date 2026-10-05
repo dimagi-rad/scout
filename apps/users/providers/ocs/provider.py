@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from allauth.account.models import EmailAddress
+from allauth.account.utils import get_request_param
 from allauth.socialaccount.providers.base import ProviderAccount
 from allauth.socialaccount.providers.oauth2.provider import OAuth2Provider
+from django.conf import settings
 
 from apps.users.providers.ocs.views import OCSOAuth2Adapter
+from apps.users.services import ocs_team_flow
 
 # Separates the OIDC subject from the team slug in a SocialAccount uid. Not a
 # character a slug or a subject can contain, so the split is unambiguous.
@@ -40,7 +43,47 @@ class OCSProvider(OAuth2Provider):
     oauth2_adapter_class = OCSOAuth2Adapter
 
     def get_default_scope(self) -> list[str]:
-        return ["chatbots:read", "sessions:read", "files:read", "participants:read", "openid"]
+        scope = ["chatbots:read", "sessions:read", "files:read", "participants:read", "openid"]
+        # "teams" lists every team the user belongs to (open-chat-studio#4685).
+        if settings.OCS_REQUEST_TEAMS_SCOPE:
+            scope.append("teams")
+        return scope
+
+    def requested_team(self, request) -> str:
+        """The team a signed-in user's connect is pinned to, or "".
+
+        Only a connect is pinned: the chain and its messages belong to a user.
+        """
+        if get_request_param(request, "process") != "connect" or not request.user.is_authenticated:
+            return ""
+        return ocs_team_flow.valid_slug(get_request_param(request, "team"))
+
+    def get_auth_params_from_request(self, request, action):
+        """Pin the flow to one team when the SPA asks for it.
+
+        allauth's generic ``?auth_params=`` passthrough is dropped: a team pinned
+        through it would skip the claim check the callback makes for ``team``.
+        """
+        params = self.get_auth_params()
+        team = self.requested_team(request)
+        if team:
+            params.update({"team": team, "approval_prompt": "auto"})
+        return params
+
+    def get_redirect_from_request_kwargs(self, request):
+        kwargs = super().get_redirect_from_request_kwargs(request)
+        team = self.requested_team(request)
+        if team:
+            kwargs[ocs_team_flow.REQUESTED_TEAM_STATE_KEY] = team
+        return kwargs
+
+    def redirect(self, request, process, next_url=None, data=None, **kwargs):
+        team = kwargs.get(ocs_team_flow.REQUESTED_TEAM_STATE_KEY)
+        if team:
+            request.session[ocs_team_flow.SESSION_KEY] = ocs_team_flow.note_started(
+                request.session.get(ocs_team_flow.SESSION_KEY), team
+            )
+        return super().redirect(request, process, next_url=next_url, data=data, **kwargs)
 
     def extract_uid(self, data: dict) -> str:
         """Identify the (user, team) pair the token authorises, not just the user.
