@@ -52,6 +52,7 @@ def test_pipeline_uses_snapshot_across_registry_and_asset_edits(tenant, mutate_r
     loaded_sql = []
     expected = []
     source_names = []
+    phases = []
 
     def discover(_membership, _credential, config):
         versions.append(config.version)
@@ -61,13 +62,15 @@ def test_pipeline_uses_snapshot_across_registry_and_asset_edits(tenant, mutate_r
         return {}
 
     def progress(value):
+        if value.get("phase"):
+            phases.append((value["phase"], value["message"]))
         if mutate_registry and value["message"].startswith("Provisioning"):
             pipeline.version = "mutated"
             pipeline.sources[0].name = "mutated_source"
         if value["message"].startswith("Running transforms"):
             TransformationAsset.objects.filter(pk=asset.pk).update(sql_content="select 3")
 
-    def stage(_run, assets, _schema, _stage):
+    def stage(_run, assets, _schema, _stage, *_rest):
         loaded_sql.extend(a.sql_content for a in assets)
         TransformationAsset.objects.filter(pk=asset.pk).update(sql_content="select 4")
         return []
@@ -92,6 +95,11 @@ def test_pipeline_uses_snapshot_across_registry_and_asset_edits(tenant, mutate_r
     assert versions == ["1"]
     assert source_names == ["sessions"]
     assert loaded_sql == ["select 20", "select 2"]
+    # The transform progress names each stage on the card instead of "Preparing…".
+    assert phases == [
+        ("building_tables", "Stage 1 of 2 · 1 model"),
+        ("building_tables", "Stage 2 of 2 · 1 model"),
+    ]
     assert result["load_fingerprint"] == expected[0]
     run = MaterializationRun.objects.get(pk=result["run_id"])
     assert run.result["load_fingerprint"] == expected[0]

@@ -1,10 +1,19 @@
-import { Loader2, X } from "lucide-react"
+import { Loader2, PenLine, X } from "lucide-react"
 import { api } from "@/api/client"
-import type { ActiveJob, WorkspaceLoad } from "@/api/jobs"
+import type { ActiveJob, LoadPhase, WorkspaceLoad } from "@/api/jobs"
 import { useRetryableAction } from "@/hooks/useRetryableAction"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 
 const CANCEL_FAILED = "Cancel failed — try again"
+
+const PHASE_TITLES: Record<LoadPhase, string> = {
+  building_tables: "Building tables",
+  checking_quality: "Checking data quality",
+  combining_sites: "Combining sites",
+  building_model: "Building the data model",
+  finishing: "Finishing up",
+  answering: "Writing your answer",
+}
 
 type Props = { workspaceId: string } & (
   // The caller's own job shows Stop; another member's or a refresh's load is read-only.
@@ -48,13 +57,21 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
   const step = progress?.step ?? null
   const totalSteps = progress?.total_steps ?? null
   const unit = progress?.unit ?? "rows"
-  const isDeterminate = percent != null
+  // RUNNING means the resume claimed the job and the agent is replying; an older
+  // server sends no phase for it.
+  const phase: LoadPhase | null =
+    job?.state === "running" ? "answering" : (progress?.phase ?? null)
+  const phaseTitle = phase ? (PHASE_TITLES[phase] ?? null) : null
+  const answering = phase === "answering"
+  const isDeterminate = percent != null && !phaseTitle
 
   // Count line: "27,000 of 50,000 rows" when a total is known, else "27,000
   // rows". The unit comes from the backend — OCS messages count "sessions"
   // (one detail fetch per session) rather than rows.
   let countText: string
-  if (rowsLoaded > 0) {
+  if (phaseTitle) {
+    countText = progress?.message || "Working…"
+  } else if (rowsLoaded > 0) {
     const rowsStr = rowsLoaded.toLocaleString()
     countText =
       rowsTotal != null && rowsTotal > 0
@@ -66,7 +83,9 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
     countText = "Preparing…"
   }
 
-  const stepText = step != null && totalSteps != null ? `Step ${step} of ${totalSteps}` : null
+  // The per-source step count says nothing about the named phases after it.
+  const stepText =
+    !phaseTitle && step != null && totalSteps != null ? `Step ${step} of ${totalSteps}` : null
   // Sequential loads run one bar per source, so say which of how many this is.
   const positionText =
     sourceIndex != null && sourceTotal != null && sourceTotal > 1
@@ -90,18 +109,27 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
         role="status"
         aria-live="polite"
       >
-        <Loader2
-          className="h-4 w-4 shrink-0 animate-spin text-blue-600 dark:text-blue-400"
-          aria-hidden="true"
-        />
+        {answering ? (
+          <PenLine
+            className="h-4 w-4 shrink-0 animate-pulse text-blue-600 dark:text-blue-400"
+            aria-hidden="true"
+            data-testid="materialization-banner-answering-icon"
+          />
+        ) : (
+          <Loader2
+            className="h-4 w-4 shrink-0 animate-spin text-blue-600 dark:text-blue-400"
+            aria-hidden="true"
+          />
+        )}
 
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2 flex-wrap">
             <span
               className="text-sm font-medium text-blue-900 dark:text-blue-100"
               data-testid="materialization-banner-source"
+              data-phase={phase ?? undefined}
             >
-              {sourceName ? `Fetching ${sourceName}` : "Materializing data"}
+              {phaseTitle ?? (sourceName ? `Fetching ${sourceName}` : "Materializing data")}
             </span>
             {sourceText && (
               <span
@@ -119,7 +147,7 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
                 {stepText}
               </span>
             )}
-            {percent != null && (
+            {isDeterminate && (
               <span
                 className="text-xs font-semibold text-blue-700 dark:text-blue-300"
                 data-testid="materialization-banner-percent"
@@ -145,7 +173,7 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
             {isDeterminate ? (
               <div
                 className="h-full rounded-full bg-blue-600 transition-all duration-500 ease-out dark:bg-blue-400"
-                style={{ width: `${Math.min(percent, 100)}%` }}
+                style={{ width: `${Math.min(percent ?? 0, 100)}%` }}
               />
             ) : (
               <div

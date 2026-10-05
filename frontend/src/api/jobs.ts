@@ -4,6 +4,16 @@ export type JobState = "pending" | "running" | "completed" | "failed" | "cancell
 
 export type TerminationState = "completed" | "failed" | "cancelled"
 
+/** A named step after the sources are fetched; null (or absent, from an older
+ *  server) while sources are still loading. */
+export type LoadPhase =
+  | "building_tables"
+  | "checking_quality"
+  | "combining_sites"
+  | "building_model"
+  | "finishing"
+  | "answering"
+
 export interface JobProgress {
   percent: number | null
   rows_loaded: number
@@ -15,6 +25,7 @@ export interface JobProgress {
   source: string | null
   step: number | null
   total_steps: number | null
+  phase?: LoadPhase | null
 }
 
 export interface ActiveJob {
