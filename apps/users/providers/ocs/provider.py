@@ -40,7 +40,15 @@ class OCSProvider(OAuth2Provider):
     oauth2_adapter_class = OCSOAuth2Adapter
 
     def get_default_scope(self) -> list[str]:
-        return ["chatbots:read", "sessions:read", "files:read", "participants:read", "openid"]
+        # "teams" lists every team the user belongs to (open-chat-studio#4685).
+        return [
+            "chatbots:read",
+            "sessions:read",
+            "files:read",
+            "participants:read",
+            "openid",
+            "teams",
+        ]
 
     def extract_uid(self, data: dict) -> str:
         """Identify the (user, team) pair the token authorises, not just the user.
