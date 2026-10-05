@@ -17,8 +17,9 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.publication import rebuild_workspace_semantic_model_core
 from apps.workspaces.services.query_state import workspace_query_surface
-from apps.workspaces.tasks import rebuild_workspace_semantic_model_core, recover_workspace_data
+from apps.workspaces.tasks import recover_workspace_data
 from mcp_server.server import get_schema_status
 from tests.tenant_access import agrant_tenant_access
 
@@ -329,7 +330,7 @@ async def test_recovery_worker_persists_actionable_failure(
             ),
         ),
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_semantic_model_core",
+            "apps.workspaces.services.publication.rebuild_workspace_semantic_model_core",
             new=AsyncMock(
                 return_value={"cube_schema": {"ok": False, "error": "Cube rejected schema"}}
             ),
@@ -368,7 +369,7 @@ async def test_missing_view_keeps_existing_source_data(recovery_setup):
             new=AsyncMock(side_effect=[response.json(), {"status": "ready"}]),
         ),
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_view_schema.func",
+            "apps.workspaces.services.publication.rebuild_workspace_view_schema",
             new=AsyncMock(return_value={"cube_schema": {"ok": True}}),
         ) as rebuild,
         patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as materialize,
@@ -391,7 +392,7 @@ async def test_semantic_rebuild_rejects_unsafe_snapshot(recovery_setup, state):
     await MaterializationRun.objects.acreate(tenant_schema=schema, pipeline="test", state=state)
     surface = await workspace_query_surface(recovery_setup.workspace)
     assert surface["recovery_action"] == "materialization"
-    with patch("apps.workspaces.tasks.build_and_promote_cube_schema") as promote:
+    with patch("apps.workspaces.services.publication.build_and_promote_cube_schema") as promote:
         result = await rebuild_workspace_semantic_model_core(str(recovery_setup.workspace.id))
     assert result["cube_schema"]["ok"] is False
     assert "unsafe" in result["cube_schema"]["error"]
@@ -409,7 +410,7 @@ async def test_semantic_rebuild_defers_for_active_snapshot(recovery_setup):
     assert surface["status"] == "recovering"
     assert surface["in_progress"] is True
     assert surface["queryable"] is False
-    with patch("apps.workspaces.tasks.build_and_promote_cube_schema") as promote:
+    with patch("apps.workspaces.services.publication.build_and_promote_cube_schema") as promote:
         result = await rebuild_workspace_semantic_model_core(str(recovery_setup.workspace.id))
     assert result["cube_schema"]["status"] == "deferred"
     promote.assert_not_called()

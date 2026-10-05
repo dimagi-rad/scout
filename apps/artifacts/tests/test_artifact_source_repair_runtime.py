@@ -23,6 +23,7 @@ from apps.workspaces.models import (
     WorkspaceDataRecovery,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services import publication
 from apps.workspaces.services.query_state import workspace_query_surface
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.view_sources import ViewSourcesError
@@ -195,7 +196,7 @@ async def test_worker_reassesses_partial_missing_source_under_lock(published_sou
         source_id=setup.artifact.id,
         recovery_type="view_rebuild",  # Queued before the source disappeared.
     )
-    real_rebuild = rebuild_workspace_view_schema.func
+    real_rebuild = publication.rebuild_workspace_view_schema
 
     async def restore_source(workspace_id, user_id, job_id, **_kwargs):
         assert workspace_id == str(setup.workspace.id)
@@ -211,7 +212,7 @@ async def test_worker_reassesses_partial_missing_source_under_lock(published_sou
             new=AsyncMock(side_effect=restore_source),
         ) as materialize,
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_view_schema.func",
+            "apps.workspaces.services.publication.rebuild_workspace_view_schema",
             new=AsyncMock(return_value={"error": "Synthetic view-only attempt"}),
         ) as view,
     ):

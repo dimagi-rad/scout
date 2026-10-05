@@ -76,7 +76,7 @@ async def test_materialize_core_rechecks_after_workspace_lock_wait(workspace, wr
         patch("apps.workspaces.tasks.workspace_data_lock", downgrade_during_lock),
         patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline),
         patch("apps.workspaces.tasks.build_and_promote_cube_schema", publish),
-        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", rebuild_views),
+        patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", rebuild_views),
     ):
         result = await workspaces_tasks.materialize_workspace_core(
             str(workspace.id), str(write_user.id)
@@ -107,7 +107,7 @@ async def test_blocking_materialization_rechecks_after_tenant_wait(workspace, wr
         ),
         patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline),
         patch("apps.workspaces.tasks.build_and_promote_cube_schema", publish),
-        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", rebuild_views),
+        patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", rebuild_views),
     ):
         result = await workspaces_tasks.materialize_workspace_blocking(
             str(workspace.id), str(write_user.id)
@@ -1260,7 +1260,7 @@ async def test_materialize_workspace_defers_rebuild_for_sibling_view_schemas(
         ),
         patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
         ) as mock_rebuild,
     ):
@@ -1296,7 +1296,7 @@ async def test_materialize_workspace_dedupes_sibling_rebuild(
         ),
         patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
         ) as mock_rebuild,
     ):
@@ -1326,7 +1326,7 @@ async def test_materialize_workspace_no_sibling_rebuild_when_none_qualify(
         ),
         patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
         ) as mock_rebuild,
     ):
@@ -1708,7 +1708,7 @@ async def test_unreachable_tenant_cube_build_uses_available_workspace_sources(
         patch(
             "apps.workspaces.services.schema_manager.SchemaManager._revoke_stale_view_role_grants"
         ),
-        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
+        patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
         patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
     ):
         result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
@@ -1856,7 +1856,7 @@ async def test_core_preserves_coded_pipeline_failure_guidance(
             "apps.workspaces.tasks._run_pipeline_with_progress",
             side_effect=CredentialResolutionError(code, "upstream rejected token"),
         ),
-        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
+        patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
     ):
         result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
     assert result["all_succeeded"] is False
@@ -1951,7 +1951,7 @@ async def test_preflight_reason_survives_core_wrapper_and_resume(
         patch("apps.workspaces.tasks._run_pipeline_with_progress", side_effect=pipeline),
         patch("apps.workspaces.tasks.SchemaManager", return_value=MagicMock()),
         patch("apps.workspaces.tasks.build_and_promote_cube_schema"),
-        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
+        patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
         patch(
             "apps.workspaces.tasks.resume_thread_after_materialization.defer_async",
             side_effect=fail_enqueue,

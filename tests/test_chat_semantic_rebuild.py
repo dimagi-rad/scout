@@ -240,7 +240,7 @@ async def test_the_recovery_rebuilds_a_serving_catalog_whose_last_build_failed()
         return {"cube_schema": {"ok": True}}
 
     with patch(
-        "apps.workspaces.tasks.rebuild_workspace_semantic_model_core",
+        "apps.workspaces.services.publication.rebuild_workspace_semantic_model_core",
         AsyncMock(side_effect=rebuild),
     ) as rebuild_core:
         result = await recover_workspace_data.func(
@@ -377,7 +377,10 @@ async def _run_rebuild_recovery(ws, user, build_error):
     recovery = await WorkspaceDataRecovery.objects.acreate(
         workspace=ws, requested_by=user, recovery_type=SEMANTIC_REBUILD, source_type="chat"
     )
-    with patch("apps.workspaces.tasks.build_and_promote_cube_schema", side_effect=build_error):
+    with patch(
+        "apps.workspaces.services.publication.build_and_promote_cube_schema",
+        side_effect=build_error,
+    ):
         await recover_workspace_data.func(
             SimpleNamespace(
                 job=SimpleNamespace(id=920 + await WorkspaceDataRecovery.objects.acount())
@@ -475,11 +478,11 @@ async def test_a_capacity_refused_view_rebuild_cube_build_is_flagged():
     with (
         patch("apps.workspaces.tasks.SchemaManager.build_view_schema", return_value=view_schema),
         patch(
-            "apps.workspaces.tasks._included_tenant_snapshot_state",
+            "apps.workspaces.services.publication._included_tenant_snapshot_state",
             AsyncMock(return_value="safe"),
         ),
         patch(
-            "apps.workspaces.tasks.build_and_promote_cube_schema",
+            "apps.workspaces.services.publication.build_and_promote_cube_schema",
             side_effect=CapacityExhausted(CapacityResource.DATABASE, "full"),
         ),
     ):

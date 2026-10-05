@@ -98,7 +98,7 @@ async def test_a_recovery_rebuild_still_revives_an_expired_view_schema(two_live_
         workspace=workspace, schema_name=view_schema, state=SchemaState.EXPIRED
     )
 
-    with patch("apps.workspaces.tasks.build_and_promote_cube_schema", MagicMock()):
+    with patch("apps.workspaces.services.publication.build_and_promote_cube_schema", MagicMock()):
         result = await rebuild_workspace_view_schema.func(str(workspace.id), revive_retired=True)
 
     assert result["status"] == "active"

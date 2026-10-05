@@ -17,11 +17,9 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.publication import defer_cube_promotion
 from apps.workspaces.services.query_state import semantic_layer_state
-from apps.workspaces.tasks import (
-    _defer_cube_promotion,
-    rebuild_workspace_view_schema,
-)
+from apps.workspaces.tasks import rebuild_workspace_view_schema
 
 
 @pytest.fixture
@@ -48,7 +46,7 @@ def workspace(db, user, tenant):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_rebuild_view_schema_calls_build_view_schema(workspace):
-    with patch("apps.workspaces.tasks.SchemaManager") as MockSM:
+    with patch("apps.workspaces.services.publication.SchemaManager") as MockSM:
         mock_vs = MagicMock()
         mock_vs.schema_name = "ws_abc123"
         mock_vs.tenant_coverage = {
@@ -73,9 +71,9 @@ async def test_rebuild_view_schema_reports_coverage_when_cube_build_fails(worksp
         "excluded_tenants": [{"tenant_id": "excluded"}],
     }
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as mock_schema_manager,
+        patch("apps.workspaces.services.publication.SchemaManager") as mock_schema_manager,
         patch(
-            "apps.workspaces.tasks.build_and_promote_cube_schema",
+            "apps.workspaces.services.publication.build_and_promote_cube_schema",
             side_effect=CubeSchemaBuildError("invalid cube"),
         ),
     ):
@@ -98,10 +96,10 @@ async def test_rebuild_view_schema_fails_if_no_active_tenant_schema(workspace, t
         state=SchemaState.EXPIRED
     )
 
-    with caplog.at_level(logging.INFO, logger="apps.workspaces.tasks"):
+    with caplog.at_level(logging.INFO, logger="apps.workspaces.services.publication"):
         result = await rebuild_workspace_view_schema(workspace_id=str(workspace.id))
 
-    task_records = [r for r in caplog.records if r.name == "apps.workspaces.tasks"]
+    task_records = [r for r in caplog.records if r.name == "apps.workspaces.services.publication"]
     assert any("Cannot build view schema" in r.getMessage() for r in task_records)
     assert not [r for r in task_records if r.levelno >= logging.ERROR]
     vs = await WorkspaceViewSchema.objects.aget(workspace=workspace)
@@ -123,7 +121,7 @@ async def test_rebuild_view_schema_fails_if_no_active_tenant_schema(workspace, t
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_rebuild_view_schema_marks_failed_on_exception(workspace):
-    with patch("apps.workspaces.tasks.SchemaManager") as MockSM:
+    with patch("apps.workspaces.services.publication.SchemaManager") as MockSM:
         MockSM.return_value.build_view_schema.side_effect = Exception("boom")
 
         result = await rebuild_workspace_view_schema(workspace_id=str(workspace.id))
@@ -156,9 +154,9 @@ async def test_rebuild_does_not_promote_failed_included_snapshot(
         "excluded_tenants": [{"tenant_id": str(tenant.id)}] if excluded else [],
     }
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as manager,
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
-        patch("apps.workspaces.tasks.record_cube_schema_build_failure") as failure,
+        patch("apps.workspaces.services.publication.SchemaManager") as manager,
+        patch("apps.workspaces.services.publication.build_and_promote_cube_schema") as cube,
+        patch("apps.workspaces.services.publication.record_cube_schema_build_failure") as failure,
     ):
         manager.return_value.build_view_schema.return_value.tenant_coverage = coverage
         result = await rebuild_workspace_view_schema(workspace_id=str(workspace.id))
@@ -189,8 +187,8 @@ async def test_rebuild_defers_inflight_promotion_without_model_error(workspace, 
     )
     coverage = {"included_tenants": [{"tenant_id": str(tenant.id)}], "excluded_tenants": []}
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as manager,
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+        patch("apps.workspaces.services.publication.SchemaManager") as manager,
+        patch("apps.workspaces.services.publication.build_and_promote_cube_schema") as cube,
     ):
         manager.return_value.build_view_schema.return_value.tenant_coverage = coverage
         result = await rebuild_workspace_view_schema(str(workspace.id))
@@ -222,8 +220,8 @@ async def test_tied_latest_attempts_do_not_choose_random_success(workspace, tena
     )
     await MaterializationRun.objects.filter(pk=failed.pk).aupdate(started_at=completed.started_at)
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as manager,
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+        patch("apps.workspaces.services.publication.SchemaManager") as manager,
+        patch("apps.workspaces.services.publication.build_and_promote_cube_schema") as cube,
     ):
         manager.return_value.build_view_schema.return_value.tenant_coverage = {
             "included_tenants": [{"tenant_id": str(tenant.id)}],
@@ -239,8 +237,8 @@ async def test_tied_latest_attempts_do_not_choose_random_success(workspace, tena
 async def test_legacy_active_schema_without_runs_can_promote(workspace, tenant):
     assert not await MaterializationRun.objects.filter(tenant_schema__tenant=tenant).aexists()
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as manager,
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+        patch("apps.workspaces.services.publication.SchemaManager") as manager,
+        patch("apps.workspaces.services.publication.build_and_promote_cube_schema") as cube,
     ):
         manager.return_value.build_view_schema.return_value.tenant_coverage = {
             "included_tenants": [{"tenant_id": str(tenant.id)}],
@@ -260,8 +258,8 @@ async def test_older_live_writer_still_defers_promotion(workspace, tenant):
         tenant_schema=schema, pipeline="sync", state="completed"
     )
     with (
-        patch("apps.workspaces.tasks.SchemaManager") as manager,
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+        patch("apps.workspaces.services.publication.SchemaManager") as manager,
+        patch("apps.workspaces.services.publication.build_and_promote_cube_schema") as cube,
     ):
         manager.return_value.build_view_schema.return_value.tenant_coverage = {
             "included_tenants": [{"tenant_id": str(tenant.id)}],
@@ -275,7 +273,7 @@ async def test_older_live_writer_still_defers_promotion(workspace, tenant):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_first_model_build_can_be_deferred_without_fabricating_catalog(workspace):
-    outcome = await _defer_cube_promotion(workspace)
+    outcome = await defer_cube_promotion(workspace)
     assert outcome["status"] == "deferred"
     assert not await SemanticModel.objects.filter(workspace=workspace).aexists()
     assert await semantic_layer_state(workspace) == ("unknown", "")

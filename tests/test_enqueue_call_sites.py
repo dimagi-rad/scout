@@ -28,7 +28,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services import thread_job_dispatch
+from apps.workspaces.services import publication, thread_job_dispatch
 from apps.workspaces.services.load_generations import (
     INTENT_RECONCILE_MISSING,
     capture_load_intent,
@@ -228,6 +228,31 @@ def test_refresh_settles_a_pruned_candidate_and_queues_the_refresh(workspace, te
                 "workspace_id": str(workspace.id),
             },
         )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_reload_queues_view_rebuilds_for_multi_tenant_siblings(workspace, tenant, tenant2):
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant2)
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace, schema_name="ws_enqueue", state=SchemaState.ACTIVE
+    )
+
+    await publication.rebuild_dependent_view_schemas([tenant.id])
+
+    assert [_row(job) for job in await _aqueued(workspace_id=str(workspace.id))] == [
+        _expected("rebuild_workspace_view_schema", {"workspace_id": str(workspace.id)})
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_refresh_queues_semantic_rebuilds_for_single_tenant_workspaces(workspace, tenant):
+    await publication.rebuild_single_tenant_semantic_models([tenant.id])
+
+    assert [_row(job) for job in await _aqueued(workspace_id=str(workspace.id))] == [
+        _expected("rebuild_workspace_semantic_model", {"workspace_id": str(workspace.id)})
     ]
 
 

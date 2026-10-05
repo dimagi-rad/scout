@@ -104,7 +104,7 @@ async def _expired_hq_load(workspace, tenant, user, month_ago):
         ),
         patch("apps.workspaces.tasks.SchemaManager", return_value=MagicMock()),
         patch("apps.workspaces.tasks.build_and_promote_cube_schema"),
-        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
+        patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
     ):
         result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
     await WorkspaceViewSchema.objects.acreate(
