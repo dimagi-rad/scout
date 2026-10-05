@@ -93,7 +93,7 @@ function ChatMarkdownLink({ href, children, title }: ComponentPropsWithoutRef<"a
   if (inRouter && href?.startsWith("/") && !href.startsWith("//")) {
     return <Link to={href} title={title} data-testid="chat-markdown-link">{children}</Link>
   }
-  return <a href={href} title={title}>{children}</a>
+  return <a href={href} title={title} data-testid="chat-markdown-link">{children}</a>
 }
 
 export function ChatTextPart({ role, text }: ChatTextPartProps) {
@@ -476,6 +476,11 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   const hasChildren = childParts.length > 0
   const isSubagentCard = toolName in SUBAGENT_TOOL_LABELS && !isNested
   const isErrored = part.state === "output-error"
+  const helperOutput = isSubagentCard && hasOutput ? parseOutput(part.output) : null
+  const helperFailed = isErrored || (
+    helperOutput !== null && typeof helperOutput === "object" && "status" in helperOutput
+    && (helperOutput.status === "error" || helperOutput.status === "denied")
+  )
 
   // Scope the job to THIS tool-call card via toolCallId, else the progress block
   // and Stop button would render on every historical run_materialization card.
@@ -501,7 +506,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   // stays expanded while it has an active job or failure card for THIS card,
   // independent of the SSE stream.
   const autoExpanded =
-    (isSubagentCard && isLoading)
+    (isSubagentCard && (isLoading || helperFailed))
     || (isNested && (isLoading || isErrored))
     || (
       AUTO_EXPAND_TOOLS.has(toolName)
@@ -512,7 +517,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
       )
       && (isActiveMessage || toolName === "run_materialization")
     )
-  const expansionKey = isSubagentCard ? String(isLoading) : String(isLatest)
+  const expansionKey = isSubagentCard ? `${isLoading}:${helperFailed}` : String(isLatest)
   const [override, setOverride] = useState<{ key: string; value: boolean } | null>(null)
   const effectiveOverride = override?.key === expansionKey ? override.value : null
   const expanded = effectiveOverride ?? autoExpanded

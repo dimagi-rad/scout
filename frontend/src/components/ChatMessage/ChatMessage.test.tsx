@@ -418,3 +418,18 @@ it("does not leak markdown AST node props onto anchors", () => {
   expect(screen.getByRole("link", { name: "Chart" })).not.toHaveAttribute("node")
 })
 
+it("keeps helper errors visible at completion", () => {
+  const message = { id: "failed-helper", role: "assistant", parts: [
+    { type: "tool-artifact_manager", toolCallId: "failed", state: "output-error", input: {}, errorText: "The chart service timed out." },
+  ] } as unknown as UIMessage
+  render(<ChatMessage message={message} isActiveMessage={false} />)
+  expect(screen.getByTestId("tool-call-artifact_manager")).toHaveAttribute("aria-expanded", "true")
+  expect(screen.getByText("The chart service timed out.")).toBeVisible()
+})
+
+it("keeps failed helper summaries visible at completion", () => {
+  const message = liveMessage("artifact_manager", { status: "error", message: "The chart could not be saved." })
+  render(<ChatMessage message={message} isActiveMessage={false} />)
+  expect(screen.getByTestId("tool-call-artifact_manager")).toHaveAttribute("aria-expanded", "true")
+  expect(screen.getByText("The chart could not be saved.")).toBeVisible()
+})
