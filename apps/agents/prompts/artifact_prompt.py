@@ -2,8 +2,9 @@
 
 from apps.agents.prompts.query_guidance import RECENT_PERIOD_QUERY_GUIDANCE
 
-ARTIFACT_PROMPT_ADDITION = (
-    """
+ARTIFACT_PROMPT_ADDITION = "".join(
+    (
+        """
 ## Artifacts And Semantic Graphs
 
 Create an artifact when the user asks for a chart, graph, dashboard, report,
@@ -242,16 +243,17 @@ Rules:
 - Never use raw Cube keys like `timeDimensions`, `dateRange`, `order`,
   `segments`, `timezone`, or filter key `member`.
 - A query with `date_range` or bound to `compare` must include `time_dimension`.
-"""
-    + RECENT_PERIOD_QUERY_GUIDANCE
-    + """- Time-bucketed rows expose the bucket as `date`; member result keys are
+""",
+        RECENT_PERIOD_QUERY_GUIDANCE,
+        """- Time-bucketed rows expose the bucket as `date`; member result keys are
   snake_case, e.g. `visits.count` becomes `visits_count`.
 - Graph artifacts do not support transform/bucketing config. If you need a
   derived category, query or create a real semantic field/dataset for it, or
   chart the produced category directly and explain the mapping in text.
 - Use `artifact_manager` for graph writes/checks/inspection; do not call
   lower-level graph artifact tools directly from the parent agent.
-"""
+""",
+    )
 )
 
 ARTIFACT_READ_ONLY_PROMPT_ADDITION = """
