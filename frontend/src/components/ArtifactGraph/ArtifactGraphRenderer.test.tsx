@@ -599,5 +599,4 @@ describe("ArtifactGraphRenderer", () => {
     expect(screen.queryByText(/Chart config error:/)).not.toBeInTheDocument()
     expect(screen.queryByText(/Not in the data:/)).not.toBeInTheDocument()
   })
-
 })

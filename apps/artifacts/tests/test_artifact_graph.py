@@ -1717,6 +1717,8 @@ def test_graph_doc_rejects_invalid_series_with_long_format_guidance(series):
         [{"data_key": "visits_count", "label": "Visits"}],
         [{"y_key": "visits_count", "name": "Visits"}],
         [{"key": "visits_count"}],
+        [{"data_key": "", "y_key": "visits_count"}],
+        [{"data_key": "", "y_key": "", "key": "visits_count"}],
     ],
 )
 def test_graph_doc_accepts_legacy_series_forms(series):

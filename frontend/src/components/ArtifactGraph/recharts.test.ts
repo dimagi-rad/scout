@@ -265,6 +265,7 @@ describe("dimension series rendering", () => {
     ["count", 42],
     [{ data_key: "count" }, {}],
     [{ data_key: 42, y_key: "count" }],
+    [{ data_key: "", y_key: "count" }],
   ])("preserves valid legacy series entries and alias fallbacks (%j)", (...series) => {
     const tree = compileCompactGraphConfig({ chart_type: "bar", series })
     expect(tree.children?.filter((node) => node.type === "Bar").map((node) => node.props?.dataKey)).toEqual(["count"])
@@ -274,4 +275,8 @@ describe("dimension series rendering", () => {
     expect(normalizeGraphSeries(series, "count")).toEqual([])
   })
 
+  it.each([3, true, { data_key: "count" }])("retains the legacy measure fallback for non-string scalar series (%j)", (series) => {
+    const tree = compileCompactGraphConfig({ chart_type: "bar", series, y_key: "count", data_label: "Visits" })
+    expect(tree.children?.find((node) => node.type === "Bar")?.props).toMatchObject({ dataKey: "count", name: "Visits" })
+  })
 })
