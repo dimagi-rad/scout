@@ -164,8 +164,10 @@ const AUTO_EXPAND_TOOLS = new Set([
 ])
 
 function readableHelperText(text: string): string {
-  return text.replaceAll("Artifact Manager", SUBAGENT_TOOL_LABELS.artifact_manager)
-    .replaceAll("Canvas Manager", SUBAGENT_TOOL_LABELS.canvas_manager)
+  for (const [toolName, label] of Object.entries(SUBAGENT_TOOL_LABELS)) {
+    text = text.replace(new RegExp(`\\b${toolName.replaceAll("_", " ")}\\b`, "gi"), label)
+  }
+  return text
 }
 
 function displayToolName(toolName: string): string {

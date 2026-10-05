@@ -376,8 +376,8 @@ describe("helper artifacts in the assistant flow", () => {
   })
 })
 
-it("uses plain-language labels for the data model helper and its activity", () => {
-  const msg = liveMessage("canvas_manager", { status: "done", message: "Canvas Manager completed." })
+it.each(["Canvas Manager", "canvas manager"])("uses plain-language labels for %s and its activity", (label) => {
+  const msg = liveMessage("canvas_manager", { status: "done", message: `${label} completed.` })
   render(<ChatMessage message={msg} isActiveMessage={false} />)
   expect(screen.getByText("Data model editor")).toBeInTheDocument()
   fireEvent.click(screen.getByTestId("tool-call-canvas_manager"))
