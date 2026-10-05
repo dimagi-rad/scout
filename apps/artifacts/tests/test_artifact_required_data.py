@@ -253,7 +253,7 @@ async def test_required_source_already_loaded_only_rebuilds_view(required_setup)
     assert response.json()["recovery_action"] == "view_rebuild"
     recovery = await make_recovery(setup)
 
-    async def rebuild(_workspace_id):
+    async def rebuild(_workspace_id, *, revive_retired):
         await restore_b(setup)
         return {"cube_schema": {"ok": True}}
 
@@ -268,7 +268,7 @@ async def test_required_source_already_loaded_only_rebuilds_view(required_setup)
     ):
         result = await recover_workspace_data.func(task_context(), str(recovery.id))
     assert result["status"] == "completed"
-    view.assert_awaited_once_with(str(setup.workspace.id))
+    view.assert_awaited_once_with(str(setup.workspace.id), revive_retired=True)
     load.assert_not_awaited()
 
 
