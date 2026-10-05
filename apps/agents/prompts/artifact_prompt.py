@@ -169,7 +169,7 @@ Block config keys:
 - `date_filter`: `label`, `default`.
 - `period_selector`: `label`, `default_range`, `default_comparison`.
 - `semantic_query`: `queries`, optional `compare`.
-- `graph`: `title`, `chart_type`, `x_key`, `y_key`, `series`,
+- `graph`: `title`, `chart_type`, `x_key`, `y_key`, `series`, `series_by`,
   `subtitle`, `data_label`, `query`, `stacked`, `y_format`, `height`,
   `x_label`, `y_label`, `style`,
   or `recharts` for an explicit Recharts element tree. Compact graph configs
@@ -180,6 +180,27 @@ Block config keys:
 - `table`: `title`, `columns`, `query`.
 - `stat`: `title`, `label`, `value_path`, `value_key`, `format`,
   `delta_path`, optional `prefix`, `suffix`, and `comparison`.
+
+
+Long-format charts: `series` is a non-empty array of wide-format measure keys
+(or objects with `data_key`, optional `label` and token `color`); never pass a
+string dimension as `series`. For rows grouped by week and segment, query
+`visits.count` with dimension `visits.segment` and a weekly time bucket, then
+bind that query output to a graph with this config:
+```json
+{"chart_type": "bar", "x_key": "date", "y_key": "visits_count",
+ "series_by": "visits_segment", "stacked": true, "y_format": "number_0"}
+```
+`series_by` is supported on compact bar, area and line charts. It requires
+explicit `x_key` and `y_key`; do not combine it with `series` or `recharts`.
+Dimension values become legend and hover labels. Duplicate (x, dimension)
+pairs are summed, so use additive measures. Null measures are treated as missing;
+empty strings and non-numeric measures are errors. Missing bars and stacked areas
+use zero; lines and unstacked areas have gaps. At most five series render;
+high cardinality uses the four largest totals plus an aggregated Other series.
+Omit `stacked` for grouped bars. When you cannot verify a visual property,
+use this validated schema and run artifact validation; never assume the runtime
+pivots an unsupported configuration or claim a visual check you did not perform.
 
 Visualization grammar:
 - Choose the chart from the analytical comparison: one headline measure ->
