@@ -1682,3 +1682,53 @@ def test_concurrent_manifest_persistence_does_not_collide(
     assert list(
         ArtifactSemanticQuery.objects.filter(artifact=artifact).values_list("query_key", flat=True)
     ) == ["q.visits_by_day"]
+
+
+@pytest.mark.parametrize(
+    "series",
+    [
+        "visits_segment",
+        None,
+        {},
+        42,
+        [],
+        [""],
+        [None],
+        [42],
+        [{}],
+        [{"data_key": 42}],
+        [{"data_key": "visits_count", "label": 42}],
+    ],
+)
+def test_graph_doc_rejects_invalid_series_with_long_format_guidance(series):
+    doc = graph_doc()
+    doc["blocks"][2]["config"]["series"] = series
+    diagnostics = validate_doc(doc)
+    errors = [item for item in diagnostics if item.get("code") == "graph_series"]
+    assert errors
+    assert errors[0]["severity"] == "error"
+    assert "series_by" in errors[0]["message"]
+
+
+@pytest.mark.parametrize(
+    "series",
+    [
+        ["visits_count"],
+        [{"data_key": "visits_count", "label": "Visits"}],
+        [{"y_key": "visits_count", "name": "Visits"}],
+        [{"key": "visits_count"}],
+    ],
+)
+def test_graph_doc_accepts_legacy_series_forms(series):
+    doc = graph_doc()
+    doc["blocks"][2]["config"]["series"] = series
+    assert validate_doc(doc) == []
+
+
+@pytest.mark.parametrize(
+    "series", [["absent"], [{"data_key": "absent"}], [{"y_key": "absent"}], [{"key": "absent"}]]
+)
+def test_graph_doc_checks_every_series_key_against_query(series):
+    doc = graph_doc()
+    doc["blocks"][2]["config"]["series"] = series
+    assert any(item.get("code") == "missing_result_key:absent" for item in validate_doc(doc))
