@@ -166,7 +166,7 @@ const AUTO_EXPAND_TOOLS = new Set([
 ])
 
 const HELPER_TEXT_LABELS = Object.entries(SUBAGENT_TOOL_LABELS).map(([toolName, label]) => {
-  const escapedName = toolName.replaceAll("_", " ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const escapedName = toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replaceAll("_", "[_ ]")
   return { pattern: new RegExp(`\\b${escapedName}\\b`, "gi"), label }
 })
 
@@ -512,11 +512,12 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   // in errorText (no `output`); otherwise show the raw output when no rich card
   // matched. Either way, the <pre> renders the FULL text — the historical
   // `.slice(0, 2000)` silently dropped the tail with no marker (13#4).
-  const fallbackText = isErrored
+  const rawFallbackText = isErrored
     ? (part.errorText ?? "The tool reported an error.")
     : hasOutput && part.output != null && !richOutput && (!isSubagentCard || helperUnstructuredOutput)
       ? formatToolOutput(part.output)
       : null
+  const fallbackText = isSubagentCard && rawFallbackText ? readableHelperText(rawFallbackText) : rawFallbackText
 
   const { canWrite } = useWorkspaceRole(workspaceId)
   const showCancelButton =

@@ -376,7 +376,7 @@ describe("helper artifacts in the assistant flow", () => {
   })
 })
 
-it.each(["Canvas Manager", "canvas manager"])("uses plain-language labels for %s and its activity", (label) => {
+it.each(["Canvas Manager", "canvas manager", "canvas_manager"])("uses plain-language labels for %s and its activity", (label) => {
   const msg = liveMessage("canvas_manager", { status: "done", message: `${label} completed.` })
   render(<ChatMessage message={msg} isActiveMessage={false} />)
   expect(screen.getByText("Data model editor")).toBeInTheDocument()
@@ -455,6 +455,12 @@ it("shows plain-string helper validation errors", () => {
   render(<ChatMessage message={message} isActiveMessage={false} />)
   expect(screen.getByTestId("tool-call-artifact_manager")).toHaveAttribute("aria-expanded", "true")
   expect(screen.getByText("Please provide an artifact task.")).toBeVisible()
+})
+
+it("uses the UI helper label in plain validation errors", () => {
+  const message = liveMessage("artifact_manager", "artifact_manager requires a non-empty task.")
+  render(<ChatMessage message={message} isActiveMessage={false} />)
+  expect(screen.getByText("Artifact editor requires a non-empty task.")).toBeVisible()
 })
 
 it("keeps earlier artifact tool activity when its button is deduplicated", () => {
