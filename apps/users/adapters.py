@@ -27,7 +27,7 @@ from django.core.exceptions import (
 from django.shortcuts import redirect
 
 from apps.common.commcare_servers import server_for_provider
-from apps.users.providers.ocs.provider import REQUESTED_TEAM_STATE_KEY
+from apps.users.providers.ocs.views import OCSTeamMismatch
 from apps.users.services import ocs_team_flow
 from apps.users.services.oauth_scope import canonical_provider, provider_accounts
 
@@ -111,7 +111,6 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         are unaffected by this gate.
         """
         self._reject_cross_server_commcare_login(request, sociallogin)
-        self._reject_ocs_team_mismatch(request, sociallogin)
         provider = sociallogin.account.provider
         restrictions = settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS
         allowed = restrictions.get(provider, restrictions.get(canonical_provider(provider))) or []
@@ -158,32 +157,6 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         messages.error(request, "This CommCare HQ sign-in is misconfigured. Contact support.")
         raise ImmediateHttpResponse(redirect("account_login"))
 
-    def _reject_ocs_team_mismatch(self, request, sociallogin):
-        """Refuse an OCS token for a team other than the one Scout pinned the flow to.
-
-        OCS falls back to the browser's session team when the pinned slug is not one
-        of the user's teams, and says so only through the ``team`` claim. Connecting
-        that token anyway would quietly add a team the user did not pick.
-        """
-        if canonical_provider(sociallogin.account.provider) != "ocs":
-            return
-        requested = (sociallogin.state or {}).get(REQUESTED_TEAM_STATE_KEY)
-        if not requested:
-            return
-        claims = sociallogin.account.extra_data or {}
-        got = str(claims.get("team") or "").strip()
-        if got == requested:
-            return
-        logger.warning("OCS returned team %r for a flow pinned to %r; refused", got, requested)
-        request.session[ocs_team_flow.SESSION_KEY] = ocs_team_flow.stop(
-            request.session.get(ocs_team_flow.SESSION_KEY),
-            ocs_team_flow.STOP_MISMATCH,
-            requested,
-            got,
-        )
-        self._store_fresh_ocs_teams(request, claims)
-        raise ImmediateHttpResponse(redirect(self._connections_url(request)))
-
     def _store_fresh_ocs_teams(self, request, claims):
         # The refused login never reaches allauth's extra_data update, but its team
         # list is the freshest one; without it a team the user left keeps being offered.
@@ -199,7 +172,7 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
     def on_authentication_error(
         self, request, provider, error=None, exception=None, extra_context=None
     ):
-        """Bring a failed or cancelled pinned OCS connect back to the connections page.
+        """Bring a failed, cancelled or wrong-team pinned OCS connect back to Connections.
 
         Only flows Scout pinned to a team are redirected; any other failure keeps
         allauth's own error page.
@@ -208,17 +181,23 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
             request, provider, error=error, exception=exception, extra_context=extra_context
         )
         state = (extra_context or {}).get("state") or {}
-        requested = state.get(REQUESTED_TEAM_STATE_KEY) if isinstance(state, dict) else None
+        requested = (
+            state.get(ocs_team_flow.REQUESTED_TEAM_STATE_KEY) if isinstance(state, dict) else None
+        )
         if not requested or canonical_provider(getattr(provider, "id", "")) != "ocs":
             return
-        reason = (
-            ocs_team_flow.STOP_CANCELLED
-            if error == AuthError.CANCELLED
-            else ocs_team_flow.STOP_FAILED
-        )
-        request.session[ocs_team_flow.SESSION_KEY] = ocs_team_flow.stop(
-            request.session.get(ocs_team_flow.SESSION_KEY), reason, requested
-        )
+        flow = request.session.get(ocs_team_flow.SESSION_KEY)
+        if isinstance(exception, OCSTeamMismatch):
+            # OCS falls back to the session team when the pinned slug isn't one of the
+            # user's, and says so only through the team claim.
+            logger.warning("%s; refused", exception)
+            flow = ocs_team_flow.stop(flow, ocs_team_flow.STOP_MISMATCH, requested, exception.got)
+            self._store_fresh_ocs_teams(request, exception.claims)
+        elif error == AuthError.CANCELLED:
+            flow = ocs_team_flow.stop(flow, ocs_team_flow.STOP_CANCELLED, requested)
+        else:
+            flow = ocs_team_flow.stop(flow, ocs_team_flow.STOP_FAILED, requested)
+        request.session[ocs_team_flow.SESSION_KEY] = flow
         raise ImmediateHttpResponse(redirect(self._connections_url(request)))
 
     def _connections_url(self, request):

@@ -50,10 +50,12 @@ def _flow_payload(flow, names, *, finished):
 async def _arespond(request, flow, teams, connected):
     finished = ocs_team_flow.is_finished(flow)
     # A finished chain is reported once, then forgotten.
-    if flow and not finished:
-        await request.session.aset(ocs_team_flow.SESSION_KEY, flow)
-    else:
-        await request.session.apop(ocs_team_flow.SESSION_KEY, None)
+    keep = flow if flow and not finished else None
+    if keep != await request.session.aget(ocs_team_flow.SESSION_KEY):
+        if keep:
+            await request.session.aset(ocs_team_flow.SESSION_KEY, keep)
+        else:
+            await request.session.apop(ocs_team_flow.SESSION_KEY, None)
     names = {t["slug"]: t["name"] for t in teams or []}
     return JsonResponse(
         {

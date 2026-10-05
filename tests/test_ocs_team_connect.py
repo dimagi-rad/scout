@@ -11,7 +11,7 @@ from allauth.socialaccount.models import SocialAccount, SocialToken
 from django.test import Client
 from django.utils import timezone
 
-from apps.users.providers.ocs.provider import REQUESTED_TEAM_STATE_KEY, OCSProvider
+from apps.users.providers.ocs.provider import OCSProvider
 from apps.users.services import ocs_team_flow
 
 SUB = "ocs-user-1"
@@ -163,6 +163,11 @@ class TestPinnedStart:
 
         assert "team" not in parse_qs(urlparse(response["Location"]).query)
 
+    def test_a_sign_in_is_never_pinned(self, ocs_app):
+        response = Client().post("/accounts/ocs/login/", {"process": "login", "team": "beta"})
+
+        assert "team" not in parse_qs(urlparse(response["Location"]).query)
+
     def test_a_get_does_not_start_or_record_a_flow(self, client):
         response = client.get("/accounts/ocs/login/", {"process": "connect", "team": "beta"})
 
@@ -211,6 +216,18 @@ class TestCallback:
         assert body["flow"]["stopped"]["got"] == {"slug": "beta", "name": "Beta"}
         assert body["next"] is None
 
+    def test_a_fallback_to_a_removed_team_does_not_revive_its_token(
+        self, client, user, ocs_app, mocker
+    ):
+        _identity(user, ocs_app, "alpha")
+        removed = _identity(user, ocs_app, "beta", token=False)
+        _response, query = _start(client, "gamma")
+
+        _callback(client, mocker, query, _userinfo("beta"))
+
+        assert not SocialToken.objects.filter(account=removed).exists()
+        assert _flow(client)["stopped"]["reason"] == ocs_team_flow.STOP_MISMATCH
+
     def test_a_missing_team_claim_is_a_mismatch(self, client, user, ocs_app, mocker):
         _response, query = _start(client, "beta")
 
@@ -256,7 +273,7 @@ class TestCallback:
         _start(client, "beta")
 
         states = client.session["socialaccount_states"]
-        assert [s[0][REQUESTED_TEAM_STATE_KEY] for s in states.values()] == ["beta"]
+        assert [s[0][ocs_team_flow.REQUESTED_TEAM_STATE_KEY] for s in states.values()] == ["beta"]
 
 
 @pytest.mark.django_db
@@ -313,6 +330,28 @@ class TestChain:
         _start(client, "gamma")
 
         assert _flow(client)["mode"] == ocs_team_flow.MODE_ONE
+
+    def test_restarting_the_head_from_a_second_tab_keeps_the_chain(self, client, user, ocs_app):
+        _identity(user, ocs_app, "alpha")
+        client.post("/api/auth/ocs/teams/connect-all/")
+        _start(client, "beta")
+
+        _start(client, "beta")
+
+        assert _flow(client)["mode"] == ocs_team_flow.MODE_ALL
+        assert _flow(client)["queue"] == ["beta", "gamma"]
+
+    def test_an_idle_chain_does_not_resume_by_itself(self, client, user, ocs_app):
+        _identity(user, ocs_app, "alpha")
+        client.post("/api/auth/ocs/teams/connect-all/")
+        session = client.session
+        session[ocs_team_flow.SESSION_KEY]["updated_at"] -= ocs_team_flow.CHAIN_IDLE_SECONDS + 1
+        session.save()
+
+        body = client.get("/api/auth/ocs/teams/").json()
+
+        assert body["next"] is None
+        assert body["flow"]["stopped"]["reason"] == ocs_team_flow.STOP_IDLE
 
     def test_stop_keeps_progress_and_halts(self, client, user, ocs_app):
         _identity(user, ocs_app, "alpha")
