@@ -6,6 +6,7 @@ from allauth.account.models import EmailAddress
 from allauth.account.utils import get_request_param
 from allauth.socialaccount.providers.base import ProviderAccount
 from allauth.socialaccount.providers.oauth2.provider import OAuth2Provider
+from django.conf import settings
 
 from apps.users.providers.ocs.views import OCSOAuth2Adapter
 from apps.users.services import ocs_team_flow
@@ -42,15 +43,11 @@ class OCSProvider(OAuth2Provider):
     oauth2_adapter_class = OCSOAuth2Adapter
 
     def get_default_scope(self) -> list[str]:
+        scope = ["chatbots:read", "sessions:read", "files:read", "participants:read", "openid"]
         # "teams" lists every team the user belongs to (open-chat-studio#4685).
-        return [
-            "chatbots:read",
-            "sessions:read",
-            "files:read",
-            "participants:read",
-            "openid",
-            "teams",
-        ]
+        if settings.OCS_REQUEST_TEAMS_SCOPE:
+            scope.append("teams")
+        return scope
 
     def requested_team(self, request) -> str:
         """The team a signed-in user's connect is pinned to, or "".

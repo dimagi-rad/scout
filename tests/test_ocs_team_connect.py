@@ -94,6 +94,10 @@ class TestClaims:
     def test_teams_scope_is_requested(self):
         assert "teams" in OCSProvider.get_default_scope(None)
 
+    def test_teams_scope_can_be_turned_off_for_an_older_ocs(self, settings):
+        settings.OCS_REQUEST_TEAMS_SCOPE = False
+        assert "teams" not in OCSProvider.get_default_scope(None)
+
     def test_teams_claim_is_sanitized_and_sorted(self):
         claims = {
             "teams": [
@@ -299,10 +303,24 @@ class TestChain:
         assert [t["slug"] for t in body["flow"]["connected"]] == ["beta", "gamma"]
         assert client.get("/api/auth/ocs/teams/").json()["flow"] is None
 
+    def test_a_hop_still_on_ocs_is_not_declared_incomplete(self, client, user, ocs_app):
+        _identity(user, ocs_app, "alpha")
+        client.post("/api/auth/ocs/teams/connect-all/")
+        _start(client, "beta")
+
+        body = client.get("/api/auth/ocs/teams/").json()
+
+        assert body["next"] is None
+        assert body["flow"]["stopped"] is None
+        assert body["flow"]["pending"] == {"slug": "beta", "name": "Beta"}
+
     def test_a_hop_that_never_returns_stops_the_chain(self, client, user, ocs_app):
         _identity(user, ocs_app, "alpha")
         client.post("/api/auth/ocs/teams/connect-all/")
         _start(client, "beta")
+        session = client.session
+        session[ocs_team_flow.SESSION_KEY]["updated_at"] -= ocs_team_flow.PENDING_GRACE_SECONDS + 1
+        session.save()
 
         body = client.get("/api/auth/ocs/teams/").json()
 
@@ -370,6 +388,14 @@ class TestChain:
         assert client.post("/api/auth/ocs/teams/dismiss/").status_code == 200
 
         assert _flow(client) is None
+
+    def test_connect_all_needs_a_known_list(self, client, user, ocs_app):
+        _identity(user, ocs_app, "alpha", teams=None)
+
+        response = client.post("/api/auth/ocs/teams/connect-all/")
+
+        assert response.status_code == 400
+        assert "Reconnect" in response.json()["error"]
 
     def test_nothing_to_connect_is_rejected(self, client, user, ocs_app):
         for team in ("alpha", "beta", "gamma"):

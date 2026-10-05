@@ -32,18 +32,22 @@ def _flow_payload(flow, names, *, finished):
     def team(slug):
         return {"slug": slug, "name": names.get(slug, slug)}
 
-    stopped = flow.get("stopped")
+    stopped = flow.get("stopped") or {}
     return {
-        "mode": flow["mode"],
-        "connected": [team(s) for s in flow.get("connected", [])],
-        "remaining": [team(s) for s in flow.get("queue", [])],
+        "mode": flow.get("mode", ocs_team_flow.MODE_ONE),
+        "connected": [team(s) for s in flow.get("connected") or []],
+        "remaining": [team(s) for s in flow.get("queue") or []],
+        "pending": team(flow["pending"]) if flow.get("pending") else None,
         "finished": finished,
-        "stopped": stopped
-        and {
-            "reason": stopped["reason"],
-            "team": team(stopped["team"]),
-            "got": team(stopped["got"]) if stopped.get("got") else None,
-        },
+        "stopped": (
+            stopped.get("team")
+            and {
+                "reason": stopped.get("reason", ocs_team_flow.STOP_FAILED),
+                "team": team(stopped["team"]),
+                "got": team(stopped["got"]) if stopped.get("got") else None,
+            }
+        )
+        or None,
     }
 
 
@@ -85,7 +89,12 @@ async def ocs_teams_view(request):
 async def ocs_teams_connect_all_view(request):
     """Queue every known, unconnected team; the page then starts the first hop."""
     teams, connected = await _ateam_state(request._authenticated_user)
-    unconnected = [t["slug"] for t in teams or [] if t["slug"] not in connected]
+    if teams is None:
+        return JsonResponse(
+            {"error": "Reconnect an Open Chat Studio team first to list your teams."},
+            status=400,
+        )
+    unconnected = [t["slug"] for t in teams if t["slug"] not in connected]
     if not unconnected:
         return JsonResponse({"error": "No unconnected Open Chat Studio teams."}, status=400)
     return await _arespond(request, ocs_team_flow.start_all(unconnected), teams, connected)

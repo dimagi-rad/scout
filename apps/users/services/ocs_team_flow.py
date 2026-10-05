@@ -27,6 +27,9 @@ REQUESTED_TEAM_STATE_KEY = "ocs_requested_team"
 # itself on the user's next visit, possibly days later.
 CHAIN_IDLE_SECONDS = 10 * 60
 
+# A hop still on OCS (or a read from another tab mid-hop) is not yet "incomplete".
+PENDING_GRACE_SECONDS = 20
+
 MODE_ALL = "all"
 MODE_ONE = "one"
 
@@ -140,24 +143,26 @@ def stop(flow: dict | None, reason: str, team: str, got: str = "") -> dict:
 def reconcile(flow: dict | None, connected: set[str], now: float | None = None) -> dict | None:
     """Settle the in-flight hop against the teams the user now has connected.
 
-    A pending team that is now connected came back from OCS; one that is not never
-    did (cancelled or failed somewhere allauth could not report), so the chain stops
-    rather than retrying it. Returns None once a one-off connect has succeeded.
+    A pending team that is now connected came back from OCS; one that still is not
+    after a short grace never did (cancelled or failed somewhere allauth could not
+    report), so the chain stops rather than retrying it. Returns None once a one-off connect has succeeded.
     """
     if not flow:
         return None
+    now = time.time() if now is None else now
     flow = {**flow, "queue": list(flow.get("queue") or [])}
+    idle_for = now - flow.get("updated_at", 0)
     pending = flow.get("pending")
     if pending:
         if pending in connected:
             flow["connected"] = [*flow.get("connected", []), pending]
             flow["pending"] = None
-            flow["updated_at"] = time.time() if now is None else now
-        else:
+            flow["updated_at"] = now
+            idle_for = 0
+        elif idle_for > PENDING_GRACE_SECONDS:
             flow = stop(flow, STOP_INCOMPLETE, pending)
     flow["queue"] = [slug for slug in flow["queue"] if slug not in connected]
     upcoming = next_team(flow)
-    idle_for = (time.time() if now is None else now) - flow.get("updated_at", 0)
     if upcoming and idle_for > CHAIN_IDLE_SECONDS:
         flow = stop(flow, STOP_IDLE, upcoming)
     if flow.get("mode") == MODE_ONE and not flow.get("stopped") and not flow["queue"]:
