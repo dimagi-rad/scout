@@ -981,6 +981,7 @@ async def materialize_workspace(
         preflight_failures = _resume_records(result)
         return result
     finally:
+        load_completed_at = timezone.now()
         succeeded = (
             isinstance(result, dict)
             and result.get("all_succeeded", False)
@@ -988,7 +989,6 @@ async def materialize_workspace(
             and not result.get("denied_mid_run")
             and (result.get("view_schema") is None or result["view_schema"].get("ok", False))
         )
-        await afinish_load_timing(job_id, bool(succeeded), require_runs=True)
         reported_publication = isinstance(result, dict) and "view_schema" in result
         outcome = result.get("view_schema") if reported_publication else None
         # None means a single-source workspace needed no view publication.
@@ -1002,6 +1002,12 @@ async def materialize_workspace(
         if notify_thread:
             await _defer_resume_for_job(job_id, preflight_failures)
         await _defer_pending_flush(workspace_id)
+        await afinish_load_timing(
+            job_id,
+            bool(succeeded),
+            now=load_completed_at,
+            require_runs=True,
+        )
 
 
 def _resume_records(result: dict) -> list[dict]:
