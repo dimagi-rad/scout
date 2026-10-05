@@ -412,3 +412,9 @@ function ChatMessageList({ messages }: { messages: UIMessage[] }) {
   return messages.map((message) => <ChatMessage key={message.id} message={message} isActiveMessage={false} visibleArtifactIds={visible.get(message.id)} />)
 }
 
+it("does not leak markdown AST node props onto anchors", () => {
+  const msg = { id: "link-node", role: "assistant", parts: [{ type: "text", text: "[Chart](/artifacts/a)" }] } as UIMessage
+  render(<MemoryRouter><ChatMessage message={msg} isActiveMessage={false} /></MemoryRouter>)
+  expect(screen.getByRole("link", { name: "Chart" })).not.toHaveAttribute("node")
+})
+
