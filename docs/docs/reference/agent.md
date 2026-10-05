@@ -166,11 +166,16 @@ Run a structured query against the semantic model.
 - `dimensions` (list, optional): Semantic dimension members such as `visits.username`
 - `time_dimension` (string, optional): Semantic time dimension member
 - `granularity` (string, optional): `day`, `week`, `month`, `quarter`, or `year`
-- `date_range` (object, optional): A preset such as `{"preset": "last_30_days"}`, a counted window such as `{"last": 24, "unit": "week"}`, or inclusive `start`/`end` dates; requires `time_dimension`. Counted day/week/month/quarter/year windows include the current calendar period through today; weeks start Monday. For recent N periods shown oldest-first, use a counted window with ascending time order; `limit` caps rows, not periods.
+- `date_range` (object, optional): A preset such as `{"preset": "last_30_days"}`, a counted window such as `{"last": 24, "unit": "week"}`, or inclusive `start`/`end` dates; requires `time_dimension`
 - `query_context` (object, optional): Reporting context; only `timezone` is used
 - `filters` (list, optional): Structured filters
 - `order_by` (list, optional): Structured ordering
 - `limit` (number, optional): Maximum rows (default 100, clamped server-side)
+
+Counted day/week/month/quarter/year windows include the current calendar period
+through today; weeks start Monday. For recent N periods shown oldest-first, use a
+counted window with ascending time order. `limit` caps rows, not periods: allow for
+multiple series, increase the limit as needed (maximum 500), and check `truncated`.
 
 **Returns:**
 - `columns`: List of column names
