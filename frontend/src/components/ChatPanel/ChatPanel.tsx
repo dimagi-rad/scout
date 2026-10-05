@@ -5,6 +5,7 @@ import { useLocation } from "react-router-dom"
 import { getCsrfToken, api, ApiError } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
+import { turnArtifactOwners } from "@/components/ChatMessage/artifactReferences"
 import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
 import { workspaceApi } from "@/api/workspaces"
 import { SourceFreshness } from "@/components/SourceFreshness"
@@ -251,6 +252,8 @@ export function ChatPanel() {
   const visibleMessages = held.hiddenMessageIds.size
     ? withoutHeldMessages(messages, held.hiddenMessageIds)
     : messages
+
+  const artifactOwners = turnArtifactOwners(visibleMessages)
 
   const cancelBusyRetry = useCallback(() => {
     if (busyTimerRef.current) clearTimeout(busyTimerRef.current)
@@ -704,6 +707,7 @@ export function ChatPanel() {
             <ChatMessage
               key={msg.id}
               message={msg}
+              visibleArtifactIds={artifactOwners.get(msg.id)}
               isActiveMessage={isStreaming && msgIdx === visibleMessages.length - 1}
               workspaceId={activeDomainId ?? undefined}
               threadId={threadId}

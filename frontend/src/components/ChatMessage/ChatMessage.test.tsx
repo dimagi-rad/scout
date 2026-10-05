@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { UIMessage } from "ai"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
+import { turnArtifactOwners } from "./artifactReferences"
 import { ChatMessage } from "./ChatMessage"
 import { useAppStore } from "@/store/store"
 
@@ -393,3 +394,21 @@ it("navigates relative artifact markdown links through the client router", async
   await userEvent.click(screen.getByRole("link", { name: "View chart" }))
   expect(await screen.findByText("Opened chart")).toBeInTheDocument()
 })
+
+it("deduplicates artifacts across assistant steps within each saved turn", () => {
+  const first = helperMessage()
+  const second = helperMessage()
+  second.id = "second-step"
+  const nextTurn = helperMessage()
+  nextTurn.id = "next-turn"
+  const messages = [first, second, { id: "question", role: "user", parts: [{ type: "text", text: "Update it" }] }, nextTurn] as UIMessage[]
+  render(<ChatMessageList messages={messages} />)
+  expect(screen.getAllByTestId("chat-artifact-a")).toHaveLength(2)
+  expect(screen.getAllByTestId("chat-artifact-b")).toHaveLength(2)
+})
+
+function ChatMessageList({ messages }: { messages: UIMessage[] }) {
+  const visible = turnArtifactOwners(messages)
+  return messages.map((message) => <ChatMessage key={message.id} message={message} isActiveMessage={false} visibleArtifactIds={visible.get(message.id)} />)
+}
+

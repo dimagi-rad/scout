@@ -1,3 +1,4 @@
+import { extractArtifactIdFromOutput, messageArtifacts, parseOutput } from "./artifactReferences"
 import { Fragment, useState, type ComponentPropsWithoutRef } from "react"
 import { Link, useInRouterContext } from "react-router-dom"
 import type { UIMessage } from "ai"
@@ -35,32 +36,6 @@ import type {
   ListTablesOutput,
   GetMetadataOutput,
 } from "./ToolOutput"
-
-function parseOutput(output: unknown): unknown {
-  if (typeof output === "string") {
-    // Backend emits the MCP envelope as JSON (apps/chat/stream.py), so a plain
-    // JSON.parse suffices. The old Python-repr→JSON `replace(/'/g, '"')` hack
-    // corrupted apostrophes in the data (05#2 / 13#8) and was removed.
-    try {
-      return JSON.parse(output)
-    } catch {
-      return output
-    }
-  }
-  // MCP envelope array (already-parsed objects).
-  if (
-    Array.isArray(output) &&
-    output[0]?.type === "text" &&
-    typeof output[0]?.text === "string"
-  ) {
-    try {
-      return JSON.parse(output[0].text)
-    } catch {
-      return output
-    }
-  }
-  return output
-}
 
 function inputSql(input: unknown): string | undefined {
   if (input != null && typeof input === "object" && "sql" in input) {
@@ -105,6 +80,7 @@ interface ChatMessageProps {
   activeMaterializationJob?: ActiveJob | null
   recentTerminationsByToolCallId?: Record<string, RecentTermination>
   onRetryDispatched?: () => void
+  visibleArtifactIds?: ReadonlySet<string>
 }
 
 interface ChatTextPartProps {
@@ -157,32 +133,6 @@ function isArtifactToolPart(part: any): boolean {
 function extractArtifactId(part: any): string | null {
   if (part.state !== "output-available" || part.output == null) return null
   return extractArtifactIdFromOutput(part.output)
-}
-
-function extractArtifactIdFromOutput(rawOutput: unknown): string | null {
-  const output = parseOutput(rawOutput)
-  if (output == null) return null
-  if (typeof output === "object" && "status" in output && ["error", "denied"].includes(String(output.status))) return null
-  if (typeof output === "object" && !Array.isArray(output)) {
-    if (
-      "artifact_id" in output
-      && typeof output.artifact_id === "string"
-      && output.artifact_id
-    ) {
-      return output.artifact_id
-    }
-    if (
-      "artifact" in output
-      && output.artifact != null
-      && typeof output.artifact === "object"
-      && "id" in output.artifact
-      && typeof output.artifact.id === "string"
-      && output.artifact.id
-    ) {
-      return output.artifact.id
-    }
-  }
-  return null
 }
 
 function formatToolOutput(output: unknown): string {
@@ -817,7 +767,7 @@ export function ChatArtifactButton({ artifactId, artifactVersion, isActive = fal
   )
 }
 
-export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTerminationsByToolCallId, onRetryDispatched }: ChatMessageProps) {
+export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTerminationsByToolCallId, onRetryDispatched, visibleArtifactIds }: ChatMessageProps) {
   const isUser = message.role === "user"
   const activeArtifactId = useAppStore((s) => s.activeArtifactId)
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
@@ -897,32 +847,9 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
     }
   }
 
-  const artifacts = new Map<string, { id: string; version?: number; afterIndex: number }>()
-  const parentIndices = new Map<string, number>()
-  message.parts.forEach((part, index) => {
-    if (isToolUIPart(part) && !(part as ChatToolPartShape).parentToolCallId) {
-      parentIndices.set(part.toolCallId, index)
-    }
-  })
-  message.parts.forEach((part, index) => {
-    const child = getSubagentToolData(part)
-    const tool = isToolUIPart(part) ? part as ChatToolPartShape : null
-    if (tool?.state !== "output-available" && part.type !== "data-subagent-tool-output") return
-    const rawOutput = child?.output ?? tool?.output
-    const id = extractArtifactIdFromOutput(rawOutput)
-    if (!id) return
-    const output = parseOutput(rawOutput) as { artifact_version?: unknown; artifact?: { version?: unknown } }
-    const rawVersion = output.artifact_version ?? output.artifact?.version
-    const version = typeof rawVersion === "number" ? rawVersion : undefined
-    const parentId = child?.parentToolCallId ?? tool?.parentToolCallId
-    const afterIndex = parentId ? parentIndices.get(parentId) : index
-    if (afterIndex === undefined) return
-    const previous = artifacts.get(id)
-    if (previous && (previous.version ?? 0) > (version ?? 0)) return
-    artifacts.set(id, { id, version, afterIndex })
-  })
+  const artifacts = messageArtifacts(message)
   const renderArtifacts = (index: number) => [...artifacts.values()]
-    .filter((artifact) => artifact.afterIndex === index)
+    .filter((artifact) => artifact.afterIndex === index && (!visibleArtifactIds || visibleArtifactIds.has(artifact.id)))
     .map((artifact) => (
       <ChatArtifactButton
         key={artifact.id}

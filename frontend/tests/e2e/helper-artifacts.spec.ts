@@ -20,6 +20,11 @@ test("keeps helper artifacts visible in the main reply after reload", async ({ p
     if (path.endsWith("/threads/")) return route.fulfill({ json: [{ id: THREAD, title: "Visits by week" }] })
     if (path.endsWith("/jobs/active/")) return route.fulfill({ json: { jobs: [], recent_terminations: [], workspace_loads: [] } })
     if (path.endsWith("/messages/")) return route.fulfill({ json: [{
+      id: "earlier-step", role: "assistant", parts: [
+        { type: "tool-artifact_manager", toolCallId: "earlier-helper", state: "output-available", input: { task: "Inspect chart" },
+          output: { status: "done", artifact_id: ARTIFACT, artifact_version: 1 } },
+      ],
+    }, {
       id: "reply", role: "assistant", parts: [
         { type: "tool-artifact_manager", toolCallId: "helper", state: "output-available", input: { task: "Build chart" },
           output: { status: "done", artifact_id: ARTIFACT, artifact_version: 1 } },
@@ -37,7 +42,7 @@ test("keeps helper artifacts visible in the main reply after reload", async ({ p
     return route.fulfill({ json: {} })
   })
   await page.goto(`/workspaces/${WORKSPACE}/chat/${THREAD}`)
-  const helper = page.getByTestId("tool-call-artifact_manager")
+  const helper = page.getByTestId("tool-call-artifact_manager").last()
   const artifact = page.getByTestId(`chat-artifact-${ARTIFACT}`)
   await expect(helper).toHaveAttribute("aria-expanded", "false")
   await expect(artifact).toBeVisible()
