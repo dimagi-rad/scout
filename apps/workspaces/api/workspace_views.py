@@ -45,6 +45,7 @@ from apps.workspaces.access import (
     missing_tenants_for_member,
     missing_tenants_payload,
     needed_text,
+    reconnect_restores_access,
     remedy_text,
 )
 from apps.workspaces.models import (
@@ -581,6 +582,7 @@ class WorkspaceListView(APIView):
                     # No sources is denied by the gate (#381) without naming any missing.
                     "has_access": bool(workspace_tenants) and not missing,
                     "missing_tenants": missing_tenants_payload(missing),
+                    "needs_reconnect": reconnect_restores_access(missing),
                     "member_count": m.member_count,
                     "schema_status": schema_statuses[m.workspace_id],
                     "in_progress": m.workspace_id in loading_ids,

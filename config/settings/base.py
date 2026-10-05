@@ -205,8 +205,8 @@ ACCOUNT_EMAIL_VERIFICATION = "optional"
 ACCOUNT_DEFAULT_HTTP_PROTOCOL = env("ACCOUNT_DEFAULT_HTTP_PROTOCOL", default="http")
 
 # Require POST (not GET) to initiate OAuth, so /accounts/<provider>/login/ can't
-# be triggered by a forged GET (login CSRF). allauth renders a short CSRF-token
-# "Continue with <provider>" interstitial on GET that POSTs to the same URL.
+# be triggered by a forged GET (login CSRF). The SPA POSTs with its CSRF token
+# (frontend/src/lib/oauth.ts); a bare GET gets allauth's "Continue" interstitial.
 # (arch #258, finding 14#2.)
 SOCIALACCOUNT_LOGIN_ON_GET = False
 SOCIALACCOUNT_AUTO_SIGNUP = True

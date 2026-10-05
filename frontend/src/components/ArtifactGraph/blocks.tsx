@@ -23,8 +23,9 @@ import { useBlockInputs, useOutput } from "./hooks"
 import {
   buildRechartsTree,
   collectResultKeyRefs,
-  compileCompactGraphConfig,
+  prepareCompactGraph,
   normalizeGraphSeries,
+  type CompactGraphConfig,
   type RechartsNode,
 } from "./recharts"
 import {
@@ -430,13 +431,11 @@ function GraphComponent({ block, config, engine }: BlockComponentProps) {
   const state = useOutput(engine, outputKey(block.id, "data"))
   const rows = rowsFromState(state)
   const xKey = stringValue(config.x_key) ?? "date"
-  const inferredSeries = inferSeries(config, rows, xKey)
   const style = isRecord(config.style) ? config.style : {}
   const chartConfig = {
     chart_type: stringValue(config.chart_type) ?? "line",
-    x_key: xKey,
+    x_key: "series_by" in config ? stringValue(config.x_key) : xKey,
     y_key: stringValue(config.y_key),
-    series: inferredSeries,
     data_label: stringValue(config.data_label),
     y_format: stringValue(config.y_format),
     stacked: config.stacked === true,
@@ -451,8 +450,28 @@ function GraphComponent({ block, config, engine }: BlockComponentProps) {
   }
   const height = typeof config.height === "number" && Number.isFinite(config.height) ? config.height : 280
   let tree: RechartsNode
+  let chartRows = rows
   try {
-    tree = isRechartsNode(config.recharts) ? config.recharts : compileCompactGraphConfig(chartConfig)
+    if (isRechartsNode(config.recharts)) {
+      if ("series_by" in config) throw new Error("series_by is supported only on compact charts")
+      tree = config.recharts
+    } else {
+      let compactConfig: CompactGraphConfig
+      if ("series_by" in config) {
+        // Preserve presence so ambiguous series configs fail just as they do on write.
+        compactConfig = {
+          ...chartConfig,
+          series_by: config.series_by,
+          ...("series" in config ? { series: config.series } : {}),
+        }
+      } else {
+        const series = inferSeries(config, rows, xKey)
+        compactConfig = { ...chartConfig, ...(series.length > 0 ? { series } : {}) }
+      }
+      const prepared = prepareCompactGraph(compactConfig, rows)
+      tree = prepared.tree
+      chartRows = prepared.rows
+    }
   } catch (error) {
     return (
       <BlockCard title={stringValue(config.title)} description={stringValue(config.subtitle)}>
@@ -462,7 +481,7 @@ function GraphComponent({ block, config, engine }: BlockComponentProps) {
       </BlockCard>
     )
   }
-  const missing = rows.length > 0 ? collectMissingKeys(tree, rows) : []
+  const missing = chartRows.length > 0 ? collectMissingKeys(tree, chartRows) : []
 
   return (
     <BlockCard title={stringValue(config.title)} description={stringValue(config.subtitle)}>
@@ -473,7 +492,7 @@ function GraphComponent({ block, config, engine }: BlockComponentProps) {
         </div>
       )}
       {rows.length > 0 ? (
-        <GraphBuildBoundary rows={rows} tree={tree} height={height} />
+        <GraphBuildBoundary rows={chartRows} tree={tree} height={height} />
       ) : (
         state.status === "ready" && <EmptyBlock label="No data" minHeight={height} />
       )}

@@ -11,6 +11,7 @@ from apps.transformations.models import (
     TransformationScope,
 )
 from apps.transformations.services.executor import run_transformation_pipeline
+from apps.workspaces.services.load_phases import LoadPhase
 
 pytestmark = pytest.mark.usefixtures("_managed_db_url")
 
@@ -409,3 +410,25 @@ def test_dbt_run_failure_outranks_test_status(
 
     assert run.status == TransformationRunStatus.FAILED
     mock_test.assert_not_called()
+
+
+@pytest.mark.django_db
+@patch("apps.transformations.services.executor.run_dbt_test")
+@patch("apps.transformations.services.executor.run_dbt")
+@patch("apps.transformations.services.executor.generate_profiles_yml")
+def test_phase_callback_names_each_stage_and_its_data_tests(
+    mock_profiles, mock_dbt, mock_test, tenant, system_assets, tenant_assets
+):
+    system_assets[0].test_yaml = "version: 2"
+    system_assets[0].save(update_fields=["test_yaml"])
+    mock_dbt.return_value = _dbt_success(*(a.name for a in system_assets + tenant_assets))
+    mock_test.return_value = _dbt_test_success()
+    callback = MagicMock()
+
+    run_transformation_pipeline(tenant=tenant, schema_name="test_schema", phase_callback=callback)
+
+    assert [c.args for c in callback.call_args_list] == [
+        (LoadPhase.BUILDING_TABLES, "Stage 1 of 2 · 3 models"),
+        (LoadPhase.CHECKING_QUALITY, "Running data tests on the new tables"),
+        (LoadPhase.BUILDING_TABLES, "Stage 2 of 2 · 2 models"),
+    ]

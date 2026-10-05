@@ -56,6 +56,7 @@ _NOT_LOAD_SHAPING = {
     "apps/workspaces/models.py": "ORM state; its schema changes ship as migrations.",
     "apps/workspaces/services/__init__.py": "Re-exports SchemaManager, excluded below.",
     "apps/workspaces/services/load_generations.py": "The fingerprint itself.",
+    "apps/workspaces/services/load_phases.py": "Progress-card phase names; never decides rows.",
     "apps/workspaces/services/schema_manager.py": (
         "Provisions and names schemas and roles; never decides their rows."
     ),

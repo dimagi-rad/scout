@@ -4,6 +4,7 @@ import { useAppStore } from "@/store/store"
 import {
   workspaceApi,
   workspaceHasAccess,
+  workspaceNeedsReconnect,
   type AwaitingInvite,
   type WorkspaceListItem,
 } from "@/api/workspaces"
@@ -151,15 +152,15 @@ function AwaitingInvitesBanner() {
   )
 }
 
-function NoAccessBanner({ count, connectionsPath }: { count: number; connectionsPath: string }) {
+function ReconnectBanner({ count, connectionsPath }: { count: number; connectionsPath: string }) {
   return (
     <div
       className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300"
       data-testid="workspaces-no-access-banner"
     >
       <span>
-        You don't have access to {count} {count === 1 ? "workspace" : "workspaces"}. Connected
-        Accounts shows why and what to do.
+        {count} {count === 1 ? "workspace needs" : "workspaces need"} a reconnect to restore
+        access.
       </span>
       <Button variant="outline" size="sm" asChild>
         <Link to={connectionsPath} data-testid="workspaces-no-access-connections">
@@ -255,8 +256,8 @@ export function WorkspacesPage() {
   }, [domains, search, activeFilters, sort])
 
   const visible = filtered.slice(0, visibleCount)
-  const noAccessCount = useMemo(
-    () => domains.filter((ws) => !workspaceHasAccess(ws)).length,
+  const reconnectCount = useMemo(
+    () => domains.filter(workspaceNeedsReconnect).length,
     [domains],
   )
 
@@ -298,8 +299,8 @@ export function WorkspacesPage() {
 
       <AwaitingInvitesBanner />
 
-      {!isLoading && noAccessCount > 0 && (
-        <NoAccessBanner count={noAccessCount} connectionsPath={connectionsPath} />
+      {!isLoading && reconnectCount > 0 && (
+        <ReconnectBanner count={reconnectCount} connectionsPath={connectionsPath} />
       )}
 
       {isLoading ? (

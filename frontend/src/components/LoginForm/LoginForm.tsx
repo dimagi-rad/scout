@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { useEmbedParams } from "@/hooks/useEmbedParams"
 import { BASE_PATH } from "@/config"
-import type { OAuthProvider } from "@/lib/oauth"
+import { startOAuthOnClick, type OAuthProvider } from "@/lib/oauth"
 
 export function LoginForm() {
   const [email, setEmail] = useState("")
@@ -107,6 +107,9 @@ export function LoginForm() {
                     <a
                       href={`${BASE_PATH}${provider.login_url}?next=${encodeURIComponent(oauthReturnUrl)}`}
                       target={isEmbed ? "_top" : undefined}
+                      // An embed's CSRF cookie may be partitioned away from the top-level
+                      // POST, so embeds keep allauth's GET confirmation page.
+                      onClick={isEmbed ? undefined : startOAuthOnClick}
                     >
                       {provider.name}
                     </a>

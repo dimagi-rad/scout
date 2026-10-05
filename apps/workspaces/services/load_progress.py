@@ -32,6 +32,15 @@ def workspace_ids_in_progress(workspace_ids) -> set:
 def progress_payload(progress: dict | None) -> dict | None:
     if not progress:
         return None
+    if progress.get("phase"):
+        # A named phase follows the source loads: their counts no longer apply.
+        progress = {
+            **progress,
+            "message": progress.get("phase_message") or progress.get("message"),
+            "source": None,
+            "rows_loaded": 0,
+            "rows_total": None,
+        }
     rows_loaded = progress.get("rows_loaded") or 0
     rows_total = progress.get("rows_total")
     percent = None
@@ -47,6 +56,8 @@ def progress_payload(progress: dict | None) -> dict | None:
         "source": progress.get("source"),
         "step": progress.get("step"),
         "total_steps": progress.get("total_steps"),
+        # A named step after the sources load (``LoadPhase``); None while loading.
+        "phase": progress.get("phase"),
     }
 
 

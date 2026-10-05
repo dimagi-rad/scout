@@ -425,7 +425,9 @@ def _archive_and_delete_connection(conn):
                 account_id__in=scope_account_ids(conn.user_id, conn.provider, conn.scope_key)
             ).delete()
         conn.memberships.filter(archived_at__isnull=True).update(
-            archived_at=timezone.now(), connection=None
+            archived_at=timezone.now(),
+            archived_reason=TenantMembership.ARCHIVED_DISCONNECTED,
+            connection=None,
         )
         conn.delete()
 

@@ -123,3 +123,12 @@ def test_artifact_prompts_require_returned_ui_links_after_writes():
     assert "`ui_path`" in ARTIFACT_PROMPT_ADDITION
     assert "`ui_path`" in ARTIFACT_MANAGER_SYSTEM_PROMPT
     assert "successful tool result" in ARTIFACT_MANAGER_SYSTEM_PROMPT
+
+
+def test_artifact_prompts_explain_long_format_series_and_visual_verification():
+    for prompt in (ARTIFACT_PROMPT_ADDITION, ARTIFACT_MANAGER_SYSTEM_PROMPT):
+        assert '"series_by": "visits_segment"' in prompt
+        assert '"stacked": true' in prompt
+        assert "wide-format" in prompt
+        assert "validated schema" in prompt
+        assert "Other" in prompt

@@ -648,7 +648,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
           {toolName === "run_materialization" && matchingJob && (
             <div className="text-xs text-muted-foreground mb-2">
               ⏳ {matchingJob.progress?.message ?? "Materializing..."}
-              {matchingJob.progress?.rows_loaded != null && (
+              {!matchingJob.progress?.phase && matchingJob.progress?.rows_loaded != null && (
                 <>
                   {" "}({matchingJob.progress.rows_loaded.toLocaleString()}
                   {matchingJob.progress.rows_total
