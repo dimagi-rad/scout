@@ -1,0 +1,53 @@
+=== system block 0 {"cache_control": {"type": "ephemeral"}} ===
+<<select_base_system_prompt(write_capable=False, interactive=True)>>
+<<ARTIFACT_READ_ONLY_PROMPT_ADDITION>>
+
+## Workspace Instructions
+
+Report counts by district.
+
+
+## Knowledge Base
+
+### Active user
+
+Logged a visit in the last 30 days.
+
+=== system block 1 {} ===
+<<agent_date_context>>
+=== ainvoke kwargs {"cache_control": {"type": "ephemeral"}} ===
+=== bound tools ===
+describe_dataset(request) required=[request]
+describe_table(request) required=[request]
+get_lineage(request) required=[request]
+get_materialization_status(request) required=[request]
+get_metadata(request) required=[request]
+get_schema_status(request) required=[request]
+list_datasets(request) required=[request]
+list_tables(request) required=[request]
+list_workspaces(request) required=[request]
+query(request) required=[request]
+semantic_catalog(request) required=[request]
+semantic_query(request) required=[request]
+artifact_graph_overview(artifact_id) required=[]
+get_artifact_semantic_queries(artifact_id,limit,offset) required=[artifact_id]
+=== nodes ===
+__end__
+__start__
+agent
+escalate
+model_stopped
+tools
+truncated_tool_calls
+=== edges ===
+__start__ -> agent
+agent -> __end__ (conditional)
+agent -> model_stopped (conditional)
+agent -> tools (conditional)
+agent -> truncated_tool_calls (conditional)
+escalate -> __end__
+model_stopped -> __end__
+tools -> agent (conditional)
+tools -> escalate (conditional)
+truncated_tool_calls -> agent (conditional)
+truncated_tool_calls -> model_stopped (conditional)
