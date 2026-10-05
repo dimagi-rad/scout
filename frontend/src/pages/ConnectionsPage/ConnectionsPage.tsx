@@ -27,6 +27,7 @@ import {
 } from "@/components/WorkspaceBadge/providerMeta"
 import { accessNotice, productName, providerAccessLines } from "./accessCopy"
 import { ConnectionCard } from "./ConnectionCard"
+import { OcsTeamsPanel } from "./OcsTeamsPanel"
 import {
   connectionRemoveCopy,
   providerDisconnectLabel,
@@ -406,6 +407,9 @@ export function ConnectionsPage() {
                       )}
                     </div>
                   </div>
+                  {dataProvider === "ocs" && provider.connected && (
+                    <OcsTeamsPanel provider={provider} />
+                  )}
                   {canDisconnect && isConfirmingDisconnect && (
                     <div
                       className="flex flex-wrap items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-3"
