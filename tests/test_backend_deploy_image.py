@@ -10,7 +10,6 @@ import yaml
 from tests.kamal_config import load_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-WORKFLOWS = [("deploy.yml", "production"), ("deploy-staging.yml", "staging")]
 BACKENDS = [
     ("API", "deploy.yml", "scout"),
     ("MCP", "deploy-mcp.yml", "scout-mcp"),
@@ -18,54 +17,47 @@ BACKENDS = [
 ]
 
 
-def _workflow(name):
-    return yaml.safe_load((REPO_ROOT / ".github" / "workflows" / name).read_text())["jobs"][
+def _workflow():
+    return yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "deploy.yml").read_text())["jobs"][
         "deploy"
     ]
 
 
-@pytest.mark.parametrize(("name", "environment"), WORKFLOWS)
 @pytest.mark.parametrize(("role", "config_name", "service"), BACKENDS)
-def test_each_backend_deploy_pulls_and_validates_its_prebuilt_version(
-    name, environment, role, config_name, service
-):
-    workflow = _workflow(name)
+def test_each_backend_deploy_pulls_and_validates_its_prebuilt_version(role, config_name, service):
+    workflow = _workflow()
     step = next(step for step in workflow["steps"] if step.get("name") == f"Deploy {role}")
     tag = f"{role.upper()}_TAG"
     # Worker redeploy deliberately omits Kamal's service-wide pruning, which
-    # could otherwise erase the other destination's pending-drain evidence.
+    # could otherwise erase pending-drain evidence.
     expected_args = ["kamal", "redeploy" if role == "Worker" else "deploy"]
     if config_name != "deploy.yml":
         expected_args += ["-c", f"config/{config_name}"]
-    if environment == "staging":
-        expected_args += ["-d", "staging"]
     expected_args += ["--skip-push", f"--version=${tag}"]
 
     # --skip-push still pulls and validates the exact role-labeled image;
     # builds must have finished before any old worker receives SIGTERM.
     assert shlex.split(step["run"]) == expected_args
-    assert workflow["env"][tag] == f"{environment}-{role.lower()}-${{{{ github.sha }}}}"
-    config = load_config(config_name, destination="staging" if environment == "staging" else None)
+    assert workflow["env"][tag] == f"production-{role.lower()}-${{{{ github.sha }}}}"
+    config = load_config(config_name)
     assert config["image"] == "scout/api"
     assert config["service"] == service
     assert config["builder"]["arch"] == "amd64"
 
 
-def test_backend_versions_cannot_collide_across_roles_or_destinations():
+def test_backend_versions_cannot_collide_across_roles():
     sha = "0123456789abcdef" * 2 + "01234567"
     versions = [
-        _workflow(name)["env"][f"{role.upper()}_TAG"].replace("${{ github.sha }}", sha)
-        for name, _ in WORKFLOWS
+        _workflow()["env"][f"{role.upper()}_TAG"].replace("${{ github.sha }}", sha)
         for role, _, _ in BACKENDS
     ]
-    assert len(set(versions)) == 6
+    assert len(set(versions)) == 3
     assert sha not in versions
     assert all(re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", tag) for tag in versions)
 
 
-@pytest.mark.parametrize(("name", "environment"), WORKFLOWS)
-def test_no_unlabeled_backend_prebuild_and_dependency_order_is_preserved(name, environment):
-    steps = _workflow(name)["steps"]
+def test_no_unlabeled_backend_prebuild_and_dependency_order_is_preserved():
+    steps = _workflow()["steps"]
     assert not any("scout/api:" in step.get("run", "") for step in steps)
     assert [step["name"] for step in steps if step.get("name", "").startswith("Deploy ")] == [
         "Deploy Cube",
@@ -76,12 +68,9 @@ def test_no_unlabeled_backend_prebuild_and_dependency_order_is_preserved(name, e
     ]
 
 
-@pytest.mark.parametrize(("name", "environment"), WORKFLOWS)
 @pytest.mark.parametrize(("role", "config_name", "service"), BACKENDS)
-def test_backend_builds_finish_before_cube_changes_or_worker_drain(
-    name, environment, role, config_name, service
-):
-    steps = _workflow(name)["steps"]
+def test_backend_builds_finish_before_cube_changes_or_worker_drain(role, config_name, service):
+    steps = _workflow()["steps"]
     names = [step.get("name") for step in steps]
     build_name = f"Build and push {role} image"
     assert names.count(build_name) == 1, f"Missing role-qualified prebuild: {build_name}"
@@ -89,32 +78,26 @@ def test_backend_builds_finish_before_cube_changes_or_worker_drain(
     expected_args = ["kamal", "build", "push"]
     if config_name != "deploy.yml":
         expected_args += ["-c", f"config/{config_name}"]
-    if environment == "staging":
-        expected_args += ["-d", "staging"]
     expected_args.append(f"--version=${role.upper()}_TAG")
     assert shlex.split(steps[build_index]["run"]) == expected_args
     assert names.index("Setup SSH") < build_index < names.index("Deploy Cube")
     assert build_index < names.index("Drain old workers")
 
 
-@pytest.mark.parametrize(("name", "environment"), WORKFLOWS)
-def test_kamal_runtime_is_pinned_to_verified_label_and_health_contract(name, environment):
-    step = next(step for step in _workflow(name)["steps"] if step.get("name") == "Install Kamal")
+def test_kamal_runtime_is_pinned_to_verified_label_and_health_contract():
+    step = next(step for step in _workflow()["steps"] if step.get("name") == "Install Kamal")
     assert shlex.split(step["run"]) == ["gem", "install", "kamal", "--version", "2.12.0"]
 
 
-@pytest.mark.parametrize(("name", "environment"), WORKFLOWS)
 @pytest.mark.parametrize(("role", "config_name", "service"), BACKENDS)
-def test_runtime_release_remains_the_commit_sha_not_the_image_version(
-    name, environment, role, config_name, service
-):
-    assert _workflow(name)["env"]["IMAGE_TAG"] == "${{ github.sha }}"
-    config = load_config(config_name, destination="staging" if environment == "staging" else None)
+def test_runtime_release_remains_the_commit_sha_not_the_image_version(role, config_name, service):
+    assert _workflow()["env"]["IMAGE_TAG"] == "${{ github.sha }}"
+    config = load_config(config_name)
     assert config["env"]["clear"]["SENTRY_RELEASE"] == "<%= ENV.fetch('IMAGE_TAG', '') %>"
-    assert config["env"]["clear"]["SENTRY_ENVIRONMENT"] == environment
+    assert config["env"]["clear"]["SENTRY_ENVIRONMENT"] == "production"
 
 
-def test_manual_backend_commands_also_use_role_and_destination_qualified_versions():
+def test_manual_backend_commands_also_use_role_qualified_versions():
     commands = re.findall(
         r"^\s*(kamal (?:setup|deploy|redeploy)\b[^\n]*)",
         (REPO_ROOT / "DEPLOYMENT.md").read_text(),
@@ -128,12 +111,10 @@ def test_manual_backend_commands_also_use_role_and_destination_qualified_version
         if backend is None:
             continue
         role = backend[0].lower()
-        environment = args[args.index("-d") + 1] if "-d" in args else "production"
-        assert f"--version={environment}-{role}-$IMAGE_TAG" in args
-        checked.add((environment, role))
-    assert checked == {
-        (environment, role.lower()) for _, environment in WORKFLOWS for role, _, _ in BACKENDS
-    }
+        assert "-d" not in args, f"No Kamal destinations remain (#808): {command}"
+        assert f"--version=production-{role}-$IMAGE_TAG" in args
+        checked.add(role)
+    assert checked == {role.lower() for role, _, _ in BACKENDS}
 
 
 def _assert_manual_worker_sequence(block):
@@ -158,7 +139,7 @@ def _assert_manual_worker_sequence(block):
     worker_args = shlex.split(lines[worker])
     assert worker_args[:2] == ["kamal", "redeploy"], "Worker handoff must not service-prune"
     destination = worker_args[worker_args.index("-d") + 1] if "-d" in worker_args else "production"
-    assert destination in {"production", "staging"}
+    assert destination == "production"
     assert f"bash -s -- {destination} 600 < scripts/drain-workers.sh" in lines[drain], (
         f"Drain destination does not match the {destination} worker: {lines[drain]}"
     )
@@ -185,40 +166,45 @@ def test_manual_worker_sequences_stop_on_failed_drain_or_api_gate():
     sequences = [
         block for block in blocks if "kamal " in block and "config/deploy-worker.yml" in block
     ]
-    assert len(sequences) == 4  # Setup/deploy, separately for production/staging.
+    assert len(sequences) == 2  # First-time setup and subsequent deploys.
     for block in sequences:
         _assert_manual_worker_sequence(block)
 
 
-MANUAL_STAGING_SEQUENCE = """(
+MANUAL_SEQUENCE = """(
 set -e
-kamal build push -d staging --version="staging-api-$IMAGE_TAG"
-kamal build push -c config/deploy-mcp.yml -d staging --version="staging-mcp-$IMAGE_TAG"
-kamal build push -c config/deploy-worker.yml -d staging --version="staging-worker-$IMAGE_TAG"
-ssh scout@example.invalid bash -s -- staging 600 < scripts/drain-workers.sh
-kamal deploy -d staging --skip-push --version="staging-api-$IMAGE_TAG"
-kamal deploy -c config/deploy-mcp.yml -d staging --skip-push --version="staging-mcp-$IMAGE_TAG"
-kamal redeploy -c config/deploy-worker.yml -d staging --skip-push --version="staging-worker-$IMAGE_TAG"
+kamal build push --version="production-api-$IMAGE_TAG"
+kamal build push -c config/deploy-mcp.yml --version="production-mcp-$IMAGE_TAG"
+kamal build push -c config/deploy-worker.yml --version="production-worker-$IMAGE_TAG"
+ssh scout@example.invalid bash -s -- production 600 < scripts/drain-workers.sh
+kamal deploy --skip-push --version="production-api-$IMAGE_TAG"
+kamal deploy -c config/deploy-mcp.yml --skip-push --version="production-mcp-$IMAGE_TAG"
+kamal redeploy -c config/deploy-worker.yml --skip-push --version="production-worker-$IMAGE_TAG"
 )"""
 
 
+def test_manual_sequence_checker_accepts_the_production_sequence():
+    _assert_manual_worker_sequence(MANUAL_SEQUENCE)
+
+
 def test_manual_sequence_checker_rejects_wrong_destination_drain():
-    wrong = MANUAL_STAGING_SEQUENCE.replace("bash -s -- staging", "bash -s -- production")
-    with pytest.raises(AssertionError, match="Drain destination does not match the staging worker"):
+    wrong = MANUAL_SEQUENCE.replace("bash -s -- production", "bash -s -- staging")
+    with pytest.raises(
+        AssertionError, match="Drain destination does not match the production worker"
+    ):
         _assert_manual_worker_sequence(wrong)
 
 
 @pytest.mark.parametrize("marker", ["scripts/drain-workers.sh", "config/deploy-mcp.yml"])
 def test_manual_sequence_checker_reports_missing_marker(marker):
-    wrong = "\n".join(line for line in MANUAL_STAGING_SEQUENCE.splitlines() if marker not in line)
+    wrong = "\n".join(line for line in MANUAL_SEQUENCE.splitlines() if marker not in line)
     with pytest.raises(AssertionError, match="Expected one") as failure:
         _assert_manual_worker_sequence(wrong)
     assert marker in str(failure.value)
 
 
-@pytest.mark.parametrize(("name", "_environment"), WORKFLOWS)
-def test_every_workflow_ssh_call_sends_keepalives(name, _environment):
-    text = (REPO_ROOT / ".github" / "workflows" / name).read_text()
+def test_every_workflow_ssh_call_sends_keepalives():
+    text = (REPO_ROOT / ".github" / "workflows" / "deploy.yml").read_text()
     calls = re.findall(r"^\s*ssh -T .*$", text, flags=re.MULTILINE)
     assert calls, "Expected ssh calls in the deploy workflow"
     for call in calls:

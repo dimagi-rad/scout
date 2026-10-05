@@ -24,7 +24,7 @@ Scout supports OAuth login through django-allauth with these providers:
 | Google | `google` | Login only; no data sources. |
 | GitHub | `github` | Login only; no data sources. |
 
-The login page shows a button for each provider that has an OAuth app configured. To configure them, set `<PREFIX>_OAUTH_CLIENT_ID` and `<PREFIX>_OAUTH_CLIENT_SECRET` (prefixes `COMMCARE`, `CONNECT`, `OCS`, `GOOGLE`, `GITHUB`; when `DEPLOY_ENVIRONMENT` is `staging`, CommCare Connect uses `STAGING_CONNECT` instead) and run:
+The login page shows a button for each provider that has an OAuth app configured. To configure them, set `<PREFIX>_OAUTH_CLIENT_ID` and `<PREFIX>_OAUTH_CLIENT_SECRET` (prefixes `COMMCARE`, `CONNECT`, `OCS`, `GOOGLE`, `GITHUB`) and run:
 
 ```bash
 uv run manage.py setup_oauth_apps --domain scout.example.com

@@ -60,6 +60,8 @@ prune_workers() {
     done
   fi
 
+  # The staging stack is retired (#808), but its stopped workers may still sit on
+  # this host pinning images; keep trimming them so they cannot fill the disk.
   for destination in production staging; do
     [[ "$destination" == production ]] && label="" || label="staging"
     # docker ps lists newest first, so everything after the first N is older.

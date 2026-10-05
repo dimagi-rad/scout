@@ -2,15 +2,13 @@
 # Internal only (no proxy) — reached via nginx in frontend container
 #
 # Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
-#
-# Staging deploys from this file too, via `-d staging` — see the .staging.yml overlay.
 
 service: scout
 
 image: scout/api
 
-# Stopped rollback containers pin their images. Kamal counts these per service
-# across both destinations; the default of 5 helped fill the shared host disk.
+# Stopped rollback containers pin their images. Kamal counts these per
+# service; the default of 5 helped fill the host disk.
 retain_containers: 3
 
 # Include migration time, not just the time needed to start an HTTP listener.
@@ -69,11 +67,10 @@ env:
     SENTRY_RELEASE: "<%= ENV.fetch('IMAGE_TAG', '') %>"
     # All-of workspace access (#380). The API, worker and MCP server all evaluate
     # access, so change it in all three deploy files together; "False" rolls back.
-    # The staging overlays don't set it, so staging inherits this value.
     WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT: "True"
     # Upstream access freshness (#548, closes #307 and #383). Same rule as above:
     # all three services evaluate access, so change it in all three files together;
-    # "False" rolls back. The staging overlays don't set it, so staging inherits it.
+    # "False" rolls back.
     UPSTREAM_ACCESS_FRESHNESS_ENFORCED: "True"
   secret:
     - DATABASE_URL
@@ -109,14 +106,6 @@ ssh:
 builder:
   arch: amd64
 
-# Production ships container logs to CloudWatch; staging (-d staging) stays on
-# Docker's json-file driver so `kamal app logs -d staging` works for debugging.
-# This is an ERB gate rather than an override in deploy.staging.yml because Kamal
-# deep-merges the destination file over this one: a destination `driver:` would
-# still inherit the awslogs-* options below, and Docker rejects those on
-# json-file. The leading `#` keeps the ERB tags YAML comments, so this file also
-# parses as plain YAML for the fitness tests.
-#<% unless ENV["KAMAL_DESTINATION"] %>
 logging:
   driver: awslogs
   options:
@@ -124,6 +113,5 @@ logging:
     awslogs-group: /scout/api
     awslogs-create-group: "false"
     tag: "{{.Name}}"
-#<% end %>
 
 # No proxy — API is internal only, reached via nginx in frontend container

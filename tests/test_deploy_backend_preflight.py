@@ -12,9 +12,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ROLES = ("API", "MCP", "Worker")
 
 
-def _workflow(destination):
-    filename = "deploy-staging.yml" if destination == "staging" else "deploy.yml"
-    return yaml.safe_load((REPO_ROOT / ".github/workflows" / filename).read_text())
+def _workflow():
+    return yaml.safe_load((REPO_ROOT / ".github/workflows" / "deploy.yml").read_text())
 
 
 def _assert_default_success_gating(steps):
@@ -49,28 +48,24 @@ def _run_workflow_steps(steps, *, cwd, env):
     return result
 
 
-def test_both_destinations_share_a_non_cancelling_host_queue():
-    production = _workflow("production")["concurrency"]
-    staging = _workflow("staging")["concurrency"]
-    assert production == staging, "Both workflows deploy to the same host"
+def test_deploys_share_a_non_cancelling_host_queue():
+    production = _workflow()["concurrency"]
     assert isinstance(production["group"], str) and production["group"]
     assert "${{" not in production["group"], "The host lock must not vary by workflow/ref"
     assert production["cancel-in-progress"] is False
     # Current GitHub concurrency.queue supports max=100 pending runs; its
-    # default single slot can silently cancel the other destination.
+    # default single slot can silently cancel a pending deploy.
     assert production["queue"] == "max"
 
 
-@pytest.mark.parametrize("destination", ["production", "staging"])
-def test_deploy_job_bounds_prebuild_and_setup_hangs_in_the_shared_queue(destination):
-    timeout = _workflow(destination)["jobs"]["deploy"].get("timeout-minutes")
+def test_deploy_job_bounds_prebuild_and_setup_hangs_in_the_shared_queue():
+    timeout = _workflow()["jobs"]["deploy"].get("timeout-minutes")
     assert type(timeout) is int and 1 <= timeout <= 90
 
 
-@pytest.mark.parametrize("destination", ["production", "staging"])
 @pytest.mark.parametrize("role", [*ROLES, "Frontend"])
-def test_post_drain_deployments_have_an_explicit_bounded_step_timeout(destination, role):
-    steps = _workflow(destination)["jobs"]["deploy"]["steps"]
+def test_post_drain_deployments_have_an_explicit_bounded_step_timeout(role):
+    steps = _workflow()["jobs"]["deploy"]["steps"]
     step = next(step for step in steps if step.get("name") == f"Deploy {role}")
     timeout = step.get("timeout-minutes")
     assert type(timeout) is int and 1 <= timeout <= 15, step["name"]
@@ -122,10 +117,9 @@ def test_workflow_step_model_matches_default_and_explicit_pipeline_failure(
     assert result.returncode == expected
 
 
-@pytest.mark.parametrize("destination", ["production", "staging"])
 @pytest.mark.parametrize("failed_role", [None, *ROLES])
-def test_backend_build_failure_never_drains_workers(destination, failed_role, tmp_path):
-    workflow = _workflow(destination)
+def test_backend_build_failure_never_drains_workers(failed_role, tmp_path):
+    workflow = _workflow()
     steps = workflow["jobs"]["deploy"]["steps"]
     selected_names = {
         *(f"Build and push {role} image" for role in ROLES),
@@ -173,7 +167,7 @@ if event == 'build:' + os.environ.get('SCOUT_PREFLIGHT_FAIL_ROLE', ''):
             "SCOUT_PREFLIGHT_EVENTS": os.fspath(events),
             "SCOUT_PREFLIGHT_FAIL_ROLE": failed_role or "",
             "SCOUT_EC2_IP": "example.invalid",
-            **{f"{role.upper()}_TAG": f"{destination}-{role.lower()}-test" for role in ROLES},
+            **{f"{role.upper()}_TAG": f"production-{role.lower()}-test" for role in ROLES},
         },
     )
     observed = events.read_text().splitlines() if events.exists() else []

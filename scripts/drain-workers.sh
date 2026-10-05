@@ -4,11 +4,10 @@ set -euo pipefail
 umask 077
 shopt -s nullglob dotglob
 
-destination=${1:?Specify production or staging}
+destination=${1:?Specify the production destination}
 drain_timeout=${2:-600}
 case "$destination" in
   production) destination_label="" ;;
-  staging) destination_label="staging" ;;
   *) echo "Refusing an unknown worker destination." >&2; exit 2 ;;
 esac
 if [[ ! "$drain_timeout" =~ ^[1-9][0-9]{0,2}$ ]] || (( drain_timeout > 600 )); then
@@ -44,6 +43,9 @@ inspect_worker() {
   [[ "$container_id" == "$expected_id" && "$container_service" == "scout-worker" ]] \
     || fail "Worker labels do not match the selected destination."
   if [[ "$validation_scope" == any_destination ]]; then
+    # "staging" stays accepted: the retired staging stack (#808) shared this host,
+    # and a leftover staging-labelled worker must not fail the production drain.
+    # It is validated here only, never selected or signalled.
     [[ "$container_role" == web && "$destination_presence" == present && \
        ( "$container_destination" == "" || "$container_destination" == staging ) ]] \
       || fail "Worker labels do not match a supported deployment: missing or unknown role/destination labels."

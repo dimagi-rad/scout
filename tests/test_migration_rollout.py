@@ -18,9 +18,8 @@ from tests.kamal_config import load_config
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-@pytest.mark.parametrize("destination", [None, "staging"])
-def test_api_has_an_actual_container_health_gate_before_other_backend_roles(destination):
-    config = load_config("deploy.yml", destination=destination)
+def test_api_has_an_actual_container_health_gate_before_other_backend_roles():
+    config = load_config("deploy.yml")
     web = config["servers"]["web"]
     assert web["proxy"] is False
     assert web["cmd"].split()[0] == "uvicorn"
@@ -36,8 +35,7 @@ def test_api_has_an_actual_container_health_gate_before_other_backend_roles(dest
     assert re.search(r"^\s*curl\s+\\$", final_stage, re.MULTILINE), "Final image must install curl"
     assert "apt-get install" in final_stage
 
-    filename = "deploy-staging.yml" if destination else "deploy.yml"
-    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / filename).read_text())
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "deploy.yml").read_text())
     steps = workflow["jobs"]["deploy"]["steps"]
     names = [step.get("name") for step in steps]
     assert names.index("Deploy Cube") < names.index("Drain old workers") < names.index("Deploy API")
@@ -48,8 +46,7 @@ def test_api_has_an_actual_container_health_gate_before_other_backend_roles(dest
             assert not step.get("continue-on-error", False)
             assert step.get("if", "success()") == "success()"
     drain = next(step for step in steps if step.get("name") == "Drain old workers")
-    target = "staging" if destination else "production"
-    assert f"bash -s -- {target} 600 < scripts/drain-workers.sh" in drain["run"]
+    assert "bash -s -- production 600 < scripts/drain-workers.sh" in drain["run"]
     assert '"scout@$SCOUT_EC2_IP"' in drain["run"]
     assert drain["timeout-minutes"] == 12
 
@@ -90,7 +87,7 @@ def _entrypoint_commands(tmp_path):
         ),
         "CALL_LOG": str(log),
         "CURL_ARGV_LOG": str(tmp_path / "curl-argv.json"),
-        "DJANGO_ALLOWED_HOSTS": "scout-staging.example.invalid,other.example.invalid",
+        "DJANGO_ALLOWED_HOSTS": "scout.example.invalid,other.example.invalid",
     }
 
 
@@ -183,7 +180,7 @@ def test_slow_migration_cannot_start_api_until_it_finishes(
         assert process.returncode == 17  # The final command's status is preserved.
         assert log.read_text().splitlines() == [
             "python manage.py migrate --no-input",
-            "python manage.py setup_oauth_apps --domain scout-staging.example.invalid",
+            "python manage.py setup_oauth_apps --domain scout.example.invalid",
             "uvicorn config.asgi:application --port 8000",
         ]
 
@@ -214,13 +211,12 @@ def test_non_api_roles_do_not_race_the_api_by_running_migrations(entrypoint_comm
     assert log.read_text().splitlines() == [" ".join(args)]
 
 
-@pytest.mark.parametrize("destination", [None, "staging"])
 @pytest.mark.parametrize("curl_exit", [0, 7, 22, 28])
 def test_health_gate_uses_container_local_url_correct_host_and_preserves_failure(
-    entrypoint_commands, destination, curl_exit
+    entrypoint_commands, curl_exit
 ):
     _, env = entrypoint_commands
-    config = load_config("deploy.yml", destination=destination)
+    config = load_config("deploy.yml")
     allowlist = config["env"]["clear"]["DJANGO_ALLOWED_HOSTS"]
     host = allowlist.split(",")[0].strip()
     result = subprocess.run(  # noqa: S603 - fixed script; curl is an isolated recording fake

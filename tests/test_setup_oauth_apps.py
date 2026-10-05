@@ -52,7 +52,9 @@ class TestSetupOAuthApps:
         assert SocialApp.objects.get(provider="commcare_connect").client_id == "CONNECT-id"
         assert SocialApp.objects.get(provider="ocs").client_id == "OCS-id"
 
-    def test_staging_uses_isolated_connect_credentials(self, monkeypatch, settings):
+    def test_connect_reads_only_production_credentials(self, monkeypatch, settings):
+        # The retired staging environment read STAGING_CONNECT_OAUTH_*; that
+        # override must not come back for any DEPLOY_ENVIRONMENT value.
         settings.DEPLOY_ENVIRONMENT = "staging"
         monkeypatch.setenv("CONNECT_OAUTH_CLIENT_ID", "production-id")
         monkeypatch.setenv("CONNECT_OAUTH_CLIENT_SECRET", "production-secret")
@@ -62,8 +64,8 @@ class TestSetupOAuthApps:
         call_command("setup_oauth_apps")
 
         app = SocialApp.objects.get(provider="commcare_connect")
-        assert app.client_id == "staging-id"
-        assert app.secret == "staging-secret"
+        assert app.client_id == "production-id"
+        assert app.secret == "production-secret"
 
     def test_skip_message_names_the_real_env_var(self, monkeypatch, capsys):
         # No env vars set for google -> skip line must reference the real name.

@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # Both destinations share a host. Preserve pending deployments as well as
-  # the active handoff instead of letting one destination cancel the other.
+  # Preserve pending deployments as well as the active handoff instead of
+  # letting a newer run cancel a drain in progress.
   group: scout-deploy-host
   cancel-in-progress: false
   # GitHub supports up to 100 pending runs with this optional queue property:
@@ -24,8 +24,7 @@ jobs:
     # ~22-minute test+deploy per commit. When a newer deploy of main is already
     # queued it ships this commit too, so skip ours instead of redeploying.
     # Also skip when a newer commit is already live, so re-running an old run
-    # cannot roll production back. Skipping touches nothing on the host, so the
-    # drain/deploy handoff with the staging destination is unchanged.
+    # cannot roll production back. Skipping touches nothing on the host.
     # Trade-off: if that newer run fails tests, this commit is not deployed either
     # (the deploy-failure issue reports that run). If it is cancelled while
     # pending, deploy-watch.yml files that issue once main has been ahead of
@@ -141,10 +140,10 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      # Both destinations share one host. A full disk once failed every deploy
-      # for six days: the first pull died, so Kamal's end-of-deploy prune never
-      # ran. Prune before anything is pulled on the host, and stop with a clear
-      # error if that still leaves too little room. See DEPLOYMENT.md: Host disk full.
+      # A full disk once failed every deploy for six days: the first pull died,
+      # so Kamal's end-of-deploy prune never ran. Prune before anything is pulled
+      # on the host, and stop with a clear error if that still leaves too little
+      # room. See DEPLOYMENT.md: Host disk full.
       - name: Free host disk space
         timeout-minutes: 10
         run: |
@@ -212,8 +211,8 @@ jobs:
 
       - name: Deploy Worker
         id: deploy_worker
-        # Kamal's automatic prune is service-wide, not destination-scoped.
-        # Preserve stopped workers referenced by either destination's receipts.
+        # `redeploy` skips Kamal's service-wide prune so stopped workers named by
+        # a pending drain receipt survive (scripts/host-disk-guard.sh).
         # Pinned Kamal's app:boot refreshes this role's secret file and clear
         # env on every redeploy; there is no separate env push in Kamal 2.
         timeout-minutes: 10

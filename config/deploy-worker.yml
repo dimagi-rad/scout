@@ -2,8 +2,6 @@
 # No HTTP interface — runs background tasks and periodic scheduling
 #
 # Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
-#
-# Staging deploys from this file too, via `-d staging` — see the .staging.yml overlay.
 
 service: scout-worker
 
@@ -51,11 +49,10 @@ env:
     DEFAULT_FROM_EMAIL: "Scout <noreply@dimagi.com>"
     # All-of workspace access (#380). The API, worker and MCP server all evaluate
     # access, so change it in all three deploy files together; "False" rolls back.
-    # The staging overlays don't set it, so staging inherits this value.
     WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT: "True"
     # Upstream access freshness (#548, closes #307 and #383). Same rule as above:
     # all three services evaluate access, so change it in all three files together;
-    # "False" rolls back. The staging overlays don't set it, so staging inherits it.
+    # "False" rolls back.
     UPSTREAM_ACCESS_FRESHNESS_ENFORCED: "True"
   secret:
     - DATABASE_URL
@@ -90,8 +87,6 @@ ssh:
 builder:
   arch: amd64
 
-# Production only — see the gate comment in config/deploy.yml.
-#<% unless ENV["KAMAL_DESTINATION"] %>
 logging:
   driver: awslogs
   options:
@@ -99,6 +94,5 @@ logging:
     awslogs-group: /scout/worker
     awslogs-create-group: "false"
     tag: "{{.Name}}"
-#<% end %>
 
 # No proxy — worker has no HTTP interface

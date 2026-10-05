@@ -24,7 +24,7 @@ Scout is configured via environment variables, typically set in a `.env` file in
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Comma-separated list of allowed host headers. |
-| `DEPLOY_ENVIRONMENT` | `production` for the production or connectlabs settings, otherwise `development` | Environment label used by Sentry, Task Badger and the CommCare Connect host. Set `staging` for a staging deployment that uses the production settings. |
+| `DEPLOY_ENVIRONMENT` | `production` for the production or connectlabs settings, otherwise `development` | Environment label used by Sentry and Task Badger. |
 | `SCOUT_BASE_URL` | `http://localhost:5173` | Public URL of the Scout frontend, used for links in emails sent from the background worker. |
 
 ### Security
@@ -36,14 +36,14 @@ Scout is configured via environment variables, typically set in a `.env` file in
 
 ### Authentication
 
-OAuth client IDs and secrets live in allauth social application records. `manage.py setup_oauth_apps` creates or updates them from `COMMCARE_OAUTH_*`, `COMMCARE_EU_OAUTH_*`, `CONNECT_OAUTH_*`, `OCS_OAUTH_*`, `GOOGLE_OAUTH_*` and `GITHUB_OAUTH_*` `CLIENT_ID`/`CLIENT_SECRET` pairs. When `DEPLOY_ENVIRONMENT=staging` it reads Connect's from `STAGING_CONNECT_OAUTH_*` instead. You can also manage them in Django admin.
+OAuth client IDs and secrets live in allauth social application records. `manage.py setup_oauth_apps` creates or updates them from `COMMCARE_OAUTH_*`, `COMMCARE_EU_OAUTH_*`, `CONNECT_OAUTH_*`, `OCS_OAUTH_*`, `GOOGLE_OAUTH_*` and `GITHUB_OAUTH_*` `CLIENT_ID`/`CLIENT_SECRET` pairs. You can also manage them in Django admin.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COMMCARE_EU_OAUTH_CLIENT_ID`, `COMMCARE_EU_OAUTH_CLIENT_SECRET` | empty | OAuth application registered on CommCare HQ's EU server (`eu.commcarehq.org`). While either is empty, `setup_oauth_apps` skips the `commcare_eu` provider and EU sign-in is not offered. EU domains can still be connected with an API key. See [CommCare HQ on EU](#commcare-hq-on-eu). |
 | `SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS` | `{"commcare": ["dimagi.com"]}` | JSON map of OAuth provider ID to allowed email domains. A provider not listed inherits its canonical provider's entry, so `commcare_eu` follows `commcare` unless it has its own. Providers with neither are unrestricted. A provider with a list rejects other domains and logins with no email. |
 | `ACCOUNT_DEFAULT_HTTP_PROTOCOL` | `http` | Protocol allauth uses for OAuth callback URLs. Set `https` behind TLS. |
-| `CONNECT_API_URL` | `https://connect-staging.dimagi.com` when `DEPLOY_ENVIRONMENT=staging`, otherwise `https://connect.dimagi.com` | CommCare Connect API and OAuth host. |
+| `CONNECT_API_URL` | `https://connect.dimagi.com` | CommCare Connect API and OAuth host. |
 | `OCS_URL` | `https://www.openchatstudio.com` | Open Chat Studio API and OAuth host. |
 
 ### CommCare HQ on EU
@@ -53,7 +53,7 @@ CommCare HQ runs a separate EU deployment at `eu.commcarehq.org`, with its own a
 - **API keys** work with no configuration. When adding a CommCare API key, pick "EU (eu.commcarehq.org)" as the server.
 - **OAuth sign-in** needs its own application on EU HQ:
   1. On `eu.commcarehq.org`, register an OAuth2 application the same way as the www one: a confidential client with the authorization-code grant. Registering applications needs HQ admin access, so ask the HQ team if you don't have it.
-  2. Add one redirect URI per Scout host, for example `https://<scout-host>/accounts/commcare_eu/login/callback/`. Add staging and `http://localhost:8000/accounts/commcare_eu/login/callback/` if you want to use them.
+  2. Add one redirect URI per Scout host, for example `https://<scout-host>/accounts/commcare_eu/login/callback/`. Add `http://localhost:8000/accounts/commcare_eu/login/callback/` if you want to use it locally.
   3. Set `COMMCARE_EU_OAUTH_CLIENT_ID` and `COMMCARE_EU_OAUTH_CLIENT_SECRET` in the API container's environment and run `manage.py setup_oauth_apps` (the API entrypoint runs it on start).
   4. "CommCare HQ (EU)" then appears on the Connections page and in the onboarding wizard. Sign-in requests the same `access_apis` scope as www.
 
@@ -93,7 +93,7 @@ These are staged-rollout switches.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT` | `False` | When on, a member can use a workspace only if their own credentials cover every one of its data sources; when off, any one is enough. Run `manage.py report_workspace_credential_coverage` before turning it on. Production runs with it on (set in `config/deploy.yml`, `config/deploy-worker.yml` and `config/deploy-mcp.yml`); each coverage denial the gate makes is logged at INFO as `workspace_access_denied_coverage` with the user, workspace, tenant ids and gap codes, at most once per user and workspace per request. The line also appears on requests a remediation action then lets through (leaving, removing the missing source), since the member is still not covered. While it is on, OCS OAuth needs an OCS deployment that sends the `team` claim in userinfo. A sign-in without it discovers no chatbots, and the Connections page shows it as having no team (`needs_team`), since a team-less membership can never be covered. `manage.py archive_teamless_ocs_memberships` (a dry run unless given `--apply`, which requires this switch) archives the legacy team-less OCS memberships. To roll back, set it to `"False"` in all three and redeploy. Rolling back restores team-less discovery, but it does not restore memberships the command archived. They come back only when the user reconnects to that team. |
-| `UPSTREAM_ACCESS_FRESHNESS_ENFORCED` | `False` | When on, workspace access also requires the user's access to have been confirmed with the upstream provider recently. Enable it in the API, worker and MCP server together. Production runs with it on (set in `config/deploy.yml`, `config/deploy-worker.yml` and `config/deploy-mcp.yml`), and staging inherits it. Each user's first protected request after a deploy makes one provider call, since no proof exists yet. Each freshness denial is logged at INFO as `workspace_access_denied_freshness` with the user, workspace and reason code (`verification_unavailable` means the provider could not be reached), at most once per user and workspace per request. To roll back, set it to `"False"` in all three and redeploy. |
+| `UPSTREAM_ACCESS_FRESHNESS_ENFORCED` | `False` | When on, workspace access also requires the user's access to have been confirmed with the upstream provider recently. Enable it in the API, worker and MCP server together. Production runs with it on (set in `config/deploy.yml`, `config/deploy-worker.yml` and `config/deploy-mcp.yml`). Each user's first protected request after a deploy makes one provider call, since no proof exists yet. Each freshness denial is logged at INFO as `workspace_access_denied_freshness` with the user, workspace and reason code (`verification_unavailable` means the provider could not be reached), at most once per user and workspace per request. To roll back, set it to `"False"` in all three and redeploy. |
 | `UPSTREAM_ACCESS_GRACE_SECONDS` | `1800` | With freshness enforced, how old a positive upstream proof may be and still admit an interactive request whose recheck got no answer from the provider (timeout, network error, 5xx, 429, or a check still running). Never applies to a 401, an omission, a no-access 404 or an indeterminate answer, nor after any denial recorded since the proof. Each grace admission is logged at INFO as `upstream_access_grace` and starts a background recheck. Set it to `0` in the API, worker and MCP server deploy files and redeploy to turn grace off. |
 
 ### LLM and agent

@@ -15,7 +15,6 @@ from tests.kamal_config import load_config
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "host-disk-guard.sh"
-WORKFLOWS = [("deploy.yml", None), ("deploy-staging.yml", "staging")]
 KAMAL_CONFIGS = [
     "deploy.yml",
     "deploy-mcp.yml",
@@ -119,7 +118,7 @@ def _removed(commands):
     return [args[1] for args in commands if args[0] == "rm"]
 
 
-def test_prunes_stopped_workers_beyond_retention_per_destination(guard):
+def test_prunes_stopped_workers_beyond_retention_including_leftover_staging(guard):
     stopped = {"production": ["p1", "p2", "p3", "p4", "p5"], "staging": ["s1", "s2", "s3", "s4"]}
     result, commands = guard("prune-workers", stopped=stopped)
     assert result.returncode == 0, result.stderr
@@ -256,14 +255,13 @@ def test_rejects_bad_usage(guard, args):
     assert commands == []
 
 
-def _deploy_job(name):
-    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
+def _deploy_job():
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "deploy.yml").read_text())
     return workflow["jobs"]["deploy"]
 
 
-@pytest.mark.parametrize(("name", "destination"), WORKFLOWS)
-def test_disk_is_freed_and_checked_before_anything_is_pulled(name, destination):
-    job = _deploy_job(name)
+def test_disk_is_freed_and_checked_before_anything_is_pulled():
+    job = _deploy_job()
     names = [step.get("name") for step in job["steps"]]
     free, check = names.index("Free host disk space"), names.index("Check host disk space")
     assert names.index("Setup SSH") < free < check < names.index("Deploy Cube")
@@ -272,12 +270,11 @@ def test_disk_is_freed_and_checked_before_anything_is_pulled(name, destination):
 
     free_run = job["steps"][free]["run"]
     kamal_prunes = re.findall(r"^\s*kamal prune .*$", free_run, re.MULTILINE)
-    suffix = ["-d", "staging"] if destination else []
     assert [shlex.split(line.rstrip("\\"))[:3] for line in kamal_prunes] == [
         ["kamal", "prune", "all"],
         ["kamal", "prune", "images"],
     ]
-    assert f'-c "$config"{" -d staging" if destination else ""}' in free_run
+    assert '-c "$config"' in free_run
     # Service-wide container pruning could delete receipt-referenced workers.
     configs = shlex.split(free_run.split("for config in", 1)[1].split(";", 1)[0])
     assert configs == [f"config/{c}" for c in KAMAL_CONFIGS if c != "deploy-worker.yml"]
@@ -287,7 +284,6 @@ def test_disk_is_freed_and_checked_before_anything_is_pulled(name, destination):
         "images",
         "-c",
         "config/deploy-worker.yml",
-        *suffix,
     ]
     assert "prune-workers < scripts/host-disk-guard.sh" in free_run
 
@@ -298,20 +294,16 @@ def test_disk_is_freed_and_checked_before_anything_is_pulled(name, destination):
 
 
 @pytest.mark.parametrize("config_name", KAMAL_CONFIGS)
-@pytest.mark.parametrize("destination", [None, "staging"])
-def test_every_role_retains_three_stopped_containers(config_name, destination):
-    assert load_config(config_name, destination=destination)["retain_containers"] == 3
+def test_every_role_retains_three_stopped_containers(config_name):
+    assert load_config(config_name)["retain_containers"] == 3
     assert "WORKER_RETAIN=3\n" in SCRIPT.read_text()
 
 
-@pytest.mark.parametrize(("name", "destination"), WORKFLOWS)
 @pytest.mark.parametrize(
     ("failing", "expected"), [("", 0), ("ssh", 0), ("kamal", 1), ("kamal ssh", 1)]
 )
-def test_prune_step_tolerates_some_failures_but_not_all(
-    tmp_path, name, destination, failing, expected
-):
-    job = _deploy_job(name)
+def test_prune_step_tolerates_some_failures_but_not_all(tmp_path, failing, expected):
+    job = _deploy_job()
     step = next(s for s in job["steps"] if s.get("name") == "Free host disk space")
     calls = tmp_path / "calls"
     for tool in ("kamal", "ssh"):

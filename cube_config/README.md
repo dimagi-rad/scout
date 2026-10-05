@@ -22,8 +22,8 @@ publication; existing workspace/schema/read-only-role isolation remains unchange
 
 ## Database connection bounds
 
-Production and staging share one RDS instance, which has already run out of
-connections once, so every Cube pool is capped (#421):
+The RDS instance has already run out of connections once, so every Cube pool is
+capped (#421):
 
 | Pool | Cap | Idle release |
 |---|---|---|
@@ -53,8 +53,8 @@ connection wait and 30-second statement timeout. Both patches share
 Worst case per Cube process: 16 tenant + 1 readiness (+1 transient readiness
 probe) + 3 catalog = 21 connections. The owner pool serves catalog reads only
 until the role pool takes over, and its connections close within 10 seconds of
-that one-time switch, so the transient ceiling is 24. Production and staging
-together: 42, or 48 transiently.
+that one-time switch, so the transient ceiling is 24. Production runs one Cube
+process; the retired staging stack (#808) ran a second.
 
 ### Catalog role
 

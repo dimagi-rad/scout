@@ -35,7 +35,6 @@ async def _validate(host: str):
         "localhost:8100",
         "127.0.0.1:8100",
         "scout-mcp-web:8100",
-        "scout-staging-mcp-web:8100",
     ],
 )
 async def test_internal_hosts_are_accepted(host):
@@ -43,7 +42,10 @@ async def test_internal_hosts_are_accepted(host):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("host", ["evil.example.com", "mcp-server.evil.example.com:8100"])
+@pytest.mark.parametrize(
+    "host",
+    ["evil.example.com", "mcp-server.evil.example.com:8100", "scout-staging-mcp-web:8100"],
+)
 async def test_other_hosts_are_rejected(host):
     response = await _validate(host)
     assert response is not None

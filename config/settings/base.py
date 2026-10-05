@@ -53,10 +53,8 @@ def resolve_deploy_environment(settings_module: str) -> str:
     return "production" if settings_module in PRODUCTION_SETTINGS_MODULES else "development"
 
 
-# Default deployment environment label for environment-specific integrations,
-# Sentry, and Task Badger. Staging intentionally uses the production settings
-# module, so it must set DEPLOY_ENVIRONMENT=staging explicitly; production and
-# development continue to derive a safe default from DJANGO_SETTINGS_MODULE.
+# Deployment environment label for Sentry and Task Badger. Defaults from
+# DJANGO_SETTINGS_MODULE so prod-posture modules are labelled production.
 DEPLOY_ENVIRONMENT = env(
     "DEPLOY_ENVIRONMENT",
     default=resolve_deploy_environment(os.environ.get("DJANGO_SETTINGS_MODULE", "")),
@@ -397,19 +395,9 @@ MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 MCP_SHARED_SECRET = env("MCP_SHARED_SECRET", default="").strip()
 
 
-def resolve_connect_api_url(deploy_environment: str) -> str:
-    """Return the Connect host paired with a Scout deployment environment."""
-    if deploy_environment == "staging":
-        return "https://connect-staging.dimagi.com"
-    return "https://connect.dimagi.com"
-
-
-# CommCare Connect API and OAuth host. CONNECT_API_URL remains independently
-# overridable for local development and one-off environments.
-CONNECT_API_URL = env(
-    "CONNECT_API_URL",
-    default=resolve_connect_api_url(DEPLOY_ENVIRONMENT),
-)
+# CommCare Connect API and OAuth host. Overridable for local development and
+# one-off environments.
+CONNECT_API_URL = env("CONNECT_API_URL", default="https://connect.dimagi.com")
 OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
 
 
