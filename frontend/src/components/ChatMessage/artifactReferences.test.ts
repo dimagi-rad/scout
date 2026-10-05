@@ -34,6 +34,6 @@ it("does not reparse unchanged history during streaming updates", () => {
 it.each(["failed", "partial", "needs_review", "unknown"])("keeps unknown helper status %s open", (status) => {
   expect(isUnsuccessfulHelperOutcome({ status })).toBe(true)
 })
-it.each(["done", "created", "updated", "replaced", "checked"])("accepts successful helper status %s", (status) => {
+it.each(["done", "ok", "success", "completed", "created", "updated", "replaced", "checked"])("accepts successful helper status %s", (status) => {
   expect(isUnsuccessfulHelperOutcome({ status })).toBe(false)
 })

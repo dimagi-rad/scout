@@ -50,7 +50,7 @@ export function isUnsuccessfulHelperOutcome(output: unknown): boolean {
   // without suppressing the link to the artifact that was already created.
   return output !== null && typeof output === "object" && "status" in output
     && typeof output.status === "string"
-    && !["done", "created", "updated", "replaced", "checked"].includes(output.status)
+    && !["done", "ok", "success", "completed", "created", "updated", "replaced", "checked"].includes(output.status)
 }
 
 export function getSubagentToolData(part: { type: string; data?: unknown }) {
