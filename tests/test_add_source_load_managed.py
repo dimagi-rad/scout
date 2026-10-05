@@ -119,7 +119,7 @@ async def test_adding_an_unloaded_source_loads_it_and_republishes_the_views(owne
     assert load_kwargs["user_id"] == str(user.id)
 
     cube = MagicMock(return_value=MagicMock(id="cube", content_hash="hash"))
-    with patch("apps.workspaces.tasks.build_and_promote_cube_schema", cube):
+    with patch("apps.workspaces.services.publication.build_and_promote_cube_schema", cube):
         await workspaces_tasks.rebuild_workspace_view_schema.func(**queued.rebuild.call_args.kwargs)
 
     vs = await WorkspaceViewSchema.objects.aget(workspace=ws)
@@ -147,7 +147,7 @@ async def test_adding_an_unloaded_source_loads_it_and_republishes_the_views(owne
             AsyncMock(return_value={"type": "api_key", "value": "k"}),
         ),
         patch("apps.workspaces.tasks.build_and_promote_cube_schema", cube),
-        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
+        patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
         patch(
             "apps.workspaces.tasks._included_tenant_snapshot_state", AsyncMock(return_value="safe")
         ),

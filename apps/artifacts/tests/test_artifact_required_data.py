@@ -259,7 +259,7 @@ async def test_required_source_already_loaded_only_rebuilds_view(required_setup)
 
     with (
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_view_schema.func",
+            "apps.workspaces.services.publication.rebuild_workspace_view_schema",
             new=AsyncMock(side_effect=rebuild),
         ) as view,
         patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as load,
@@ -513,10 +513,11 @@ async def test_recovery_worker_denies_write_after_wait_downgrade(required_setup)
         patch("apps.workspaces.tasks.recovery_query_surface", new=AsyncMock()) as inspect,
         patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as load,
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_semantic_model_core", new=AsyncMock()
+            "apps.workspaces.services.publication.rebuild_workspace_semantic_model_core",
+            new=AsyncMock(),
         ) as rebuild_semantic,
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_view_schema.func", new=AsyncMock()
+            "apps.workspaces.services.publication.rebuild_workspace_view_schema", new=AsyncMock()
         ) as rebuild_view,
     ):
         result = await recover_workspace_data.func(task_context(), str(recovery.id))
@@ -669,7 +670,7 @@ async def test_readable_failure_is_disclosed_until_later_verified_repair(
 
     current = await WorkspaceDataRecovery.objects.aget(workspace=setup.workspace, state="pending")
     with patch(
-        "apps.workspaces.tasks.rebuild_workspace_semantic_model_core",
+        "apps.workspaces.services.publication.rebuild_workspace_semantic_model_core",
         new=AsyncMock(side_effect=rebuild),
     ) as build:
         result = await recover_workspace_data.func(task_context(904), str(current.id))
@@ -794,7 +795,7 @@ async def test_restored_source_with_rolled_back_catalog_retries_only_semantic_pr
 
     with (
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_semantic_model_core",
+            "apps.workspaces.services.publication.rebuild_workspace_semantic_model_core",
             new=AsyncMock(side_effect=rebuild),
         ) as build,
         patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as load,

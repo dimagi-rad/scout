@@ -39,6 +39,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services import publication
 from apps.workspaces.services import schema_manager as sm
 from apps.workspaces.services.schema_manager import (
     SchemaManager,
@@ -499,8 +500,10 @@ async def test_standalone_rebuild_holds_the_tenant_lock_through_grants(owned, ma
 
     with (
         patch.object(SchemaManager, "_create_readonly_role", grants),
-        patch.object(tasks, "_included_tenant_snapshot_state", AsyncMock(return_value="safe")),
-        patch.object(tasks, "build_and_promote_cube_schema", return_value=MagicMock()),
+        patch.object(
+            publication, "_included_tenant_snapshot_state", AsyncMock(return_value="safe")
+        ),
+        patch.object(publication, "build_and_promote_cube_schema", return_value=MagicMock()),
     ):
         result = await tasks.rebuild_workspace_view_schema.func(str(workspace.id))
     assert result["status"] == "active"

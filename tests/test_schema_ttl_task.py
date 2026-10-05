@@ -24,11 +24,11 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.data_operation import DataLockTimeout
+from apps.workspaces.services.publication import rebuild_dependent_view_schemas
 from apps.workspaces.services.schema_manager import SchemaManager, SchemaStillReferenced
 from apps.workspaces.tasks import (
     _RETIRE_MAX_ATTEMPTS,
     _RETIRE_RETRY_BASE_SECONDS,
-    _rebuild_dependent_view_schemas,
     expire_inactive_schemas,
     teardown_schema,
     teardown_view_schema_task,
@@ -436,7 +436,7 @@ async def test_teardown_schema_rebuilds_dependent_views_when_surviving_active_sc
     with (
         patch("apps.workspaces.tasks.SchemaManager") as MockManager,
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
         ) as mock_rebuild,
     ):
@@ -471,10 +471,10 @@ async def test_dependent_rebuild_skips_a_retiring_view_schema(tenant, user, reti
     )
 
     with patch(
-        "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+        "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
         new_callable=AsyncMock,
     ) as mock_rebuild:
-        await _rebuild_dependent_view_schemas([tenant.id])
+        await rebuild_dependent_view_schemas([tenant.id])
 
     mock_rebuild.assert_awaited_once_with(workspace_id=str(live.id))
 

@@ -111,7 +111,7 @@ async def test_siblings_read_last_good_through_a_shared_load_until_they_rebuild(
             "apps.workspaces.tasks.build_and_promote_cube_schema",
             return_value=MagicMock(id="cube", content_hash="hash"),
         ),
-        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
+        patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
         patch("apps.workspaces.tasks.teardown_schema.configure") as retire,
         patch(
             "apps.workspaces.tasks._included_tenant_snapshot_state", AsyncMock(return_value="safe")
@@ -137,7 +137,7 @@ async def test_siblings_read_last_good_through_a_shared_load_until_they_rebuild(
     assert old_shared.state == SchemaState.TEARDOWN, "B's views still read the old schema"
 
     with patch(
-        "apps.workspaces.tasks.build_and_promote_cube_schema",
+        "apps.workspaces.services.publication.build_and_promote_cube_schema",
         return_value=MagicMock(id="cube", content_hash="hash"),
     ):
         await workspaces_tasks.rebuild_workspace_view_schema.func(str(workspaces["B"].id))
@@ -159,7 +159,7 @@ async def test_a_reverted_retirement_rebuilds_siblings_back_onto_the_active_sche
     shared.last_accessed_at = expired_at
     await shared.asave(update_fields=["state", "last_accessed_at"])
     cube = patch(
-        "apps.workspaces.tasks.build_and_promote_cube_schema",
+        "apps.workspaces.services.publication.build_and_promote_cube_schema",
         return_value=MagicMock(id="cube", content_hash="hash"),
     )
 
@@ -179,7 +179,9 @@ async def test_a_reverted_retirement_rebuilds_siblings_back_onto_the_active_sche
     deferred = AsyncMock()
     with (
         patch.object(SchemaManager, "retire_tenant_schema", side_effect=RuntimeError("boom")),
-        patch.object(workspaces_tasks.rebuild_workspace_view_schema, "defer_async", deferred),
+        patch(
+            "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema", deferred
+        ),
         pytest.raises(RuntimeError),
     ):
         await workspaces_tasks.teardown_schema(schema_id=str(shared.id), attempt=1)

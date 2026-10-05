@@ -38,6 +38,7 @@ DISPATCHED_TASK_NAMES = (
     DROP_FAILED_REFRESH_SCHEMA,
     FLUSH_PENDING_REQUESTS,
     MATERIALIZE_WORKSPACE,
+    REBUILD_WORKSPACE_SEMANTIC_MODEL,
     REBUILD_WORKSPACE_VIEW_SCHEMA,
     RECOVER_WORKSPACE_DATA,
     REFRESH_TENANT_SCHEMA,
@@ -112,6 +113,14 @@ async def adefer_materialize_workspace(
 
 def defer_rebuild_workspace_view_schema(*, workspace_id: str) -> int:
     return _task(REBUILD_WORKSPACE_VIEW_SCHEMA).defer(workspace_id=workspace_id)
+
+
+async def adefer_rebuild_workspace_view_schema(*, workspace_id: str) -> int:
+    return await _task(REBUILD_WORKSPACE_VIEW_SCHEMA).defer_async(workspace_id=workspace_id)
+
+
+async def adefer_rebuild_workspace_semantic_model(*, workspace_id: str) -> int:
+    return await _task(REBUILD_WORKSPACE_SEMANTIC_MODEL).defer_async(workspace_id=workspace_id)
 
 
 def defer_teardown_view_schema(*, view_schema_id: str) -> int:

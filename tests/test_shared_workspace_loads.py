@@ -94,7 +94,7 @@ async def _loads(pipeline: _Pipeline):
             "apps.workspaces.tasks.build_and_promote_cube_schema",
             return_value=MagicMock(id="cube", content_hash="hash"),
         ),
-        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
+        patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
         patch("apps.workspaces.tasks.teardown_schema.configure") as retire,
         patch("apps.workspaces.tasks._queue_candidate_drop_sync") as drop,
     ):
@@ -511,7 +511,8 @@ async def test_a_new_source_load_only_loads_sources_that_serve_nothing(workspace
         with (
             patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
             patch(
-                "apps.workspaces.tasks._rebuild_dependent_view_schemas", new_callable=AsyncMock
+                "apps.workspaces.services.publication.rebuild_dependent_view_schemas",
+                new_callable=AsyncMock,
             ) as dependents,
         ):
             build.return_value.tenant_coverage = {}
@@ -599,7 +600,7 @@ async def test_new_source_denial_does_not_rebuild_untouched_siblings(workspace, 
             ),
             patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
             patch(
-                "apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()
+                "apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()
             ) as dependents,
         ):
             build.return_value.tenant_coverage = {}

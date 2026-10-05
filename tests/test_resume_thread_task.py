@@ -33,10 +33,10 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.failure_guidance import credential_guidance
 from apps.workspaces.services.load_outcome import TENANT_NOT_RUN, aggregate_materialization_state
+from apps.workspaces.services.publication import defer_cube_promotion
 from apps.workspaces.services.query_state import semantic_layer_state
 from apps.workspaces.services.reconciliation import STALE_JOB_THRESHOLD
 from apps.workspaces.tasks import (
-    _defer_cube_promotion,
     _summary_failures,
     resume_thread_after_materialization,
 )
@@ -1914,7 +1914,7 @@ async def test_deferral_retains_prior_validation_failure(workspace, tenant, writ
         await MaterializationRun.objects.acreate(
             tenant_schema=schema, pipeline="sync", state="loading"
         )
-    await _defer_cube_promotion(workspace)
+    await defer_cube_promotion(workspace)
     await model.arefresh_from_db()
     assert model.metadata["last_build"]["error"] == "Cube validation failed: bad metric"
     state, reason = await semantic_layer_state(workspace)

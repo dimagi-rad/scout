@@ -309,7 +309,7 @@ async def test_real_pipeline_defers_refresh_promotion_to_owned_worker_cas(
             side_effect=observe_owned_promotion,
         ),
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_semantic_model.defer_async",
+            "apps.workspaces.services.publication.adefer_rebuild_workspace_semantic_model",
             new_callable=AsyncMock,
         ) as semantic_rebuild,
         patch(
@@ -694,7 +694,7 @@ async def test_refresh_task_rebuilds_dependent_multitenant_view_schemas(
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry()),
         patch("apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run),
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
         ) as mock_rebuild,
     ):

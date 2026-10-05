@@ -1129,8 +1129,8 @@ def test_real_enqueue_is_claimed_and_published_by_the_worker(
             patch(
                 "apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run
             ) as pipeline,
-            patch("apps.workspaces.tasks._rebuild_dependent_view_schemas"),
-            patch("apps.workspaces.tasks._rebuild_single_tenant_semantic_models"),
+            patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas"),
+            patch("apps.workspaces.services.publication.rebuild_single_tenant_semantic_models"),
         ):
             result = _run_refresh(job.id, job.args)
 

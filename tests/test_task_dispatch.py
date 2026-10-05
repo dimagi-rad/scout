@@ -124,10 +124,6 @@ def test_each_dispatched_name_resolves_to_its_registered_task(name):
     assert app.tasks[name] is getattr(workspace_tasks, name.removeprefix(f"{TASKS_MODULE}."))
 
 
-def test_a_semantic_rebuild_name_is_registered_though_never_dispatched():
-    assert task_dispatch.REBUILD_WORKSPACE_SEMANTIC_MODEL in app.tasks
-
-
 def test_an_unknown_name_raises_instead_of_queueing_an_orphan_row():
     with pytest.raises(TaskNotFound):
         task_dispatch._task(f"{TASKS_MODULE}.no_such_task")
