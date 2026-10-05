@@ -71,7 +71,7 @@ The actual source table and column names must be discovered in your workspace;
 multi-chatbot workspaces may use prefixed names. Saving a dataset requires a
 Read-Write or Manager workspace role. The change is staged on the chat's Canvas
 and saved to the data model (see [Datasets](datasets.md#custom-datasets-and-fields));
-the Artifact Manager uses the saved semantic fields to create and validate the
+the Artifact editor uses the saved semantic fields to create and validate the
 chart. A request for a chart alone does not authorize a model change.
 
 Keyword matching is not NLP clustering. Reviewed message-ID labels are a

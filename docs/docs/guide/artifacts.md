@@ -22,7 +22,7 @@ Ask for a chart or dashboard in chat:
 - "Create a dashboard showing key metrics for this quarter"
 - "Build a bar chart comparing sales by region"
 
-The main agent hands artifact work to a subagent, the **Artifact Manager**, which checks the semantic queries and writes the story. Creating or changing artifacts requires the **Read-Write** or **Manager** workspace role. For **Read** members the agent can inspect existing artifacts but cannot create or change them.
+The main agent hands artifact work to a subagent, the **Artifact editor**, which checks the semantic queries and writes the story. Creating or changing artifacts requires the **Read-Write** or **Manager** workspace role. For **Read** members the agent can inspect existing artifacts but cannot create or change them.
 
 ## Viewing artifacts
 
