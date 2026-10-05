@@ -133,6 +133,15 @@ def test_compile_semantic_query_from_members(monkeypatch, workspace, semantic_mo
     )
 
     assert compiled["members"] == ["visits.visit_date", "visits.username", "visits.count"]
+    assert compiled["field_metadata"] == {
+        "visits.visit_date": {
+            "field_type": "time_dimension",
+            "data_type": "timestamp with time zone",
+            "granularity": "day",
+        },
+        "visits.username": {"field_type": "dimension", "data_type": "text"},
+        "visits.count": {"field_type": "measure", "data_type": "integer"},
+    }
     assert compiled["cube_query"] == {
         "measures": ["visits.count"],
         "dimensions": ["visits.username"],
@@ -345,6 +354,10 @@ async def test_run_semantic_query_executes_via_cube(monkeypatch, workspace, sema
 
     assert result["columns"] == ["visits.count"]
     assert result["rows"] == [[3]]
+    assert result["field_metadata"]["visits.count"] == {
+        "field_type": "measure",
+        "data_type": "integer",
+    }
     assert captured["cube_query"] == {"measures": ["visits.count"], "limit": 10}
     assert captured["security_context"]["workspaceId"] == str(workspace.id)
     assert captured["security_context"]["userId"] == "user-1"

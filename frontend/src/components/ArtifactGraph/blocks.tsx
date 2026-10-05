@@ -17,6 +17,7 @@ import { ResponsiveContainer } from "recharts"
 
 import { cn } from "@/lib/utils"
 
+import { ROW_FIELDS } from "./types"
 import { firstNumericKey, formatValue, numeric, pathKey, selectPath } from "./format"
 import { useBlockInputs, useOutput } from "./hooks"
 import {
@@ -525,7 +526,7 @@ function TableComponent({ block, config, engine }: BlockComponentProps) {
                 <tr key={rowIndex}>
                   {columns.map((column) => (
                     <td key={column.key} className="px-3 py-1.5">
-                      {formatValue(row[column.key], column.format)}
+                      {formatValue(row[column.key], column.format, row[ROW_FIELDS]?.[column.key])}
                     </td>
                   ))}
                 </tr>

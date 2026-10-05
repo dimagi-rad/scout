@@ -104,7 +104,14 @@ export interface CompareRanges {
   label?: string
 }
 
-export type Row = Record<string, unknown>
+export interface FieldMetadata {
+  field_type?: string
+  data_type?: string
+  granularity?: string
+}
+
+export const ROW_FIELDS = Symbol("semantic-field-metadata")
+export type Row = Record<string, unknown> & { [ROW_FIELDS]?: Record<string, FieldMetadata> }
 
 export interface SemanticQuerySpec {
   measures?: string[]

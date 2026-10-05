@@ -1,3 +1,5 @@
+import type { FieldMetadata } from "./types"
+
 export function numeric(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value
   if (typeof value === "string" && value.trim() !== "") {
@@ -7,15 +9,27 @@ export function numeric(value: unknown): number | null {
   return null
 }
 
-export function formatValue(value: unknown, format?: string): string {
+export function formatValue(value: unknown, format?: string, field?: FieldMetadata): string {
   if (value === null || value === undefined) return "-"
 
-  if (format === "date" && typeof value === "string") {
-    const date = parseIsoDateLocal(value)
-    return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString()
+  const dateOnly = format === "date" || (!format && (
+    field?.data_type === "date" || field?.field_type === "time_dimension"
+      && ["day", "week", "month", "quarter", "year"].includes(field.granularity ?? "")
+  ))
+  const dateTime = format === "datetime" || (!format && field?.field_type === "time_dimension" && !dateOnly)
+  if ((dateOnly || dateTime) && typeof value === "string") {
+    const calendarDate = parseIsoDateLocal(value)
+    if (!calendarDate) return value
+    const date = dateOnly ? calendarDate : new Date(value)
+    return Number.isNaN(date.getTime()) ? value : dateOnly ? date.toLocaleDateString() : date.toLocaleString()
   }
 
-  const numberValue = numeric(value)
+  if (field?.field_type === "dimension" || /^(string|text|varchar|char|character|uuid)/i.test(field?.data_type ?? "")) {
+    return String(value)
+  }
+  const declaredNumeric = field?.field_type === "measure" || /^(number|numeric|decimal|integer|int|bigint|smallint|float|double|real)/i.test(field?.data_type ?? "")
+  const numberValue = typeof value === "number" ? numeric(value)
+    : declaredNumeric && typeof value === "string" && safeNumericString(value) ? numeric(value) : null
   if (numberValue !== null) {
     const namedFormat = parseNamedFormat(format)
     if (namedFormat.kind === "currency") {
@@ -88,9 +102,21 @@ export function pathKey(value: string | undefined): string | undefined {
   return value?.match(/[A-Za-z_][A-Za-z0-9_]*/g)?.at(-1)
 }
 
-function parseIsoDateLocal(value: string): Date {
-  const [year, month, day] = value.split("-").map((part) => Number.parseInt(part, 10))
-  return new Date(year, (month || 1) - 1, day || 1)
+function safeNumericString(value: string): boolean {
+  const digits = value.trim().match(/[1-9]\d*/)?.[0]
+  if (digits && digits.length > 15) return false
+  const number = numeric(value)
+  return number !== null && Math.abs(number) <= Number.MAX_SAFE_INTEGER
+}
+
+function parseIsoDateLocal(value: string): Date | null {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|T)/)
+  if (!match) return null
+  const [, year, month, day] = match.map(Number)
+  const date = new Date(0)
+  date.setFullYear(year, month - 1, day)
+  date.setHours(0, 0, 0, 0)
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day ? date : null
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
