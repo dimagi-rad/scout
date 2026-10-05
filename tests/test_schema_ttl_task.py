@@ -892,9 +892,13 @@ async def test_retirement_never_rebuilds_an_expired_dependent_view_schema(
         patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
         patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            "apps.workspaces.services.retirement.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
         ) as rebuild,
+        patch(
+            "apps.workspaces.services.retirement.adefer_teardown_view_schema",
+            new_callable=AsyncMock,
+        ) as view_teardown,
     ):
         MockManager.return_value.retire_tenant_schema.side_effect = SchemaStillReferenced(
             active_schema.schema_name,
@@ -904,6 +908,7 @@ async def test_retirement_never_rebuilds_an_expired_dependent_view_schema(
         await teardown_schema(schema_id=str(active_schema.id))
 
     rebuild.assert_not_awaited()
+    view_teardown.assert_not_awaited()
     # Its views are already gone, so the next attempt can retire: keep retrying.
     retry.return_value.defer_async.assert_awaited_once_with(
         schema_id=str(active_schema.id), attempt=1

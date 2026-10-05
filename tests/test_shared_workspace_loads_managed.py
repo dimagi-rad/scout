@@ -166,7 +166,9 @@ async def test_a_reverted_retirement_rebuilds_siblings_back_onto_the_active_sche
     # TTL expiry: the first attempt finds both siblings reading S and moves them off it.
     with (
         patch("apps.workspaces.services.retirement.configure_teardown_schema") as retry,
-        patch.object(workspaces_tasks.rebuild_workspace_view_schema, "defer_async", AsyncMock()),
+        patch(
+            "apps.workspaces.services.retirement.adefer_rebuild_workspace_view_schema", AsyncMock()
+        ),
     ):
         retry.return_value.defer_async = AsyncMock(return_value=1)
         await workspaces_tasks.teardown_schema(schema_id=str(shared.id))
