@@ -71,7 +71,7 @@ DJANGO_SETTINGS_MODULE=config.settings.production \
   uv run python -m mcp_server --transport streamable-http
 ```
 
-By default it listens on `127.0.0.1:8100`; pass `--host` and `--port` to change that. Set `MCP_SERVER_URL` on the backend if the MCP server isn't at `http://localhost:8100/mcp`, and set the same `MCP_SHARED_SECRET` on the MCP server, API and worker. The server's DNS-rebinding protection accepts only a fixed set of `Host` values — loopback (`127.0.0.1`, `localhost`, `[::1]`), the `scout-mcp-web` / `scout-staging-mcp-web` service names, on any port, and the Docker Compose service name `mcp-server`, with or without a port (`mcp_server/server.py`) — so the hostname in `MCP_SERVER_URL` must be one of them. To run MCP on another machine, make it reachable under one of those names (for example a `scout-mcp-web` network alias or hosts entry).
+By default it listens on `127.0.0.1:8100`; pass `--host` and `--port` to change that. Set `MCP_SERVER_URL` on the backend if the MCP server isn't at `http://localhost:8100/mcp`, and set the same `MCP_SHARED_SECRET` on the MCP server, API and worker. The server's DNS-rebinding protection accepts only a fixed set of `Host` values — loopback (`127.0.0.1`, `localhost`, `[::1]`), the `scout-mcp-web` service name, on any port, and the Docker Compose service name `mcp-server`, with or without a port (`mcp_server/server.py`) — so the hostname in `MCP_SERVER_URL` must be one of them. To run MCP on another machine, make it reachable under one of those names (for example a `scout-mcp-web` network alias or hosts entry).
 
 ## Background worker
 
