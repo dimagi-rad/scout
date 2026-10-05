@@ -129,8 +129,8 @@ export function ChatTextPart({ role, text }: ChatTextPartProps) {
 // Parent-facing subagent tools: rendered as a grouped card with nested child
 // calls and streamed activity instead of a plain tool row.
 const SUBAGENT_TOOL_LABELS: Record<string, string> = {
-  artifact_manager: "Artifact Manager",
-  canvas_manager: "Canvas Manager",
+  artifact_manager: "Artifact editor",
+  canvas_manager: "Data model editor",
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -203,6 +203,11 @@ const AUTO_EXPAND_TOOLS = new Set([
   "list_tables",
   "get_metadata",
 ])
+
+function readableHelperText(text: string): string {
+  return text.replaceAll("Artifact Manager", SUBAGENT_TOOL_LABELS.artifact_manager)
+    .replaceAll("Canvas Manager", SUBAGENT_TOOL_LABELS.canvas_manager)
+}
 
 function displayToolName(toolName: string): string {
   return SUBAGENT_TOOL_LABELS[toolName] ?? toolName
@@ -327,7 +332,7 @@ function artifactManagerSummaryText(rawOutput: unknown): string | null {
   }
   if (summary.runtime_summary) lines.push(`Runtime: ${summary.runtime_summary}`)
   if (summary.message && !summary.message.startsWith("[{")) {
-    lines.push(summary.message)
+    lines.push(readableHelperText(summary.message))
   }
   return lines.length > 1 ? lines.join("\n\n") : null
 }
@@ -379,7 +384,7 @@ function SubagentActivityPanel({
     .find((event) => event.type === "data-subagent-status")
   const hasTimelineTools = timelineItems.some((item) => item.kind === "tool")
   const renderActivityItem = (event: SubagentActivityItem, eventIndex: number) => {
-    const text = event.text || event.message || event.phase || ""
+    const text = readableHelperText(event.text || event.message || event.phase || "")
     if (!text) return null
     const id = event.id ?? `subagent-${eventIndex}`
     if (event.type === "data-subagent-reasoning") {
@@ -416,7 +421,7 @@ function SubagentActivityPanel({
   }
   const timelineContent = timelineItems.map(renderTimelineItem).filter(Boolean)
   const activityParts = events.flatMap((event, eventIndex) => {
-    const text = event.text || event.message || event.phase || ""
+    const text = readableHelperText(event.text || event.message || event.phase || "")
     if (!text) return []
     const id = event.id ?? `subagent-${eventIndex}`
     if (event.type === "data-subagent-reasoning") {

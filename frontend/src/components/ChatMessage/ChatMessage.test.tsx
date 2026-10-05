@@ -169,7 +169,7 @@ describe("ChatMessage live tool cards (arch #246)", () => {
     render(<ChatMessage message={msg} isActiveMessage={false} />)
 
     expect(screen.getByTestId("tool-call-artifact_manager")).toBeInTheDocument()
-    expect(screen.getByText("Artifact Manager")).toBeInTheDocument()
+    expect(screen.getByText("Artifact editor")).toBeInTheDocument()
     expect(screen.queryByText("subagent")).not.toBeInTheDocument()
     expect(screen.queryByText("1 call")).not.toBeInTheDocument()
     expect(screen.queryByTestId("subagent-activity-log")).not.toBeInTheDocument()
@@ -313,7 +313,7 @@ describe("ChatMessage live tool cards (arch #246)", () => {
 
     expect(screen.queryByText("subagent")).not.toBeInTheDocument()
     expect(screen.getByText("working")).toBeInTheDocument()
-    expect(screen.getByText("Starting Artifact Manager...")).toBeInTheDocument()
+    expect(screen.getByText("Starting Artifact editor...")).toBeInTheDocument()
   })
 })
 
@@ -372,4 +372,13 @@ describe("helper artifacts in the assistant flow", () => {
     expect(screen.getAllByTestId("chat-artifact-a")).toHaveLength(1)
     expect(screen.getByTestId("chat-artifact-a")).toHaveAttribute("data-artifact-version", "3")
   })
+})
+
+it("uses plain-language labels for the data model helper and its activity", () => {
+  const msg = liveMessage("canvas_manager", { status: "done", message: "Canvas Manager completed." })
+  render(<ChatMessage message={msg} isActiveMessage={false} />)
+  expect(screen.getByText("Data model editor")).toBeInTheDocument()
+  fireEvent.click(screen.getByTestId("tool-call-canvas_manager"))
+  expect(screen.getByText("Data model editor completed.")).toBeInTheDocument()
+  expect(screen.queryByText(/Canvas Manager/)).not.toBeInTheDocument()
 })
