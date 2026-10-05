@@ -116,3 +116,10 @@ def test_unknown_repair_is_not_presented_as_authorized_recovery(prompt):
     assert "repair could not be determined" in prose
     assert "diagnostics" in prose
     assert "do not guess" in prose
+
+
+def test_artifact_prompts_require_returned_ui_links_after_writes():
+    assert "markdown link" in ARTIFACT_PROMPT_ADDITION
+    assert "`ui_path`" in ARTIFACT_PROMPT_ADDITION
+    assert "`ui_path`" in ARTIFACT_MANAGER_SYSTEM_PROMPT
+    assert "successful tool result" in ARTIFACT_MANAGER_SYSTEM_PROMPT

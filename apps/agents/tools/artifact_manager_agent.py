@@ -214,7 +214,9 @@ this subagent.
 
 Final response: return a compact JSON object in text with keys:
 `status`, `artifact_id`, `artifact_version`, `touched_blocks`, `diagnostics`,
-`runtime_summary`, and `message`. Include `data_requirements` only when the
+`runtime_summary`, and `message`. Copy `ui_path` from the successful tool result
+when available; never invent a link or link to a failed unpublished candidate.
+Include `data_requirements` only when the
 parent must prepare missing analytical capabilities.
 """
     + "\nData requirements JSON Schema:\n"
@@ -882,6 +884,8 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
             if isinstance(error_message, str) and error_message
             else "Artifact validation failed. Follow its diagnostics and typed runtime failures."
         )
+    if not artifact_failed and summary["artifact_id"] and artifact_result.get("ui_path"):
+        summary["ui_path"] = artifact_result["ui_path"]
     return summary
 
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import { fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { UIMessage } from "ai"
+import { MemoryRouter, Route, Routes } from "react-router-dom"
 import { ChatMessage } from "./ChatMessage"
 import { useAppStore } from "@/store/store"
 
@@ -381,4 +382,14 @@ it("uses plain-language labels for the data model helper and its activity", () =
   fireEvent.click(screen.getByTestId("tool-call-canvas_manager"))
   expect(screen.getByText("Data model editor completed.")).toBeInTheDocument()
   expect(screen.queryByText(/Canvas Manager/)).not.toBeInTheDocument()
+})
+
+it("navigates relative artifact markdown links through the client router", async () => {
+  const msg = { id: "link", role: "assistant", parts: [{ type: "text", text: "[View chart](/workspaces/ws/artifacts/art)" }] } as UIMessage
+  render(<MemoryRouter initialEntries={["/chat"]}><Routes>
+    <Route path="/chat" element={<ChatMessage message={msg} isActiveMessage={false} />} />
+    <Route path="/workspaces/ws/artifacts/art" element={<p>Opened chart</p>} />
+  </Routes></MemoryRouter>)
+  await userEvent.click(screen.getByRole("link", { name: "View chart" }))
+  expect(await screen.findByText("Opened chart")).toBeInTheDocument()
 })

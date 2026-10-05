@@ -1,4 +1,5 @@
-import { Fragment, useState } from "react"
+import { Fragment, useState, type ComponentPropsWithoutRef } from "react"
+import { Link, useInRouterContext } from "react-router-dom"
 import type { UIMessage } from "ai"
 import { isToolUIPart, getToolName } from "ai"
 import Markdown from "react-markdown"
@@ -111,6 +112,14 @@ interface ChatTextPartProps {
   text: string
 }
 
+function ChatMarkdownLink({ href, children, ...props }: ComponentPropsWithoutRef<"a">) {
+  const inRouter = useInRouterContext()
+  if (inRouter && href?.startsWith("/") && !href.startsWith("//")) {
+    return <Link to={href} {...props} data-testid="chat-markdown-link">{children}</Link>
+  }
+  return <a href={href} {...props}>{children}</a>
+}
+
 export function ChatTextPart({ role, text }: ChatTextPartProps) {
   const isUser = role === "user"
   return (
@@ -121,7 +130,7 @@ export function ChatTextPart({ role, text }: ChatTextPartProps) {
           : "prose prose-sm max-w-none py-1"
       }`}
     >
-      {isUser ? text : <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>}
+      {isUser ? text : <Markdown remarkPlugins={[remarkGfm]} components={{ a: ChatMarkdownLink }}>{text}</Markdown>}
     </div>
   )
 }

@@ -972,3 +972,35 @@ async def test_artifact_manager_model_timeout_is_a_tool_error(monkeypatch, timeo
         if item["event"]["type"] == "data-subagent-status"
     ]
     assert statuses[-1] == "failed"
+
+
+@pytest.mark.parametrize("status", ["created", "updated", "replaced"])
+def test_summary_returns_tool_ui_path_for_published_revision(status):
+    path = "/workspaces/workspace/artifacts/v2"
+    result = _published_artifact_result(
+        "v2", status=status, previous_artifact_id="v1", ui_path=path
+    )
+    summary = _summarize_result(
+        [_write_message(result)],
+        json.dumps({"status": "done", "artifact_id": "v1", "ui_path": "/invented"}),
+    )
+    assert summary["artifact_id"] == "v2"
+    assert summary["ui_path"] == path
+
+
+@pytest.mark.parametrize("status", ["error", "checked"])
+def test_summary_omits_links_after_failed_write_or_check_even_when_model_claims_success(status):
+    result = {
+        "status": status,
+        "ui_path": "/artifacts/deleted-candidate",
+        "artifact": {"id": "deleted-candidate", "version": 2},
+        "runtime": {"success": False},
+    }
+    summary = _summarize_result(
+        [_write_message(result)],
+        json.dumps({"status": "done", "ui_path": "/artifacts/deleted-candidate"}),
+    )
+    assert summary["status"] == "error"
+    if status == "error":
+        assert summary["artifact_id"] is None
+    assert "ui_path" not in summary
