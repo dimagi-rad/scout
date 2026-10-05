@@ -131,6 +131,16 @@ describe("ArtifactGraphRenderer", () => {
     expect(await screen.findByRole("cell", { name: "1,234" })).toBeInTheDocument()
   })
 
+  it("keeps currency formatting for stats bound to string-valued measures", async () => {
+    const report = artifact()
+    const doc = report.data!.story_doc as { blocks: Array<{ id: string; config?: Record<string, unknown> }> }
+    doc.blocks = doc.blocks.filter((block) => ["range", "q", "stat"].includes(block.id))
+    doc.blocks.find((block) => block.id === "stat")!.config = { label: "Total", value_key: "visits_count", format: "currency" }
+    mockedPost.mockResolvedValue({ columns: ["date", "visits.count"], rows: [["2026-06-24", "1234"]] })
+    render(<ArtifactGraphRenderer artifact={report} workspaceId="workspace-1" />)
+    expect(await screen.findByText("$1,234")).toBeInTheDocument()
+  })
+
   it("does not render the internal prd brief", async () => {
     mockedPost.mockResolvedValue({ columns: ["date", "visits__count"], rows: [["2026-06-24", 12]], row_count: 1 })
     render(<ArtifactGraphRenderer artifact={artifact()} workspaceId="workspace-1" />)

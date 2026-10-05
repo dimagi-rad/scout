@@ -15,6 +15,9 @@ describe("formatValue", () => {
   it("formats numeric measures but preserves unsafe numeric strings", () => {
     expect(formatValue("1234", "number", { field_type: "measure", data_type: "integer" })).toBe("1,234")
     expect(formatValue("33504507934753956376", "number", { field_type: "measure", data_type: "integer" })).toBe("33504507934753956376")
+    expect(formatValue("1.0000000000000000001", "number_19", { field_type: "measure", data_type: "decimal" })).toBe("1.0000000000000000001")
+    expect(formatValue("1.0000000000000000001e-2", "number_19", { field_type: "measure" })).toBe("1.0000000000000000001e-2")
+    expect(formatValue("1e-1000", "number", { field_type: "measure" })).toBe("1e-1000")
     expect(formatValue(1234.5)).toBe("1,234.5")
     expect(formatValue(0.25, "percent")).toBe("25%")
     expect(formatValue(null)).toBe("-")

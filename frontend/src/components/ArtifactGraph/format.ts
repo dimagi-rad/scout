@@ -103,10 +103,13 @@ export function pathKey(value: string | undefined): string | undefined {
 }
 
 function safeNumericString(value: string): boolean {
-  const digits = value.trim().match(/[1-9]\d*/)?.[0]
-  if (digits && digits.length > 15) return false
+  const match = value.trim().match(/^[+-]?(\d*\.?\d+)(?:[eE][+-]?\d+)?$/)
+  if (!match) return false
+  const significantDigits = match[1].replace(".", "").replace(/^0+/, "").replace(/0+$/, "")
+  if (significantDigits.length > 15) return false
   const number = numeric(value)
   return number !== null && Math.abs(number) <= Number.MAX_SAFE_INTEGER
+    && (number !== 0 || significantDigits.length === 0)
 }
 
 function parseIsoDateLocal(value: string): Date | null {
