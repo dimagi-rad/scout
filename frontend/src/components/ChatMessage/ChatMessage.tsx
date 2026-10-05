@@ -864,8 +864,9 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
             if (typeof parentToolCallId === "string" && parentToolCallId) {
               return null
             }
-            if (isArtifactToolPart(part)) {
-              if (extractArtifactId(part)) return <Fragment key={i}>{renderArtifacts(i)}</Fragment>
+            if (isArtifactToolPart(part) && extractArtifactId(part)) {
+              const buttons = renderArtifacts(i)
+              if (buttons.length) return <Fragment key={i}>{buttons}</Fragment>
             }
 
             const toolCallId = toolPart.toolCallId

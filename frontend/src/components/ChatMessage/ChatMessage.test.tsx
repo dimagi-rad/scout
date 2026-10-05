@@ -456,3 +456,13 @@ it("shows plain-string helper validation errors", () => {
   expect(screen.getByTestId("tool-call-artifact_manager")).toHaveAttribute("aria-expanded", "true")
   expect(screen.getByText("Please provide an artifact task.")).toBeVisible()
 })
+
+it("keeps earlier artifact tool activity when its button is deduplicated", () => {
+  const messages = [1, 2].map((version) => ({ id: `read-${version}`, role: "assistant", parts: [
+    { type: "tool-artifact_graph_overview", toolCallId: `overview-${version}`, state: "output-available", input: {},
+      output: { status: "ok", artifact: { id: "shared-artifact", version } } },
+  ] })) as UIMessage[]
+  render(<ChatMessageList messages={messages} />)
+  expect(screen.getAllByTestId("chat-artifact-shared-artifact")).toHaveLength(1)
+  expect(screen.getByTestId("tool-call-artifact_graph_overview")).toBeInTheDocument()
+})
