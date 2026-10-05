@@ -285,4 +285,11 @@ describe("OcsTeamsPanel", () => {
     await act(async () => {})
     expect(container).toBeEmptyDOMElement()
   })
+
+  it("keeps a stored team list usable when the teams scope is off", async () => {
+    serve({ available: false, known: true, teams, flow: null, next: null })
+    await renderPanel()
+    expect(screen.getByTestId("ocs-team-connect-beta").getAttribute("href")).toContain("team=beta")
+    expect(screen.getByTestId("ocs-teams-connect-all")).toBeInTheDocument()
+  })
 })

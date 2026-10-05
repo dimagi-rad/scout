@@ -15,7 +15,6 @@ interface OcsTeam {
   name: string
 }
 
-
 interface OcsTeamFlow {
   mode: "all" | "one"
   connected: OcsTeam[]
@@ -28,7 +27,7 @@ interface OcsTeamFlow {
 
 /** GET /api/auth/ocs/teams/ */
 export interface OcsTeamsState {
-  /** False when Scout doesn't request the `teams` scope, so no list can arrive. */
+  /** False when Scout doesn't request the `teams` scope, so no fresh list can arrive. */
   available: boolean
   /** False until an OCS connect has returned the `teams` claim. */
   known: boolean
