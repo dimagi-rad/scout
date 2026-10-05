@@ -1,14 +1,11 @@
 import json
 from datetime import timedelta
-from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from asgiref.sync import async_to_sync
-from django.apps import apps
 from django.contrib.auth import get_user_model
-from django.core.cache import cache
 from django.db import connection
 from django.test import AsyncClient
 from django.utils import timezone
@@ -126,11 +123,12 @@ async def test_failed_history_alone_has_no_estimate():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_legacy_history_without_retained_mode_evidence_is_not_used():
+async def test_legacy_completed_jobs_are_not_treated_as_successful_history():
+    """Old completion can hide a failed Cube rebuild; never infer a timing sample."""
     ws = await make_workspace()
     start = timezone.now() - timedelta(minutes=10)
     thread = await Thread.objects.acreate(workspace=ws, user_id=ws.created_by_id)
-    job = await ThreadJob.objects.acreate(
+    await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=1,
@@ -147,13 +145,6 @@ async def test_legacy_history_without_retained_mode_evidence_is_not_used():
         completed_at=start + timedelta(seconds=200),
     )
     await MaterializationRun.objects.filter(pk=run.pk).aupdate(started_at=start)
-    assert await aload_time_estimate(ws.id, 100) is None
-    await cache.aclear()
-    await MaterializationRun.objects.filter(pk=run.pk).aupdate(state="partial")
-    assert await aload_time_estimate(ws.id, 100) is None
-    await MaterializationRun.objects.filter(pk=run.pk).aupdate(state="completed")
-    await ThreadJob.objects.filter(pk=job.pk).aupdate(state="failed")
-    await cache.aclear()
     assert await aload_time_estimate(ws.id, 100) is None
 
 
@@ -251,77 +242,6 @@ async def test_phase_publication_updates_timing_and_workspace_load_payload(works
     response = await client.get(f"/api/workspaces/{workspace.id}/jobs/active/")
     assert response.status_code == 200
     assert response.json()["workspace_loads"][0]["time_estimate"]["usual_seconds"] == 240
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize(
-    "mode,state,retained,expected",
-    [
-        (False, "completed", True, True),
-        (True, "completed", True, False),
-        (False, "partial", True, False),
-        (False, "failed", True, False),
-        (True, "completed", False, False),
-    ],
-)
-@pytest.mark.parametrize("newer_rows", [0, 2])
-def test_history_seed_requires_retained_successful_full_load(
-    mode,
-    state,
-    retained,
-    expected,
-    newer_rows,
-    monkeypatch,
-):
-    user = User.objects.create_user(email="seed@example.test")
-    ws = Workspace.objects.create(name="Seed", created_by=user)
-    args = json.dumps({"workspace_id": str(ws.id), "only_unserved": mode})
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "INSERT INTO procrastinate_jobs (queue_name, task_name, status, args) "
-            "VALUES ('default', 'apps.workspaces.tasks.materialize_workspace', 'succeeded', %s) "
-            "RETURNING id",
-            [args],
-        )
-        job_id = cursor.fetchone()[0]
-        if not retained:
-            cursor.execute("DELETE FROM procrastinate_jobs WHERE id = %s", [job_id])
-    start = timezone.now() - timedelta(minutes=10)
-    thread = Thread.objects.create(workspace=ws, user=user)
-    ThreadJob.objects.create(
-        thread=thread,
-        job_type="materialization",
-        procrastinate_job_id=job_id,
-        state="completed",
-        started_at=start + timedelta(seconds=300),
-    )
-    tenant = Tenant.objects.create(external_id="seed", provider="commcare")
-    schema = TenantSchema.objects.create(tenant=tenant, schema_name="seed")
-    run = MaterializationRun.objects.create(
-        tenant_schema=schema,
-        pipeline="test",
-        state=state,
-        procrastinate_job_id=job_id,
-        completed_at=start + timedelta(seconds=200),
-    )
-    MaterializationRun.objects.filter(pk=run.pk).update(started_at=start)
-    migration = import_module("apps.workspaces.migrations.0022_seed_load_timing_history")
-    monkeypatch.setattr(migration, "QUEUE_HISTORY_LIMIT", 2)
-    with connection.cursor() as cursor:
-        for _ in range(newer_rows):
-            cursor.execute(
-                "INSERT INTO procrastinate_jobs (queue_name, task_name, status) "
-                "VALUES ('default', 'unrelated', 'succeeded')",
-            )
-    expected = bool(expected and not newer_rows)
-    seed = migration.seed_history
-    seed(apps, SimpleNamespace(connection=connection))
-    timing = WorkspaceLoadTiming.objects.filter(job_id=job_id).first()
-    assert bool(timing) is expected
-    if expected:
-        assert (timing.completed_at - timing.started_at).total_seconds() == 300
-        seed(apps, SimpleNamespace(connection=connection))
-        assert WorkspaceLoadTiming.objects.filter(job_id=job_id).count() == 1
 
 
 @pytest.mark.asyncio
