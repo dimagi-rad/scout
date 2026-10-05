@@ -1,4 +1,5 @@
 import { extractArtifactIdFromOutput, getSubagentToolData, isUnsuccessfulHelperOutcome, messageArtifacts, parseOutput } from "./artifactReferences"
+import { internalChatPath } from "./chatLinks"
 import { Fragment, useMemo, useState, type ComponentPropsWithoutRef } from "react"
 import { Link, useInRouterContext } from "react-router-dom"
 import type { UIMessage } from "ai"
@@ -92,8 +93,9 @@ function ChatMarkdownLink({ href, children, ...markdownProps }: ComponentPropsWi
   const props = { ...markdownProps }
   delete props.node
   const inRouter = useInRouterContext()
-  if (inRouter && href?.startsWith("/") && !href.startsWith("//")) {
-    return <Link to={href} {...props} data-testid="chat-markdown-link">{children}</Link>
+  const path = inRouter ? internalChatPath(href, window.location.origin) : null
+  if (path) {
+    return <Link to={path} {...props} data-testid="chat-markdown-link">{children}</Link>
   }
   return <a href={href} {...props} data-testid="chat-markdown-link">{children}</a>
 }
