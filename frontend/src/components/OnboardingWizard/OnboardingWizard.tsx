@@ -264,7 +264,10 @@ export function OnboardingWizard() {
               data-testid="onboarding-oauth"
               asChild
             >
-              <a onClick={startOAuthOnClick} href={oauthConnectUrl(commcare ?? WWW_COMMCARE_FALLBACK, "/")}>
+              <a
+                href={oauthConnectUrl(commcare ?? WWW_COMMCARE_FALLBACK, "/")}
+                onClick={startOAuthOnClick}
+              >
                 {commcareEu ? "Connect with CommCare HQ (Global)" : "Connect with OAuth"}
               </a>
             </Button>
@@ -276,7 +279,10 @@ export function OnboardingWizard() {
               data-testid="onboarding-oauth-commcare-eu"
               asChild
             >
-              <a onClick={startOAuthOnClick} href={oauthConnectUrl(commcareEu, "/")}>Connect with {commcareEu.name}</a>
+              <a
+                href={oauthConnectUrl(commcareEu, "/")}
+                onClick={startOAuthOnClick}
+              >Connect with {commcareEu.name}</a>
             </Button>
           )}
           <Button
@@ -297,7 +303,10 @@ export function OnboardingWizard() {
                 </p>
               )}
               <Button className="w-full" variant="outline" data-testid="onboarding-ocs" asChild>
-                <a onClick={startOAuthOnClick} href={oauthConnectUrl(ocs, "/")}>
+                <a
+                  href={oauthConnectUrl(ocs, "/")}
+                  onClick={startOAuthOnClick}
+                >
                   Connect {ocs.name}
                 </a>
               </Button>

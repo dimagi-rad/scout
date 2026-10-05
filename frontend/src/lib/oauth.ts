@@ -38,7 +38,20 @@ export function oauthConnectUrl(provider: OAuthProvider, next: string): string {
  * on POST (SOCIALACCOUNT_LOGIN_ON_GET=False, arch #258) and answers a GET with its own
  * "Continue" page, so posting from our UI goes straight to the provider.
  */
+let starting = false
+
 export async function postOAuthStart(href: string, target = ""): Promise<void> {
+  // A repeat click while the token fetch is pending would stash a second OAuth state.
+  if (starting) return
+  starting = true
+  try {
+    await submitOAuthStart(href, target)
+  } finally {
+    starting = false
+  }
+}
+
+async function submitOAuthStart(href: string, target: string): Promise<void> {
   let token = getCsrfToken()
   if (!token) {
     try {
@@ -53,6 +66,10 @@ export async function postOAuthStart(href: string, target = ""): Promise<void> {
     return
   }
   const url = new URL(href, window.location.href)
+  if (url.origin !== window.location.origin) {
+    window.open(href, target || "_self")
+    return
+  }
   const form = document.createElement("form")
   form.method = "post"
   form.action = `${url.origin}${url.pathname}`
@@ -65,7 +82,11 @@ export async function postOAuthStart(href: string, target = ""): Promise<void> {
     form.appendChild(input)
   }
   document.body.appendChild(form)
-  form.submit()
+  try {
+    form.submit()
+  } finally {
+    form.remove()
+  }
 }
 
 /**
@@ -83,6 +104,7 @@ export function startOAuthOnClick(event: MouseEvent<HTMLAnchorElement>): void {
   ) {
     return
   }
+  const { href, target } = event.currentTarget
   event.preventDefault()
-  void postOAuthStart(event.currentTarget.href, event.currentTarget.target)
+  postOAuthStart(href, target).catch(() => window.open(href, target || "_self"))
 }

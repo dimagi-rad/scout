@@ -371,7 +371,10 @@ export function ConnectionsPage() {
                             asChild
                             data-testid={`connect-another-${provider.id}`}
                           >
-                            <a href={connectUrlFor(provider)} onClick={startOAuthOnClick}>Connect another team</a>
+                            <a
+                              href={connectUrlFor(provider)}
+                              onClick={startOAuthOnClick}
+                            >Connect another team</a>
                           </Button>
                         )}
                       {provider.status !== "connected" && copy.action && (
@@ -381,7 +384,10 @@ export function ConnectionsPage() {
                           asChild
                           data-testid={`connect-${provider.id}`}
                         >
-                          <a href={connectUrlFor(provider)} onClick={startOAuthOnClick}>{copy.action}</a>
+                          <a
+                            href={connectUrlFor(provider)}
+                            onClick={startOAuthOnClick}
+                          >{copy.action}</a>
                         </Button>
                       )}
                       {canDisconnect && !isConfirmingDisconnect && (
@@ -539,7 +545,10 @@ export function ConnectionsPage() {
                                   asChild
                                   data-testid={`connection-reconnect-${conn.connection_id}`}
                                 >
-                                  <a href={connectUrlFor(oauthProvider)} onClick={startOAuthOnClick}>Reconnect</a>
+                                  <a
+                                    href={connectUrlFor(oauthProvider)}
+                                    onClick={startOAuthOnClick}
+                                  >Reconnect</a>
                                 </Button>
                               ) : null
                             }
