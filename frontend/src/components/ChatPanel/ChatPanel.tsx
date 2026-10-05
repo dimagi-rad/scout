@@ -1,6 +1,6 @@
 import { useChat } from "@ai-sdk/react"
 import { DefaultChatTransport, generateId, type UIMessage } from "ai"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useLocation } from "react-router-dom"
 import { getCsrfToken, api, ApiError } from "@/api/client"
 import { BASE_PATH } from "@/config"
@@ -249,11 +249,11 @@ export function ChatPanel() {
     },
   })
   const busyError = error !== undefined && isBusyChatError(error)
-  const visibleMessages = held.hiddenMessageIds.size
+  const visibleMessages = useMemo(() => held.hiddenMessageIds.size
     ? withoutHeldMessages(messages, held.hiddenMessageIds)
-    : messages
+    : messages, [messages, held.hiddenMessageIds])
 
-  const artifactOwners = turnArtifactOwners(visibleMessages)
+  const artifactOwners = useMemo(() => turnArtifactOwners(visibleMessages), [visibleMessages])
 
   const cancelBusyRetry = useCallback(() => {
     if (busyTimerRef.current) clearTimeout(busyTimerRef.current)
