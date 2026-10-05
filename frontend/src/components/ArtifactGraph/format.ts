@@ -34,7 +34,7 @@ export function formatValue(value: unknown, format?: string, field?: FieldMetada
   if (field?.field_type === "dimension" || /^(string|text|varchar|char|character|uuid)/i.test(field?.data_type ?? "")) {
     return String(value)
   }
-  const declaredNumeric = field?.field_type === "measure" || /^(number|numeric|decimal|integer|int|bigint|smallint|float|double|real)/i.test(field?.data_type ?? "")
+  const declaredNumeric = field?.field_type === "measure" || /^(number|numeric|decimal|integer|int|bigint|smallint|float|double|real)(?:\b|\d)/i.test(field?.data_type ?? "")
   const numericString = declaredNumeric && typeof value === "string" && safeNumericString(value)
   const numberValue = typeof value === "number" || numericString ? numeric(value) : null
   if (numberValue !== null) {

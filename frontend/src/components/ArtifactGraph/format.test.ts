@@ -64,3 +64,7 @@ it("preserves the time in SQL-style timestamp buckets", () => {
   expect(formatValue("2025-05-26 14:30:00", undefined, { field_type: "time_dimension", granularity: "hour" }))
     .toBe(new Date(2025, 4, 26, 14, 30).toLocaleString())
 })
+
+it("does not mistake an interval type for an integer", () => {
+  expect(formatValue("001234", "number", { data_type: "interval" })).toBe("001234")
+})
