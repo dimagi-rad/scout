@@ -1,4 +1,4 @@
-import { extractArtifactIdFromOutput, messageArtifacts, parseOutput } from "./artifactReferences"
+import { extractArtifactIdFromOutput, getSubagentToolData, isFailedOutput, messageArtifacts, parseOutput } from "./artifactReferences"
 import { Fragment, useState, type ComponentPropsWithoutRef } from "react"
 import { Link, useInRouterContext } from "react-router-dom"
 import type { UIMessage } from "ai"
@@ -176,33 +176,6 @@ function displayToolName(toolName: string): string {
   return SUBAGENT_TOOL_LABELS[toolName] ?? toolName
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function getSubagentToolData(part: any) {
-  if (
-    part?.type !== "data-subagent-tool-input"
-    && part?.type !== "data-subagent-tool-output"
-  ) {
-    return null
-  }
-  const data = part.data
-  if (
-    data == null
-    || typeof data !== "object"
-    || typeof data.parentToolCallId !== "string"
-    || typeof data.toolCallId !== "string"
-    || typeof data.toolName !== "string"
-  ) {
-    return null
-  }
-  return data as {
-    parentToolCallId: string
-    subagentName?: string
-    toolCallId: string
-    toolName: string
-    input?: unknown
-    output?: unknown
-  }
-}
 
 interface SubagentActivityItem {
   type: string
@@ -481,10 +454,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   const isSubagentCard = toolName in SUBAGENT_TOOL_LABELS && !isNested
   const isErrored = part.state === "output-error"
   const helperOutput = isSubagentCard && hasOutput ? parseOutput(part.output) : null
-  const helperFailed = isErrored || (
-    helperOutput !== null && typeof helperOutput === "object" && "status" in helperOutput
-    && (helperOutput.status === "error" || helperOutput.status === "denied")
-  )
+  const helperFailed = isErrored || isFailedOutput(helperOutput)
 
   // Scope the job to THIS tool-call card via toolCallId, else the progress block
   // and Stop button would render on every historical run_materialization card.

@@ -39,10 +39,32 @@ export function parseOutput(output: unknown): unknown {
   return output
 }
 
+export function isFailedOutput(output: unknown): boolean {
+  return output !== null && typeof output === "object" && "status" in output
+    && (output.status === "error" || output.status === "denied")
+}
+
+export function getSubagentToolData(part: { type: string; data?: unknown }) {
+  if (part.type !== "data-subagent-tool-input" && part.type !== "data-subagent-tool-output") return null
+  const data = part.data
+  if (data === null || typeof data !== "object"
+    || !("parentToolCallId" in data) || typeof data.parentToolCallId !== "string"
+    || !("toolCallId" in data) || typeof data.toolCallId !== "string"
+    || !("toolName" in data) || typeof data.toolName !== "string") return null
+  return data as {
+    parentToolCallId: string
+    subagentName?: string
+    toolCallId: string
+    toolName: string
+    input?: unknown
+    output?: unknown
+  }
+}
+
 export function extractArtifactIdFromOutput(rawOutput: unknown): string | null {
   const output = parseOutput(rawOutput)
   if (output == null) return null
-  if (typeof output === "object" && "status" in output && ["error", "denied"].includes(String(output.status))) return null
+  if (isFailedOutput(output)) return null
   if (typeof output === "object" && !Array.isArray(output)) {
     if (
       "artifact_id" in output
@@ -66,7 +88,7 @@ export function extractArtifactIdFromOutput(rawOutput: unknown): string | null {
 }
 
 export function messageArtifacts(message: UIMessage): Map<string, MessageArtifact> {
-  const artifacts = new Map<string, { id: string; version?: number; afterIndex: number }>()
+  const artifacts = new Map<string, MessageArtifact>()
   const parentIndices = new Map<string, number>()
   message.parts.forEach((part, index) => {
     if (isToolUIPart(part) && !(part as ArtifactToolPart).parentToolCallId) {
@@ -74,13 +96,14 @@ export function messageArtifacts(message: UIMessage): Map<string, MessageArtifac
     }
   })
   message.parts.forEach((part, index) => {
-    const child = part.type === "data-subagent-tool-output" ? part.data as { output?: unknown; parentToolCallId?: string } : null
+    const child = part.type === "data-subagent-tool-output" ? getSubagentToolData(part) : null
+    if (part.type === "data-subagent-tool-output" && !child) return
     const tool = isToolUIPart(part) ? part as ArtifactToolPart : null
     if (tool?.state !== "output-available" && part.type !== "data-subagent-tool-output") return
     const rawOutput = child?.output ?? tool?.output
-    const id = extractArtifactIdFromOutput(rawOutput)
-    if (!id) return
     const output = parseOutput(rawOutput) as { artifact_version?: unknown; artifact?: { version?: unknown } }
+    const id = extractArtifactIdFromOutput(output)
+    if (!id) return
     const rawVersion = output.artifact_version ?? output.artifact?.version
     const version = typeof rawVersion === "number" ? rawVersion : undefined
     const parentId = child?.parentToolCallId ?? tool?.parentToolCallId
