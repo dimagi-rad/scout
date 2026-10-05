@@ -158,11 +158,14 @@ export function normalizeResultRows(rows: unknown[], columns: string[], query: R
   }
   for (const [member, field] of Object.entries(declaredFields)) fields[normalizeKey(member, query)] = field
   return rows.map((row) => {
-    const normalized: Row = Array.isArray(row)
-      ? Object.fromEntries(columns.map((column, index) => [normalizeKey(column, query), row[index]]))
-      : isRecord(row) ? Object.fromEntries(Object.entries(row).map(([key, value]) => [normalizeKey(key, query), value])) : {}
+    let normalized: Row = {}
+    if (Array.isArray(row)) {
+      normalized = Object.fromEntries(columns.map((column, index) => [normalizeKey(column, query), row[index]]))
+    } else if (isRecord(row)) {
+      normalized = Object.fromEntries(Object.entries(row).map(([key, value]) => [normalizeKey(key, query), value]))
+    }
     // Metadata follows bound rows without becoming a visible table column.
-    Object.defineProperty(normalized, ROW_FIELDS, { value: fields })
+    Object.defineProperty(normalized, ROW_FIELDS, { value: fields, enumerable: true, configurable: true })
     return normalized
   })
 }

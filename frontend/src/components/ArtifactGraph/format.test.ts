@@ -39,3 +39,19 @@ describe("formatValue", () => {
     expect(formatValue("2025-99-99", undefined, { field_type: "time_dimension", granularity: "day" })).toBe("2025-99-99")
   })
 })
+
+it("formats uppercase warehouse DATE types as calendar dates", () => {
+  expect(formatValue("2025-05-26T00:00:00.000", undefined, { field_type: "dimension", data_type: "DATE" }))
+    .toBe(new Date(2025, 4, 26).toLocaleDateString())
+})
+
+it.each(["hour", "minute", "second"])("keeps time in %s buckets even when the declared source type is DATE", (granularity) => {
+  const value = "2025-05-26T14:30:00.000"
+  expect(formatValue(value, undefined, { field_type: "time_dimension", data_type: "DATE", granularity }))
+    .toBe(new Date(value).toLocaleString())
+})
+
+it("treats date-only datetime values as local calendar dates", () => {
+  expect(formatValue("2026-06-24", "datetime"))
+    .toBe(new Date(2026, 5, 24).toLocaleString())
+})

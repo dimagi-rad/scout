@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { comparisonPeriod, resolvePresetRange } from "./runtime"
+import { ROW_FIELDS } from "./types"
+import { comparisonPeriod, normalizeResultRows, resolvePresetRange } from "./runtime"
 
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -43,3 +44,12 @@ describe.each(["Pacific/Kiritimati", "Asia/Kolkata", "UTC", "America/Los_Angeles
     })
   },
 )
+
+it("keeps declared field metadata through row copies without adding table columns", () => {
+  const rows = normalizeResultRows([["001234"]], ["visits.id"], { dimensions: ["visits.id"] }, {
+    "visits.id": { field_type: "dimension", data_type: "text" },
+  })
+  const copy = { ...rows[0] }
+  expect(copy[ROW_FIELDS]?.visits_id).toEqual({ field_type: "dimension", data_type: "text" })
+  expect(Object.keys(copy)).toEqual(["visits_id"])
+})

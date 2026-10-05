@@ -12,24 +12,29 @@ export function numeric(value: unknown): number | null {
 export function formatValue(value: unknown, format?: string, field?: FieldMetadata): string {
   if (value === null || value === undefined) return "-"
 
+  const dataType = field?.data_type?.toLowerCase() ?? ""
+  const isTimeDimension = field?.field_type === "time_dimension"
+  const hasTimeBucket = isTimeDimension && Boolean(field.granularity)
+  const coarseTimeBucket = isTimeDimension
+    && ["day", "week", "month", "quarter", "year"].includes(field.granularity ?? "")
   const dateOnly = format === "date" || (!format && (
-    field?.data_type === "date" || field?.field_type === "time_dimension"
-      && ["day", "week", "month", "quarter", "year"].includes(field.granularity ?? "")
+    coarseTimeBucket || (dataType === "date" && !hasTimeBucket)
   ))
-  const dateTime = format === "datetime" || (!format && field?.field_type === "time_dimension" && !dateOnly)
+  const dateTime = format === "datetime" || (!format && isTimeDimension && !dateOnly)
   if ((dateOnly || dateTime) && typeof value === "string") {
     const calendarDate = parseIsoDateLocal(value)
     if (!calendarDate) return value
-    const date = dateOnly ? calendarDate : new Date(value)
-    return Number.isNaN(date.getTime()) ? value : dateOnly ? date.toLocaleDateString() : date.toLocaleString()
+    const date = dateOnly || !value.includes("T") ? calendarDate : new Date(value)
+    if (Number.isNaN(date.getTime())) return value
+    return dateOnly ? date.toLocaleDateString() : date.toLocaleString()
   }
 
   if (field?.field_type === "dimension" || /^(string|text|varchar|char|character|uuid)/i.test(field?.data_type ?? "")) {
     return String(value)
   }
   const declaredNumeric = field?.field_type === "measure" || /^(number|numeric|decimal|integer|int|bigint|smallint|float|double|real)/i.test(field?.data_type ?? "")
-  const numberValue = typeof value === "number" ? numeric(value)
-    : declaredNumeric && typeof value === "string" && safeNumericString(value) ? numeric(value) : null
+  const numericString = declaredNumeric && typeof value === "string" && safeNumericString(value)
+  const numberValue = typeof value === "number" || numericString ? numeric(value) : null
   if (numberValue !== null) {
     const namedFormat = parseNamedFormat(format)
     if (namedFormat.kind === "currency") {
