@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
 from allauth.socialaccount.models import SocialToken
+from django.conf import settings
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
@@ -63,6 +66,8 @@ async def _arespond(request, flow, teams, connected):
     names = {t["slug"]: t["name"] for t in teams or []}
     return JsonResponse(
         {
+            # Without the scope no list can ever arrive, so the UI shows nothing.
+            "available": settings.OCS_REQUEST_TEAMS_SCOPE,
             "known": teams is not None,
             "teams": [{**t, "connected": t["slug"] in connected} for t in teams or []],
             "flow": _flow_payload(flow, names, finished=finished),
@@ -103,12 +108,25 @@ async def ocs_teams_connect_all_view(request):
 @require_http_methods(["POST"])
 @async_login_required
 async def ocs_teams_stop_view(request):
-    """Stop a running chain before its next hop, keeping what it connected."""
+    """Stop a running chain, keeping what it connected.
+
+    ``{"reason": "failed"}`` records a hop the browser couldn't start. A hop still
+    pending is stopped too: if it lands anyway its team is simply connected.
+    """
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        body = {}
+    reason = (
+        ocs_team_flow.STOP_FAILED
+        if isinstance(body, dict) and body.get("reason") == "failed"
+        else ocs_team_flow.STOP_USER
+    )
     teams, connected = await _ateam_state(request._authenticated_user)
     flow = ocs_team_flow.reconcile(await request.session.aget(ocs_team_flow.SESSION_KEY), connected)
-    upcoming = ocs_team_flow.next_team(flow)
-    if upcoming:
-        flow = ocs_team_flow.stop(flow, ocs_team_flow.STOP_USER, upcoming)
+    team = (flow or {}).get("pending") or ocs_team_flow.next_team(flow)
+    if team:
+        flow = ocs_team_flow.stop(flow, reason, team)
     return await _arespond(request, flow, teams, connected)
 
 

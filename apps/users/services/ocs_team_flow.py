@@ -27,8 +27,9 @@ REQUESTED_TEAM_STATE_KEY = "ocs_requested_team"
 # itself on the user's next visit, possibly days later.
 CHAIN_IDLE_SECONDS = 10 * 60
 
-# A hop still on OCS (or a read from another tab mid-hop) is not yet "incomplete".
-PENDING_GRACE_SECONDS = 20
+# A hop still on OCS (sign-in, 2FA, consent; or a read from another tab mid-hop)
+# is not yet "incomplete".
+PENDING_GRACE_SECONDS = 2 * 60
 
 MODE_ALL = "all"
 MODE_ONE = "one"

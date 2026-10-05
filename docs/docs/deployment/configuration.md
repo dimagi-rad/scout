@@ -45,6 +45,7 @@ OAuth client IDs and secrets live in allauth social application records. `manage
 | `ACCOUNT_DEFAULT_HTTP_PROTOCOL` | `http` | Protocol allauth uses for OAuth callback URLs. Set `https` behind TLS. |
 | `CONNECT_API_URL` | `https://connect-staging.dimagi.com` when `DEPLOY_ENVIRONMENT=staging`, otherwise `https://connect.dimagi.com` | CommCare Connect API and OAuth host. |
 | `OCS_URL` | `https://www.openchatstudio.com` | Open Chat Studio API and OAuth host. |
+| `OCS_REQUEST_TEAMS_SCOPE` | `true` | Request the OCS `teams` scope, which lists a user's teams so they can connect them all at once. Set to `false` for an OCS that predates it, which otherwise rejects every OCS sign-in with `invalid_scope`. |
 
 ### CommCare HQ on EU
 

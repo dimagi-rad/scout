@@ -381,6 +381,30 @@ class TestChain:
         assert body["flow"]["stopped"]["reason"] == ocs_team_flow.STOP_USER
         assert body["flow"]["stopped"]["team"]["slug"] == "beta"
 
+    def test_stop_halts_a_hop_still_in_its_grace_period(self, client, user, ocs_app, mocker):
+        _identity(user, ocs_app, "alpha")
+        client.post("/api/auth/ocs/teams/connect-all/")
+        _response, query = _start(client, "beta")
+
+        stopped = client.post("/api/auth/ocs/teams/stop/").json()
+        _callback(client, mocker, query, _userinfo("beta"))
+        body = client.get("/api/auth/ocs/teams/").json()
+
+        assert stopped["flow"]["stopped"]["team"]["slug"] == "beta"
+        assert body["next"] is None
+        assert body["flow"]["stopped"]["reason"] == ocs_team_flow.STOP_USER
+        assert [t["slug"] for t in body["flow"]["remaining"]] == ["gamma"]
+
+    def test_a_hop_the_browser_could_not_start_is_reported_as_failed(self, client, user, ocs_app):
+        _identity(user, ocs_app, "alpha")
+        client.post("/api/auth/ocs/teams/connect-all/")
+
+        body = client.post(
+            "/api/auth/ocs/teams/stop/", {"reason": "failed"}, content_type="application/json"
+        ).json()
+
+        assert body["flow"]["stopped"]["reason"] == ocs_team_flow.STOP_FAILED
+
     def test_dismiss_forgets_the_flow(self, client, user, ocs_app):
         _identity(user, ocs_app, "alpha")
         client.post("/api/auth/ocs/teams/connect-all/")
@@ -419,7 +443,13 @@ class TestEndpoints:
 
         body = client.get("/api/auth/ocs/teams/").json()
 
-        assert body == {"known": False, "teams": [], "flow": None, "next": None}
+        assert body == {
+            "available": True,
+            "known": False,
+            "teams": [],
+            "flow": None,
+            "next": None,
+        }
 
     def test_requires_authentication(self, ocs_app):
         assert Client().get("/api/auth/ocs/teams/").status_code == 401
