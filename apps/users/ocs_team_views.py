@@ -66,7 +66,7 @@ async def _arespond(request, flow, teams, connected):
     names = {t["slug"]: t["name"] for t in teams or []}
     return JsonResponse(
         {
-            # Without the scope no list can ever arrive, so the UI shows nothing.
+            # Without the scope no fresh list can arrive, so a reconnect hint can't help.
             "available": settings.OCS_REQUEST_TEAMS_SCOPE,
             "known": teams is not None,
             "teams": [{**t, "connected": t["slug"] in connected} for t in teams or []],

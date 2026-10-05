@@ -392,7 +392,9 @@ class TestChain:
 
         assert stopped["flow"]["stopped"]["team"]["slug"] == "beta"
         assert body["next"] is None
+        assert body["flow"]["connected"] == [{"slug": "beta", "name": "Beta"}]
         assert body["flow"]["stopped"]["reason"] == ocs_team_flow.STOP_USER
+        assert body["flow"]["stopped"]["team"]["slug"] == "gamma"
         assert [t["slug"] for t in body["flow"]["remaining"]] == ["gamma"]
 
     def test_a_hop_the_browser_could_not_start_is_reported_as_failed(self, client, user, ocs_app):
@@ -450,6 +452,23 @@ class TestEndpoints:
             "flow": None,
             "next": None,
         }
+
+    def test_reports_when_the_teams_scope_is_off(self, client, user, ocs_app, settings):
+        settings.OCS_REQUEST_TEAMS_SCOPE = False
+        _identity(user, ocs_app, "alpha")
+
+        body = client.get("/api/auth/ocs/teams/").json()
+
+        assert body["available"] is False
+        assert body["known"] is True
+
+    @pytest.mark.parametrize("action", ["connect-all", "stop", "dismiss"])
+    def test_chain_actions_require_csrf(self, user, ocs_app, action):
+        _identity(user, ocs_app, "alpha")
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(user)
+
+        assert client.post(f"/api/auth/ocs/teams/{action}/").status_code == 403
 
     def test_requires_authentication(self, ocs_app):
         assert Client().get("/api/auth/ocs/teams/").status_code == 401

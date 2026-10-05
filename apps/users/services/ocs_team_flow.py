@@ -162,6 +162,12 @@ def reconcile(flow: dict | None, connected: set[str], now: float | None = None) 
             idle_for = 0
         elif idle_for > PENDING_GRACE_SECONDS:
             flow = stop(flow, STOP_INCOMPLETE, pending)
+    stopped = flow.get("stopped") or {}
+    if stopped.get("team") in connected and stopped.get("reason") != STOP_MISMATCH:
+        # A hop stopped mid-flight (or declared incomplete) that landed anyway.
+        flow["connected"] = [*flow.get("connected", []), stopped["team"]]
+        rest = [slug for slug in flow["queue"] if slug not in connected]
+        flow["stopped"] = {**stopped, "team": rest[0]} if rest else None
     flow["queue"] = [slug for slug in flow["queue"] if slug not in connected]
     upcoming = next_team(flow)
     if upcoming and idle_for > CHAIN_IDLE_SECONDS:
