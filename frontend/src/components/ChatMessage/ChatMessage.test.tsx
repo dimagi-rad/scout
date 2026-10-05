@@ -418,6 +418,15 @@ it("does not leak markdown AST node props onto anchors", () => {
   expect(screen.getByRole("link", { name: "Chart" })).not.toHaveAttribute("node")
 })
 
+it("preserves Markdown footnote navigation and accessibility attributes", () => {
+  const msg = { id: "footnote", role: "assistant", parts: [{ type: "text", text: "Chart[^1]\n\n[^1]: Dataset details." }] } as UIMessage
+  render(<MemoryRouter><ChatMessage message={msg} isActiveMessage={false} /></MemoryRouter>)
+  const reference = screen.getByRole("link", { name: "1" })
+  expect(reference).toHaveAttribute("id", "user-content-fnref-1")
+  expect(reference).toHaveAttribute("aria-describedby", "footnote-label")
+  expect(screen.getByRole("link", { name: "Back to reference 1" })).toHaveAttribute("href", "#user-content-fnref-1")
+})
+
 it("keeps helper errors visible at completion", () => {
   const message = { id: "failed-helper", role: "assistant", parts: [
     { type: "tool-artifact_manager", toolCallId: "failed", state: "output-error", input: {}, errorText: "The chart service timed out." },

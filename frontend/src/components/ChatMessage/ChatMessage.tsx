@@ -88,12 +88,14 @@ interface ChatTextPartProps {
   text: string
 }
 
-function ChatMarkdownLink({ href, children, title }: ComponentPropsWithoutRef<"a">) {
+function ChatMarkdownLink({ href, children, ...markdownProps }: ComponentPropsWithoutRef<"a"> & { node?: unknown }) {
+  const props = { ...markdownProps }
+  delete props.node
   const inRouter = useInRouterContext()
   if (inRouter && href?.startsWith("/") && !href.startsWith("//")) {
-    return <Link to={href} title={title} data-testid="chat-markdown-link">{children}</Link>
+    return <Link to={href} {...props} data-testid="chat-markdown-link">{children}</Link>
   }
-  return <a href={href} title={title} data-testid="chat-markdown-link">{children}</a>
+  return <a href={href} {...props} data-testid="chat-markdown-link">{children}</a>
 }
 
 export function ChatTextPart({ role, text }: ChatTextPartProps) {
