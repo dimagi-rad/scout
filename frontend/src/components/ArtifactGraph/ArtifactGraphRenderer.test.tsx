@@ -93,7 +93,7 @@ describe("ArtifactGraphRenderer", () => {
     expect(screen.getByText("Visits by day")).toBeInTheDocument()
     await waitFor(() => expect(container.querySelector('[data-block-type="graph"]')).toBeInTheDocument())
     expect(await screen.findAllByText("visits_count")).toHaveLength(1)
-    expect(screen.getAllByText("2026-06-24").length).toBeGreaterThan(0)
+    expect(screen.getByRole("cell", { name: new Date(2026, 5, 24).toLocaleDateString() })).toBeInTheDocument()
     expect(screen.getByText("Total visits")).toBeInTheDocument()
     await waitFor(() => expect(screen.getAllByText("12").length).toBeGreaterThan(0))
     expect(mockedPost).toHaveBeenCalledWith(
@@ -104,6 +104,41 @@ describe("ArtifactGraphRenderer", () => {
         granularity: "day",
       }),
     )
+  })
+
+  it("formats bound table fields using semantic roles and declared types", async () => {
+    const report = artifact()
+    const doc = report.data!.story_doc as { blocks: Array<{ id: string; config?: Record<string, unknown> }> }
+    doc.blocks = doc.blocks.filter((block) => ["range", "q", "table"].includes(block.id))
+    doc.blocks.find((block) => block.id === "q")!.config = {
+      queries: { visits_by_day: {
+        measures: ["visits.count"], dimensions: ["visits.user_id"], time_dimension: "visits.visit_date", granularity: "week",
+      } },
+    }
+    doc.blocks.find((block) => block.id === "table")!.config = { columns: ["visits_user_id", "date", "visits_count"] }
+    mockedPost.mockResolvedValue({
+      columns: ["visits.user_id", "visits.visit_date.week", "visits.count"],
+      rows: [["33504507934753956376", "2025-05-26T00:00:00.000", "1234"]],
+      field_metadata: {
+        "visits.user_id": { field_type: "dimension", data_type: "text" },
+        "visits.visit_date": { field_type: "time_dimension", data_type: "timestamp", granularity: "week" },
+        "visits.count": { field_type: "measure", data_type: "integer" },
+      },
+    })
+    render(<ArtifactGraphRenderer artifact={report} workspaceId="workspace-1" />)
+    expect(await screen.findByRole("cell", { name: "33504507934753956376" })).toBeInTheDocument()
+    expect(await screen.findByRole("cell", { name: new Date(2025, 4, 26).toLocaleDateString() })).toBeInTheDocument()
+    expect(await screen.findByRole("cell", { name: "1,234" })).toBeInTheDocument()
+  })
+
+  it("keeps currency formatting for stats bound to string-valued measures", async () => {
+    const report = artifact()
+    const doc = report.data!.story_doc as { blocks: Array<{ id: string; config?: Record<string, unknown> }> }
+    doc.blocks = doc.blocks.filter((block) => ["range", "q", "stat"].includes(block.id))
+    doc.blocks.find((block) => block.id === "stat")!.config = { label: "Total", value_key: "visits_count", format: "currency" }
+    mockedPost.mockResolvedValue({ columns: ["date", "visits.count"], rows: [["2026-06-24", "1234"]] })
+    render(<ArtifactGraphRenderer artifact={report} workspaceId="workspace-1" />)
+    expect(await screen.findByText("$1,234")).toBeInTheDocument()
   })
 
   it("does not render the internal prd brief", async () => {

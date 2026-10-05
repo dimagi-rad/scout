@@ -235,11 +235,16 @@ def create_artifact_graph_tools(
                     artifact,
                     user_id=str(user.id) if user else "",
                 )
-                return {
+                result = {
                     "status": "checked",
                     "artifact": _artifact_summary(artifact),
                     "runtime": runtime,
                 }
+                if runtime.get("success") is True:
+                    result["ui_path"] = (
+                        f"/workspaces/{artifact.workspace_id}/artifacts/{artifact.id}"
+                    )
+                return result
         except GraphDocError as exc:
             return {"status": "error", "message": str(exc)}
         except Exception as exc:
@@ -464,6 +469,7 @@ async def _write_result(
             if runtime is not None
             else "skipped"
         ),
+        "ui_path": f"/workspaces/{artifact.workspace_id}/artifacts/{artifact.id}",
         "render_url": f"/api/workspaces/{artifact.workspace_id}/artifacts/{artifact.id}/data/",
     }
 

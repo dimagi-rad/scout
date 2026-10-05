@@ -3,7 +3,7 @@ import { defineConfig, devices } from "@playwright/test"
 // Isolated frontend-only fixture tests: every backend request is intercepted.
 export default defineConfig({
   testDir: "./tests/e2e",
-  testMatch: "artifact-workspace-links.spec.ts",
+  testMatch: ["artifact-workspace-links.spec.ts", "helper-artifacts.spec.ts"],
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   use: {

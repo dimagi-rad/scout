@@ -1,6 +1,7 @@
 import { api } from "@/api/client"
 import { createContext } from "react"
 
+import { ROW_FIELDS, type FieldMetadata } from "./types"
 import type { DateContext, DateRange, ResolvedQuery, Row, SemanticQuerySpec, StoryDoc } from "./types"
 
 export const ArtifactDateContext = createContext<DateContext | undefined>(undefined)
@@ -14,6 +15,7 @@ export const COMPARISON_LABELS: Record<ComparisonPreset, string> = {
 }
 
 interface SemanticQueryResponse {
+  field_metadata?: Record<string, FieldMetadata>
   columns?: string[]
   rows?: unknown[]
   row_count?: number
@@ -149,21 +151,28 @@ export async function runSemanticQuery(
     `/api/workspaces/${workspaceId}/semantic-query/`,
     input,
   )
-  return normalizeResultRows(response.rows ?? [], response.columns ?? [], query)
+  return normalizeResultRows(response.rows ?? [], response.columns ?? [], query, response.field_metadata)
 }
 
-export function normalizeResultRows(rows: unknown[], columns: string[], query: ResolvedQuery): Row[] {
+export function normalizeResultRows(rows: unknown[], columns: string[], query: ResolvedQuery, declaredFields: Record<string, FieldMetadata> = {}): Row[] {
   if (!Array.isArray(rows)) return []
+  const fields: Record<string, FieldMetadata> = {}
+  for (const member of query.measures ?? []) fields[normalizeKey(member, query)] = { field_type: "measure" }
+  for (const member of query.dimensions ?? []) fields[normalizeKey(member, query)] = { field_type: "dimension" }
+  if (query.time_dimension) fields[normalizeKey(query.time_dimension, query)] = {
+    field_type: "time_dimension", granularity: query.granularity,
+  }
+  for (const [member, field] of Object.entries(declaredFields)) fields[normalizeKey(member, query)] = field
   return rows.map((row) => {
+    let normalized: Row = {}
     if (Array.isArray(row)) {
-      return Object.fromEntries(columns.map((column, index) => [normalizeKey(column, query), row[index]]))
+      normalized = Object.fromEntries(columns.map((column, index) => [normalizeKey(column, query), row[index]]))
+    } else if (isRecord(row)) {
+      normalized = Object.fromEntries(Object.entries(row).map(([key, value]) => [normalizeKey(key, query), value]))
     }
-    if (isRecord(row)) {
-      return Object.fromEntries(
-        Object.entries(row).map(([key, value]) => [normalizeKey(key, query), value]),
-      )
-    }
-    return {}
+    // Metadata follows bound rows without becoming a visible table column.
+    Object.defineProperty(normalized, ROW_FIELDS, { value: fields, enumerable: true, configurable: true })
+    return normalized
   })
 }
 

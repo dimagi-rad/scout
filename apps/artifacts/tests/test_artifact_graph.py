@@ -142,6 +142,7 @@ async def test_graph_manager_create_description(
 
     assert result["status"] == "created"
     artifact = await Artifact.objects.aget(id=result["artifact"]["id"])
+    assert result["ui_path"] == f"/workspaces/{artifact.workspace_id}/artifacts/{artifact.id}"
     assert artifact.description == expected
     assert result["artifact"]["description"] == expected
     assert result["runtime"]["success"] is True
@@ -207,6 +208,7 @@ async def test_graph_manager_description_edits_round_trip(
         {"artifact_id": latest_id}
     )
     checked = await write.ainvoke({"action": "check", "artifact_id": latest_id})
+    assert checked["ui_path"] == f"/workspaces/{workspace.id}/artifacts/{latest_id}"
     for payload in (overview, dependencies, checked):
         assert payload["artifact"]["description"] == expected
 
@@ -1010,6 +1012,10 @@ async def test_graph_manager_replace_and_apply_create_linked_versions(workspace,
     assert updated["status"] == "updated"
     replacement = await Artifact.objects.aget(id=replaced["artifact"]["id"])
     applied = await Artifact.objects.aget(id=updated["artifact"]["id"])
+    assert replaced["ui_path"] == f"/workspaces/{workspace.id}/artifacts/{replacement.id}"
+    assert updated["ui_path"] == f"/workspaces/{workspace.id}/artifacts/{applied.id}"
+    assert replacement.id != original.id
+    assert applied.id != replacement.id
     assert replacement.parent_artifact_id == original.id
     assert replacement.version == 2
     assert replacement.description == original.description
@@ -1057,6 +1063,8 @@ async def test_graph_manager_runtime_invalid_replace_keeps_previous_version(
         )
 
     assert result["status"] == "error"
+    assert "ui_path" not in result
+    assert "ui_path" not in result["artifact"]
     assert await Artifact.objects.filter(id=original.id).aexists()
     assert await Artifact.objects.filter(parent_artifact=original).acount() == 0
     assert (
@@ -1109,6 +1117,8 @@ async def test_graph_manager_does_not_publish_runtime_invalid_create(workspace, 
 
     assert result["status"] == "error"
     assert "not published" in result["message"]
+    assert "ui_path" not in result
+    assert "ui_path" not in result["artifact"]
     assert await Artifact.objects.filter(artifact_type=ArtifactType.STORY).acount() == 0
     assert (
         await Artifact.all_objects.filter(

@@ -1,4 +1,7 @@
-import { useState } from "react"
+import { getSubagentToolData, isUnsuccessfulHelperOutcome, messageArtifacts, parseOutput } from "./artifactReferences"
+import { internalChatPath } from "./chatLinks"
+import { Fragment, useMemo, useState, type ComponentPropsWithoutRef } from "react"
+import { Link, useInRouterContext } from "react-router-dom"
 import type { UIMessage } from "ai"
 import { isToolUIPart, getToolName } from "ai"
 import Markdown from "react-markdown"
@@ -34,32 +37,6 @@ import type {
   ListTablesOutput,
   GetMetadataOutput,
 } from "./ToolOutput"
-
-function parseOutput(output: unknown): unknown {
-  if (typeof output === "string") {
-    // Backend emits the MCP envelope as JSON (apps/chat/stream.py), so a plain
-    // JSON.parse suffices. The old Python-repr→JSON `replace(/'/g, '"')` hack
-    // corrupted apostrophes in the data (05#2 / 13#8) and was removed.
-    try {
-      return JSON.parse(output)
-    } catch {
-      return output
-    }
-  }
-  // MCP envelope array (already-parsed objects).
-  if (
-    Array.isArray(output) &&
-    output[0]?.type === "text" &&
-    typeof output[0]?.text === "string"
-  ) {
-    try {
-      return JSON.parse(output[0].text)
-    } catch {
-      return output
-    }
-  }
-  return output
-}
 
 function inputSql(input: unknown): string | undefined {
   if (input != null && typeof input === "object" && "sql" in input) {
@@ -104,11 +81,23 @@ interface ChatMessageProps {
   activeMaterializationJob?: ActiveJob | null
   recentTerminationsByToolCallId?: Record<string, RecentTermination>
   onRetryDispatched?: () => void
+  visibleArtifactIds?: ReadonlySet<string>
 }
 
 interface ChatTextPartProps {
   role: "user" | "assistant"
   text: string
+}
+
+function ChatMarkdownLink({ href, children, ...markdownProps }: ComponentPropsWithoutRef<"a"> & { node?: unknown }) {
+  const props = { ...markdownProps }
+  delete props.node
+  const inRouter = useInRouterContext()
+  const path = inRouter ? internalChatPath(href, window.location.origin) : null
+  if (path) {
+    return <Link to={path} {...props} data-testid="chat-markdown-link">{children}</Link>
+  }
+  return <a href={href} {...props} data-testid="chat-markdown-link">{children}</a>
 }
 
 export function ChatTextPart({ role, text }: ChatTextPartProps) {
@@ -121,7 +110,7 @@ export function ChatTextPart({ role, text }: ChatTextPartProps) {
           : "prose prose-sm max-w-none py-1"
       }`}
     >
-      {isUser ? text : <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>}
+      {isUser ? text : <Markdown remarkPlugins={[remarkGfm]} components={{ a: ChatMarkdownLink }}>{text}</Markdown>}
     </div>
   )
 }
@@ -129,50 +118,8 @@ export function ChatTextPart({ role, text }: ChatTextPartProps) {
 // Parent-facing subagent tools: rendered as a grouped card with nested child
 // calls and streamed activity instead of a plain tool row.
 const SUBAGENT_TOOL_LABELS: Record<string, string> = {
-  artifact_manager: "Artifact Manager",
-  canvas_manager: "Canvas Manager",
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function isArtifactToolPart(part: any): boolean {
-  const name = getToolName(part)
-  if (name in SUBAGENT_TOOL_LABELS) return false
-  if (name === "create_artifact" || name === "update_artifact") return true
-  if (part.state === "output-available" && part.output != null) {
-    return extractArtifactIdFromOutput(part.output) != null
-  }
-  return false
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractArtifactId(part: any): string | null {
-  if (part.state !== "output-available" || part.output == null) return null
-  return extractArtifactIdFromOutput(part.output)
-}
-
-function extractArtifactIdFromOutput(rawOutput: unknown): string | null {
-  const output = parseOutput(rawOutput)
-  if (output == null) return null
-  if (typeof output === "object" && !Array.isArray(output)) {
-    if (
-      "artifact_id" in output
-      && typeof output.artifact_id === "string"
-      && output.artifact_id
-    ) {
-      return output.artifact_id
-    }
-    if (
-      "artifact" in output
-      && output.artifact != null
-      && typeof output.artifact === "object"
-      && "id" in output.artifact
-      && typeof output.artifact.id === "string"
-      && output.artifact.id
-    ) {
-      return output.artifact.id
-    }
-  }
-  return null
+  artifact_manager: "Artifact editor",
+  canvas_manager: "Data model editor",
 }
 
 function formatToolOutput(output: unknown): string {
@@ -203,37 +150,22 @@ const AUTO_EXPAND_TOOLS = new Set([
   "get_metadata",
 ])
 
+const HELPER_TEXT_LABELS = Object.entries(SUBAGENT_TOOL_LABELS).map(([toolName, label]) => {
+  const escapedName = toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replaceAll("_", "[_ ]")
+  return { pattern: new RegExp(`\\b${escapedName}\\b`, "gi"), label }
+})
+
+function readableHelperText(text: string): string {
+  for (const { pattern, label } of HELPER_TEXT_LABELS) {
+    text = text.replace(pattern, label)
+  }
+  return text
+}
+
 function displayToolName(toolName: string): string {
   return SUBAGENT_TOOL_LABELS[toolName] ?? toolName
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function getSubagentToolData(part: any) {
-  if (
-    part?.type !== "data-subagent-tool-input"
-    && part?.type !== "data-subagent-tool-output"
-  ) {
-    return null
-  }
-  const data = part.data
-  if (
-    data == null
-    || typeof data !== "object"
-    || typeof data.parentToolCallId !== "string"
-    || typeof data.toolCallId !== "string"
-    || typeof data.toolName !== "string"
-  ) {
-    return null
-  }
-  return data as {
-    parentToolCallId: string
-    subagentName?: string
-    toolCallId: string
-    toolName: string
-    input?: unknown
-    output?: unknown
-  }
-}
 
 interface SubagentActivityItem {
   type: string
@@ -326,7 +258,7 @@ function artifactManagerSummaryText(rawOutput: unknown): string | null {
   }
   if (summary.runtime_summary) lines.push(`Runtime: ${summary.runtime_summary}`)
   if (summary.message && !summary.message.startsWith("[{")) {
-    lines.push(summary.message)
+    lines.push(readableHelperText(summary.message))
   }
   return lines.length > 1 ? lines.join("\n\n") : null
 }
@@ -378,7 +310,7 @@ function SubagentActivityPanel({
     .find((event) => event.type === "data-subagent-status")
   const hasTimelineTools = timelineItems.some((item) => item.kind === "tool")
   const renderActivityItem = (event: SubagentActivityItem, eventIndex: number) => {
-    const text = event.text || event.message || event.phase || ""
+    const text = readableHelperText(event.text || event.message || event.phase || "")
     if (!text) return null
     const id = event.id ?? `subagent-${eventIndex}`
     if (event.type === "data-subagent-reasoning") {
@@ -415,7 +347,7 @@ function SubagentActivityPanel({
   }
   const timelineContent = timelineItems.map(renderTimelineItem).filter(Boolean)
   const activityParts = events.flatMap((event, eventIndex) => {
-    const text = event.text || event.message || event.phase || ""
+    const text = readableHelperText(event.text || event.message || event.phase || "")
     if (!text) return []
     const id = event.id ?? `subagent-${eventIndex}`
     if (event.type === "data-subagent-reasoning") {
@@ -510,14 +442,11 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   const hasOutput = part.state === "output-available" || part.state === "output-error"
   const hasChildren = childParts.length > 0
   const isSubagentCard = toolName in SUBAGENT_TOOL_LABELS && !isNested
-  const hasSubagentActivity = subagentEvents.length > 0
   const isErrored = part.state === "output-error"
-  const activeArtifactId = useAppStore((s) => s.activeArtifactId)
-  const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
-  const artifactId =
-    isSubagentCard && hasOutput && part.output != null && !isErrored
-      ? extractArtifactIdFromOutput(part.output)
-      : null
+  const helperOutput = isSubagentCard && hasOutput ? parseOutput(part.output) : null
+  const helperUnstructuredOutput = isSubagentCard && hasOutput
+    && (helperOutput === null || typeof helperOutput !== "object" || Array.isArray(helperOutput))
+  const helperFailed = isErrored || helperUnstructuredOutput || isUnsuccessfulHelperOutcome(helperOutput)
 
   // Scope the job to THIS tool-call card via toolCallId, else the progress block
   // and Stop button would render on every historical run_materialization card.
@@ -543,7 +472,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   // stays expanded while it has an active job or failure card for THIS card,
   // independent of the SSE stream.
   const autoExpanded =
-    (toolName in SUBAGENT_TOOL_LABELS && (hasChildren || hasSubagentActivity || isLoading))
+    (isSubagentCard && (isLoading || helperFailed))
     || (isNested && (isLoading || isErrored))
     || (
       AUTO_EXPAND_TOOLS.has(toolName)
@@ -554,10 +483,11 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
       )
       && (isActiveMessage || toolName === "run_materialization")
     )
-  const [override, setOverride] = useState<{ whenLatest: boolean; value: boolean } | null>(null)
-  const effectiveOverride = override?.whenLatest === isLatest ? override.value : null
+  const expansionKey = isSubagentCard ? `${isLoading}:${helperFailed}` : String(isLatest)
+  const [override, setOverride] = useState<{ key: string; value: boolean } | null>(null)
+  const effectiveOverride = override?.key === expansionKey ? override.value : null
   const expanded = effectiveOverride ?? autoExpanded
-  const toggleExpanded = () => setOverride({ whenLatest: isLatest, value: !expanded })
+  const toggleExpanded = () => setOverride({ key: expansionKey, value: !expanded })
 
   const richOutput =
     hasOutput && part.output != null && !isErrored && !isSubagentCard
@@ -567,11 +497,12 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   // in errorText (no `output`); otherwise show the raw output when no rich card
   // matched. Either way, the <pre> renders the FULL text — the historical
   // `.slice(0, 2000)` silently dropped the tail with no marker (13#4).
-  const fallbackText = isErrored
+  const rawFallbackText = isErrored
     ? (part.errorText ?? "The tool reported an error.")
-    : hasOutput && part.output != null && !richOutput && !isSubagentCard
+    : hasOutput && part.output != null && !richOutput && (!isSubagentCard || helperUnstructuredOutput)
       ? formatToolOutput(part.output)
       : null
+  const fallbackText = isSubagentCard && rawFallbackText ? readableHelperText(rawFallbackText) : rawFallbackText
 
   const { canWrite } = useWorkspaceRole(workspaceId)
   const showCancelButton =
@@ -613,6 +544,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
           onClick={toggleExpanded}
           className="flex flex-1 items-center gap-2 px-3 py-1.5 hover:bg-muted/50 transition-colors"
           data-testid={`tool-call-${toolName}`}
+          aria-expanded={expanded}
         >
           {expanded ? (
             <ChevronDown className="w-3 h-3 text-muted-foreground shrink-0" />
@@ -656,15 +588,6 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
           </button>
         )}
       </div>
-      {artifactId && (
-        <div className="border-t border-sky-100 px-3 py-2">
-          <ChatArtifactButton
-            artifactId={artifactId}
-            isActive={activeArtifactId === artifactId}
-            onOpen={openArtifact}
-          />
-        </div>
-      )}
       {expanded && (
         isSubagentCard
         ||
@@ -792,13 +715,17 @@ export function ChatReasoningPart({ part, index, isLatest, isActiveMessage }: { 
 
 interface ChatArtifactButtonProps {
   artifactId: string
+  artifactVersion?: number
   isActive?: boolean
   onOpen?: (artifactId: string) => void
 }
 
-export function ChatArtifactButton({ artifactId, isActive = false, onOpen }: ChatArtifactButtonProps) {
+export function ChatArtifactButton({ artifactId, artifactVersion, isActive = false, onOpen }: ChatArtifactButtonProps) {
   return (
     <button
+      type="button"
+      data-testid={`chat-artifact-${artifactId}`}
+      data-artifact-version={artifactVersion}
       onClick={() => onOpen?.(artifactId)}
       className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm my-1 transition-colors hover:bg-muted ${
         isActive
@@ -812,7 +739,7 @@ export function ChatArtifactButton({ artifactId, isActive = false, onOpen }: Cha
   )
 }
 
-export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTerminationsByToolCallId, onRetryDispatched }: ChatMessageProps) {
+export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTerminationsByToolCallId, onRetryDispatched, visibleArtifactIds }: ChatMessageProps) {
   const isUser = message.role === "user"
   const activeArtifactId = useAppStore((s) => s.activeArtifactId)
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
@@ -892,6 +819,19 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
     }
   }
 
+  const artifacts = useMemo(() => messageArtifacts(message), [message])
+  const renderArtifacts = (index: number) => [...artifacts.values()]
+    .filter((artifact) => artifact.afterIndex === index && (!visibleArtifactIds || visibleArtifactIds.has(artifact.id)))
+    .map((artifact) => (
+      <ChatArtifactButton
+        key={artifact.id}
+        artifactId={artifact.id}
+        artifactVersion={artifact.version}
+        isActive={activeArtifactId === artifact.id}
+        onOpen={openArtifact}
+      />
+    ))
+
   return (
     <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}>
       <div className="max-w-[90%]">
@@ -910,19 +850,9 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
             if (typeof parentToolCallId === "string" && parentToolCallId) {
               return null
             }
-            if (isArtifactToolPart(part)) {
-              const artifactId = extractArtifactId(part)
-              if (artifactId && part.state === "output-available") {
-                const isActive = activeArtifactId === artifactId
-                return (
-                  <ChatArtifactButton
-                    key={i}
-                    artifactId={artifactId}
-                    isActive={isActive}
-                    onOpen={openArtifact}
-                  />
-                )
-              }
+            if (!(getToolName(part) in SUBAGENT_TOOL_LABELS)) {
+              const buttons = renderArtifacts(i)
+              if (buttons.length) return <Fragment key={i}>{buttons}</Fragment>
             }
 
             const toolCallId = toolPart.toolCallId
@@ -930,7 +860,12 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
               toolCallId && recentTerminationsByToolCallId
                 ? recentTerminationsByToolCallId[toolCallId] ?? null
                 : null
-            return <ChatToolCallPart key={i} part={toolPart} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} childParts={toolCallId ? childToolPartsByParent.get(toolCallId) ?? [] : []} subagentEvents={toolCallId ? subagentEventsByParent.get(toolCallId) ?? [] : []} subagentTimeline={toolCallId ? subagentTimelineByParent.get(toolCallId) ?? [] : []} />
+            return (
+              <Fragment key={i}>
+                <ChatToolCallPart part={toolPart} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} childParts={toolCallId ? childToolPartsByParent.get(toolCallId) ?? [] : []} subagentEvents={toolCallId ? subagentEventsByParent.get(toolCallId) ?? [] : []} subagentTimeline={toolCallId ? subagentTimelineByParent.get(toolCallId) ?? [] : []} />
+                {renderArtifacts(i)}
+              </Fragment>
+            )
           }
 
           return null

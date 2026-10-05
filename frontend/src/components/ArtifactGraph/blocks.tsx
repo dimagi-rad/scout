@@ -17,6 +17,7 @@ import { ResponsiveContainer } from "recharts"
 
 import { cn } from "@/lib/utils"
 
+import { ROW_FIELDS, type FieldMetadata } from "./types"
 import { firstNumericKey, formatValue, numeric, pathKey, selectPath } from "./format"
 import { useBlockInputs, useOutput } from "./hooks"
 import {
@@ -544,7 +545,7 @@ function TableComponent({ block, config, engine }: BlockComponentProps) {
                 <tr key={rowIndex}>
                   {columns.map((column) => (
                     <td key={column.key} className="px-3 py-1.5">
-                      {formatValue(row[column.key], column.format)}
+                      {formatValue(row[column.key], column.format, row[ROW_FIELDS]?.[column.key])}
                     </td>
                   ))}
                 </tr>
@@ -599,7 +600,7 @@ function StatComponent({ block, config, engine }: BlockComponentProps) {
       {inputs.pending && <div className="mt-2 text-xs text-muted-foreground">Loading metric…</div>}
       {inputs.failed && <div className="mt-2 text-xs text-destructive">{inputs.failed.state.error ?? "Data failed to load"}</div>}
       <div className="mt-3 text-4xl font-semibold leading-none tracking-[-0.025em] tabular-nums">
-        {formatWithAffixes(selected, format, prefix, suffix)}
+        {formatWithAffixes(selected, format, prefix, suffix, key ? (rows[0] as Row | undefined)?.[ROW_FIELDS]?.[key] : undefined)}
       </div>
       {comparisonDelta !== null && (
         <StatDelta
@@ -708,8 +709,8 @@ function statSentiment(delta: number, direction: TrendDirection): "positive" | "
   return favorable ? "positive" : "negative"
 }
 
-function formatWithAffixes(value: unknown, format: string | undefined, prefix: string, suffix: string): string {
-  return `${prefix}${formatValue(value, format)}${suffix}`
+function formatWithAffixes(value: unknown, format: string | undefined, prefix: string, suffix: string, field?: FieldMetadata): string {
+  return `${prefix}${formatValue(value, format, field)}${suffix}`
 }
 
 function OutputStatus({ state }: { state: OutputState }) {

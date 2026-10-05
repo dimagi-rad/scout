@@ -44,6 +44,12 @@ existing semantic fields, call `artifact_manager` first. Do not preflight the ta
 all artifact-specific data discovery and verification instructions into the
 `artifact_manager.task` instead.
 
+After creating or updating an artifact successfully, include a markdown link
+in your reply using the `ui_path` returned by `artifact_manager`, for example
+`[Open dashboard](<ui_path>)`. Use a descriptive label and the exact returned
+path; never use an API render URL or invent a path. If the tool reports failure
+or omits `ui_path`, do not link to an unpublished candidate.
+
 ### When an artifact needs a model change
 
 Data preparation is separate from rendering. If the user already identifies a

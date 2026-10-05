@@ -181,6 +181,7 @@ async def run_semantic_query(
         "truncated": result.get("row_count", 0) >= compiled["limit"],
         "semantic_query": compiled["query"],
         "members": compiled["members"],
+        "field_metadata": compiled["field_metadata"],
     }
 
 
@@ -297,6 +298,18 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
         "limit": limit,
         "query": canonical_query,
         "members": members,
+        "field_metadata": {
+            member.member: {
+                "field_type": member.field.field_type,
+                "data_type": member.field.data_type,
+                **({"granularity": granularity} if member is resolved_time else {}),
+            }
+            for member in [
+                *resolved_measures,
+                *resolved_dimensions,
+                *([resolved_time] if resolved_time else []),
+            ]
+        },
     }
 
 

@@ -217,7 +217,7 @@ See [Security](security.md#raw-sql-validation) for the enforcement details.
 
 ### artifact_manager
 
-Delegates story artifact work to the Artifact Manager subagent, which has its
+Delegates story artifact work to the Artifact editor subagent, which has its
 own tools and recursion limit. It discovers data, checks the semantic queries,
 and writes the story through `artifact_write`. That is the only write path for
 story artifacts, and it validates the story before publishing. The parent agent
@@ -425,15 +425,22 @@ Tool inputs are redacted of the injected parameters, and tool outputs over
 that arrive before their parent tool call ID is known are held back and sent
 just before that tool's output.
 
-There is no separate artifact event. The frontend finds artifacts in tool
-output (`frontend/src/components/ChatMessage/ChatMessage.tsx`):
+There is no separate artifact event. The frontend collects artifact references
+from tool output and helper activity
+(`frontend/src/components/ChatMessage/artifactReferences.ts`):
 
 - An artifact ID is a string `artifact_id` or `artifact.id` in the tool
   output, parsed as JSON.
-- The subagent cards (`artifact_manager`, `canvas_manager`) show an
-  open-artifact button when their output carries one.
-- Any other tool part whose output carries one renders as an open-artifact
-  button in place of the tool card.
+- Artifact buttons appear in the main reply after the helper card. Each user
+  turn shows one button per artifact ID, using its latest reported version,
+  including when saved history contains several assistant steps.
+- The **Artifact editor** and **Data model editor** cards stay open while
+  running or requiring attention, and collapse after successful completion.
+  Click a card to inspect its activity.
+- Direct artifact tool results show an open-artifact button in place of the
+  tool card. Earlier deduplicated results retain their activity cards.
+- Successful writes return a relative UI path for the parent agent to include
+  as a Markdown link. In-app reply links use client-side navigation.
 
 Thread-to-artifact links are stored server-side in `ThreadArtifact`.
 Artifact tools link an artifact when they create, update or inspect it
