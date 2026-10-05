@@ -1,4 +1,4 @@
-import { extractArtifactIdFromOutput, getSubagentToolData, isUnsuccessfulHelperOutcome, messageArtifacts, parseOutput } from "./artifactReferences"
+import { getSubagentToolData, isUnsuccessfulHelperOutcome, messageArtifacts, parseOutput } from "./artifactReferences"
 import { internalChatPath } from "./chatLinks"
 import { Fragment, useMemo, useState, type ComponentPropsWithoutRef } from "react"
 import { Link, useInRouterContext } from "react-router-dom"
@@ -120,23 +120,6 @@ export function ChatTextPart({ role, text }: ChatTextPartProps) {
 const SUBAGENT_TOOL_LABELS: Record<string, string> = {
   artifact_manager: "Artifact editor",
   canvas_manager: "Data model editor",
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function isArtifactToolPart(part: any): boolean {
-  const name = getToolName(part)
-  if (name in SUBAGENT_TOOL_LABELS) return false
-  if (name === "create_artifact" || name === "update_artifact") return true
-  if (part.state === "output-available" && part.output != null) {
-    return extractArtifactIdFromOutput(part.output) != null
-  }
-  return false
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractArtifactId(part: any): string | null {
-  if (part.state !== "output-available" || part.output == null) return null
-  return extractArtifactIdFromOutput(part.output)
 }
 
 function formatToolOutput(output: unknown): string {
@@ -867,7 +850,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
             if (typeof parentToolCallId === "string" && parentToolCallId) {
               return null
             }
-            if (isArtifactToolPart(part) && extractArtifactId(part)) {
+            if (!(getToolName(part) in SUBAGENT_TOOL_LABELS)) {
               const buttons = renderArtifacts(i)
               if (buttons.length) return <Fragment key={i}>{buttons}</Fragment>
             }

@@ -1,6 +1,8 @@
 import type { UIMessage } from "ai"
-import { expect, it } from "vitest"
-import { messageArtifacts } from "./artifactReferences"
+import { afterEach, expect, it, vi } from "vitest"
+import { messageArtifacts, turnArtifactOwners } from "./artifactReferences"
+
+afterEach(() => vi.restoreAllMocks())
 
 it.each([null, {}, { output: { artifact_id: "orphan" } }, { parentToolCallId: 1, output: { artifact_id: "orphan" } }])(
   "ignores malformed helper artifact events: %j", (data) => {
@@ -10,3 +12,21 @@ it.each([null, {}, { output: { artifact_id: "orphan" } }, { parentToolCallId: 1,
     expect(messageArtifacts(message).size).toBe(0)
   },
 )
+
+it("does not reparse unchanged history during streaming updates", () => {
+  const history = { id: "history", role: "assistant", parts: [
+    { type: "tool-artifact_manager", toolCallId: "history-call", state: "output-available", input: {},
+      output: JSON.stringify({ artifact_id: "a", artifact_version: 1 }) },
+  ] } as UIMessage
+  const parse = vi.spyOn(JSON, "parse")
+  for (const text of ["Chart", "Chart is", "Chart is ready."]) {
+    const streaming = { id: "streaming", role: "assistant", parts: [{ type: "text", text }] } as UIMessage
+    expect(turnArtifactOwners([history, streaming]).get(history.id)?.has("a")).toBe(true)
+  }
+  expect(parse).toHaveBeenCalledTimes(1)
+  const updated = { ...history, parts: [{ ...history.parts[0],
+    output: JSON.stringify({ artifact_id: "a", artifact_version: 2 }),
+  }] } as UIMessage
+  expect(messageArtifacts(updated).get("a")?.version).toBe(2)
+  expect(parse).toHaveBeenCalledTimes(2)
+})

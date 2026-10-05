@@ -98,7 +98,13 @@ export function extractArtifactIdFromOutput(rawOutput: unknown): string | null {
   return null
 }
 
-export function messageArtifacts(message: UIMessage): Map<string, MessageArtifact> {
+// The chat SDK replaces changed parts arrays while preserving unchanged history.
+// Weak keys reuse parsed references without retaining removed conversations.
+const artifactCache = new WeakMap<UIMessage["parts"], ReadonlyMap<string, MessageArtifact>>()
+
+export function messageArtifacts(message: UIMessage): ReadonlyMap<string, MessageArtifact> {
+  const cached = artifactCache.get(message.parts)
+  if (cached) return cached
   const artifacts = new Map<string, MessageArtifact>()
   const parentIndices = new Map<string, number>()
   message.parts.forEach((part, index) => {
@@ -124,6 +130,7 @@ export function messageArtifacts(message: UIMessage): Map<string, MessageArtifac
     if (previous && (previous.version ?? 0) > (version ?? 0)) return
     artifacts.set(id, { id, version, afterIndex })
   })
+  artifactCache.set(message.parts, artifacts)
   return artifacts
 }
 
