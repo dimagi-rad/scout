@@ -12,7 +12,7 @@ from django.db import connection
 from django.test import AsyncClient
 from procrastinate.contrib.django.models import ProcrastinateJob
 
-from apps.agents.graph.base import (
+from apps.agents.graph.prompt_context import (
     _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE,
     _LOAD_STARTED_FOR_THIS_CHAT_GUIDANCE,
     _build_system_prompt,

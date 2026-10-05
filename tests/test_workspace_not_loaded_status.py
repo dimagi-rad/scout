@@ -9,7 +9,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 
-from apps.agents.graph.base import _fetch_semantic_model_context
+from apps.agents.graph.prompt_context import _fetch_semantic_model_context
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, load_physical_tables
 from apps.users.models import Tenant
 from apps.workspaces.models import (

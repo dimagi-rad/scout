@@ -8,7 +8,7 @@ the move is provably behaviour-preserving.
 
 import pytest
 
-from apps.agents.graph.base import _fetch_semantic_model_context
+from apps.agents.graph.prompt_context import _fetch_semantic_model_context
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.users.models import Tenant
 from apps.workspaces.models import (

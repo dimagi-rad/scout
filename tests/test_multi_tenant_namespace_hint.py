@@ -4,7 +4,10 @@ import re
 
 import pytest
 
-from apps.agents.graph.base import _MULTI_TENANT_NAMESPACE_HINT, _MULTI_TENANT_VIEW_NAME_EXAMPLE
+from apps.agents.graph.prompt_context import (
+    _MULTI_TENANT_NAMESPACE_HINT,
+    _MULTI_TENANT_VIEW_NAME_EXAMPLE,
+)
 from apps.common.identifiers import PG_MAX_IDENTIFIER_BYTES, sanitize_identifier, view_name
 from apps.workspaces.services.schema_manager import SchemaManager
 

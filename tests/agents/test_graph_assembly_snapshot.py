@@ -23,7 +23,8 @@ from langchain_core.tools import StructuredTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel
 
-from apps.agents.graph.base import _system_prompt_cache, build_agent_graph
+from apps.agents.graph.base import build_agent_graph
+from apps.agents.graph.prompt_context import _system_prompt_cache
 from apps.agents.llm_request import MAIN_AGENT_EFFORT, chat_model_kwargs
 from apps.agents.prompts.artifact_prompt import (
     ARTIFACT_PROMPT_ADDITION,

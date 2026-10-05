@@ -23,9 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from apps.agents.graph.base import (
-    _build_system_prompt,
-)
+from apps.agents.graph.prompt_context import _build_system_prompt
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
 from mcp_server.services.metadata import pipeline_list_tables

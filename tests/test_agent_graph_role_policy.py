@@ -6,15 +6,17 @@ import pytest
 from langchain_core.tools import StructuredTool
 
 from apps.agents.graph.base import (
-    _MULTI_TENANT_NAMESPACE_HINT,
     ESCALATION_MESSAGE,
     HEADLESS_ESCALATION_MESSAGE,
     READ_ONLY_ESCALATION_MESSAGE,
-    _build_system_prompt,
     _build_tools,
+    build_agent_graph,
+)
+from apps.agents.graph.prompt_context import (
+    _MULTI_TENANT_NAMESPACE_HINT,
+    _build_system_prompt,
     _fetch_semantic_model_context,
     _system_prompt_cache,
-    build_agent_graph,
 )
 from apps.agents.prompts.base_system import (
     BASE_SYSTEM_PROMPT,
