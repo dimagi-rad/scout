@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from allauth.account.models import EmailAddress
+from allauth.account.utils import get_request_param
 from allauth.socialaccount.providers.base import ProviderAccount
 from allauth.socialaccount.providers.oauth2.provider import OAuth2Provider
 
 from apps.users.providers.ocs.views import OCSOAuth2Adapter
+from apps.users.services import ocs_team_flow
+
+# Key in allauth's per-flow OAuth state naming the team Scout pinned the flow to.
+REQUESTED_TEAM_STATE_KEY = "ocs_requested_team"
 
 # Separates the OIDC subject from the team slug in a SocialAccount uid. Not a
 # character a slug or a subject can contain, so the split is unambiguous.
@@ -49,6 +54,36 @@ class OCSProvider(OAuth2Provider):
             "openid",
             "teams",
         ]
+
+    def requested_team(self, request) -> str:
+        return ocs_team_flow.valid_slug(get_request_param(request, "team"))
+
+    def get_auth_params_from_request(self, request, action):
+        """Pin the flow to one team when the SPA asks for it.
+
+        allauth's generic ``?auth_params=`` passthrough is dropped: a team pinned
+        through it would skip the claim check the callback makes for ``team``.
+        """
+        params = self.get_auth_params()
+        team = self.requested_team(request)
+        if team:
+            params.update({"team": team, "approval_prompt": "auto"})
+        return params
+
+    def get_redirect_from_request_kwargs(self, request):
+        kwargs = super().get_redirect_from_request_kwargs(request)
+        team = self.requested_team(request)
+        if team:
+            kwargs[REQUESTED_TEAM_STATE_KEY] = team
+        return kwargs
+
+    def redirect(self, request, process, next_url=None, data=None, **kwargs):
+        team = kwargs.get(REQUESTED_TEAM_STATE_KEY)
+        if team and request.user.is_authenticated:
+            request.session[ocs_team_flow.SESSION_KEY] = ocs_team_flow.note_started(
+                request.session.get(ocs_team_flow.SESSION_KEY), team
+            )
+        return super().redirect(request, process, next_url=next_url, data=data, **kwargs)
 
     def extract_uid(self, data: dict) -> str:
         """Identify the (user, team) pair the token authorises, not just the user.
