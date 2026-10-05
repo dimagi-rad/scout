@@ -8,8 +8,8 @@ CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
 
 def load_config(name: str) -> dict:
-    """Return the parsed config for ``name``. ERB tags only appear inside quoted
-    values, so the raw file parses as plain YAML."""
+    """Return the parsed config for ``name``. The raw files parse as plain YAML;
+    ERB values are read as literal strings."""
     return yaml.safe_load((CONFIG_DIR / name).read_text())
 
 
