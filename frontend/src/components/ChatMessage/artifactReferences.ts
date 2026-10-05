@@ -45,12 +45,14 @@ export function isFailedOutput(output: unknown): boolean {
     && ["error", "denied"].includes(output.status)
 }
 
+const SUCCESSFUL_HELPER_STATUSES = ["done", "ok", "success", "completed", "created", "updated", "replaced", "checked"]
+
 export function isUnsuccessfulHelperOutcome(output: unknown): boolean {
   // A data-model handoff can follow a published write: keep its card open
   // without suppressing the link to the artifact that was already created.
   return output !== null && typeof output === "object" && "status" in output
     && typeof output.status === "string"
-    && !["done", "ok", "success", "completed", "created", "updated", "replaced", "checked"].includes(output.status)
+    && !SUCCESSFUL_HELPER_STATUSES.includes(output.status.trim().toLowerCase())
 }
 
 export function getSubagentToolData(part: { type: string; data?: unknown }) {
