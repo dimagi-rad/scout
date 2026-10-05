@@ -241,3 +241,9 @@ describe("dimension series rendering", () => {
     expect(() => prepareCompactGraph({ ...base, ...changes }, [])).toThrow()
   })
 })
+
+
+it("retains inferred count-axis semantics for dimension series", () => {
+  const { tree } = prepareCompactGraph({ chart_type: "bar", x_key: "date", y_key: "visits_count", series_by: "segment" }, [{ date: "a", segment: "A", visits_count: 2 }])
+  expect(tree.children?.find((node) => node.type === "YAxis")?.props).toMatchObject({ allowDecimals: false, domain: [0, "dataMax"] })
+})

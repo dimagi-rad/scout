@@ -197,9 +197,6 @@ export interface CompactGraphConfig {
 
 export function prepareCompactGraph(config: CompactGraphConfig, rows: Row[]): { rows: Row[]; tree: RechartsNode } {
   if (!("series_by" in config)) {
-    if ("series" in config && (config.series === undefined || (Array.isArray(config.series) && config.series.length === 0))) {
-      throw new Error("series must be a non-empty array; use series_by for long-format data")
-    }
     return { rows, tree: compileCompactGraphConfig(config) }
   }
   if (
@@ -221,19 +218,18 @@ export function prepareCompactGraph(config: CompactGraphConfig, rows: Row[]): { 
     tree: compileCompactGraphConfig({
       ...config,
       series: pivot.series.length ? pivot.series : undefined,
-      y_format: config.y_format ?? inferSeriesFormat([{ data_key: config.y_key }]),
-    }),
+    }, config.y_key),
   }
 }
 
-export function compileCompactGraphConfig(config: CompactGraphConfig): RechartsNode {
+export function compileCompactGraphConfig(config: CompactGraphConfig, measureKey?: string): RechartsNode {
   const chartType = config.chart_type ?? "line"
   if (!["line", "bar", "area", "pie", "donut"].includes(chartType)) {
     throw new Error(`Unsupported compact chart type "${chartType}"`)
   }
   const xKey = config.x_key ?? "date"
   const series = normalizeGraphSeries(config.series, config.y_key, config.data_label)
-  const yFormatName = config.y_format ?? inferSeriesFormat(series)
+  const yFormatName = config.y_format ?? inferSeriesFormat(measureKey ? [{ data_key: measureKey }] : series)
   const hasCountSemantic = config.y_format === undefined && yFormatName === "number_0"
   const yFormat = (value: unknown) => formatValue(value, yFormatName)
   const palette = namedPalette(config.palette)
@@ -630,8 +626,6 @@ function resolveDataProp(type: string, value: unknown, rows: Row[]): unknown {
   }
   throw new Error(`Recharts ${type} props.data must be an array; omit props.data to use block rows`)
 }
-
-
 
 const CATEGORY_TICK_FONT_SIZE = 11
 const CATEGORY_TICK_CHAR_WIDTH = 6.2
