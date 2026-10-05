@@ -2191,7 +2191,6 @@ TRANSPORT_SECURITY = TransportSecuritySettings(
         "localhost:*",
         "[::1]:*",
         "scout-mcp-web:*",
-        "scout-staging-mcp-web:*",
         "mcp-server",
         "mcp-server:*",
     ],

@@ -1,4 +1,4 @@
-"""CommCare Connect OAuth follows the selected deployment environment."""
+"""CommCare Connect OAuth follows the configured CONNECT_API_URL."""
 
 from urllib.parse import parse_qs, urlparse
 
@@ -9,8 +9,8 @@ from django.test import override_settings
 
 
 @pytest.mark.django_db
-@override_settings(CONNECT_API_URL="https://connect-staging.dimagi.com")
-def test_connect_login_redirects_to_staging(client):
+@override_settings(CONNECT_API_URL="https://connect.example.invalid")
+def test_connect_login_redirects_to_configured_host(client):
     site, _ = Site.objects.update_or_create(
         id=1,
         defaults={"domain": "testserver", "name": "Test Server"},
@@ -18,8 +18,8 @@ def test_connect_login_redirects_to_staging(client):
     app = SocialApp.objects.create(
         provider="commcare_connect",
         name="CommCare Connect",
-        client_id="staging-client-id",
-        secret="staging-client-secret",
+        client_id="connect-client-id",
+        secret="connect-client-secret",
     )
     app.sites.add(site)
 
@@ -29,8 +29,8 @@ def test_connect_login_redirects_to_staging(client):
     location = response.headers["Location"]
     parsed = urlparse(location)
     assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == (
-        "https://connect-staging.dimagi.com/o/authorize/"
+        "https://connect.example.invalid/o/authorize/"
     )
     params = parse_qs(parsed.query)
-    assert params["client_id"] == ["staging-client-id"]
+    assert params["client_id"] == ["connect-client-id"]
     assert params["redirect_uri"] == ["http://testserver/accounts/commcare_connect/login/callback/"]
