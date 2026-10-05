@@ -16,7 +16,7 @@ pin the structural pieces that make the bug impossible by construction:
 
 import pytest
 
-from apps.agents.graph.base import _build_system_prompt
+from apps.agents.graph.prompt_context import _build_system_prompt
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 
 

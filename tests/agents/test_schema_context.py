@@ -6,11 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from django.utils import timezone
 
-from apps.agents.graph import base as graph_base
-from apps.agents.graph.base import (
-    _build_system_prompt,
-    _fetch_semantic_model_context,
-)
+from apps.agents.graph import prompt_context
+from apps.agents.graph.prompt_context import _build_system_prompt, _fetch_semantic_model_context
 from apps.chat.models import Thread, ThreadJob
 from apps.semantic.models import SemanticModel
 from apps.users.models import Tenant
@@ -242,7 +239,7 @@ async def test_semantic_context_completed_run_does_not_hide_active_model(workspa
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("interactive", [True, False])
 async def test_prompt_availability_changes_within_cache_ttl(workspace, tenant, user, interactive):
-    graph_base._system_prompt_cache.clear()
+    prompt_context._system_prompt_cache.clear()
     schema = await TenantSchema.objects.acreate(
         tenant=tenant, schema_name="prompt_transition", state=SchemaState.ACTIVE
     )
@@ -250,11 +247,11 @@ async def test_prompt_availability_changes_within_cache_ttl(workspace, tenant, u
         workspace=workspace, name="Existing model", status=SemanticModel.Status.ACTIVE
     )
     with (
-        patch.object(graph_base, "time", MagicMock(monotonic=MagicMock(return_value=100))),
-        patch("apps.agents.graph.base.KnowledgeRetriever") as retriever,
+        patch.object(prompt_context, "time", MagicMock(monotonic=MagicMock(return_value=100))),
+        patch("apps.agents.graph.prompt_context.KnowledgeRetriever") as retriever,
     ):
         retriever.return_value.retrieve = AsyncMock(return_value="Knowledge")
-        stable, ready = await graph_base._build_system_prompt(
+        stable, ready = await prompt_context._build_system_prompt(
             workspace, user, interactive, write_capable=True
         )
         run = await MaterializationRun.objects.acreate(
@@ -262,13 +259,13 @@ async def test_prompt_availability_changes_within_cache_ttl(workspace, tenant, u
             pipeline="commcare_sync",
             state=MaterializationRun.RunState.LOADING,
         )
-        stable_loading, loading = await graph_base._build_system_prompt(
+        stable_loading, loading = await prompt_context._build_system_prompt(
             workspace, user, interactive, write_capable=True
         )
         await MaterializationRun.objects.filter(pk=run.pk).aupdate(
             state=MaterializationRun.RunState.COMPLETED
         )
-        stable_done, done = await graph_base._build_system_prompt(
+        stable_done, done = await prompt_context._build_system_prompt(
             workspace, user, interactive, write_capable=True
         )
 
@@ -279,7 +276,7 @@ async def test_prompt_availability_changes_within_cache_ttl(workspace, tenant, u
     assert "in progress" not in done.lower()
     assert stable == stable_loading == stable_done
     retriever.return_value.retrieve.assert_awaited_once()
-    graph_base._system_prompt_cache.clear()
+    prompt_context._system_prompt_cache.clear()
 
 
 @pytest.mark.asyncio
@@ -293,12 +290,15 @@ async def test_build_system_prompt_no_schema_status_call():
     mock_workspace.tenants.aexists = AsyncMock(return_value=True)
 
     with (
-        patch("apps.agents.graph.base.KnowledgeRetriever") as MockKR,
+        patch("apps.agents.graph.prompt_context.KnowledgeRetriever") as MockKR,
         patch(
-            "apps.agents.graph.base._fetch_semantic_model_context",
+            "apps.agents.graph.prompt_context._fetch_semantic_model_context",
             new=AsyncMock(return_value="Data is loaded. Use `list_datasets`."),
         ),
-        patch("apps.agents.graph.base.aworkspace_source_freshness", AsyncMock(return_value=[])),
+        patch(
+            "apps.agents.graph.prompt_context.aworkspace_source_freshness",
+            AsyncMock(return_value=[]),
+        ),
     ):
         MockKR.return_value.retrieve = AsyncMock(return_value="")
 
@@ -340,9 +340,9 @@ async def test_build_system_prompt_multi_tenant_no_data_pre_fetched():
     ws.tenants.all.return_value = _AsyncIter([MagicMock(id="aa"), MagicMock(id="bb")])
 
     with (
-        patch("apps.agents.graph.base.KnowledgeRetriever") as MockKR,
+        patch("apps.agents.graph.prompt_context.KnowledgeRetriever") as MockKR,
         patch(
-            "apps.agents.graph.base._fetch_semantic_model_context",
+            "apps.agents.graph.prompt_context._fetch_semantic_model_context",
             new=AsyncMock(
                 return_value=(
                     "No data has been loaded yet. Call `run_materialization` to start loading."
@@ -371,7 +371,7 @@ async def test_build_system_prompt_multi_tenant_no_data_pre_fetched():
 async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
     workspace, tenant, user, interactive, coverage_kind
 ):
-    graph_base._system_prompt_cache.clear()
+    prompt_context._system_prompt_cache.clear()
     missing = await Tenant.objects.acreate(provider="commcare", external_id="missing-domain")
     await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=missing)
     view = await WorkspaceViewSchema.objects.acreate(
@@ -398,15 +398,15 @@ async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
     elif coverage_kind == "absent":
         await view.adelete()
     with (
-        patch("apps.agents.graph.base.time.monotonic", return_value=100),
-        patch("apps.agents.graph.base.KnowledgeRetriever") as retriever,
+        patch("apps.agents.graph.prompt_context.time.monotonic", return_value=100),
+        patch("apps.agents.graph.prompt_context.KnowledgeRetriever") as retriever,
         patch(
-            "apps.agents.graph.base._fetch_semantic_model_context",
+            "apps.agents.graph.prompt_context._fetch_semantic_model_context",
             AsyncMock(return_value="Data is loaded and ready."),
         ),
     ):
         retriever.return_value.retrieve = AsyncMock(return_value="Knowledge")
-        stable, degraded = await graph_base._build_system_prompt(
+        stable, degraded = await prompt_context._build_system_prompt(
             workspace, user, interactive, write_capable=True
         )
         await WorkspaceViewSchema.objects.filter(pk=view.pk).aupdate(
@@ -415,7 +415,7 @@ async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
                 "excluded_tenants": [],
             }
         )
-        stable_again, recovered = await graph_base._build_system_prompt(
+        stable_again, recovered = await prompt_context._build_system_prompt(
             workspace, user, interactive, write_capable=True
         )
     if coverage_kind == "malformed":
@@ -430,7 +430,7 @@ async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
     assert "missing-domain" not in recovered
     assert stable == stable_again
     retriever.return_value.retrieve.assert_awaited_once()
-    graph_base._system_prompt_cache.clear()
+    prompt_context._system_prompt_cache.clear()
 
 
 @pytest.mark.asyncio
@@ -536,15 +536,15 @@ async def test_unresolvable_pipeline_asks_for_an_admin_instead_of_a_rerun(
 def _expected_load_guidance(state, *, interactive, write_capable):
     if state == SchemaState.ACTIVE:
         if write_capable and interactive:
-            return graph_base._SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE
+            return prompt_context._SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE
         if write_capable:
-            return graph_base._HEADLESS_LOADED_REBUILD_GUIDANCE
-        return graph_base._READ_ONLY_LOADED_SQL_GUIDANCE
+            return prompt_context._HEADLESS_LOADED_REBUILD_GUIDANCE
+        return prompt_context._READ_ONLY_LOADED_SQL_GUIDANCE
     if not write_capable:
-        return graph_base._READ_ONLY_MATERIALIZE_GUIDANCE
+        return prompt_context._READ_ONLY_MATERIALIZE_GUIDANCE
     if interactive:
-        return graph_base._INTERACTIVE_MATERIALIZE_GUIDANCE
-    return graph_base._HEADLESS_MATERIALIZE_GUIDANCE
+        return prompt_context._INTERACTIVE_MATERIALIZE_GUIDANCE
+    return prompt_context._HEADLESS_MATERIALIZE_GUIDANCE
 
 
 @pytest.mark.asyncio

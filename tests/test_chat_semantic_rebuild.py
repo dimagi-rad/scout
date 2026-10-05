@@ -18,8 +18,8 @@ from django.test import AsyncClient
 from django.utils import timezone
 from procrastinate.contrib.django.models import ProcrastinateJob
 
-from apps.agents.graph import base as graph_base
-from apps.agents.graph.base import _fetch_semantic_model_context
+from apps.agents.graph import prompt_context
+from apps.agents.graph.prompt_context import _fetch_semantic_model_context
 from apps.common.capacity import CapacityExhausted, CapacityResource
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.semantic.services.cube_schema import CubeSchemaBuildError
@@ -267,9 +267,9 @@ async def test_the_agent_is_never_sent_to_a_reload_for_the_data_model(rebuilding
     assert "Do NOT call `run_materialization`" in context
     assert "approve a reload" in context
     expected = (
-        graph_base._SEMANTIC_REBUILDING_GUIDANCE
+        prompt_context._SEMANTIC_REBUILDING_GUIDANCE
         if rebuilding
-        else graph_base._SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE
+        else prompt_context._SEMANTIC_REBUILD_NOT_RUNNING_GUIDANCE
     )
     assert expected in context
     assert ("ask again once it has" in context) is rebuilding
@@ -336,7 +336,7 @@ async def test_an_unsafe_snapshot_still_points_the_agent_at_a_refresh():
 
     context = await _fetch_semantic_model_context(ws, interactive=True, write_capable=True)
 
-    assert graph_base._LOADED_NEEDS_RELOAD_GUIDANCE in context
+    assert prompt_context._LOADED_NEEDS_RELOAD_GUIDANCE in context
     assert "being rebuilt" not in context
 
 
@@ -350,7 +350,7 @@ async def test_a_reloading_recovery_is_not_described_as_a_rebuild():
 
     context = await _fetch_semantic_model_context(ws, interactive=True, write_capable=True)
 
-    assert graph_base._INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE in context
+    assert prompt_context._INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE in context
     assert "reloads nothing" not in context
 
 

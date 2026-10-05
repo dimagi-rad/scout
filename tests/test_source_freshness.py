@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from django.utils import timezone
 
-from apps.agents.graph import base as graph_base
+from apps.agents.graph import prompt_context
 from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant
 from apps.users.services.credential_resolver import CredentialResolutionError
@@ -159,10 +159,10 @@ async def test_prompt_names_the_stale_source_and_says_reconnect(
 ):
     await _expired_hq_load(workspace, tenant, user, month_ago)
     with patch(
-        "apps.agents.graph.base._fetch_semantic_model_context",
+        "apps.agents.graph.prompt_context._fetch_semantic_model_context",
         AsyncMock(return_value="Data is loaded and ready."),
     ):
-        _stable, volatile = await graph_base._build_system_prompt(
+        _stable, volatile = await prompt_context._build_system_prompt(
             workspace, user, write_capable=write_capable
         )
 
@@ -358,10 +358,10 @@ async def test_prompt_says_when_a_stale_source_is_left_out_of_the_queryable_data
         },
     )
     with patch(
-        "apps.agents.graph.base._fetch_semantic_model_context",
+        "apps.agents.graph.prompt_context._fetch_semantic_model_context",
         AsyncMock(return_value="Data is loaded and ready."),
     ):
-        _stable, volatile = await graph_base._build_system_prompt(
+        _stable, volatile = await prompt_context._build_system_prompt(
             workspace, user, write_capable=True
         )
 

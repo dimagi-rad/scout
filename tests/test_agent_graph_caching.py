@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from apps.agents.graph.base import _build_system_prompt, _system_prompt_cache
+from apps.agents.graph.prompt_context import _build_system_prompt, _system_prompt_cache
 
 
 @pytest.mark.asyncio
@@ -24,7 +24,7 @@ async def test_system_prompt_is_cached_across_calls():
     user = MagicMock()
     user.id = "test-user-id"
 
-    with patch("apps.agents.graph.base.KnowledgeRetriever") as MockRetriever:
+    with patch("apps.agents.graph.prompt_context.KnowledgeRetriever") as MockRetriever:
         mock_retriever = MagicMock()
         mock_retriever.retrieve = AsyncMock(return_value="knowledge context")
         MockRetriever.return_value = mock_retriever
@@ -51,7 +51,7 @@ async def test_system_prompt_cache_invalidates_on_prompt_change():
 
     user = MagicMock()
 
-    with patch("apps.agents.graph.base.KnowledgeRetriever") as MockRetriever:
+    with patch("apps.agents.graph.prompt_context.KnowledgeRetriever") as MockRetriever:
         mock_retriever = MagicMock()
         mock_retriever.retrieve = AsyncMock(return_value="")
         MockRetriever.return_value = mock_retriever
@@ -81,7 +81,7 @@ async def test_system_prompt_cache_separates_canvas_write_mode():
     user = MagicMock()
     user.id = "test-user-id"
 
-    with patch("apps.agents.graph.base.KnowledgeRetriever") as MockRetriever:
+    with patch("apps.agents.graph.prompt_context.KnowledgeRetriever") as MockRetriever:
         mock_retriever = MagicMock()
         mock_retriever.retrieve = AsyncMock(return_value="")
         MockRetriever.return_value = mock_retriever

@@ -21,7 +21,8 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from apps.agents.graph import base as graph_base
-from apps.agents.graph.base import PROMPT_CACHE_CONTROL, _build_cached_system_message
+from apps.agents.graph import prompt_context
+from apps.agents.graph.prompt_context import PROMPT_CACHE_CONTROL, _build_cached_system_message
 from apps.agents.graph.state import DEFAULT_MAX_MESSAGES, prune_messages
 
 
@@ -39,7 +40,7 @@ async def test_system_prompt_split_into_stable_and_volatile(monkeypatch):
     The stable section holds the frozen base prompt + knowledge; the volatile
     section holds tenant context / schema availability (row counts, timestamps).
     """
-    graph_base._system_prompt_cache.clear()
+    prompt_context._system_prompt_cache.clear()
     workspace = MagicMock()
     workspace.id = "ws-split"
     workspace.system_prompt = "WS instructions"
@@ -49,12 +50,12 @@ async def test_system_prompt_split_into_stable_and_volatile(monkeypatch):
     user = MagicMock()
     user.id = "u1"
 
-    with patch("apps.agents.graph.base.KnowledgeRetriever") as MockRetriever:
+    with patch("apps.agents.graph.prompt_context.KnowledgeRetriever") as MockRetriever:
         mock_retriever = MagicMock()
         mock_retriever.retrieve = AsyncMock(return_value="## Knowledge Base\n\nMetric X")
         MockRetriever.return_value = mock_retriever
 
-        stable, volatile = await graph_base._build_system_prompt(workspace, user)
+        stable, volatile = await prompt_context._build_system_prompt(workspace, user)
 
     assert isinstance(stable, str)
     assert isinstance(volatile, str)
@@ -70,7 +71,7 @@ async def test_volatile_schema_not_in_stable_prefix(monkeypatch):
     Caching keys off exact prefix bytes; a per-materialization row count in the
     cached prefix would defeat every cache hit (02#3 prefix-stability half).
     """
-    graph_base._system_prompt_cache.clear()
+    prompt_context._system_prompt_cache.clear()
     workspace = MagicMock()
     workspace.id = "ws-vol"
     workspace.system_prompt = ""
@@ -89,16 +90,19 @@ async def test_volatile_schema_not_in_stable_prefix(monkeypatch):
     schema_block = "Data is loaded. Last updated: 2026-06-25. cases (1,234 rows)"
 
     with (
-        patch("apps.agents.graph.base.KnowledgeRetriever") as MockRetriever,
+        patch("apps.agents.graph.prompt_context.KnowledgeRetriever") as MockRetriever,
         patch(
-            "apps.agents.graph.base._fetch_semantic_model_context",
+            "apps.agents.graph.prompt_context._fetch_semantic_model_context",
             new=AsyncMock(return_value=schema_block),
         ),
-        patch("apps.agents.graph.base.aworkspace_source_freshness", AsyncMock(return_value=[])),
+        patch(
+            "apps.agents.graph.prompt_context.aworkspace_source_freshness",
+            AsyncMock(return_value=[]),
+        ),
     ):
         MockRetriever.return_value = MagicMock(retrieve=AsyncMock(return_value=""))
 
-        stable, volatile = await graph_base._build_system_prompt(workspace, user)
+        stable, volatile = await prompt_context._build_system_prompt(workspace, user)
 
     # The volatile schema text (row counts + timestamp) is NOT in the cached prefix.
     assert "1,234 rows" not in stable
