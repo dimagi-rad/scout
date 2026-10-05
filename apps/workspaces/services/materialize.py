@@ -910,7 +910,7 @@ async def materialize_workspace(
     only_unserved: bool = False,
     notify_thread: bool = True,
 ) -> dict:
-    """Procrastinate task: run materialization for a workspace, then ALWAYS
+    """Body of the materialize_workspace task: run materialization, then ALWAYS
     defer the chat-resume task so an interactive user is never left with a
     phantom spinner — even on early-return paths (workspace missing, no
     memberships) where the per-tenant loop never executed.
