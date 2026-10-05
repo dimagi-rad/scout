@@ -205,6 +205,16 @@ class TestConnectByPost:
 
         assert _stashed_state(csrf_client).get("next") is None
 
+    def test_anonymous_sign_in_post_redirects_to_provider(self, ocs_app):
+        client = Client(enforce_csrf_checks=True)
+        client.get("/api/auth/csrf/")
+        token = client.cookies[settings.CSRF_COOKIE_NAME].value
+        response = client.post(OCS_LOGIN, {"csrfmiddlewaretoken": token, "next": "/"})
+
+        assert response.status_code == 302
+        assert response["Location"].startswith(f"{settings.OCS_URL}/o/authorize/")
+        assert _stashed_state(client)["process"] == "login"
+
     def test_post_without_token_is_rejected(self, ocs_app, csrf_client):
         response = csrf_client.post(OCS_LOGIN, {"process": "connect", "next": "/connections"})
 
