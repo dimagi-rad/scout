@@ -24,14 +24,20 @@ export function pivotSeriesRows(rows: Row[], { xKey, yKey, seriesBy, fillMissing
     if (dimension !== null && !["string", "number", "boolean"].includes(typeof dimension)) {
       throw new Error(`series_by field "${seriesBy}" must contain scalar values or null`)
     }
-    const raw = row[yKey]
-    const value = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN
-    if (!Number.isFinite(value)) throw new Error(`Series measure "${yKey}" must contain finite numeric values`)
-    totals.set(dimension, (totals.get(dimension) ?? 0) + value)
     const x = row[xKey]
     const group = groups.get(x) ?? new Map<unknown, number>()
-    group.set(dimension, (group.get(dimension) ?? 0) + value)
     groups.set(x, group)
+    const raw = row[yKey]
+    if (raw === null) {
+      if (!totals.has(dimension)) totals.set(dimension, 0)
+      continue
+    }
+    let value = NaN
+    if (typeof raw === "number") value = raw
+    if (typeof raw === "string" && raw.trim() !== "") value = Number(raw)
+    if (!Number.isFinite(value)) throw new Error(`Series measure "${yKey}" must contain finite numeric values`)
+    totals.set(dimension, (totals.get(dimension) ?? 0) + value)
+    group.set(dimension, (group.get(dimension) ?? 0) + value)
   }
 
   const capped = totals.size > MAX_DIMENSION_SERIES
@@ -47,10 +53,13 @@ export function pivotSeriesRows(rows: Row[], { xKey, yKey, seriesBy, fillMissing
     labels.add(label)
     return label
   }
-  const series: GraphSeries[] = dimensions.map((dimension, index) => ({
-    data_key: generatedKey(index, xKey),
-    label: dimension === null ? uniqueLabel("(Missing)") : typeof dimension === "string" ? dimension : uniqueLabel(String(dimension)),
-  }))
+  const series: GraphSeries[] = dimensions.map((dimension, index) => {
+    let label: string
+    if (dimension === null) label = uniqueLabel("(Missing)")
+    else if (typeof dimension === "string") label = dimension
+    else label = uniqueLabel(String(dimension))
+    return { data_key: generatedKey(index, xKey), label }
+  })
   if (capped) {
     series.push({
       data_key: generatedKey(series.length, xKey),

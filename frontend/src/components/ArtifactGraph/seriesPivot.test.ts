@@ -68,11 +68,31 @@ describe("long-format series pivot", () => {
     expect(pivotSeriesRows([], options)).toEqual({ rows: [], series: [] })
   })
 
-  it.each([null, "", "invalid", Infinity, true])("rejects non-numeric measures (%s) instead of silently changing totals", (count) => {
+  it.each(["", "invalid", Infinity, true])("rejects non-numeric measures (%s) instead of silently changing totals", (count) => {
     expect(() => pivotSeriesRows([{ week: "a", segment: "A", count }], options)).toThrow("numeric")
   })
 
   it("rejects missing fields in any row", () => {
     expect(() => pivotSeriesRows([{ week: "a", segment: "A", count: 1 }, { week: "b", count: 2 }], options)).toThrow("segment")
   })
+})
+
+
+it.each([true, false])("preserves null measures as missing combinations (fillMissing=%s)", (fillMissing) => {
+  const result = pivotSeriesRows([
+    { week: "a", segment: "A", count: null },
+    { week: "b", segment: "B", count: 2 },
+    { week: "b", segment: "B", count: null },
+  ], { ...options, fillMissing })
+  const [a, b] = result.series.map((s) => s.data_key)
+  expect(result.rows).toEqual([
+    { week: "a", [a]: fillMissing ? 0 : null, [b]: fillMissing ? 0 : null },
+    { week: "b", [a]: fillMissing ? 0 : null, [b]: 2 },
+  ])
+})
+
+it("keeps Other as a gap when its contributing measures are all null", () => {
+  const rows = Array.from({ length: 6 }, (_, i) => ({ week: "a", segment: `S${i}`, count: 6 - i }))
+  const result = pivotSeriesRows([...rows, { week: "b", segment: "S5", count: null }], { ...options, fillMissing: false })
+  expect(result.rows[1][result.series[4].data_key]).toBeNull()
 })

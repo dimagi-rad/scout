@@ -194,7 +194,8 @@ bind that query output to a graph with this config:
 `series_by` is supported on compact bar, area and line charts. It requires
 explicit `x_key` and `y_key`; do not combine it with `series` or `recharts`.
 Dimension values become legend and hover labels. Duplicate (x, dimension)
-pairs are summed, so use additive measures. Missing bars and stacked areas
+pairs are summed, so use additive measures. Null measures are treated as missing.
+Missing bars and stacked areas
 use zero; lines and unstacked areas have gaps. At most five series render;
 high cardinality uses the four largest totals plus an aggregated Other series.
 Omit `stacked` for grouped bars. When you cannot verify a visual property,
