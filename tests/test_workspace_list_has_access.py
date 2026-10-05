@@ -19,7 +19,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.services.credential_coverage import CoverageRecovery
+from apps.workspaces.services.credential_coverage import CoverageRecovery, member_coverage_gaps
 from tests.tenant_access import grant_ocs_team_access, ocs_team_connection
 
 
@@ -131,8 +131,11 @@ def test_deleted_connection_no_longer_needs_reconnect(client, user, team_slug):
 
 
 @pytest.mark.django_db
-def test_provider_wide_disconnect_no_longer_needs_reconnect(client, user):
-    ws = _ocs_workspace(user, "bot-signed-out", ocs_team_connection(user, "acme"))
+@pytest.mark.parametrize("team_slug", [None, ""], ids=["team", "pre-team"])
+def test_provider_wide_disconnect_no_longer_needs_reconnect(client, user, team_slug):
+    ws = _ocs_workspace(
+        user, f"bot-signed-out-{team_slug}", ocs_team_connection(user, "acme"), team_slug=team_slug
+    )
     client.force_login(user)
 
     assert client.post("/api/auth/providers/ocs/disconnect/").status_code == 200
@@ -182,3 +185,40 @@ def test_removed_upstream_or_never_connected_does_not_need_reconnect(client, use
 def test_accessible_workspace_does_not_need_reconnect(client, user, workspace):
     client.force_login(user)
     assert _entry(client.get("/api/workspaces/"), workspace.id)["needs_reconnect"] is False
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("keep_connection", [True, False])
+def test_tombstone_is_disconnected_only_once_its_connection_is_gone(user, keep_connection):
+    connection = ocs_team_connection(user, "acme")
+    tenant = Tenant.objects.create(provider="ocs", external_id="bot-x", canonical_name="Bot X")
+    grant_ocs_team_access(user, tenant, connection)
+    TenantMembership.objects.filter(user=user).update(
+        archived_at=timezone.now(), **({} if keep_connection else {"connection": None})
+    )
+
+    (missing,) = member_coverage_gaps(user.pk, [tenant]).values()
+
+    assert missing.disconnected is not keep_connection
+    assert "disconnected" not in missing.as_dict()
+
+
+@pytest.mark.django_db
+def test_any_of_rule_needs_one_reconnectable_source(settings, client, user):
+    settings.WORKSPACE_ACCESS_REQUIRES_EVERY_TENANT = False
+    connection = ocs_team_connection(user, "acme")
+    legacy = Tenant.objects.create(provider="ocs", external_id="bot-l", canonical_name="Bot L")
+    gone = Tenant.objects.create(provider="ocs", external_id="bot-g", canonical_name="Bot G")
+    grant_ocs_team_access(user, legacy, connection, team_slug="")
+    grant_ocs_team_access(user, gone, connection)
+    TenantMembership.objects.filter(user=user).update(archived_at=timezone.now())
+    ws = Workspace.objects.create(name="Mixed", created_by=user)
+    for tenant in (legacy, gone):
+        WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
+    WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+
+    client.force_login(user)
+    entry = _entry(client.get("/api/workspaces/"), ws.id)
+
+    assert entry["has_access"] is False
+    assert entry["needs_reconnect"] is True

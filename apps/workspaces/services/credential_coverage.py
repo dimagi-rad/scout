@@ -710,13 +710,13 @@ def _gaps_by_pair(readiness, removed_pairs) -> dict[tuple[int, str], MissingTena
         and credential_type != TenantConnection.API_KEY
         for user_id, tenant_id, team_slug, team_name, credential_type, _conn in removed_pairs
     }
-    # Deleting a connection nulls its tombstones' link (SET_NULL), whatever archived them.
-    still_connected = {
+    # Deleting a connection nulls its tombstones' link (SET_NULL), whatever archived
+    # them; (user, tenant) is unique, so each pair has at most one tombstone.
+    disconnected = {
         (user_id, str(tenant_id))
         for user_id, tenant_id, *_rest, connection_id in removed_pairs
-        if connection_id is not None
+        if connection_id is None
     }
-    disconnected = removed.keys() - still_connected
     return {
         (item.user_id, item.tenant_id): _missing_tenant(item, removed, disconnected)
         for item in readiness

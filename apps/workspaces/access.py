@@ -249,11 +249,13 @@ def reconnect_restores_access(missing) -> bool:
     """Whether reconnecting the member's existing connections would clear ``missing``.
 
     A source whose connection the member deleted never qualifies: they chose to
-    drop it, so its workspaces are not something to keep nagging them about.
+    drop it, so its workspaces are not something to keep nagging them about. Under
+    any-of, one restored source is enough.
     """
-    return bool(missing) and all(
-        t.recovery in _RECONNECTABLE and not t.disconnected for t in missing
-    )
+    fixable = [t.recovery in _RECONNECTABLE and not t.disconnected for t in missing]
+    if not fixable:
+        return False
+    return all(fixable) if all_of_access_enforced() else any(fixable)
 
 
 def missing_tenants_payload(missing) -> list[dict]:
