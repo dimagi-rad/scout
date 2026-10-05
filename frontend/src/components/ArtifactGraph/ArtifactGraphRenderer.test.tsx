@@ -6,7 +6,7 @@ import { api } from "@/api/client"
 
 import { ArtifactGraphRenderer } from "./ArtifactGraphRenderer"
 import { buildSemanticQueryInput } from "./runtime"
-import type { ArtifactDetail } from "./types"
+import type { ArtifactDetail, ResolvedQuery } from "./types"
 
 vi.mock("@/api/client", () => ({
   api: {
@@ -578,5 +578,13 @@ describe("query-local date ranges", () => {
     render(<ArtifactGraphRenderer artifact={doc} workspaceId="workspace-1" />)
     await waitFor(() => expect(mockedPost).toHaveBeenCalled())
     expect(mockedPost.mock.calls[0][1]).toMatchObject(query)
+  })
+})
+
+
+describe("malformed query-local ranges", () => {
+  it.each([null, "last_30_days", 24, true, []])("rejects %j with a date-range diagnostic", (range) => {
+    const query = { time_dimension: "visits.visit_date", date_range: range } as unknown as ResolvedQuery
+    expect(() => buildSemanticQueryInput(query)).toThrow("date_range must be an object")
   })
 })

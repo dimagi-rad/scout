@@ -120,9 +120,7 @@ export interface SemanticQuerySpec {
   query_context?: { as_of: string; timezone: string }
 }
 
-export interface ResolvedQuery extends SemanticQuerySpec {
-  date_range?: QueryDateRange
-}
+export type ResolvedQuery = SemanticQuerySpec
 
 export interface OutputState {
   status: OutputStatus

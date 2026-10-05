@@ -778,8 +778,9 @@ async function evaluateSemanticQuery({
         outputs[name] = current
         outputs[`${name}_previous`] = previous
       } else {
-        buildSemanticQueryInput({ ...query, date_range: dateRange ?? query.date_range })
-        outputs[name] = await ctx.runQuery({ ...query, date_range: dateRange ?? query.date_range }, { signal })
+        const resolved = { ...query, date_range: dateRange ?? query.date_range }
+        buildSemanticQueryInput(resolved)
+        outputs[name] = await ctx.runQuery(resolved, { signal })
       }
     }),
   )
