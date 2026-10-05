@@ -42,7 +42,17 @@ export function parseOutput(output: unknown): unknown {
 export function isFailedOutput(output: unknown): boolean {
   return output !== null && typeof output === "object" && "status" in output
     && typeof output.status === "string"
-    && ["error", "denied", "blocked", "needs_data_model", "invalid_data_requirements"].includes(output.status)
+    && ["error", "denied"].includes(output.status)
+}
+
+export function isUnsuccessfulHelperOutcome(output: unknown): boolean {
+  // A data-model handoff can follow a published write: keep its card open
+  // without suppressing the link to the artifact that was already created.
+  return isFailedOutput(output) || (
+    output !== null && typeof output === "object" && "status" in output
+    && typeof output.status === "string"
+    && ["blocked", "needs_data_model", "invalid_data_requirements"].includes(output.status)
+  )
 }
 
 export function getSubagentToolData(part: { type: string; data?: unknown }) {

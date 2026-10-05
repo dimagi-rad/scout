@@ -1,4 +1,4 @@
-import { extractArtifactIdFromOutput, getSubagentToolData, isFailedOutput, messageArtifacts, parseOutput } from "./artifactReferences"
+import { extractArtifactIdFromOutput, getSubagentToolData, isUnsuccessfulHelperOutcome, messageArtifacts, parseOutput } from "./artifactReferences"
 import { Fragment, useState, type ComponentPropsWithoutRef } from "react"
 import { Link, useInRouterContext } from "react-router-dom"
 import type { UIMessage } from "ai"
@@ -461,7 +461,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   const helperOutput = isSubagentCard && hasOutput ? parseOutput(part.output) : null
   const helperUnstructuredOutput = isSubagentCard && hasOutput
     && (helperOutput === null || typeof helperOutput !== "object" || Array.isArray(helperOutput))
-  const helperFailed = isErrored || helperUnstructuredOutput || isFailedOutput(helperOutput)
+  const helperFailed = isErrored || helperUnstructuredOutput || isUnsuccessfulHelperOutcome(helperOutput)
 
   // Scope the job to THIS tool-call card via toolCallId, else the progress block
   // and Stop button would render on every historical run_materialization card.

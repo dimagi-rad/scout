@@ -466,3 +466,10 @@ it("keeps earlier artifact tool activity when its button is deduplicated", () =>
   expect(screen.getAllByTestId("chat-artifact-shared-artifact")).toHaveLength(1)
   expect(screen.getByTestId("tool-call-artifact_graph_overview")).toBeInTheDocument()
 })
+
+it.each(["needs_data_model", "invalid_data_requirements"])("keeps published artifacts visible alongside %s handoffs", (status) => {
+  const message = liveMessage("artifact_manager", { status, artifact_id: "published", ui_path: "/workspaces/w/artifacts/published" })
+  render(<ChatMessage message={message} isActiveMessage={false} />)
+  expect(screen.getByTestId("tool-call-artifact_manager")).toHaveAttribute("aria-expanded", "true")
+  expect(screen.getByTestId("chat-artifact-published")).toBeInTheDocument()
+})
