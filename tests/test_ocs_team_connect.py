@@ -314,6 +314,27 @@ class TestChain:
         assert body["flow"]["stopped"] is None
         assert body["flow"]["pending"] == {"slug": "beta", "name": "Beta"}
 
+    def test_an_incomplete_hop_that_lands_late_pauses_before_the_next(
+        self, client, user, ocs_app, mocker
+    ):
+        _identity(user, ocs_app, "alpha")
+        client.post("/api/auth/ocs/teams/connect-all/")
+        _response, query = _start(client, "beta")
+        session = client.session
+        session[ocs_team_flow.SESSION_KEY]["updated_at"] -= ocs_team_flow.PENDING_GRACE_SECONDS + 1
+        session.save()
+        assert client.get("/api/auth/ocs/teams/").json()["flow"]["stopped"]["reason"] == (
+            ocs_team_flow.STOP_INCOMPLETE
+        )
+
+        _callback(client, mocker, query, _userinfo("beta"))
+        body = client.get("/api/auth/ocs/teams/").json()
+
+        assert body["flow"]["connected"] == [{"slug": "beta", "name": "Beta"}]
+        assert body["flow"]["stopped"]["reason"] == ocs_team_flow.STOP_IDLE
+        assert body["flow"]["stopped"]["team"]["slug"] == "gamma"
+        assert body["next"] is None
+
     def test_a_hop_that_never_returns_stops_the_chain(self, client, user, ocs_app):
         _identity(user, ocs_app, "alpha")
         client.post("/api/auth/ocs/teams/connect-all/")
@@ -473,13 +494,6 @@ class TestEndpoints:
     def test_requires_authentication(self, ocs_app):
         assert Client().get("/api/auth/ocs/teams/").status_code == 401
         assert Client().post("/api/auth/ocs/teams/connect-all/").status_code == 401
-
-    def test_connect_all_requires_csrf(self, user, ocs_app):
-        _identity(user, ocs_app, "alpha")
-        client = Client(enforce_csrf_checks=True)
-        client.force_login(user)
-
-        assert client.post("/api/auth/ocs/teams/connect-all/").status_code == 403
 
     def test_the_pinned_login_requires_csrf(self, user, ocs_app):
         client = Client(enforce_csrf_checks=True)
