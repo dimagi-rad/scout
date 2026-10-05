@@ -21,6 +21,8 @@ interface OcsTeamFlow {
   mode: "all" | "one"
   connected: OcsTeam[]
   remaining: OcsTeam[]
+  /** A hop the server hasn't seen come back yet. */
+  pending: OcsTeam | null
   finished: boolean
   stopped: { reason: StopReason; team: OcsTeam; got: OcsTeam | null } | null
 }
@@ -37,11 +39,44 @@ export interface OcsTeamsState {
 
 /** Long enough to read the progress line and press Stop before the next hop. */
 export const CHAIN_CONTINUE_DELAY_MS = 1500
+/** How often to re-check a hop the server hasn't settled yet. */
+export const PENDING_RECHECK_MS = 5000
+
+const isTeam = (value: unknown): value is OcsTeam =>
+  typeof asRecord(value)?.slug === "string"
+
+function parseFlow(value: unknown): OcsTeamFlow | null {
+  const flow = asRecord(value)
+  if (!flow || !Array.isArray(flow.connected) || !Array.isArray(flow.remaining)) return null
+  const stopped = asRecord(flow.stopped)
+  return {
+    mode: flow.mode === "all" ? "all" : "one",
+    connected: flow.connected.filter(isTeam),
+    remaining: flow.remaining.filter(isTeam),
+    pending: isTeam(flow.pending) ? flow.pending : null,
+    finished: flow.finished === true,
+    stopped:
+      stopped && isTeam(stopped.team)
+        ? {
+            reason: stopped.reason as StopReason,
+            team: stopped.team,
+            got: isTeam(stopped.got) ? stopped.got : null,
+          }
+        : null,
+  }
+}
 
 function parseState(value: unknown): OcsTeamsState | null {
   const record = asRecord(value)
   if (!record || !Array.isArray(record.teams)) return null
-  return value as OcsTeamsState
+  return {
+    known: record.known === true,
+    teams: record.teams
+      .filter(isTeam)
+      .map((t) => ({ ...t, connected: asRecord(t)?.connected === true })),
+    flow: parseFlow(record.flow),
+    next: typeof record.next === "string" ? record.next : null,
+  }
 }
 
 function stopMessage(stopped: NonNullable<OcsTeamFlow["stopped"]>): string {
@@ -54,13 +89,15 @@ function stopMessage(stopped: NonNullable<OcsTeamFlow["stopped"]>): string {
     case "cancelled":
       return `Connecting "${team}" was cancelled on Open Chat Studio.`
     case "failed":
-      return `Connecting "${team}" failed on Open Chat Studio.`
+      return `Connecting "${team}" failed.`
     case "incomplete":
       return `Connecting "${team}" didn't finish.`
     case "user":
       return `Stopped before "${team}".`
     case "idle":
       return `Paused before "${team}".`
+    default:
+      return `Connecting "${team}" stopped.`
   }
 }
 
@@ -72,8 +109,10 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
   const load = useCallback(async () => {
     try {
       setState(parseState(await api.get("/api/auth/ocs/teams/")))
+      setError(null)
     } catch {
-      setState(null)
+      // Keep what was shown: hiding the panel would also hide a running chain's Stop.
+      setError("Couldn't load your Open Chat Studio teams.")
     }
   }, [])
 
@@ -105,6 +144,13 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
     return () => window.clearTimeout(timer)
   }, [next, startTeam])
 
+  const pendingSlug = state?.flow?.pending?.slug
+  useEffect(() => {
+    if (!pendingSlug) return
+    const timer = window.setTimeout(() => void load(), PENDING_RECHECK_MS)
+    return () => window.clearTimeout(timer)
+  }, [pendingSlug, state, load])
+
   async function post(path: string): Promise<OcsTeamsState | null> {
     setBusy(true)
     setError(null)
@@ -125,6 +171,8 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
   }
 
   async function stopChain() {
+    // Cancel the hop timer now; it could fire while the POST is in flight.
+    setState((prev) => prev && { ...prev, next: null })
     const stopped = await post("/api/auth/ocs/teams/stop/")
     if (stopped) setState(stopped)
   }
@@ -141,7 +189,13 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
     await load()
   }
 
-  if (!state) return null
+  if (!state) {
+    return error ? (
+      <p className="text-sm text-destructive" data-testid="ocs-teams-error">
+        {error}
+      </p>
+    ) : null
+  }
 
   if (!state.known) {
     return (
@@ -155,6 +209,7 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
   const unconnected = state.teams.filter((t) => !t.connected)
   const flow = state.flow
   const chainRunning = flow?.mode === "all" && !flow.stopped && !flow.finished
+  const nextName = flow?.remaining.find((t) => t.slug === next)?.name ?? next
 
   return (
     <div className="space-y-3 border-t pt-3" data-testid="ocs-teams-panel">
@@ -176,14 +231,19 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
             ) : flow.finished ? (
               <p data-testid="ocs-teams-flow-finished">All your teams are connected.</p>
             ) : (
-              chainRunning &&
-              next && (
-                <p data-testid="ocs-teams-flow-next">
-                  Connecting{" "}
-                  {flow.remaining.find((t) => t.slug === next)?.name ?? next}
-                  {flow.remaining.length > 1 ? ` (${flow.remaining.length} left)` : ""}…
-                </p>
-              )
+              <>
+                {flow.pending && (
+                  <p data-testid="ocs-teams-flow-pending">
+                    Waiting for &quot;{flow.pending.name}&quot; to finish on Open Chat Studio…
+                  </p>
+                )}
+                {chainRunning && next && (
+                  <p data-testid="ocs-teams-flow-next">
+                    Connecting {nextName}
+                    {flow.remaining.length > 1 ? ` (${flow.remaining.length} left)` : ""}…
+                  </p>
+                )}
+              </>
             )}
           </div>
           <div className="flex shrink-0 gap-2">

@@ -3,7 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { api } from "@/api/client"
 import { postOAuthStart, type OAuthProvider } from "@/lib/oauth"
-import { CHAIN_CONTINUE_DELAY_MS, OcsTeamsPanel, type OcsTeamsState } from "./OcsTeamsPanel"
+import {
+  CHAIN_CONTINUE_DELAY_MS,
+  OcsTeamsPanel,
+  PENDING_RECHECK_MS,
+  type OcsTeamsState,
+} from "./OcsTeamsPanel"
 
 vi.mock("@/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/api/client")>()),
@@ -80,6 +85,7 @@ describe("OcsTeamsPanel", () => {
         mode: "all",
         connected: [],
         remaining: teams.slice(1),
+        pending: null,
         finished: false,
         stopped: null,
       },
@@ -106,6 +112,7 @@ describe("OcsTeamsPanel", () => {
       mode: "all" as const,
       connected: [{ slug: "beta", name: "Beta" }],
       remaining: [{ slug: "gamma", name: "Gamma" }],
+      pending: null,
       finished: false,
       stopped: null,
     }
@@ -143,6 +150,7 @@ describe("OcsTeamsPanel", () => {
         mode: "all",
         connected: [],
         remaining: teams.slice(1),
+        pending: null,
         finished: false,
         stopped: {
           reason: "mismatch",
@@ -169,6 +177,7 @@ describe("OcsTeamsPanel", () => {
       mode: "all" as const,
       connected: [],
       remaining: teams.slice(1),
+      pending: null,
       finished: false,
       stopped: null,
     }
@@ -192,5 +201,64 @@ describe("OcsTeamsPanel", () => {
     expect(api.post).toHaveBeenCalledWith("/api/auth/ocs/teams/stop/")
     expect(screen.getByTestId("ocs-teams-error")).toBeInTheDocument()
     expect(screen.getByTestId("ocs-teams-connect-all")).toHaveTextContent("Resume")
+  })
+
+  it("cancels the hop locally the moment Stop is pressed", async () => {
+    vi.useFakeTimers()
+    const running = {
+      mode: "all" as const,
+      connected: [],
+      remaining: teams.slice(1),
+      pending: null,
+      finished: false,
+      stopped: null,
+    }
+    serve({ known: true, teams, flow: running, next: "beta" })
+    await renderPanel()
+    vi.mocked(api.post).mockReturnValue(new Promise(() => {}))
+
+    await act(async () => {
+      vi.advanceTimersByTime(CHAIN_CONTINUE_DELAY_MS - 300)
+      fireEvent.click(screen.getByTestId("ocs-teams-stop"))
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(CHAIN_CONTINUE_DELAY_MS)
+    })
+
+    expect(postOAuthStart).not.toHaveBeenCalled()
+  })
+
+  it("keeps a running chain's Stop when a reload fails", async () => {
+    vi.useFakeTimers()
+    serve({
+      known: true,
+      teams,
+      flow: {
+        mode: "all",
+        connected: [],
+        remaining: teams.slice(1),
+        pending: { slug: "beta", name: "Beta" },
+        finished: false,
+        stopped: null,
+      },
+      next: null,
+    })
+    await renderPanel()
+    expect(screen.getByTestId("ocs-teams-flow-pending")).toBeInTheDocument()
+    vi.mocked(api.get).mockRejectedValue(new Error("503"))
+
+    await act(async () => {
+      vi.advanceTimersByTime(PENDING_RECHECK_MS)
+    })
+
+    expect(screen.getByTestId("ocs-teams-error")).toBeInTheDocument()
+    expect(screen.getByTestId("ocs-teams-stop")).toBeInTheDocument()
+  })
+
+  it("ignores a malformed flow instead of breaking the page", async () => {
+    serve({ known: true, teams, flow: { mode: "all" }, next: null } as unknown as OcsTeamsState)
+    await renderPanel()
+    expect(screen.queryByTestId("ocs-teams-flow")).not.toBeInTheDocument()
+    expect(screen.getByTestId("ocs-team-beta")).toBeInTheDocument()
   })
 })
