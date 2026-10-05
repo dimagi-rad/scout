@@ -17,6 +17,7 @@ Covers:
 import pytest
 from allauth.core.context import request_context
 from allauth.socialaccount.helpers import complete_social_login
+from allauth.socialaccount.internal.statekit import STATES_SESSION_KEY
 from allauth.socialaccount.models import SocialAccount, SocialLogin
 from allauth.urls import build_provider_urlpatterns
 from django.conf import settings
@@ -161,6 +162,60 @@ class TestSocialSignupStillCreatesUsers:
 class TestLoginOnGetDisabled:
     def test_socialaccount_login_on_get_is_false(self):
         assert settings.SOCIALACCOUNT_LOGIN_ON_GET is False
+
+
+OCS_LOGIN = "/accounts/ocs/login/"
+
+
+@pytest.fixture
+def csrf_client(user):
+    client = Client(enforce_csrf_checks=True)
+    client.force_login(user)
+    client.get("/api/auth/csrf/")
+    return client
+
+
+def _stashed_state(client):
+    (state, _ts) = next(iter(client.session[STATES_SESSION_KEY].values()))
+    return state
+
+
+@pytest.mark.django_db
+class TestConnectByPost:
+    """The SPA starts OAuth with a CSRF-token POST, skipping allauth's GET interstitial."""
+
+    def test_post_with_token_redirects_to_provider(self, ocs_app, csrf_client):
+        token = csrf_client.cookies[settings.CSRF_COOKIE_NAME].value
+        response = csrf_client.post(
+            OCS_LOGIN,
+            {"csrfmiddlewaretoken": token, "process": "connect", "next": "/connections"},
+        )
+
+        assert response.status_code == 302
+        assert response["Location"].startswith(f"{settings.OCS_URL}/o/authorize/")
+        state = _stashed_state(csrf_client)
+        assert (state["process"], state["next"]) == ("connect", "/connections")
+
+    def test_post_drops_an_offsite_next(self, ocs_app, csrf_client):
+        token = csrf_client.cookies[settings.CSRF_COOKIE_NAME].value
+        csrf_client.post(
+            OCS_LOGIN,
+            {"csrfmiddlewaretoken": token, "process": "connect", "next": "https://evil.test/"},
+        )
+
+        assert _stashed_state(csrf_client).get("next") is None
+
+    def test_post_without_token_is_rejected(self, ocs_app, csrf_client):
+        response = csrf_client.post(OCS_LOGIN, {"process": "connect", "next": "/connections"})
+
+        assert response.status_code == 403
+        assert STATES_SESSION_KEY not in csrf_client.session
+
+    def test_get_still_renders_the_confirmation_page(self, ocs_app, csrf_client):
+        response = csrf_client.get(OCS_LOGIN, {"process": "connect", "next": "/connections"})
+
+        assert response.status_code == 200
+        assert STATES_SESSION_KEY not in csrf_client.session
 
 
 # --- 14#0: explicit email backend ------------------------------------------ #
