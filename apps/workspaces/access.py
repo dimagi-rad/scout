@@ -234,6 +234,28 @@ def remedy_text(missing: MissingTenant) -> str:
     return f"connect an account on {product} that has access to it in Connected Accounts"
 
 
+# Fixed by reconnecting a connection the member still has. ACCESS_REMOVED needs an
+# upstream admin and CONNECT_SOURCE a source they never had, so neither qualifies.
+_RECONNECTABLE = frozenset(
+    {
+        CoverageRecovery.RECONNECT,
+        CoverageRecovery.CONNECT_TEAM,
+        CoverageRecovery.LEGACY_TEAM_UNKNOWN,
+    }
+)
+
+
+def reconnect_restores_access(missing) -> bool:
+    """Whether reconnecting the member's existing connections would clear ``missing``.
+
+    A source whose connection the member deleted never qualifies: they chose to
+    drop it, so its workspaces are not something to keep nagging them about.
+    """
+    return bool(missing) and all(
+        t.recovery in _RECONNECTABLE and not t.disconnected for t in missing
+    )
+
+
 def missing_tenants_payload(missing) -> list[dict]:
     """Serialize missing tenants, name-ordered, with the remedy for each."""
     ordered = sorted(missing, key=lambda t: (t.tenant_name, t.tenant_id))

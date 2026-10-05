@@ -629,10 +629,14 @@ class MissingTenant:
     # For the operator log only: ``recovery`` is the member-facing contract, and
     # replayed denials are rebuilt from ``as_dict`` without it.
     gap_code: str = field(default="", compare=False)
+    # The member deleted the connection that held this source, so no reconnect of
+    # a connection they still have brings it back. Not part of the denial contract.
+    disconnected: bool = field(default=False, compare=False)
 
     def as_dict(self) -> dict:
         value = asdict(self)
         del value["gap_code"]
+        del value["disconnected"]
         return value
 
 
@@ -654,7 +658,9 @@ def _recovery(item: TenantCredentialReadiness, removed_pairs) -> CoverageRecover
     return CoverageRecovery.RECONNECT
 
 
-def _missing_tenant(item: TenantCredentialReadiness, removed_pairs) -> MissingTenant:
+def _missing_tenant(
+    item: TenantCredentialReadiness, removed_pairs, disconnected_pairs
+) -> MissingTenant:
     return MissingTenant(
         tenant_id=item.gap.tenant_id,
         tenant_name=item.gap.tenant_name,
@@ -663,6 +669,8 @@ def _missing_tenant(item: TenantCredentialReadiness, removed_pairs) -> MissingTe
         team_slug=item.gap.team_slug,
         team_name=item.gap.team_name,
         gap_code=item.gap.code,
+        disconnected=item.gap.code == CredentialGapCode.MISSING_LIVE_MEMBERSHIP
+        and (item.user_id, item.tenant_id) in disconnected_pairs,
     )
 
 
@@ -687,6 +695,7 @@ def _removed_pairs_queryset(unmembered):
         "provider_metadata__team_slug",
         "provider_metadata__team_name",
         "connection__credential_type",
+        "connection_id",
     )
 
 
@@ -699,10 +708,17 @@ def _gaps_by_pair(readiness, removed_pairs) -> dict[tuple[int, str], MissingTena
         (user_id, str(tenant_id)): not str(team_slug or "").strip()
         and not str(team_name or "").strip()
         and credential_type != TenantConnection.API_KEY
-        for user_id, tenant_id, team_slug, team_name, credential_type in removed_pairs
+        for user_id, tenant_id, team_slug, team_name, credential_type, _conn in removed_pairs
     }
+    # Deleting a connection nulls its tombstones' link (SET_NULL), whatever archived them.
+    still_connected = {
+        (user_id, str(tenant_id))
+        for user_id, tenant_id, *_rest, connection_id in removed_pairs
+        if connection_id is not None
+    }
+    disconnected = removed.keys() - still_connected
     return {
-        (item.user_id, item.tenant_id): _missing_tenant(item, removed)
+        (item.user_id, item.tenant_id): _missing_tenant(item, removed, disconnected)
         for item in readiness
         if item.gap is not None
     }
