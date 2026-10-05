@@ -779,6 +779,7 @@ async function evaluateSemanticQuery({
         outputs[`${name}_previous`] = previous
       } else {
         const resolved = { ...query, date_range: dateRange ?? query.date_range }
+        // Offline runtimes bypass runSemanticQuery; validate before handing them a spec.
         buildSemanticQueryInput(resolved)
         outputs[name] = await ctx.runQuery(resolved, { signal })
       }
