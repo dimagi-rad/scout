@@ -214,4 +214,17 @@ def test_web_instance_ami_is_explicitly_pinned():
 def test_replacement_instance_bootstraps_deploy_access_and_networks():
     bootstrap = _resources()["EC2Instance"]["Properties"]["UserData"]["Fn::Base64"]
     assert "/home/scout/.ssh/authorized_keys" in bootstrap
+    # scout_staging_shared is unused since staging was retired (#808), but editing
+    # UserData restarts the instance; it goes with the next deliberate change.
     assert "scout_shared scout_staging_shared" in bootstrap
+
+
+def test_only_main_can_assume_the_deploy_role():
+    """The retired staging workflow (#808) was trusted via `environment:staging`."""
+    statement = _resources()["GitHubDeployRole"]["Properties"]["AssumeRolePolicyDocument"][
+        "Statement"
+    ]
+    (trust,) = statement
+    assert trust["Condition"]["StringLike"]["token.actions.githubusercontent.com:sub"] == [
+        "repo:dimagi-rad/scout:ref:refs/heads/main"
+    ]
