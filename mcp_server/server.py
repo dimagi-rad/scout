@@ -1169,7 +1169,7 @@ async def semantic_query(
         dimensions: Semantic dimension members such as ["visits.username"].
         time_dimension: Optional time dimension member, such as "visits.visited_at".
         granularity: Optional time bucket: day, week, month, quarter, or year.
-        date_range: Optional {"preset":"last_30_days"} or {"start":"YYYY-MM-DD","end":"YYYY-MM-DD"}. Requires time_dimension; inclusive calendar dates.
+        date_range: Optional {"preset":"last_30_days"}, {"last":24,"unit":"week"}, or {"start":"YYYY-MM-DD","end":"YYYY-MM-DD"}. Counted day/week/month/quarter/year windows include the current calendar period through today; weeks start Monday. Requires time_dimension; inclusive calendar dates. For recent N periods shown oldest-first, use a counted range and ascending time order, not limit=N (limit caps rows).
         query_context: Optional reporting context {"timezone":"America/New_York"}. Chat always resolves presets against the current server clock; use explicit date_range bounds for historical reproduction.
         filters: Optional filters: [{"field": "visits.username", "operator": "equals", "value": "a@example.com"}].
         order_by: Optional ordering: [{"field": "visits.count", "direction": "desc"}].

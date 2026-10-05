@@ -6,7 +6,7 @@ import { api } from "@/api/client"
 
 import { ArtifactGraphRenderer } from "./ArtifactGraphRenderer"
 import { buildSemanticQueryInput } from "./runtime"
-import type { ArtifactDetail } from "./types"
+import type { ArtifactDetail, ResolvedQuery } from "./types"
 
 vi.mock("@/api/client", () => ({
   api: {
@@ -598,5 +598,84 @@ describe("ArtifactGraphRenderer", () => {
     await waitFor(() => expect(container.querySelector('[data-block-type="graph"]')).toBeInTheDocument())
     expect(screen.queryByText(/Chart config error:/)).not.toBeInTheDocument()
     expect(screen.queryByText(/Not in the data:/)).not.toBeInTheDocument()
+  })
+})
+
+
+describe("query-local date ranges", () => {
+  beforeEach(() => mockedPost.mockReset())
+
+  it.each(["semantic_query", "graph", "table"])("preserves a counted range for %s blocks", async (type) => {
+    mockedPost.mockResolvedValue({ rows: [] })
+    const query = {
+      measures: ["visits.count"], time_dimension: "visits.visit_date", granularity: "week",
+      date_range: { last: 24, unit: "week" }, limit: 500,
+    }
+    const doc = artifact()
+    doc.data.story_doc = { schema_version: 1, blocks: [{
+      id: "q", type,
+      config: type === "semantic_query" ? { queries: { visits: query } } : { query },
+    }] }
+    render(<ArtifactGraphRenderer artifact={doc} workspaceId="workspace-1" />)
+    await waitFor(() => expect(mockedPost).toHaveBeenCalled())
+    expect(mockedPost.mock.calls[0][1]).toMatchObject(query)
+  })
+})
+
+
+describe("malformed query-local ranges", () => {
+  it.each([null, "last_30_days", 24, true, []])("rejects %j with a date-range diagnostic", (range) => {
+    const query = { time_dimension: "visits.visit_date", date_range: range } as unknown as ResolvedQuery
+    expect(() => buildSemanticQueryInput(query)).toThrow("date_range must be an object")
+  })
+})
+
+
+describe("bound dates override query-local ranges", () => {
+  beforeEach(() => mockedPost.mockReset())
+
+  it.each(["semantic_query", "graph", "table"])("uses bound dates for %s", async (type) => {
+    mockedPost.mockResolvedValue({ rows: [] })
+    const query = {
+      measures: ["visits.count"], time_dimension: "visits.visit_date", granularity: "week",
+      date_range: { last: 24, unit: "week" },
+    }
+    const doc = artifact()
+    doc.data.story_doc = { schema_version: 1, blocks: [{
+      id: "q", type,
+      inputs: { date_range: { value: { start: "2026-06-01", end: "2026-06-30" } } },
+      config: type === "semantic_query" ? { queries: { visits: query } } : { query },
+    }] }
+    render(<ArtifactGraphRenderer artifact={doc} workspaceId="workspace-1" />)
+    await waitFor(() => expect(mockedPost).toHaveBeenCalled())
+    expect(mockedPost.mock.calls[0][1]).toMatchObject({
+      filters: [{ field: "visits.visit_date", operator: "inDateRange", values: ["2026-06-01", "2026-06-30"] }],
+    })
+    expect(mockedPost.mock.calls[0][1]).toHaveProperty("date_range", undefined)
+  })
+
+  it("uses comparison bounds for both queries", async () => {
+    mockedPost.mockResolvedValue({ rows: [] })
+    const doc = artifact()
+    doc.data.story_doc = { schema_version: 1, blocks: [{
+      id: "q", type: "semantic_query",
+      inputs: { compare: { value: {
+        current: { start: "2026-06-01", end: "2026-06-30" },
+        previous: { start: "2026-05-01", end: "2026-05-31" },
+      } } },
+      config: { compare: true, queries: { visits: {
+        measures: ["visits.count"], time_dimension: "visits.visit_date", granularity: "week",
+        date_range: { last: 24, unit: "week" },
+      } } },
+    }] }
+    render(<ArtifactGraphRenderer artifact={doc} workspaceId="workspace-1" />)
+    await waitFor(() => expect(mockedPost).toHaveBeenCalledTimes(2))
+    expect(mockedPost.mock.calls.map((call) => call[1])).toEqual([
+      expect.objectContaining({ filters: [{ field: "visits.visit_date", operator: "inDateRange", values: ["2026-06-01", "2026-06-30"] }] }),
+      expect.objectContaining({ filters: [{ field: "visits.visit_date", operator: "inDateRange", values: ["2026-05-01", "2026-05-31"] }] }),
+    ])
+    for (const call of mockedPost.mock.calls) {
+      expect(call[1]).toHaveProperty("date_range", undefined)
+    }
   })
 })

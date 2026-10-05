@@ -111,11 +111,16 @@ export function buildSemanticQueryInput(query: ResolvedQuery): SemanticQuerySpec
     throw new Error("A date_range binding requires time_dimension")
   }
   const filters = [...(query.filters ?? [])]
-  if (query.date_range && query.time_dimension) {
+  const range = query.date_range
+  if (range !== undefined && !isRecord(range)) {
+    throw new Error("date_range must be an object")
+  }
+  const explicitRange = range && "start" in range && "end" in range ? range : undefined
+  if (explicitRange && query.time_dimension) {
     filters.push({
       field: query.time_dimension,
       operator: "inDateRange",
-      values: [query.date_range.start, query.date_range.end],
+      values: [explicitRange.start, explicitRange.end],
     })
   }
   return {
@@ -126,6 +131,7 @@ export function buildSemanticQueryInput(query: ResolvedQuery): SemanticQuerySpec
     filters,
     order_by: query.order_by,
     limit: query.limit,
+    date_range: explicitRange ? undefined : range,
   }
 }
 

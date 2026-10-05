@@ -23,6 +23,7 @@ from apps.agents.graph.state import (
     model_cut_off_reason,
 )
 from apps.agents.llm_request import LLM_TIMEOUT_ERRORS
+from apps.agents.prompts.query_guidance import RECENT_PERIOD_QUERY_GUIDANCE
 from apps.agents.subagents.data_requirements import DATA_REQUIREMENTS, validate_data_requirements
 from apps.agents.subagents.events import (
     emit_subagent_event,
@@ -70,8 +71,9 @@ class ArtifactManagerInput(BaseModel):
     subagent_event_queue: Any | None = None
 
 
-ARTIFACT_MANAGER_SYSTEM_PROMPT = (
-    """
+ARTIFACT_MANAGER_SYSTEM_PROMPT = "".join(
+    (
+        """
 You are Scout's Artifact Manager subagent. Your only job is to create, inspect,
 repair, and validate semantic story artifacts. Be concise and deterministic.
 
@@ -159,16 +161,18 @@ How to build data-backed blocks:
 - Never store query result rows in `story_doc`.
 - Never write SQL or raw Cube query keys.
 - Query specs support only `measures`, `dimensions`, `time_dimension`,
-  `granularity`, `filters`, `order_by`, and `limit`.
+  `granularity`, `date_range`, `filters`, `order_by`, and `limit`.
 - Filters use `field`, `operator`, and values. Do not use `member`.
-- If a query is bound to `date_range` or uses comparison, include
+- If a query has `date_range` or uses comparison, include
   `time_dimension`.
-- Time-bucketed rows expose the bucket as `date`.
+""",
+        RECENT_PERIOD_QUERY_GUIDANCE,
+        """- Time-bucketed rows expose the bucket as `date`.
 - Member result keys are snake_case: `visits.count` -> `visits_count`.
 - Graph artifacts do not support transform/bucketing config. If a derived
   category is missing, return the data-model prerequisite to the parent as
   described below. You cannot create semantic fields or datasets yourself.
-- For rolling windows use `date_filter`
+- For the supported rolling presets use `date_filter`
   with `inputs.date_range={"$ref":"<date_filter_block_id>.value"}` on EVERY affected query.
   For comparisons use `period_selector`, bind
   `inputs.compare={"$ref":"<period_selector_block_id>.pair"}`, and set `config.compare=true`
@@ -237,9 +241,10 @@ Final response: return a compact JSON object in text with keys:
 `status`, `artifact_id`, `artifact_version`, `touched_blocks`, `diagnostics`,
 `runtime_summary`, and `message`. Include `data_requirements` only when the
 parent must prepare missing analytical capabilities.
-"""
-    + "\nData requirements JSON Schema:\n"
-    + json.dumps(DATA_REQUIREMENTS.json_schema())
+""",
+        "\nData requirements JSON Schema:\n",
+        json.dumps(DATA_REQUIREMENTS.json_schema()),
+    )
 )
 
 

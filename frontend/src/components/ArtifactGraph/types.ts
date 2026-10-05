@@ -106,6 +106,8 @@ export interface CompareRanges {
 
 export type Row = Record<string, unknown>
 
+export type QueryDateRange = DateRange | { preset: string } | { last: number; unit: "day" | "week" | "month" | "quarter" | "year" }
+
 export interface SemanticQuerySpec {
   measures?: string[]
   dimensions?: string[]
@@ -114,13 +116,11 @@ export interface SemanticQuerySpec {
   filters?: Array<{ field: string; operator?: string; value?: unknown; values?: unknown[] }>
   order_by?: Array<{ field: string; direction?: string }>
   limit?: number
-  date_range?: DateRange
+  date_range?: QueryDateRange
   query_context?: { as_of: string; timezone: string }
 }
 
-export interface ResolvedQuery extends SemanticQuerySpec {
-  date_range?: DateRange
-}
+export type ResolvedQuery = SemanticQuerySpec
 
 export interface OutputState {
   status: OutputStatus
