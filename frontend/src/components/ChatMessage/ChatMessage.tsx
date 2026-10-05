@@ -1,5 +1,5 @@
 import { extractArtifactIdFromOutput, getSubagentToolData, isUnsuccessfulHelperOutcome, messageArtifacts, parseOutput } from "./artifactReferences"
-import { Fragment, useState, type ComponentPropsWithoutRef } from "react"
+import { Fragment, useMemo, useState, type ComponentPropsWithoutRef } from "react"
 import { Link, useInRouterContext } from "react-router-dom"
 import type { UIMessage } from "ai"
 import { isToolUIPart, getToolName } from "ai"
@@ -834,7 +834,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
     }
   }
 
-  const artifacts = messageArtifacts(message)
+  const artifacts = useMemo(() => messageArtifacts(message), [message])
   const renderArtifacts = (index: number) => [...artifacts.values()]
     .filter((artifact) => artifact.afterIndex === index && (!visibleArtifactIds || visibleArtifactIds.has(artifact.id)))
     .map((artifact) => (
