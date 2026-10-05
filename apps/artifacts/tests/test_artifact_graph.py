@@ -1789,4 +1789,5 @@ def test_graph_doc_identifies_invalid_series_entry():
     doc = graph_doc()
     doc["blocks"][2]["config"]["series"] = ["visits_count", {}]
     errors = [item for item in validate_doc(doc) if item.get("code") == "graph_series"]
+    assert len(errors) == 1
     assert "series[1]" in errors[0]["message"]

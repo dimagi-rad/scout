@@ -239,24 +239,23 @@ describe("dimension series rendering", () => {
     const base = { chart_type: "bar", x_key: "week", y_key: "count", series_by: "segment" }
     expect(() => prepareCompactGraph({ ...base, ...changes }, [])).toThrow()
   })
-})
+  it("retains inferred count-axis semantics for dimension series", () => {
+    const { tree } = prepareCompactGraph({ chart_type: "bar", x_key: "date", y_key: "visits_count", series_by: "segment" }, [{ date: "a", segment: "A", visits_count: 2 }])
+    expect(tree.children?.find((node) => node.type === "YAxis")?.props).toMatchObject({ allowDecimals: false, domain: [0, "dataMax"] })
+  })
 
-it("retains inferred count-axis semantics for dimension series", () => {
-  const { tree } = prepareCompactGraph({ chart_type: "bar", x_key: "date", y_key: "visits_count", series_by: "segment" }, [{ date: "a", segment: "A", visits_count: 2 }])
-  expect(tree.children?.find((node) => node.type === "YAxis")?.props).toMatchObject({ allowDecimals: false, domain: [0, "dataMax"] })
-})
+  it("preserves the unambiguous empty-array fallback for existing wide-format artifacts", () => {
+    const tree = compileCompactGraphConfig({ chart_type: "bar", series: [], y_key: "count", data_label: "Visits" })
+    expect(tree.children?.find((node) => node.type === "Bar")?.props).toMatchObject({ dataKey: "count", name: "Visits" })
+  })
 
-it("preserves the unambiguous empty-array fallback for existing wide-format artifacts", () => {
-  const tree = compileCompactGraphConfig({ chart_type: "bar", series: [], y_key: "count", data_label: "Visits" })
-  expect(tree.children?.find((node) => node.type === "Bar")?.props).toMatchObject({ dataKey: "count", name: "Visits" })
-})
+  it("preserves legacy fallback labels while rendering valid measure keys", () => {
+    const tree = compileCompactGraphConfig({ series: [{ data_key: "count", label: 42 }] })
+    expect(tree.children?.find((node) => node.type === "Line")?.props).toMatchObject({ dataKey: "count", name: "count" })
+  })
 
-it("preserves legacy fallback labels while rendering valid measure keys", () => {
-  const tree = compileCompactGraphConfig({ series: [{ data_key: "count", label: 42 }] })
-  expect(tree.children?.find((node) => node.type === "Line")?.props).toMatchObject({ dataKey: "count", name: "count" })
-})
-
-it("preserves the omitted-series fallback when a stored artifact uses null", () => {
-  const tree = compileCompactGraphConfig({ chart_type: "bar", series: null, y_key: "count", data_label: "Visits" })
-  expect(tree.children?.find((node) => node.type === "Bar")?.props).toMatchObject({ dataKey: "count", name: "Visits" })
+  it("preserves the omitted-series fallback when a stored artifact uses null", () => {
+    const tree = compileCompactGraphConfig({ chart_type: "bar", series: null, y_key: "count", data_label: "Visits" })
+    expect(tree.children?.find((node) => node.type === "Bar")?.props).toMatchObject({ dataKey: "count", name: "Visits" })
+  })
 })
