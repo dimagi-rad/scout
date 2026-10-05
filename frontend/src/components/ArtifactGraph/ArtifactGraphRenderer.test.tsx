@@ -580,3 +580,13 @@ it("renders dimension series without checking generated keys against the source 
   expect(screen.queryByText(/Not in the data:/)).not.toBeInTheDocument()
   expect(screen.queryByText(/Chart config error:/)).not.toBeInTheDocument()
 })
+
+
+it("requires an explicit x field for dimension series in the runtime", async () => {
+  const graph = artifact()
+  const doc = graph.data.story_doc as { blocks: Array<{ config: Record<string, unknown> }> }
+  doc.blocks[3].config = { chart_type: "bar", y_key: "visits_count", series_by: "segment" }
+  mockedPost.mockResolvedValue({ columns: ["date", "segment", "visits_count"], rows: [["2026-06-24", "A", 12]], row_count: 1 })
+  render(<ArtifactGraphRenderer artifact={graph} workspaceId="workspace-1" />)
+  expect(await screen.findByText(/Chart config error:.*series_by requires x_key/)).toBeInTheDocument()
+})

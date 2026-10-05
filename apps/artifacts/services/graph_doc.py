@@ -1040,7 +1040,13 @@ def _compact_series_diagnostics(
                 isinstance(item[field], str) for field in ("label", "name") if field in item
             )
         if not valid:
-            diagnostics.append(problem(guidance, block_id=block_id, code="graph_series"))
+            diagnostics.append(
+                problem(
+                    f"config.series[{index}] is invalid. {guidance}",
+                    block_id=block_id,
+                    code="graph_series",
+                )
+            )
         if not isinstance(item, dict) or "color" not in item:
             continue
         if not _is_choice(item.get("color"), SAFE_RECHARTS_COLORS):

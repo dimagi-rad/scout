@@ -432,7 +432,7 @@ function GraphComponent({ block, config, engine }: BlockComponentProps) {
   const style = isRecord(config.style) ? config.style : {}
   const chartConfig = {
     chart_type: stringValue(config.chart_type) ?? "line",
-    x_key: xKey,
+    x_key: "series_by" in config ? stringValue(config.x_key) : xKey,
     y_key: stringValue(config.y_key),
     data_label: stringValue(config.data_label),
     y_format: stringValue(config.y_format),
@@ -458,7 +458,8 @@ function GraphComponent({ block, config, engine }: BlockComponentProps) {
       const prepared = prepareCompactGraph({
         ...chartConfig,
         ...("series" in config ? { series: config.series } : {}),
-        ...("series_by" in config ? { series_by: config.series_by } : inferred.length ? { series: inferred } : {}),
+        ...(inferred.length > 0 ? { series: inferred } : {}),
+        ...("series_by" in config ? { series_by: config.series_by } : {}),
       }, rows)
       tree = prepared.tree
       chartRows = prepared.rows
