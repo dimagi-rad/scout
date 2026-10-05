@@ -374,6 +374,8 @@ class TenantMembership(models.Model):
     ARCHIVED_DENIED = "denied"
     ARCHIVED_DENIED_CONNECTION = "denied_connection"
     ARCHIVED_UNLISTED = "unlisted"
+    # The member deleted the connection. Rows from before this value read "".
+    ARCHIVED_DISCONNECTED = "disconnected"
 
     archived_at = models.DateTimeField(null=True, blank=True)
     archived_reason = models.CharField(

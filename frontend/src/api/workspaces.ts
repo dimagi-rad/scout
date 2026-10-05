@@ -38,6 +38,9 @@ export interface WorkspaceListItem {
   // of MissingTenant.as_dict() plus "remedy" (apps/workspaces/access.py, #551);
   // absent until that ships.
   missing_tenants?: MissingTenant[]
+  // Reconnecting a connection the user still has would restore access. False for
+  // sources whose connection the user deleted or that an upstream admin removed.
+  needs_reconnect?: boolean
   member_count: number
   // Recorded tenant/view schema state; does not certify semantic query readiness.
   schema_status: SchemaStatus
@@ -186,6 +189,15 @@ export function workspaceHasRecordedLoad(ws: { last_synced_at?: string | null })
  */
 export function workspaceHasAccess(ws: { has_access?: boolean }): boolean {
   return ws.has_access !== false
+}
+
+/** A no-access workspace the user can win back by reconnecting. Payloads older than
+ * `needs_reconnect` count every no-access workspace, as before. */
+export function workspaceNeedsReconnect(ws: {
+  has_access?: boolean
+  needs_reconnect?: boolean
+}): boolean {
+  return !workspaceHasAccess(ws) && (ws.needs_reconnect ?? true)
 }
 
 // ── Workspace CRUD ─────────────────────────────────────────────────────────
