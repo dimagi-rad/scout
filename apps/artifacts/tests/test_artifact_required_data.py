@@ -258,9 +258,12 @@ async def test_required_source_already_loaded_only_rebuilds_view(required_setup)
         return {"cube_schema": {"ok": True}}
 
     with (
-        # The fixture models coverage without creating physical managed views.
+        # Synthetic coverage has no physical views, so reconciliation would change the repair path.
         patch.object(
-            SchemaManager, "reconcile_view_publication", return_value={"status": "consistent"}
+            SchemaManager,
+            "reconcile_view_publication",
+            autospec=True,
+            return_value={"status": "consistent"},
         ),
         patch(
             "apps.workspaces.services.publication.rebuild_workspace_view_schema",
