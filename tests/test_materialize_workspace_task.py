@@ -26,12 +26,13 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services import load_outcome
+from apps.workspaces.services import load_outcome, materialize
 from apps.workspaces.services.access_freshness import CREDENTIAL_EXPIRED
 from apps.workspaces.services.credential_coverage import CoverageRecovery, MissingTenant
 from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE, compose_failure_summary
+from apps.workspaces.services.materialize import _run_pipeline_with_progress
 from apps.workspaces.services.schema_manager import NoActiveTenantSchema
-from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
+from apps.workspaces.tasks import materialize_workspace
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 from mcp_server.services.materializer import MaterializationCancelled
 from tests.agent_doubles import FakeAgent
@@ -48,10 +49,8 @@ def _no_candidate_ddl(no_candidate_ddl):
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_core_denies_read_role_before_loading(workspace, read_user):
     pipeline = AsyncMock()
-    with patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline):
-        result = await workspaces_tasks.materialize_workspace_core(
-            str(workspace.id), str(read_user.id)
-        )
+    with patch("apps.workspaces.services.materialize._run_pipeline_with_progress", pipeline):
+        result = await materialize.materialize_workspace_core(str(workspace.id), str(read_user.id))
 
     assert result["status"] == "denied"
     assert result["error_code"] == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
@@ -73,14 +72,12 @@ async def test_materialize_core_rechecks_after_workspace_lock_wait(workspace, wr
         yield
 
     with (
-        patch("apps.workspaces.tasks.workspace_data_lock", downgrade_during_lock),
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline),
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema", publish),
+        patch("apps.workspaces.services.materialize.workspace_data_lock", downgrade_during_lock),
+        patch("apps.workspaces.services.materialize._run_pipeline_with_progress", pipeline),
+        patch("apps.workspaces.services.materialize.build_and_promote_cube_schema", publish),
         patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", rebuild_views),
     ):
-        result = await workspaces_tasks.materialize_workspace_core(
-            str(workspace.id), str(write_user.id)
-        )
+        result = await materialize.materialize_workspace_core(str(workspace.id), str(write_user.id))
 
     assert result["status"] == "denied"
     pipeline.assert_not_awaited()
@@ -102,14 +99,14 @@ async def test_blocking_materialization_rechecks_after_tenant_wait(workspace, wr
 
     with (
         patch(
-            "apps.workspaces.tasks._await_in_progress_materializations",
+            "apps.workspaces.services.materialize.await_in_progress_materializations",
             new=wait_then_downgrade,
         ),
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline),
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema", publish),
+        patch("apps.workspaces.services.materialize._run_pipeline_with_progress", pipeline),
+        patch("apps.workspaces.services.materialize.build_and_promote_cube_schema", publish),
         patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", rebuild_views),
     ):
-        result = await workspaces_tasks.materialize_workspace_blocking(
+        result = await materialize.materialize_workspace_blocking(
             str(workspace.id), str(write_user.id)
         )
 
@@ -136,7 +133,7 @@ async def test_queued_materialization_downgrade_reaches_resume_as_authorization_
     )
 
     with patch(
-        "apps.workspaces.tasks.resume_thread_after_materialization.defer_async",
+        "apps.workspaces.services.materialize.adefer_resume_thread",
         new=AsyncMock(),
     ):
         result = await materialize_workspace(context_with_job_id, str(workspace.id), str(user.id))
@@ -265,9 +262,17 @@ async def test_materialize_workspace_dispatches_per_tenant(
         return completed_pipeline_run(*args, rows_loaded=7, **kwargs)
 
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", side_effect=fake_pipeline_run),
+        patch(
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
+        ),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
+            side_effect=fake_pipeline_run,
+        ),
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
         result = await materialize_workspace(
@@ -287,10 +292,15 @@ async def test_materialize_workspace_records_failure(
     workspace, tenant_membership_obj, context_with_job_id, user
 ):
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
+        ),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=RuntimeError("upstream API down"),
         ),
     ):
@@ -315,8 +325,13 @@ async def test_materialize_workspace_surfaces_team_mismatch_distinctly(
     re-authorize message — NOT the generic "No usable credential could be resolved" — so a
     user logged into the wrong OCS team is told to re-connect (finding 07#3)."""
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch(
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
+        ),
     ):
         mock_cred.side_effect = CredentialResolutionError(
             AUTH_TOKEN_EXPIRED,
@@ -359,14 +374,19 @@ async def test_materialize_workspace_rebuilds_view_schema_when_multi_tenant_succ
     mock_manager = MagicMock()
 
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
+        ),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=completed_pipeline_run,
         ),
-        patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
-        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
+        patch("apps.workspaces.services.materialize.SchemaManager", return_value=mock_manager),
+        patch("apps.workspaces.services.materialize._defer_resume_for_job", new_callable=AsyncMock),
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
         result = await materialize_workspace(
@@ -389,14 +409,19 @@ async def test_materialize_workspace_skips_view_rebuild_for_single_tenant(
     mock_manager = MagicMock()
 
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
+        ),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=completed_pipeline_run,
         ),
-        patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
-        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
+        patch("apps.workspaces.services.materialize.SchemaManager", return_value=mock_manager),
+        patch("apps.workspaces.services.materialize._defer_resume_for_job", new_callable=AsyncMock),
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
         await materialize_workspace(
@@ -422,14 +447,19 @@ async def test_materialize_workspace_reconciles_view_schema_when_any_tenant_fail
     mock_manager = MagicMock()
 
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
+        ),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=RuntimeError("upstream API down"),
         ),
-        patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
-        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
+        patch("apps.workspaces.services.materialize.SchemaManager", return_value=mock_manager),
+        patch("apps.workspaces.services.materialize._defer_resume_for_job", new_callable=AsyncMock),
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
         result = await materialize_workspace(
@@ -455,15 +485,22 @@ async def test_materialize_workspace_view_rebuild_failure_does_not_block_resume(
     defer_mock = AsyncMock()
 
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
+        ),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=completed_pipeline_run,
         ),
-        patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
-        patch("apps.workspaces.tasks.record_cube_schema_build_failure") as record_failure,
-        patch("apps.workspaces.tasks._defer_resume_for_job", defer_mock),
+        patch("apps.workspaces.services.materialize.SchemaManager", return_value=mock_manager),
+        patch(
+            "apps.workspaces.services.materialize.record_cube_schema_build_failure"
+        ) as record_failure,
+        patch("apps.workspaces.services.materialize._defer_resume_for_job", defer_mock),
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
         result = await materialize_workspace(
@@ -488,10 +525,15 @@ async def test_materialize_workspace_breaks_on_cancel(
 ):
     """When the pipeline raises MaterializationCancelled, processing stops."""
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
+        ),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=MaterializationCancelled(),
         ),
     ):
@@ -516,16 +558,23 @@ async def test_materialize_workspace_core_runs_without_deferring_resume(
     directly and block on the return value. The fire-and-resume deferral lives
     only in the materialize_workspace task wrapper."""
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
+        ),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=completed_pipeline_run,
         ),
-        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock) as defer_mock,
+        patch(
+            "apps.workspaces.services.materialize._defer_resume_for_job", new_callable=AsyncMock
+        ) as defer_mock,
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
-        result = await workspaces_tasks.materialize_workspace_core(
+        result = await materialize.materialize_workspace_core(
             str(workspace.id), user_id=str(user.id), job_id=None
         )
 
@@ -552,10 +601,10 @@ async def test_materialize_workspace_blocking_runs_immediately_when_idle(
     async def fake_sleep(_delay):
         slept["n"] += 1
 
-    monkeypatch.setattr(workspaces_tasks, "materialize_workspace_core", fake_core)
-    monkeypatch.setattr("apps.workspaces.tasks.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(materialize, "materialize_workspace_core", fake_core)
+    monkeypatch.setattr("apps.workspaces.services.materialize.asyncio.sleep", fake_sleep)
 
-    result = await workspaces_tasks.materialize_workspace_blocking(str(workspace.id), str(user.id))
+    result = await materialize.materialize_workspace_blocking(str(workspace.id), str(user.id))
 
     assert slept["n"] == 0  # nothing in progress → no waiting
     assert core["n"] == 1
@@ -595,10 +644,10 @@ async def test_materialize_workspace_blocking_waits_out_in_progress_run(
             state=MaterializationRun.RunState.COMPLETED
         )
 
-    monkeypatch.setattr(workspaces_tasks, "materialize_workspace_core", fake_core)
-    monkeypatch.setattr("apps.workspaces.tasks.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(materialize, "materialize_workspace_core", fake_core)
+    monkeypatch.setattr("apps.workspaces.services.materialize.asyncio.sleep", fake_sleep)
 
-    result = await workspaces_tasks.materialize_workspace_blocking(str(workspace.id), str(user.id))
+    result = await materialize.materialize_workspace_blocking(str(workspace.id), str(user.id))
 
     assert slept["n"] >= 1  # it waited for the in-progress run
     assert core["n"] == 1  # then ran its own
@@ -662,7 +711,7 @@ def test_run_pipeline_with_progress_writes_progress_and_raises_on_cancel(
 
     pipeline = _mock_pipeline()
     with (
-        patch("apps.workspaces.tasks.run_pipeline", side_effect=fake_run_pipeline),
+        patch("apps.workspaces.services.materialize.run_pipeline", side_effect=fake_run_pipeline),
         pytest.raises(MaterializationCancelled),
     ):
         _run_pipeline_with_progress(
@@ -790,8 +839,9 @@ async def test_materialize_workspace_defers_resume_on_no_sources_early_return(
         tool_call_id="tc-early-return",
     )
 
-    with patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume_mock:
-        resume_mock.defer_async = AsyncMock(return_value=MagicMock(id=42424))
+    with patch(
+        "apps.workspaces.services.materialize.adefer_resume_thread", new_callable=AsyncMock
+    ) as resume_mock:
         result = await materialize_workspace(
             context_with_job_id,
             workspace_id=str(bare_ws.id),
@@ -803,7 +853,7 @@ async def test_materialize_workspace_defers_resume_on_no_sources_early_return(
     assert result["tenants"] == []
     assert result["all_succeeded"] is False
     # But the resume task IS still deferred (in the finally block).
-    resume_mock.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
+    resume_mock.assert_awaited_once_with(thread_job_id=str(tj.id))
 
 
 @pytest.mark.asyncio
@@ -826,8 +876,9 @@ async def test_materialize_workspace_defers_resume_on_workspace_not_found(
         tool_call_id="tc-no-ws",
     )
 
-    with patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume_mock:
-        resume_mock.defer_async = AsyncMock(return_value=MagicMock(id=51515))
+    with patch(
+        "apps.workspaces.services.materialize.adefer_resume_thread", new_callable=AsyncMock
+    ) as resume_mock:
         # Pass a non-existent workspace_id to trigger the early-return branch.
         result = await materialize_workspace(
             context_with_job_id,
@@ -837,7 +888,7 @@ async def test_materialize_workspace_defers_resume_on_workspace_not_found(
 
     assert result["status"] == "denied"
     assert result["error_code"] == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT
-    resume_mock.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
+    resume_mock.assert_awaited_once_with(thread_job_id=str(tj.id))
 
 
 @pytest.mark.asyncio
@@ -870,11 +921,12 @@ async def test_defer_resume_for_job_retries_when_threadjob_not_yet_committed(
             insert_state["tj_id"] = str(tj.id)
 
     with (
-        patch("apps.workspaces.tasks.asyncio.sleep", side_effect=fake_sleep),
-        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume_mock,
+        patch("apps.workspaces.services.materialize.asyncio.sleep", side_effect=fake_sleep),
+        patch(
+            "apps.workspaces.services.materialize.adefer_resume_thread", new_callable=AsyncMock
+        ) as resume_mock,
     ):
-        resume_mock.defer_async = AsyncMock(return_value=MagicMock(id=99))
-        await workspaces_tasks._defer_resume_for_job(
+        await materialize._defer_resume_for_job(
             job_id,
             [
                 {
@@ -887,7 +939,7 @@ async def test_defer_resume_for_job_retries_when_threadjob_not_yet_committed(
         )
 
     assert insert_state["inserted"], "fake_sleep should have inserted the ThreadJob"
-    resume_mock.defer_async.assert_awaited_once_with(
+    resume_mock.assert_awaited_once_with(
         thread_job_id=insert_state["tj_id"],
     )
 
@@ -911,23 +963,30 @@ async def test_materialize_workspace_chains_resume_task(
     )
 
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress", side_effect=completed_pipeline_run
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
         ),
-        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume_mock,
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
+            side_effect=completed_pipeline_run,
+        ),
+        patch(
+            "apps.workspaces.services.materialize.adefer_resume_thread", new_callable=AsyncMock
+        ) as resume_mock,
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
-        resume_mock.defer_async = AsyncMock(return_value=MagicMock(id=9999))
         await materialize_workspace(
             context_with_job_id,
             workspace_id=str(workspace.id),
             user_id=str(user.id),
         )
 
-    resume_mock.defer_async.assert_awaited_once()
-    kwargs = resume_mock.defer_async.await_args.kwargs
+    resume_mock.assert_awaited_once()
+    kwargs = resume_mock.await_args.kwargs
     assert kwargs["thread_job_id"] == str(tj.id)
 
 
@@ -1253,12 +1312,18 @@ async def test_materialize_workspace_defers_rebuild_for_sibling_view_schemas(
     await WorkspaceTenant.objects.acreate(workspace=sibling_c, tenant=tenant)
 
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress", side_effect=completed_pipeline_run
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
         ),
-        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
+            side_effect=completed_pipeline_run,
+        ),
+        patch("apps.workspaces.services.materialize._defer_resume_for_job", new_callable=AsyncMock),
         patch(
             "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
@@ -1289,12 +1354,18 @@ async def test_materialize_workspace_dedupes_sibling_rebuild(
     )
 
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress", side_effect=completed_pipeline_run
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
         ),
-        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
+            side_effect=completed_pipeline_run,
+        ),
+        patch("apps.workspaces.services.materialize._defer_resume_for_job", new_callable=AsyncMock),
         patch(
             "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
@@ -1319,12 +1390,18 @@ async def test_materialize_workspace_no_sibling_rebuild_when_none_qualify(
     """Regression: with no qualifying sibling (no other multi-tenant workspace
     sharing the tenant + view schema), no rebuild is deferred."""
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress", side_effect=completed_pipeline_run
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
         ),
-        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
+            side_effect=completed_pipeline_run,
+        ),
+        patch("apps.workspaces.services.materialize._defer_resume_for_job", new_callable=AsyncMock),
         patch(
             "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
@@ -1372,14 +1449,19 @@ async def _materialize_as(
     schema_manager.build_view_schema.return_value.tenant_coverage = view_schema_coverage or {}
     schema_manager.build_view_schema.side_effect = view_schema_error
     with (
-        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline),
-        patch("apps.workspaces.tasks.SchemaManager", return_value=schema_manager),
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as mock_cube,
+        patch(
+            "apps.workspaces.services.materialize.aresolve_credential", new_callable=AsyncMock
+        ) as mock_cred,
+        patch(
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
+        ),
+        patch("apps.workspaces.services.materialize._run_pipeline_with_progress", pipeline),
+        patch("apps.workspaces.services.materialize.SchemaManager", return_value=schema_manager),
+        patch("apps.workspaces.services.materialize.build_and_promote_cube_schema") as mock_cube,
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
-        result = await workspaces_tasks.materialize_workspace_core(
+        result = await materialize.materialize_workspace_core(
             str(workspace.id), user_id=str(user.id), job_id=None
         )
     return result, mock_cube
@@ -1467,7 +1549,8 @@ async def test_refused_load_codes_each_missing_tenant_by_its_recovery(
     )
 
     with patch(
-        "apps.workspaces.tasks.aresolve_workspace_access_ex", AsyncMock(return_value=access)
+        "apps.workspaces.services.materialize.aresolve_workspace_access_ex",
+        AsyncMock(return_value=access),
     ):
         result, _ = await _materialize_as(
             user, workspace, pipeline_side_effect=AssertionError("the loader must not start")
@@ -1482,7 +1565,7 @@ async def test_refused_load_codes_each_missing_tenant_by_its_recovery(
 
 def test_every_coverage_recovery_has_a_refusal_code():
     # A new recovery must pick its own guidance, not fall back to "connect the account".
-    assert set(workspaces_tasks._RECOVERY_ERROR_CODES) == set(CoverageRecovery)
+    assert set(materialize._RECOVERY_ERROR_CODES) == set(CoverageRecovery)
 
 
 @pytest.mark.asyncio
@@ -1506,7 +1589,8 @@ async def test_refused_load_attributes_an_observed_expiry_to_the_missing_tenant_
     )
 
     with patch(
-        "apps.workspaces.tasks.aresolve_workspace_access_ex", AsyncMock(return_value=access)
+        "apps.workspaces.services.materialize.aresolve_workspace_access_ex",
+        AsyncMock(return_value=access),
     ):
         result, _ = await _materialize_as(
             user, workspace, pipeline_side_effect=AssertionError("the loader must not start")
@@ -1647,7 +1731,7 @@ async def test_manager_who_lost_tenant_access_gets_reconnect_guidance_on_resume(
     )
 
     with patch(
-        "apps.workspaces.tasks.resume_thread_after_materialization.defer_async",
+        "apps.workspaces.services.materialize.adefer_resume_thread",
         new=AsyncMock(),
     ):
         result = await materialize_workspace(context_with_job_id, str(workspace.id), str(user.id))
@@ -1693,12 +1777,15 @@ async def test_unreachable_tenant_cube_build_uses_available_workspace_sources(
     conn.cursor.return_value.fetchall.return_value = [("cases",)]
     with (
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.materialize.aresolve_credential",
             AsyncMock(return_value={"type": "api_key", "value": "k"}),
         ),
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize.get_registry",
+            return_value=_mock_registry("commcare"),
+        ),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=completed_pipeline_run,
         ),
         patch(
@@ -1709,9 +1796,9 @@ async def test_unreachable_tenant_cube_build_uses_available_workspace_sources(
             "apps.workspaces.services.schema_manager.SchemaManager._revoke_stale_view_role_grants"
         ),
         patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+        patch("apps.workspaces.services.materialize.build_and_promote_cube_schema") as cube,
     ):
-        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+        result = await materialize.materialize_workspace_core(str(workspace.id), str(user.id))
     assert result["all_succeeded"] is False
     vs = await WorkspaceViewSchema.objects.aget(workspace=workspace)
     if retained_schema:
@@ -1757,7 +1844,9 @@ async def test_cube_build_is_still_skipped_when_an_attempted_tenant_fails(
         ],
         "excluded_tenants": [],
     }
-    with patch("apps.workspaces.tasks.record_cube_schema_build_failure") as record_failure:
+    with patch(
+        "apps.workspaces.services.materialize.record_cube_schema_build_failure"
+    ) as record_failure:
         result, mock_cube = await _materialize_as(
             user,
             multi_tenant_workspace,
@@ -1783,7 +1872,7 @@ async def test_view_build_with_no_served_source_is_not_logged_as_an_error(
     def fail_all(tenant_membership, *args):
         raise RuntimeError("load blew up")
 
-    with caplog.at_level(logging.INFO, logger="apps.workspaces.tasks"):
+    with caplog.at_level(logging.INFO, logger="apps.workspaces.services.materialize"):
         result, _ = await _materialize_as(
             user,
             multi_tenant_workspace,
@@ -1848,17 +1937,17 @@ async def test_core_preserves_coded_pipeline_failure_guidance(
 ):
     with (
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.materialize.aresolve_credential",
             AsyncMock(return_value={"type": "api_key", "value": "k"}),
         ),
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry()),
+        patch("apps.workspaces.services.materialize.get_registry", return_value=_mock_registry()),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=CredentialResolutionError(code, "upstream rejected token"),
         ),
         patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
     ):
-        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+        result = await materialize.materialize_workspace_core(str(workspace.id), str(user.id))
     assert result["all_succeeded"] is False
     assert result["tenants"][0]["error_code"] == code
     assert result["guidance"]
@@ -1880,14 +1969,16 @@ async def test_headless_preflight_failure_preserves_real_core_reason(
     summaries = []
 
     async def run_core(*args):
-        summary = await workspaces_tasks.materialize_workspace_core(*args)
+        summary = await materialize.materialize_workspace_core(*args)
         summaries.append(summary)
         return summary
 
     with (
         patch("apps.agents.tools.materialization_tool.materialize_workspace_inline", run_core),
-        patch("apps.workspaces.tasks.get_registry", return_value=registry),
-        patch("apps.workspaces.tasks.aresolve_credential", AsyncMock(return_value=None)),
+        patch("apps.workspaces.services.materialize.get_registry", return_value=registry),
+        patch(
+            "apps.workspaces.services.materialize.aresolve_credential", AsyncMock(return_value=None)
+        ),
     ):
         result = await create_materialization_tool(workspace, user).ainvoke({})
     assert result["status"] == "failed"
@@ -1946,14 +2037,16 @@ async def test_preflight_reason_survives_core_wrapper_and_resume(
         raise RuntimeError("queue unavailable")
 
     with (
-        patch("apps.workspaces.tasks.get_registry", return_value=registry),
-        patch("apps.workspaces.tasks.aresolve_credential", credential),
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", side_effect=pipeline),
-        patch("apps.workspaces.tasks.SchemaManager", return_value=MagicMock()),
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema"),
+        patch("apps.workspaces.services.materialize.get_registry", return_value=registry),
+        patch("apps.workspaces.services.materialize.aresolve_credential", credential),
+        patch(
+            "apps.workspaces.services.materialize._run_pipeline_with_progress", side_effect=pipeline
+        ),
+        patch("apps.workspaces.services.materialize.SchemaManager", return_value=MagicMock()),
+        patch("apps.workspaces.services.materialize.build_and_promote_cube_schema"),
         patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
         patch(
-            "apps.workspaces.tasks.resume_thread_after_materialization.defer_async",
+            "apps.workspaces.services.materialize.adefer_resume_thread",
             side_effect=fail_enqueue,
         ),
     ):
@@ -2005,10 +2098,10 @@ async def test_missing_actor_cannot_borrow_other_memberships(
 ):
     pipeline = AsyncMock()
     with (
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline),
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+        patch("apps.workspaces.services.materialize._run_pipeline_with_progress", pipeline),
+        patch("apps.workspaces.services.materialize.build_and_promote_cube_schema") as cube,
     ):
-        result = await workspaces_tasks.materialize_workspace_core(
+        result = await materialize.materialize_workspace_core(
             str(multi_tenant_workspace.id), user_id=""
         )
 

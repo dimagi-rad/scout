@@ -13,8 +13,9 @@ module it reaches must be in the raw half or excluded below, never in the
 transform half. The transform walk starts at the transform entry points; what it
 reaches may be in either half. A module both walks reach is held to the raw rule.
 
-Orchestration reached only from apps/workspaces/tasks.py (candidate bookkeeping,
-pipeline resolution, credentials) is out of scope: it decides when and where a
+Orchestration reached only from the workspace task services (apps/workspaces/services/
+materialize.py, refresh.py, retirement.py: candidate bookkeeping, pipeline resolution,
+credentials) is out of scope: it decides when and where a
 load runs, not what it writes, and hashing it would churn the fingerprint on
 nearly every deploy.
 """

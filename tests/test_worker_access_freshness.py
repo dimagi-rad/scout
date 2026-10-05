@@ -10,8 +10,8 @@ import pytest
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantMembership
-from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import WorkspaceTenant
+from apps.workspaces.services import materialize
 from tests.pipeline_doubles import completed_pipeline_run
 from tests.upstream_proofs import (
     agrant_fresh_upstream_access,
@@ -44,8 +44,8 @@ async def test_stale_and_revoked_actor_is_denied_before_loading(
     upstream_provider.domains = []
     pipeline = MagicMock()
 
-    with patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline):
-        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+    with patch("apps.workspaces.services.materialize._run_pipeline_with_progress", pipeline):
+        result = await materialize.materialize_workspace_core(str(workspace.id), str(user.id))
 
     assert result["status"] == "denied"
     assert result["error_code"] == ErrorCode.AUTH_ACCESS_DENIED
@@ -64,8 +64,8 @@ async def test_provider_outage_denies_the_job_without_touching_memberships(
     upstream_provider.failure = 503
     pipeline = MagicMock()
 
-    with patch("apps.workspaces.tasks._run_pipeline_with_progress", pipeline):
-        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+    with patch("apps.workspaces.services.materialize._run_pipeline_with_progress", pipeline):
+        result = await materialize.materialize_workspace_core(str(workspace.id), str(user.id))
 
     assert result["status"] == "denied"
     assert result["error_code"] == ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE
@@ -96,17 +96,17 @@ async def test_proof_expiring_mid_run_stops_before_the_next_tenant(
 
     with (
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.materialize.aresolve_credential",
             AsyncMock(return_value={"type": "api_key", "value": "k"}),
         ),
-        patch("apps.workspaces.tasks.get_registry", return_value=_registry()),
+        patch("apps.workspaces.services.materialize.get_registry", return_value=_registry()),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=expire_during_first_load,
         ),
-        patch("apps.workspaces.tasks.SchemaManager", return_value=MagicMock()),
+        patch("apps.workspaces.services.materialize.SchemaManager", return_value=MagicMock()),
     ):
-        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+        result = await materialize.materialize_workspace_core(str(workspace.id), str(user.id))
 
     assert len(loaded) == 1
     denied = [entry for entry in result["tenants"] if not entry.get("success")]
@@ -137,17 +137,17 @@ async def test_one_tenant_revoked_mid_run_is_skipped_while_the_other_stays_loade
 
     with (
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.materialize.aresolve_credential",
             AsyncMock(return_value={"type": "api_key", "value": "k"}),
         ),
-        patch("apps.workspaces.tasks.get_registry", return_value=_registry()),
+        patch("apps.workspaces.services.materialize.get_registry", return_value=_registry()),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=expire_during_first_load,
         ),
-        patch("apps.workspaces.tasks.SchemaManager", return_value=MagicMock()),
+        patch("apps.workspaces.services.materialize.SchemaManager", return_value=MagicMock()),
     ):
-        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+        result = await materialize.materialize_workspace_core(str(workspace.id), str(user.id))
 
     assert loaded == [tenant.id]
     skipped = [entry for entry in result["tenants"] if not entry.get("success")]
@@ -165,16 +165,16 @@ async def test_fresh_actor_loads_without_any_provider_call(
 ):
     with (
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.materialize.aresolve_credential",
             AsyncMock(return_value={"type": "api_key", "value": "k"}),
         ),
-        patch("apps.workspaces.tasks.get_registry", return_value=_registry()),
+        patch("apps.workspaces.services.materialize.get_registry", return_value=_registry()),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=completed_pipeline_run,
         ),
     ):
-        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+        result = await materialize.materialize_workspace_core(str(workspace.id), str(user.id))
 
     assert result["all_succeeded"] is True
     assert upstream_provider.requests == []

@@ -31,6 +31,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services import materialize
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from tests.managed_sentinels import drop_owned, read_as_readonly, write_sentinel
 from tests.pipeline_doubles import completed_pipeline_run
@@ -102,25 +103,26 @@ async def test_siblings_read_last_good_through_a_shared_load_until_they_rebuild(
         return completed_pipeline_run(membership, credential, pipeline, job_id, target_schema)
 
     with (
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", side_effect=fetch),
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.materialize._run_pipeline_with_progress", side_effect=fetch
+        ),
+        patch(
+            "apps.workspaces.services.materialize.aresolve_credential",
             AsyncMock(return_value={"type": "api_key", "value": "k"}),
         ),
         patch(
-            "apps.workspaces.tasks.build_and_promote_cube_schema",
+            "apps.workspaces.services.materialize.build_and_promote_cube_schema",
             return_value=MagicMock(id="cube", content_hash="hash"),
         ),
         patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
         patch("apps.workspaces.services.retirement.configure_teardown_schema") as retire,
         patch(
-            "apps.workspaces.tasks._included_tenant_snapshot_state", AsyncMock(return_value="safe")
+            "apps.workspaces.services.materialize._included_tenant_snapshot_state",
+            AsyncMock(return_value="safe"),
         ),
     ):
         retire.return_value.defer_async = AsyncMock(return_value=1)
-        result = await workspaces_tasks.materialize_workspace_core(
-            str(workspaces["A"].id), str(user.id)
-        )
+        result = await materialize.materialize_workspace_core(str(workspaces["A"].id), str(user.id))
 
     assert result["all_succeeded"] is True
     assert during_load == [(["s1"], ["s1"])]

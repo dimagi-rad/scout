@@ -27,8 +27,8 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.materialize import _materialization_write_denial, _resume_records
 from apps.workspaces.services.reconciliation import reconcile_stale_thread_job
-from apps.workspaces.tasks import _materialization_write_denial, _resume_records
 from tests.tenant_access import acovered_source, agrant_tenant_access, ausable_connection
 from tests.upstream_proofs import amake_proof_stale
 

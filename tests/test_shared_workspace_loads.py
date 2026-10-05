@@ -30,7 +30,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.workspaces.services import load_outcome, retirement
+from apps.workspaces.services import load_outcome, materialize, retirement
 from apps.workspaces.services.data_operation import (
     LockOrderError,
     tenant_data_lock,
@@ -85,13 +85,15 @@ def _no_candidate_ddl(no_candidate_ddl):
 @asynccontextmanager
 async def _loads(pipeline: _Pipeline):
     with (
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", side_effect=pipeline),
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.materialize._run_pipeline_with_progress", side_effect=pipeline
+        ),
+        patch(
+            "apps.workspaces.services.materialize.aresolve_credential",
             AsyncMock(return_value={"type": "api_key", "value": "k"}),
         ),
         patch(
-            "apps.workspaces.tasks.build_and_promote_cube_schema",
+            "apps.workspaces.services.materialize.build_and_promote_cube_schema",
             return_value=MagicMock(id="cube", content_hash="hash"),
         ),
         patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
@@ -116,13 +118,13 @@ async def _intent(workspace):
             "tenant_id", flat=True
         )
     ]
-    return await workspaces_tasks._to_thread_fresh_db(
+    return await materialize._to_thread_fresh_db(
         capture_load_intent, tenant_ids, INTENT_FULL_REFRESH
     )
 
 
 async def _run(workspace, user, *, job_id=None, load_intent=None):
-    return await workspaces_tasks.materialize_workspace_core(
+    return await materialize.materialize_workspace_core(
         str(workspace.id), str(user.id), job_id, load_intent=load_intent
     )
 
@@ -226,7 +228,7 @@ async def test_cancellation_during_candidate_setup_clears_committed_state(
     workspace, tenant, user, phase
 ):
     operation_name = "begin_load_generation" if phase == "begin" else "open_workspace_candidate"
-    original = getattr(workspaces_tasks, operation_name)
+    original = getattr(materialize, operation_name)
     entered = threading.Event()
     release = threading.Event()
 
@@ -237,7 +239,9 @@ async def test_cancellation_during_candidate_setup_clears_committed_state(
         return result
 
     async with _loads(_Pipeline()):
-        with patch(f"apps.workspaces.tasks.{operation_name}", side_effect=commit_then_wait):
+        with patch(
+            f"apps.workspaces.services.materialize.{operation_name}", side_effect=commit_then_wait
+        ):
             task = asyncio.create_task(_run(workspace, user))
             assert await asyncio.to_thread(entered.wait, 5)
             task.cancel()
@@ -324,7 +328,7 @@ async def test_a_retry_after_a_transform_only_deploy_resumes_the_failed_candidat
             return_value="next-deploy",
         ):
             retried = await _run(workspace, user)
-        before_deploy = await workspaces_tasks._to_thread_fresh_db(
+        before_deploy = await materialize._to_thread_fresh_db(
             pipeline_fingerprint, pipeline.configs[-1], tenant
         )
 
@@ -345,7 +349,7 @@ async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(
         provider="commcare", external_id="late-domain", canonical_name="Late"
     )
     await agrant_tenant_access(user, late)
-    real_lock = workspaces_tasks.tenant_data_lock
+    real_lock = materialize.tenant_data_lock
 
     @asynccontextmanager
     async def add_tenant_after_locking(tenant_ids):
@@ -356,8 +360,12 @@ async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(
     pipeline = _Pipeline()
     async with _loads(pipeline):
         with (
-            patch("apps.workspaces.tasks.tenant_data_lock", add_tenant_after_locking),
-            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.services.materialize.tenant_data_lock", add_tenant_after_locking
+            ),
+            patch(
+                "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema"
+            ) as build,
         ):
             build.return_value.tenant_coverage = {}
             result = await _run(workspace, user)
@@ -388,7 +396,9 @@ async def test_workspaces_locking_shared_tenants_in_opposite_order_do_not_deadlo
         # Both intents up front, so the fetch count does not depend on which
         # workspace reaches begin_load_generation first.
         ab_intent, ba_intent = await _intent(ab), await _intent(ba)
-        with patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build:
+        with patch(
+            "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema"
+        ) as build:
             build.return_value.tenant_coverage = {}
             results = await asyncio.wait_for(
                 asyncio.gather(
@@ -416,7 +426,9 @@ async def _failed_workspace_candidate(tenant, workspace, *, state=SchemaState.FA
 async def test_an_abandoned_candidate_is_dropped_and_marked_expired(workspace, tenant):
     candidate = await _failed_workspace_candidate(tenant, workspace)
 
-    with patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None) as teardown:
+    with patch(
+        "apps.workspaces.services.schema_manager.SchemaManager.teardown", return_value=None
+    ) as teardown:
         await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id))
 
     teardown.assert_called_once()
@@ -427,7 +439,9 @@ async def test_an_abandoned_candidate_is_dropped_and_marked_expired(workspace, t
 async def test_a_candidate_resumed_before_its_drop_ran_is_left_alone(workspace, tenant):
     candidate = await _failed_workspace_candidate(tenant, workspace, state=SchemaState.PROVISIONING)
 
-    with patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None) as teardown:
+    with patch(
+        "apps.workspaces.services.schema_manager.SchemaManager.teardown", return_value=None
+    ) as teardown:
         await workspaces_tasks.drop_abandoned_candidate(schema_id=str(candidate.id))
 
     teardown.assert_not_called()
@@ -440,7 +454,7 @@ async def test_a_candidate_drop_defers_without_waiting_while_a_writer_holds_t(wo
 
     with (
         try_tenant_data_lock(tenant.id) as held,
-        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+        patch("apps.workspaces.services.schema_manager.SchemaManager.teardown") as teardown,
         patch("apps.workspaces.services.retirement.configure_drop_abandoned_candidate") as retry,
     ):
         assert held
@@ -462,7 +476,7 @@ async def test_a_failed_drop_retries_with_backoff_then_gives_up(workspace, tenan
 
     with (
         patch(
-            "apps.workspaces.tasks.SchemaManager.teardown",
+            "apps.workspaces.services.schema_manager.SchemaManager.teardown",
             side_effect=psycopg.OperationalError("server closed the connection"),
         ),
         patch("apps.workspaces.services.retirement.configure_drop_abandoned_candidate") as retry,
@@ -509,14 +523,16 @@ async def test_a_new_source_load_only_loads_sources_that_serve_nothing(workspace
             last_accessed_at=touched_before
         )
         with (
-            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema"
+            ) as build,
             patch(
                 "apps.workspaces.services.publication.rebuild_dependent_view_schemas",
                 new_callable=AsyncMock,
             ) as dependents,
         ):
             build.return_value.tenant_coverage = {}
-            result = await workspaces_tasks.materialize_workspace_core(
+            result = await materialize.materialize_workspace_core(
                 str(workspace.id), str(user.id), None, only_unserved=True
             )
 
@@ -540,7 +556,7 @@ def _denial(workspace_tenants, code=ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE, p
         "error": "Access could not be verified",
         "error_code": code,
         "tenants": [
-            workspaces_tasks._preflight_failure(
+            materialize._preflight_failure(
                 t, "Access could not be verified", per_tenant.get(t.external_id, code)
             )
             for t in workspace_tenants
@@ -562,7 +578,7 @@ async def _run_new_source_load_denied_after_first_tenant(workspace, user, *, onl
     """
     tenant_ids = [t async for t in workspace.tenants.values_list("id", flat=True)]
     async with workspace_data_lock(workspace.id), tenant_data_lock(tenant_ids):
-        return await workspaces_tasks.materialize_workspace_core.__wrapped__(
+        return await materialize.materialize_workspace_core.__wrapped__(
             str(workspace.id),
             str(user.id),
             None,
@@ -595,10 +611,12 @@ async def test_new_source_denial_does_not_rebuild_untouched_siblings(workspace, 
     async with _loads(pipeline):
         with (
             patch(
-                "apps.workspaces.tasks._materialization_write_denial",
+                "apps.workspaces.services.materialize._materialization_write_denial",
                 await _deny_after_first_tenant(workspace),
             ),
-            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema"
+            ) as build,
             patch(
                 "apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()
             ) as dependents,
@@ -632,15 +650,19 @@ async def test_a_transient_denial_never_fails_siblings_the_new_source_load_would
     async with _loads(pipeline):
         with (
             patch(
-                "apps.workspaces.tasks._materialization_write_denial",
+                "apps.workspaces.services.materialize._materialization_write_denial",
                 await _deny_after_first_tenant(workspace),
             ),
-            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
             patch(
-                "apps.workspaces.tasks._included_tenant_snapshot_state",
+                "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema"
+            ) as build,
+            patch(
+                "apps.workspaces.services.materialize._included_tenant_snapshot_state",
                 AsyncMock(return_value="safe"),
             ),
-            patch("apps.workspaces.tasks.record_cube_schema_build_failure") as cube_failure,
+            patch(
+                "apps.workspaces.services.materialize.record_cube_schema_build_failure"
+            ) as cube_failure,
         ):
             build.return_value.tenant_coverage = coverage
             result = await _run_new_source_load_denied_after_first_tenant(workspace, user)
@@ -672,7 +694,7 @@ async def test_a_reused_tenant_is_reported_as_served_when_the_chat_resumes(works
 
     assert "reused_generation" in reused["tenants"][0]
     assert len(pipeline.calls) == 1
-    records = workspaces_tasks._resume_records(reused)
+    records = materialize._resume_records(reused)
     status, summary = await load_outcome.aggregate_materialization_state(
         202, sibling, str(user.id), records
     )
@@ -689,13 +711,13 @@ async def test_an_already_serving_tenant_is_reported_as_served_when_the_chat_res
     pipeline = _Pipeline()
     async with _loads(pipeline):
         await _run(workspace, user, job_id=101, load_intent=await _intent(workspace))
-        passed_over = await workspaces_tasks.materialize_workspace_core(
+        passed_over = await materialize.materialize_workspace_core(
             str(workspace.id), str(user.id), 202, only_unserved=True
         )
 
     assert passed_over["tenants"][0]["result"]["status"] == "already_loaded"
     assert len(pipeline.calls) == 1
-    records = workspaces_tasks._resume_records(passed_over)
+    records = materialize._resume_records(passed_over)
     status, summary = await load_outcome.aggregate_materialization_state(
         202, workspace, str(user.id), records
     )
@@ -732,7 +754,7 @@ async def test_a_failure_opening_the_candidate_clears_the_loading_marker(workspa
     pipeline = _Pipeline()
     async with _loads(pipeline):
         with patch(
-            "apps.workspaces.tasks.open_workspace_candidate",
+            "apps.workspaces.services.materialize.open_workspace_candidate",
             side_effect=RuntimeError("schema name collision"),
         ):
             result = await _run(workspace, user)
@@ -756,13 +778,13 @@ async def test_a_source_added_mid_run_reports_the_view_build_plainly(user):
     pipeline = _Pipeline()
     async with _loads(pipeline):
         with patch(
-            "apps.workspaces.tasks.SchemaManager.build_view_schema",
+            "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema",
             side_effect=LockOrderError("Cannot expand held tenant locks"),
         ):
             result = await _run(ws, user)
 
     assert result["view_schema"]["ok"] is False
-    assert result["view_schema"]["error"] == workspaces_tasks._SOURCE_ADDED_DURING_LOAD
+    assert result["view_schema"]["error"] == materialize._SOURCE_ADDED_DURING_LOAD
 
 
 async def test_a_publish_queues_the_demoted_schemas_teardown(workspace, tenant, user):
@@ -798,14 +820,16 @@ async def test_a_new_source_load_that_stops_before_publishing_still_rebuilds_vie
         else AsyncMock(return_value=outcome)
     )
     with (
-        patch("apps.workspaces.tasks.materialize_workspace_core", core),
+        patch("apps.workspaces.services.materialize.materialize_workspace_core", core),
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            "apps.workspaces.services.materialize.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
         ) as rebuild,
-        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock) as resume,
         patch(
-            "apps.workspaces.tasks.aview_schema_buildable",
+            "apps.workspaces.services.materialize._defer_resume_for_job", new_callable=AsyncMock
+        ) as resume,
+        patch(
+            "apps.workspaces.services.materialize.aview_schema_buildable",
             new=AsyncMock(return_value=True),
         ),
     ):
@@ -848,11 +872,11 @@ async def test_an_unpublished_new_source_load_rebuilds_views_only_when_they_can_
     denial = {"status": "denied", "error": "verification unavailable", "tenants": []}
     with (
         patch(
-            "apps.workspaces.tasks.materialize_workspace_core",
+            "apps.workspaces.services.materialize.materialize_workspace_core",
             new=AsyncMock(return_value=denial),
         ),
         patch(
-            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            "apps.workspaces.services.materialize.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
         ) as rebuild,
     ):
@@ -909,7 +933,7 @@ async def test_a_drop_that_hits_a_query_bug_surfaces_instead_of_retrying(workspa
 
     with (
         patch(
-            "apps.workspaces.tasks.SchemaManager.teardown",
+            "apps.workspaces.services.schema_manager.SchemaManager.teardown",
             side_effect=psycopg.errors.UndefinedColumn("no such column"),
         ),
         patch("apps.workspaces.services.retirement.configure_drop_abandoned_candidate") as retry,
@@ -1060,7 +1084,7 @@ async def test_an_abort_during_failure_cleanup_still_stops_the_run():
         try:
             raise RuntimeError("provider timed out")
         except RuntimeError:
-            await workspaces_tasks._drain(cleanup(), "tenant x")
+            await materialize.drain(cleanup(), "tenant x")
             raise
 
     task = asyncio.create_task(fail_and_clean())
@@ -1098,8 +1122,13 @@ async def test_a_denial_that_concerns_a_serving_sibling_still_reports_it(
     pipeline = _Pipeline()
     async with _loads(pipeline):
         with (
-            patch("apps.workspaces.tasks._materialization_write_denial", side_effect=recheck),
-            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.services.materialize._materialization_write_denial",
+                side_effect=recheck,
+            ),
+            patch(
+                "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema"
+            ) as build,
         ):
             build.return_value.tenant_coverage = {}
             result = await _run_new_source_load_denied_after_first_tenant(workspace, user)
@@ -1146,13 +1175,20 @@ async def test_losing_an_already_handled_source_mid_run_is_never_reported_as_suc
     pipeline = _Pipeline()
     async with _loads(pipeline):
         with (
-            patch("apps.workspaces.tasks._materialization_write_denial", side_effect=recheck),
-            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
             patch(
-                "apps.workspaces.tasks._included_tenant_snapshot_state",
+                "apps.workspaces.services.materialize._materialization_write_denial",
+                side_effect=recheck,
+            ),
+            patch(
+                "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema"
+            ) as build,
+            patch(
+                "apps.workspaces.services.materialize._included_tenant_snapshot_state",
                 AsyncMock(return_value="safe"),
             ),
-            patch("apps.workspaces.tasks.record_cube_schema_build_failure") as cube_failure,
+            patch(
+                "apps.workspaces.services.materialize.record_cube_schema_build_failure"
+            ) as cube_failure,
         ):
             build.return_value.tenant_coverage = {}
             result = await _run_new_source_load_denied_after_first_tenant(workspace, user)
@@ -1176,10 +1212,12 @@ async def test_mid_run_denial_guidance_names_each_source_once(workspace, tenant,
     async with _loads(pipeline):
         with (
             patch(
-                "apps.workspaces.tasks._materialization_write_denial",
+                "apps.workspaces.services.materialize._materialization_write_denial",
                 AsyncMock(return_value=denial),
             ),
-            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema"
+            ) as build,
         ):
             build.return_value.tenant_coverage = {}
             result = await _run_new_source_load_denied_after_first_tenant(
@@ -1211,14 +1249,16 @@ async def test_a_load_failure_then_a_denial_names_the_failed_source_once(workspa
     async with _loads(pipeline):
         with (
             patch(
-                "apps.workspaces.tasks._materialization_write_denial",
+                "apps.workspaces.services.materialize._materialization_write_denial",
                 AsyncMock(return_value=denial),
             ),
             patch(
-                "apps.workspaces.tasks._load_workspace_candidate",
+                "apps.workspaces.services.materialize._load_workspace_candidate",
                 AsyncMock(side_effect=expired),
             ),
-            patch("apps.workspaces.tasks.SchemaManager.build_view_schema") as build,
+            patch(
+                "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema"
+            ) as build,
         ):
             build.return_value.tenant_coverage = {}
             result = await _run_new_source_load_denied_after_first_tenant(

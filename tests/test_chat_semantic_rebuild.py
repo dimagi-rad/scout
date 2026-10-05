@@ -312,7 +312,9 @@ async def test_a_chat_recovery_never_turns_into_an_unapproved_reload():
         completed_at=timezone.now(),
     )
 
-    with patch("apps.workspaces.tasks.materialize_workspace_core", AsyncMock()) as reload:
+    with patch(
+        "apps.workspaces.services.materialize.materialize_workspace_core", AsyncMock()
+    ) as reload:
         result = await recover_workspace_data.func(
             SimpleNamespace(job=SimpleNamespace(id=916)), str(recovery.id)
         )
@@ -476,7 +478,10 @@ async def test_a_capacity_refused_view_rebuild_cube_build_is_flagged():
     view_schema = SimpleNamespace(schema_name="ws_view", tenant_coverage={})
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager.build_view_schema", return_value=view_schema),
+        patch(
+            "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema",
+            return_value=view_schema,
+        ),
         patch(
             "apps.workspaces.services.publication._included_tenant_snapshot_state",
             AsyncMock(return_value="safe"),

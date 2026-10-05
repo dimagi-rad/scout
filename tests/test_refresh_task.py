@@ -143,7 +143,7 @@ async def test_refresh_task_rejects_legacy_job_without_actor_context(
     provisioning_schema, tenant_membership_obj
 ):
     pipeline = MagicMock()
-    with patch("apps.workspaces.tasks.run_pipeline", pipeline):
+    with patch("apps.workspaces.services.refresh.run_pipeline", pipeline):
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
@@ -169,7 +169,7 @@ async def test_refresh_task_denies_read_actor_before_schema_load(
         user=read_user, tenant=provisioning_schema.tenant
     )
     await _rebind_refresh(provisioning_schema, read_membership, workspace)
-    with patch("apps.workspaces.tasks.run_pipeline", pipeline):
+    with patch("apps.workspaces.services.refresh.run_pipeline", pipeline):
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
@@ -199,7 +199,7 @@ async def test_refresh_denial_never_demotes_a_serving_schema(
     provisioning_schema.state = SchemaState.ACTIVE
     await provisioning_schema.asave(update_fields=["state"])
 
-    with patch("apps.workspaces.tasks.run_pipeline") as pipeline:
+    with patch("apps.workspaces.services.refresh.run_pipeline") as pipeline:
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
@@ -222,7 +222,7 @@ async def test_refresh_task_rejects_schema_outside_authorized_workspace(
     other = await Workspace.objects.acreate(name="Other", created_by=user)
     await WorkspaceMembership.objects.acreate(workspace=other, user=user, role=WorkspaceRole.MANAGE)
     pipeline = MagicMock()
-    with patch("apps.workspaces.tasks.run_pipeline", pipeline):
+    with patch("apps.workspaces.services.refresh.run_pipeline", pipeline):
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
@@ -250,14 +250,16 @@ async def test_refresh_task_marks_schema_active_on_success(
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.refresh.aresolve_credential",
             new=AsyncMock(return_value={"type": "api_key", "value": "tok"}),
         ),
         patch(
-            "apps.workspaces.tasks.get_registry",
+            "apps.workspaces.services.refresh.get_registry",
             return_value=_mock_registry(),
         ),
-        patch("apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run) as pipeline,
+        patch(
+            "apps.workspaces.services.refresh.run_pipeline", side_effect=completed_refresh_run
+        ) as pipeline,
     ):
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
@@ -300,10 +302,10 @@ async def test_real_pipeline_defers_refresh_promotion_to_owned_worker_cas(
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.refresh.aresolve_credential",
             new=AsyncMock(return_value={"type": "api_key", "value": "tok"}),
         ),
-        patch("apps.workspaces.tasks.get_registry", return_value=registry),
+        patch("apps.workspaces.services.refresh.get_registry", return_value=registry),
         patch(
             "apps.workspaces.services.retirement.promote_candidate_schema",
             side_effect=observe_owned_promotion,
@@ -352,14 +354,14 @@ async def test_refresh_task_schedules_old_schema_teardown(
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.refresh.aresolve_credential",
             new=AsyncMock(return_value={"type": "api_key", "value": "tok"}),
         ),
         patch(
-            "apps.workspaces.tasks.get_registry",
+            "apps.workspaces.services.refresh.get_registry",
             return_value=_mock_registry(),
         ),
-        patch("apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run),
+        patch("apps.workspaces.services.refresh.run_pipeline", side_effect=completed_refresh_run),
         patch(
             "apps.workspaces.services.retirement.configure_teardown_schema",
             return_value=deferrer,
@@ -414,8 +416,10 @@ async def test_refresh_cancellation_drains_writer_then_fails_owned_candidate(
         assert release.wait(timeout=10)
 
     with (
-        patch("apps.workspaces.tasks.SchemaManager.create_physical_schema", blocked_create),
-        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+        patch(
+            "apps.workspaces.services.refresh.SchemaManager.create_physical_schema", blocked_create
+        ),
+        patch("apps.workspaces.services.refresh.SchemaManager.teardown") as teardown,
         patch(
             "apps.workspaces.services.retirement.fail_claimed_refresh_candidate",
             wraps=fail_claimed_refresh_candidate,
@@ -467,7 +471,9 @@ async def test_refresh_task_marks_failed_on_no_credential(
             "apps.workspaces.services.schema_manager.get_managed_db_connection",
             return_value=_mock_conn(),
         ),
-        patch("apps.workspaces.tasks.aresolve_credential", new=AsyncMock(return_value=None)),
+        patch(
+            "apps.workspaces.services.refresh.aresolve_credential", new=AsyncMock(return_value=None)
+        ),
         patch("apps.workspaces.services.schema_manager.SchemaManager.teardown"),
     ):
         result = await refresh_tenant_schema(
@@ -493,15 +499,15 @@ async def test_refresh_task_marks_failed_on_materialization_error(
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.refresh.aresolve_credential",
             new=AsyncMock(return_value={"type": "api_key", "value": "tok"}),
         ),
         patch(
-            "apps.workspaces.tasks.get_registry",
+            "apps.workspaces.services.refresh.get_registry",
             return_value=_mock_registry(),
         ),
         patch(
-            "apps.workspaces.tasks.run_pipeline",
+            "apps.workspaces.services.refresh.run_pipeline",
             side_effect=RuntimeError("Pipeline exploded"),
         ),
         patch("apps.workspaces.services.schema_manager.SchemaManager.teardown"),
@@ -548,10 +554,10 @@ async def test_refresh_task_resolves_credential_in_async_context(
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.workspaces.tasks.get_registry",
+            "apps.workspaces.services.refresh.get_registry",
             return_value=_mock_registry(),
         ),
-        patch("apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run),
+        patch("apps.workspaces.services.refresh.run_pipeline", side_effect=completed_refresh_run),
     ):
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
@@ -616,14 +622,14 @@ async def test_refresh_loads_into_new_schema_not_old_active(
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.refresh.aresolve_credential",
             new=AsyncMock(return_value={"type": "api_key", "value": "tok"}),
         ),
         patch(
-            "apps.workspaces.tasks.get_registry",
+            "apps.workspaces.services.refresh.get_registry",
             return_value=_mock_registry(),
         ),
-        patch("apps.workspaces.tasks.run_pipeline", side_effect=fake_run_pipeline),
+        patch("apps.workspaces.services.refresh.run_pipeline", side_effect=fake_run_pipeline),
         patch(
             "apps.workspaces.services.retirement.configure_teardown_schema", return_value=deferrer
         ),
@@ -690,11 +696,11 @@ async def test_refresh_task_rebuilds_dependent_multitenant_view_schemas(
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.refresh.aresolve_credential",
             new=AsyncMock(return_value={"type": "api_key", "value": "tok"}),
         ),
-        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry()),
-        patch("apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run),
+        patch("apps.workspaces.services.refresh.get_registry", return_value=_mock_registry()),
+        patch("apps.workspaces.services.refresh.run_pipeline", side_effect=completed_refresh_run),
         patch(
             "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
             new_callable=AsyncMock,
@@ -738,11 +744,15 @@ def _refresh_patches(**overrides):
             return_value=_mock_conn(),
         ),
         "credential": patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.refresh.aresolve_credential",
             new=AsyncMock(return_value={"type": "api_key", "value": "tok"}),
         ),
-        "registry": patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry()),
-        "pipeline": patch("apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run),
+        "registry": patch(
+            "apps.workspaces.services.refresh.get_registry", return_value=_mock_registry()
+        ),
+        "pipeline": patch(
+            "apps.workspaces.services.refresh.run_pipeline", side_effect=completed_refresh_run
+        ),
         "retire": patch("apps.workspaces.services.retirement.configure_teardown_schema"),
     }
     patches.update(overrides)
@@ -829,8 +839,8 @@ async def test_refresh_waits_for_its_tenant_and_fails_visibly_on_timeout(
         assert ready in done, "the tenant-lock holder never became ready"
         with (
             patch.object(data_operation, "_LOCK_TIMEOUT", "300ms"),
-            patch("apps.workspaces.tasks.aresolve_credential", new=AsyncMock()),
-            patch("apps.workspaces.tasks.run_pipeline", pipeline),
+            patch("apps.workspaces.services.refresh.aresolve_credential", new=AsyncMock()),
+            patch("apps.workspaces.services.refresh.run_pipeline", pipeline),
             patch(
                 "apps.workspaces.services.schema_manager.get_managed_db_connection",
                 return_value=_mock_conn(),
@@ -874,7 +884,9 @@ async def test_a_refresh_whose_transforms_failed_keeps_the_previous_data(
         return result
 
     patches = _refresh_patches(
-        pipeline=patch("apps.workspaces.tasks.run_pipeline", side_effect=transforms_failed)
+        pipeline=patch(
+            "apps.workspaces.services.refresh.run_pipeline", side_effect=transforms_failed
+        )
     )
     with contextlib.ExitStack() as stack:
         for p in patches.values():
@@ -930,10 +942,12 @@ async def test_a_refresh_rechecks_authority_once_it_holds_the_tenant_lock(
     access = AsyncMock(
         side_effect=[MagicMock(granted=True), MagicMock(granted=False, denied_reason="role")]
     )
-    patches = _refresh_patches(pipeline=patch("apps.workspaces.tasks.run_pipeline"))
+    patches = _refresh_patches(pipeline=patch("apps.workspaces.services.refresh.run_pipeline"))
     with contextlib.ExitStack() as stack:
         mocks = {name: stack.enter_context(p) for name, p in patches.items()}
-        stack.enter_context(patch("apps.workspaces.tasks.aresolve_workspace_access_ex", access))
+        stack.enter_context(
+            patch("apps.workspaces.services.refresh.aresolve_workspace_access_ex", access)
+        )
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
@@ -958,9 +972,9 @@ async def test_refresh_startup_failure_fails_candidate(
 ):
     patches = _refresh_patches()
     targets = {
-        "credential": "apps.workspaces.tasks.aresolve_credential",
-        "registry": "apps.workspaces.tasks.get_registry",
-        "generation": "apps.workspaces.tasks.begin_load_generation",
+        "credential": "apps.workspaces.services.refresh.aresolve_credential",
+        "registry": "apps.workspaces.services.refresh.get_registry",
+        "generation": "apps.workspaces.services.refresh.begin_load_generation",
     }
     with contextlib.ExitStack() as stack:
         mocks = {name: stack.enter_context(p) for name, p in patches.items()}
@@ -1000,7 +1014,9 @@ async def test_refresh_cancelled_during_generation_start_clears_committed_marker
     patches = _refresh_patches()
     with contextlib.ExitStack() as stack:
         mocks = {name: stack.enter_context(p) for name, p in patches.items()}
-        stack.enter_context(patch("apps.workspaces.tasks.begin_load_generation", blocked_begin))
+        stack.enter_context(
+            patch("apps.workspaces.services.refresh.begin_load_generation", blocked_begin)
+        )
         work = asyncio.create_task(
             refresh_tenant_schema.func(
                 context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
@@ -1066,16 +1082,16 @@ async def test_refresh_rechecks_exact_source_after_waiting_for_tenant(
     with contextlib.ExitStack() as stack:
         mocks = {name: stack.enter_context(p) for name, p in patches.items()}
         stack.enter_context(
-            patch("apps.workspaces.tasks.tenant_data_lock", lock_after_access_change)
+            patch("apps.workspaces.services.refresh.tenant_data_lock", lock_after_access_change)
         )
         stack.enter_context(
             patch(
-                "apps.workspaces.tasks.aresolve_workspace_access_ex",
+                "apps.workspaces.services.refresh.aresolve_workspace_access_ex",
                 new=AsyncMock(return_value=MagicMock(granted=True)),
             )
         )
         create = stack.enter_context(
-            patch("apps.workspaces.tasks.SchemaManager.create_physical_schema")
+            patch("apps.workspaces.services.refresh.SchemaManager.create_physical_schema")
         )
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
@@ -1100,15 +1116,20 @@ async def test_refused_refresh_fails_candidate_even_if_marker_cleanup_fails(
     provisioning_schema, old_active_schema, tenant_membership_obj
 ):
     patches = _refresh_patches(
-        pipeline=patch("apps.workspaces.tasks.run_pipeline", return_value={})
+        pipeline=patch("apps.workspaces.services.refresh.run_pipeline", return_value={})
     )
     with contextlib.ExitStack() as stack:
         for p in patches.values():
             stack.enter_context(p)
         stack.enter_context(
-            patch("apps.workspaces.tasks.end_load_generation", side_effect=DatabaseError("DB blip"))
+            patch(
+                "apps.workspaces.services.refresh.end_load_generation",
+                side_effect=DatabaseError("DB blip"),
+            )
         )
-        teardown = stack.enter_context(patch("apps.workspaces.tasks.SchemaManager.teardown"))
+        teardown = stack.enter_context(
+            patch("apps.workspaces.services.refresh.SchemaManager.teardown")
+        )
         result = await refresh_tenant_schema(
             context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
             schema_id=str(provisioning_schema.id),
@@ -1139,8 +1160,8 @@ async def test_refresh_cancelled_during_failure_cleanup_finishes_drop(
         return fail_claimed_refresh_candidate(schema_id, job_id)
 
     targets = {
-        "create": "apps.workspaces.tasks.SchemaManager.create_physical_schema",
-        "pipeline": "apps.workspaces.tasks.run_pipeline",
+        "create": "apps.workspaces.services.refresh.SchemaManager.create_physical_schema",
+        "pipeline": "apps.workspaces.services.refresh.run_pipeline",
         "promotion": "apps.workspaces.services.retirement.promote_and_queue_retirement",
     }
     patches = _refresh_patches()
@@ -1153,7 +1174,9 @@ async def test_refresh_cancelled_during_failure_cleanup_finishes_drop(
                 "apps.workspaces.services.retirement.fail_claimed_refresh_candidate", blocked_fail
             )
         )
-        teardown = stack.enter_context(patch("apps.workspaces.tasks.SchemaManager.teardown"))
+        teardown = stack.enter_context(
+            patch("apps.workspaces.services.refresh.SchemaManager.teardown")
+        )
         work = asyncio.create_task(
             refresh_tenant_schema.func(
                 context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
@@ -1200,8 +1223,12 @@ async def test_refresh_startup_abort_clears_committed_generation(
     patches = _refresh_patches()
     with contextlib.ExitStack() as stack:
         mocks = {name: stack.enter_context(p) for name, p in patches.items()}
-        stack.enter_context(patch("apps.workspaces.tasks._to_thread_fresh_db", abort_after_begin))
-        teardown = stack.enter_context(patch("apps.workspaces.tasks.SchemaManager.teardown"))
+        stack.enter_context(
+            patch("apps.workspaces.services.refresh._to_thread_fresh_db", abort_after_begin)
+        )
+        teardown = stack.enter_context(
+            patch("apps.workspaces.services.refresh.SchemaManager.teardown")
+        )
         with pytest.raises(WorkerAborted):
             await refresh_tenant_schema.func(
                 context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),
@@ -1233,8 +1260,8 @@ async def test_refresh_abnormal_abort_settles_only_unpublished_candidate(
         raise WorkerAborted
 
     targets = {
-        "create": "apps.workspaces.tasks.SchemaManager.create_physical_schema",
-        "pipeline": "apps.workspaces.tasks.run_pipeline",
+        "create": "apps.workspaces.services.refresh.SchemaManager.create_physical_schema",
+        "pipeline": "apps.workspaces.services.refresh.run_pipeline",
         "promotion": "apps.workspaces.services.retirement.promote_and_queue_retirement",
         "promotion_committed": "apps.workspaces.services.retirement.promote_and_queue_retirement",
     }
@@ -1250,7 +1277,9 @@ async def test_refresh_abnormal_abort_settles_only_unpublished_candidate(
                 else WorkerAborted,
             )
         )
-        teardown = stack.enter_context(patch("apps.workspaces.tasks.SchemaManager.teardown"))
+        teardown = stack.enter_context(
+            patch("apps.workspaces.services.refresh.SchemaManager.teardown")
+        )
         with pytest.raises(WorkerAborted):
             await refresh_tenant_schema.func(
                 context=MagicMock(job=MagicMock(id=provisioning_schema.refresh_job_id)),

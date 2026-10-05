@@ -44,7 +44,10 @@ def no_candidate_ddl():
     """Orchestration tests don't need a physical candidate schema; candidate DDL
     is covered against real managed PostgreSQL in test_shared_workspace_loads_managed."""
     with (
-        patch("apps.workspaces.tasks.SchemaManager.create_physical_schema", return_value=None),
-        patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None),
+        patch(
+            "apps.workspaces.services.schema_manager.SchemaManager.create_physical_schema",
+            return_value=None,
+        ),
+        patch("apps.workspaces.services.schema_manager.SchemaManager.teardown", return_value=None),
     ):
         yield

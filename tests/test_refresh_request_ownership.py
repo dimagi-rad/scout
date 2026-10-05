@@ -655,9 +655,9 @@ def test_duplicate_delivery_never_runs_physical_work(
     )
 
     with (
-        patch("apps.workspaces.tasks.run_pipeline") as pipeline,
-        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
-        patch("apps.workspaces.tasks.SchemaManager.create_physical_schema") as create,
+        patch("apps.workspaces.services.refresh.run_pipeline") as pipeline,
+        patch("apps.workspaces.services.refresh.SchemaManager.teardown") as teardown,
+        patch("apps.workspaces.services.refresh.SchemaManager.create_physical_schema") as create,
     ):
         result = _run_refresh(job_id, args)
 
@@ -676,7 +676,7 @@ def test_mismatched_job_reports_a_request_mismatch_not_a_role(
     candidate, args, _job_id = _bound_candidate(tenant, workspace, tenant_membership, refresh_job)
     stray_job_id = refresh_job(args)
 
-    with patch("apps.workspaces.tasks.SchemaManager.create_physical_schema") as create:
+    with patch("apps.workspaces.services.refresh.SchemaManager.create_physical_schema") as create:
         result = _run_refresh(stray_job_id, args)
 
     candidate.refresh_from_db()
@@ -709,7 +709,7 @@ def test_denied_refresh_reports_which_authority_was_lost(
     else:
         WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).delete()
 
-    with patch("apps.workspaces.tasks.SchemaManager.create_physical_schema") as create:
+    with patch("apps.workspaces.services.refresh.SchemaManager.create_physical_schema") as create:
         result = _run_refresh(job_id, args)
 
     candidate.refresh_from_db()
@@ -744,12 +744,12 @@ def test_pipeline_failure_cleanup_cannot_drop_candidate_that_became_active(
     with (
         patch("apps.workspaces.services.schema_manager.get_managed_db_connection"),
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.refresh.aresolve_credential",
             return_value={"type": "api_key", "value": "token"},
         ),
-        patch("apps.workspaces.tasks.get_registry", return_value=_stub_registry(tenant)),
-        patch("apps.workspaces.tasks.run_pipeline", side_effect=activate_then_fail),
-        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+        patch("apps.workspaces.services.refresh.get_registry", return_value=_stub_registry(tenant)),
+        patch("apps.workspaces.services.refresh.run_pipeline", side_effect=activate_then_fail),
+        patch("apps.workspaces.services.refresh.SchemaManager.teardown") as teardown,
     ):
         result = _run_refresh(job_id, args)
 
@@ -774,12 +774,14 @@ def test_lost_activation_drops_the_loaded_schema_only_if_it_was_failed(
     with (
         patch("apps.workspaces.services.schema_manager.get_managed_db_connection"),
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.refresh.aresolve_credential",
             return_value={"type": "api_key", "value": "token"},
         ),
-        patch("apps.workspaces.tasks.get_registry", return_value=_stub_registry(tenant)),
-        patch("apps.workspaces.tasks.run_pipeline", side_effect=load_then_lose_ownership),
-        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+        patch("apps.workspaces.services.refresh.get_registry", return_value=_stub_registry(tenant)),
+        patch(
+            "apps.workspaces.services.refresh.run_pipeline", side_effect=load_then_lose_ownership
+        ),
+        patch("apps.workspaces.services.refresh.SchemaManager.teardown") as teardown,
     ):
         result = _run_refresh(job_id, args)
 
@@ -799,7 +801,7 @@ def test_lost_activation_drops_the_loaded_schema_only_if_it_was_failed(
 def test_failed_refresh_drop_only_touches_failed_rows(tenant, state, dropped):
     schema = TenantSchema.objects.create(tenant=tenant, schema_name="dropped_r1", state=state)
 
-    with patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown:
+    with patch("apps.workspaces.services.refresh.SchemaManager.teardown") as teardown:
         async_to_sync(drop_failed_refresh_schema.func)(schema_id=str(schema.id))
 
     assert teardown.called is dropped
@@ -1122,12 +1124,14 @@ def test_real_enqueue_is_claimed_and_published_by_the_worker(
         with (
             patch("apps.workspaces.services.schema_manager.get_managed_db_connection"),
             patch(
-                "apps.workspaces.tasks.aresolve_credential",
+                "apps.workspaces.services.refresh.aresolve_credential",
                 return_value={"type": "api_key", "value": "token"},
             ),
-            patch("apps.workspaces.tasks.get_registry", return_value=_stub_registry(tenant)),
             patch(
-                "apps.workspaces.tasks.run_pipeline", side_effect=completed_refresh_run
+                "apps.workspaces.services.refresh.get_registry", return_value=_stub_registry(tenant)
+            ),
+            patch(
+                "apps.workspaces.services.refresh.run_pipeline", side_effect=completed_refresh_run
             ) as pipeline,
             patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas"),
             patch("apps.workspaces.services.publication.rebuild_single_tenant_semantic_models"),
@@ -1164,16 +1168,16 @@ def test_failure_cleanup_drops_schema_the_reconciler_already_failed(
     with (
         patch("apps.workspaces.services.schema_manager.get_managed_db_connection"),
         patch(
-            "apps.workspaces.tasks.SchemaManager.create_physical_schema",
+            "apps.workspaces.services.refresh.SchemaManager.create_physical_schema",
             side_effect=settle_then_fail if failure == "create_schema" else None,
         ),
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.refresh.aresolve_credential",
             return_value={"type": "api_key", "value": "token"},
         ),
-        patch("apps.workspaces.tasks.get_registry", return_value=_stub_registry(tenant)),
-        patch("apps.workspaces.tasks.run_pipeline", side_effect=settle_then_fail),
-        patch("apps.workspaces.tasks.SchemaManager.teardown") as teardown,
+        patch("apps.workspaces.services.refresh.get_registry", return_value=_stub_registry(tenant)),
+        patch("apps.workspaces.services.refresh.run_pipeline", side_effect=settle_then_fail),
+        patch("apps.workspaces.services.refresh.SchemaManager.teardown") as teardown,
     ):
         _run_refresh(job_id, args)
 
@@ -1190,10 +1194,10 @@ def test_claim_without_schema_is_not_reported_as_a_role_failure(
 
     with (
         patch(
-            "apps.workspaces.tasks.claim_refresh_candidate",
+            "apps.workspaces.services.refresh.claim_refresh_candidate",
             return_value=RefreshClaim(status="claimed"),
         ),
-        caplog.at_level(logging.ERROR, logger="apps.workspaces.tasks"),
+        caplog.at_level(logging.ERROR, logger="apps.workspaces.services.refresh"),
     ):
         result = _run_refresh(job_id, args)
 

@@ -12,7 +12,7 @@ from apps.workspaces.models import (
     Workspace,
     WorkspaceTenant,
 )
-from apps.workspaces.tasks import _await_in_progress_materializations
+from apps.workspaces.services.materialize import await_in_progress_materializations
 
 RunState = MaterializationRun.RunState
 
@@ -39,8 +39,8 @@ async def _run(tenant, state, **markers):
 
 async def _waits(workspace, caplog) -> bool:
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="apps.workspaces.tasks"):
-        await _await_in_progress_materializations(
+    with caplog.at_level(logging.WARNING, logger="apps.workspaces.services.materialize"):
+        await await_in_progress_materializations(
             str(workspace.id), poll_interval=0.01, max_wait_seconds=0.03
         )
     return any("still waiting" in record.getMessage() for record in caplog.records)

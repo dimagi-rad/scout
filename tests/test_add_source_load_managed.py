@@ -141,18 +141,22 @@ async def test_adding_an_unloaded_source_loads_it_and_republishes_the_views(owne
     cube.reset_mock()
     fallback_rebuild = AsyncMock()
     with (
-        patch("apps.workspaces.tasks._run_pipeline_with_progress", side_effect=fetch),
         patch(
-            "apps.workspaces.tasks.aresolve_credential",
+            "apps.workspaces.services.materialize._run_pipeline_with_progress", side_effect=fetch
+        ),
+        patch(
+            "apps.workspaces.services.materialize.aresolve_credential",
             AsyncMock(return_value={"type": "api_key", "value": "k"}),
         ),
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema", cube),
+        patch("apps.workspaces.services.materialize.build_and_promote_cube_schema", cube),
         patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
         patch(
-            "apps.workspaces.tasks._included_tenant_snapshot_state", AsyncMock(return_value="safe")
+            "apps.workspaces.services.materialize._included_tenant_snapshot_state",
+            AsyncMock(return_value="safe"),
         ),
-        patch.object(
-            workspaces_tasks.rebuild_workspace_view_schema, "defer_async", fallback_rebuild
+        patch(
+            "apps.workspaces.services.materialize.adefer_rebuild_workspace_view_schema",
+            fallback_rebuild,
         ),
     ):
         result = await workspaces_tasks.materialize_workspace(

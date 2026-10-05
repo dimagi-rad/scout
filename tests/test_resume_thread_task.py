@@ -32,14 +32,12 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.failure_guidance import credential_guidance
+from apps.workspaces.services.failure_guidance import summary_failures as _summary_failures
 from apps.workspaces.services.load_outcome import TENANT_NOT_RUN, aggregate_materialization_state
 from apps.workspaces.services.publication import defer_cube_promotion
 from apps.workspaces.services.query_state import semantic_layer_state
 from apps.workspaces.services.reconciliation import STALE_JOB_THRESHOLD
-from apps.workspaces.tasks import (
-    _summary_failures,
-    resume_thread_after_materialization,
-)
+from apps.workspaces.tasks import resume_thread_after_materialization
 from tests.agent_doubles import FakeAgent
 
 User = get_user_model()

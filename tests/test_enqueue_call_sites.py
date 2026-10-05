@@ -7,6 +7,7 @@ reaches the queue, so moving dispatch behind another API must leave them unchang
 
 import json
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -28,7 +29,13 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services import load_candidates, publication, retirement, thread_job_dispatch
+from apps.workspaces.services import (
+    load_candidates,
+    materialize,
+    publication,
+    retirement,
+    thread_job_dispatch,
+)
 from apps.workspaces.services.load_generations import (
     INTENT_RECONCILE_MISSING,
     capture_load_intent,
@@ -541,3 +548,47 @@ async def test_reconciler_queues_a_plain_resume_for_an_unclaimed_success(workspa
         _expected("resume_thread_after_materialization", {"thread_job_id": str(tj.id)})
     ]
     assert jobs[0].scheduled_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_finished_load_queues_the_resume_of_its_thread(workspace, user):
+    tj = await _thread_job(workspace, user)
+
+    await materialize._defer_resume_for_job(tj.procrastinate_job_id)
+
+    jobs = await _aqueued(thread_job_id=str(tj.id))
+    assert [_row(job) for job in jobs] == [
+        _expected("resume_thread_after_materialization", {"thread_job_id": str(tj.id)})
+    ]
+    assert jobs[0].scheduled_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_unpublished_new_source_load_queues_a_view_rebuild(workspace, tenant, tenant2):
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant2)
+    for index, source in enumerate((tenant, tenant2)):
+        await TenantSchema.objects.acreate(
+            tenant=source, schema_name=f"t_enqueue_unpublished_{index}", state=SchemaState.ACTIVE
+        )
+    denial = {"status": "denied", "error": "verification unavailable", "tenants": []}
+
+    with (
+        patch(
+            "apps.workspaces.services.materialize.materialize_workspace_core",
+            new=AsyncMock(return_value=denial),
+        ),
+        patch("apps.workspaces.services.materialize._defer_pending_flush", new=AsyncMock()),
+    ):
+        await materialize.materialize_workspace(
+            SimpleNamespace(job=SimpleNamespace(id=7)),
+            str(workspace.id),
+            "",
+            only_unserved=True,
+            notify_thread=False,
+        )
+
+    assert [_row(job) for job in await _aqueued(workspace_id=str(workspace.id))] == [
+        _expected("rebuild_workspace_view_schema", {"workspace_id": str(workspace.id)})
+    ]
