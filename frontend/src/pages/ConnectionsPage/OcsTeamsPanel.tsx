@@ -15,7 +15,6 @@ interface OcsTeam {
   name: string
 }
 
-type StopReason = "mismatch" | "cancelled" | "failed" | "incomplete" | "user" | "idle" | "unknown"
 
 interface OcsTeamFlow {
   mode: "all" | "one"
@@ -45,7 +44,8 @@ export const CHAIN_CONTINUE_DELAY_MS = 1500
 export const PENDING_RECHECK_MS = 5000
 
 const STOP_URL = "/api/auth/ocs/teams/stop/"
-const STOP_REASONS: readonly string[] = ["mismatch", "cancelled", "failed", "incomplete", "user", "idle"]
+const STOP_REASONS = ["mismatch", "cancelled", "failed", "incomplete", "user", "idle"] as const
+type StopReason = (typeof STOP_REASONS)[number] | "unknown"
 
 const isTeam = (value: unknown): value is OcsTeam =>
   typeof asRecord(value)?.slug === "string" && typeof asRecord(value)?.name === "string"
@@ -64,9 +64,9 @@ function parseFlow(value: unknown): OcsTeamFlow | null {
       stopped && isTeam(stopped.team)
         ? {
             // An unknown reason falls through to stopMessage's generic text.
-            reason: (STOP_REASONS.includes(String(stopped.reason))
-              ? stopped.reason
-              : "unknown") as StopReason,
+            reason: (STOP_REASONS as readonly unknown[]).includes(stopped.reason)
+              ? (stopped.reason as StopReason)
+              : "unknown",
             team: stopped.team,
             got: isTeam(stopped.got) ? stopped.got : null,
           }
@@ -209,9 +209,9 @@ export function OcsTeamsPanel({ provider }: { provider: OAuthProvider }) {
     ) : null
   }
 
-  if (!state.available) return null
-
   if (!state.known) {
+    // Only a fresh `teams` claim can fill the list, which needs the scope requested.
+    if (!state.available) return null
     return (
       <p className="text-sm text-muted-foreground" data-testid="ocs-teams-hint">
         Reconnect one Open Chat Studio team to list all your teams here, so you can connect the

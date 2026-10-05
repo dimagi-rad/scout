@@ -273,7 +273,7 @@ describe("OcsTeamsPanel", () => {
     expect(screen.getByTestId("ocs-team-beta")).toBeInTheDocument()
   })
 
-  it("shows nothing when Scout doesn't request the teams scope", async () => {
+  it("hides the reconnect hint when Scout doesn't request the teams scope", async () => {
     vi.mocked(api.get).mockResolvedValue({
       available: false,
       known: false,
