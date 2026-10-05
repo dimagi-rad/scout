@@ -236,7 +236,9 @@ async def test_deleted_requester_cannot_borrow_other_users_credentials(recovery_
         recovery_type=WorkspaceDataRecovery.RecoveryType.MATERIALIZATION,
     )
     await recovery_setup.user.adelete()
-    with patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as materialize:
+    with patch(
+        "apps.workspaces.services.materialize.materialize_workspace_core", new=AsyncMock()
+    ) as materialize:
         result = await recover_workspace_data.func(
             SimpleNamespace(job=SimpleNamespace(id=921)), str(recovery.id)
         )
@@ -271,7 +273,7 @@ async def test_recovery_worker_records_success(recovery_setup):
 
     with (
         patch(
-            "apps.workspaces.tasks._await_in_progress_materializations",
+            "apps.workspaces.services.materialize.await_in_progress_materializations",
             new=AsyncMock(),
         ),
         patch(
@@ -279,7 +281,7 @@ async def test_recovery_worker_records_success(recovery_setup):
             new=AsyncMock(side_effect=[needs_materialization, ready]),
         ),
         patch(
-            "apps.workspaces.tasks.materialize_workspace_core",
+            "apps.workspaces.services.materialize.materialize_workspace_core",
             new=AsyncMock(return_value={"cube_schema": {"ok": True}}),
         ) as materialize,
     ):
@@ -372,7 +374,9 @@ async def test_missing_view_keeps_existing_source_data(recovery_setup):
             "apps.workspaces.services.publication.rebuild_workspace_view_schema",
             new=AsyncMock(return_value={"cube_schema": {"ok": True}}),
         ) as rebuild,
-        patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as materialize,
+        patch(
+            "apps.workspaces.services.materialize.materialize_workspace_core", new=AsyncMock()
+        ) as materialize,
     ):
         result = await recover_workspace_data.func(
             SimpleNamespace(job=SimpleNamespace(id=920)), str(recovery.id)

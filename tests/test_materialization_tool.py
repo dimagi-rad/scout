@@ -7,7 +7,7 @@ from apps.common.error_codes import ErrorCode
 from apps.workspaces.access import tool_write_denied
 from apps.workspaces.services.data_recovery import ROLE_DENIED_MESSAGE
 from apps.workspaces.services.failure_guidance import CREDENTIAL_GUIDANCE, credential_guidance
-from apps.workspaces.tasks import _summary_failures
+from apps.workspaces.services.failure_guidance import summary_failures as _summary_failures
 
 
 @pytest.mark.asyncio

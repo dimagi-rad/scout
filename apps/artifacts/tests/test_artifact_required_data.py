@@ -262,7 +262,9 @@ async def test_required_source_already_loaded_only_rebuilds_view(required_setup)
             "apps.workspaces.services.publication.rebuild_workspace_view_schema",
             new=AsyncMock(side_effect=rebuild),
         ) as view,
-        patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as load,
+        patch(
+            "apps.workspaces.services.materialize.materialize_workspace_core", new=AsyncMock()
+        ) as load,
     ):
         result = await recover_workspace_data.func(task_context(), str(recovery.id))
     assert result["status"] == "completed"
@@ -446,7 +448,8 @@ async def test_partial_worker_result_is_success_only_when_requested_artifact_rep
         }
 
     with patch(
-        "apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock(side_effect=materialize)
+        "apps.workspaces.services.materialize.materialize_workspace_core",
+        new=AsyncMock(side_effect=materialize),
     ) as load:
         result = await recover_workspace_data.func(task_context(), str(recovery.id))
         await recover_workspace_data.func(task_context(), str(recovery.id))
@@ -476,7 +479,9 @@ async def test_worker_reassesses_exact_artifact_after_waiting_for_workspace_lock
             yield
 
     with (
-        patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as load,
+        patch(
+            "apps.workspaces.services.materialize.materialize_workspace_core", new=AsyncMock()
+        ) as load,
         patch("apps.workspaces.tasks.workspace_data_lock", new=observed_lock),
     ):
         async with workspace_data_lock(setup.workspace.id):
@@ -507,11 +512,13 @@ async def test_recovery_worker_denies_write_after_wait_downgrade(required_setup)
 
     with (
         patch(
-            "apps.workspaces.tasks._await_in_progress_materializations",
+            "apps.workspaces.services.materialize.await_in_progress_materializations",
             new=AsyncMock(side_effect=wait_then_downgrade),
         ),
         patch("apps.workspaces.tasks.recovery_query_surface", new=AsyncMock()) as inspect,
-        patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as load,
+        patch(
+            "apps.workspaces.services.materialize.materialize_workspace_core", new=AsyncMock()
+        ) as load,
         patch(
             "apps.workspaces.services.publication.rebuild_workspace_semantic_model_core",
             new=AsyncMock(),
@@ -541,11 +548,13 @@ async def test_recovery_worker_reports_lost_tenant_access_after_wait(required_se
 
     with (
         patch(
-            "apps.workspaces.tasks._await_in_progress_materializations",
+            "apps.workspaces.services.materialize.await_in_progress_materializations",
             new=AsyncMock(side_effect=wait_then_lose_tenant_access),
         ),
         patch("apps.workspaces.tasks.recovery_query_surface", new=AsyncMock()) as inspect,
-        patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as load,
+        patch(
+            "apps.workspaces.services.materialize.materialize_workspace_core", new=AsyncMock()
+        ) as load,
     ):
         result = await recover_workspace_data.func(task_context(), str(recovery.id))
 
@@ -593,7 +602,9 @@ async def test_queued_repair_rechecks_authority_and_source_scope(required_setup,
     else:
         other = await Workspace.objects.acreate(name="Other synthetic workspace")
         await Artifact.objects.filter(id=setup.b.id).aupdate(workspace=other)
-    with patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as load:
+    with patch(
+        "apps.workspaces.services.materialize.materialize_workspace_core", new=AsyncMock()
+    ) as load:
         result = await recover_workspace_data.func(task_context(), str(recovery.id))
     await recovery.arefresh_from_db()
     assert result["status"] == recovery.state == "failed"
@@ -798,7 +809,9 @@ async def test_restored_source_with_rolled_back_catalog_retries_only_semantic_pr
             "apps.workspaces.services.publication.rebuild_workspace_semantic_model_core",
             new=AsyncMock(side_effect=rebuild),
         ) as build,
-        patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as load,
+        patch(
+            "apps.workspaces.services.materialize.materialize_workspace_core", new=AsyncMock()
+        ) as load,
     ):
         result = await recover_workspace_data.func(task_context(), str(recovery.id))
     assert result["status"] == "completed"
@@ -879,7 +892,8 @@ async def test_recovery_failure_prioritizes_source_remedy_over_downstream_cube_e
         "cube_schema": {"ok": False, "error": "Synthetic Cube validation failed"},
     }
     with patch(
-        "apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock(return_value=summary)
+        "apps.workspaces.services.materialize.materialize_workspace_core",
+        new=AsyncMock(return_value=summary),
     ):
         result = await recover_workspace_data.func(task_context(), str(recovery.id))
     await recovery.arefresh_from_db()

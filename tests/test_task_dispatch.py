@@ -15,6 +15,7 @@ from procrastinate.exceptions import TaskNotFound
 
 from apps.workspaces import task_dispatch
 from apps.workspaces import tasks as workspace_tasks
+from apps.workspaces.services import materialize
 from config.procrastinate import app
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -130,7 +131,7 @@ def test_an_unknown_name_raises_instead_of_queueing_an_orphan_row():
 
 
 def test_the_tasks_module_registers_its_blocking_materializer():
-    assert task_dispatch._inline["materialize"] is workspace_tasks.materialize_workspace_blocking
+    assert task_dispatch._inline["materialize"] is materialize.materialize_workspace_blocking
 
 
 @pytest.mark.asyncio

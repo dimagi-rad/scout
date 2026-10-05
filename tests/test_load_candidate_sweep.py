@@ -177,7 +177,9 @@ async def test_a_drop_skips_a_candidate_resumed_after_it_was_queued(tenant, work
     judged_on = await sync_to_async(candidate_last_attempt_at)(candidate.id)
     await _attempt(candidate)
 
-    with patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None) as teardown:
+    with patch(
+        "apps.workspaces.services.schema_manager.SchemaManager.teardown", return_value=None
+    ) as teardown:
         await workspaces_tasks.drop_abandoned_candidate(
             schema_id=str(candidate.id), last_attempt_at=judged_on.isoformat()
         )
@@ -191,7 +193,9 @@ async def test_a_drop_proceeds_when_nothing_attempted_the_candidate_since(tenant
     candidate = await _candidate(tenant, workspace, state=SchemaState.FAILED, generation=1)
     judged_on = await sync_to_async(candidate_last_attempt_at)(candidate.id)
 
-    with patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None) as teardown:
+    with patch(
+        "apps.workspaces.services.schema_manager.SchemaManager.teardown", return_value=None
+    ) as teardown:
         await workspaces_tasks.drop_abandoned_candidate(
             schema_id=str(candidate.id), last_attempt_at=judged_on.isoformat()
         )
@@ -206,7 +210,9 @@ async def test_a_drop_never_waits_on_a_loading_tenant(tenant, workspace):
 
     async def drop_while_loading():
         with (
-            patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None) as teardown,
+            patch(
+                "apps.workspaces.services.schema_manager.SchemaManager.teardown", return_value=None
+            ) as teardown,
             patch.object(retirement, "configure_drop_abandoned_candidate") as retry,
         ):
             retry.return_value.defer_async = AsyncMock(return_value=1)
@@ -228,7 +234,9 @@ async def test_a_drop_skips_a_candidate_whose_owner_changed_since_it_was_queued(
     judged_on = await sync_to_async(candidate_last_attempt_at)(candidate.id)
     await TenantSchema.objects.filter(id=candidate.id).aupdate(load_job_id=99)
 
-    with patch("apps.workspaces.tasks.SchemaManager.teardown", return_value=None) as teardown:
+    with patch(
+        "apps.workspaces.services.schema_manager.SchemaManager.teardown", return_value=None
+    ) as teardown:
         await workspaces_tasks.drop_abandoned_candidate(
             schema_id=str(candidate.id), last_attempt_at=judged_on.isoformat(), load_job_id=1
         )

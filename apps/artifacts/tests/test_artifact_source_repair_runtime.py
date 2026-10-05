@@ -208,7 +208,7 @@ async def test_worker_reassesses_partial_missing_source_under_lock(published_sou
 
     with (
         patch(
-            "apps.workspaces.tasks.materialize_workspace_core",
+            "apps.workspaces.services.materialize.materialize_workspace_core",
             new=AsyncMock(side_effect=restore_source),
         ) as materialize,
         patch(

@@ -20,6 +20,7 @@ from apps.workspaces.services.access_freshness import (
     FRESHNESS_ERROR_CODES,
 )
 from apps.workspaces.services.refresh_requests import claim_refresh_candidate
+from apps.workspaces.services.schema_manager import SchemaManager
 from tests.upstream_proofs import amake_proof_stale
 
 
@@ -74,7 +75,7 @@ async def test_tenant_refresh_is_refused_when_revoked(workspace, tenant, user, u
     upstream_provider.domains = []
     create_schema = MagicMock()
 
-    with patch.object(workspaces_tasks.SchemaManager, "create_physical_schema", create_schema):
+    with patch.object(SchemaManager, "create_physical_schema", create_schema):
         result = await _run_refresh(args, job_id)
 
     await schema.arefresh_from_db()
@@ -97,7 +98,7 @@ async def test_tenant_refresh_outage_is_retryable_and_keeps_the_membership(
     upstream_provider.failure = 503
     create_schema = MagicMock()
 
-    with patch.object(workspaces_tasks.SchemaManager, "create_physical_schema", create_schema):
+    with patch.object(SchemaManager, "create_physical_schema", create_schema):
         result = await _run_refresh(args, job_id)
 
     assert result["error_code"] == ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE

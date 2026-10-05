@@ -43,7 +43,9 @@ async def test_recipe_agent_materializes_headlessly_without_crash(workspace, use
             "view_schema": None,
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_core", fake_core)
+    monkeypatch.setattr(
+        "apps.workspaces.services.materialize.materialize_workspace_core", fake_core
+    )
 
     # Stub the LLM: turn 1 calls run_materialization; turn 2 finishes the run.
     llm_calls = {"n": 0}

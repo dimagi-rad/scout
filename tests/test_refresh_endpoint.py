@@ -109,7 +109,7 @@ def test_queued_refresh_downgrade_releases_provisioning_guard(
         WorkspaceMembership.objects.filter(
             workspace=workspace, user=tenant_membership_for_user.user
         ).update(role=WorkspaceRole.READ)
-        with patch("apps.workspaces.tasks.run_pipeline") as pipeline:
+        with patch("apps.workspaces.services.refresh.run_pipeline") as pipeline:
             result = async_to_sync(refresh_tenant_schema.func)(
                 context=MagicMock(job=MagicMock(id=job_id)), **queued
             )

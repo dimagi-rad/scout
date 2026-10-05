@@ -17,7 +17,6 @@ from apps.agents.graph import prompt_context
 from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant
 from apps.users.services.credential_resolver import CredentialResolutionError
-from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -25,6 +24,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services import materialize
 from apps.workspaces.services.source_freshness import (
     REFRESHED,
     REUSED,
@@ -94,19 +94,19 @@ async def _expired_hq_load(workspace, tenant, user, month_ago):
 
     with (
         patch(
-            "apps.workspaces.tasks.get_registry",
+            "apps.workspaces.services.materialize.get_registry",
             return_value=_registry("commcare", "commcare_connect"),
         ),
-        patch("apps.workspaces.tasks.aresolve_credential", credential),
+        patch("apps.workspaces.services.materialize.aresolve_credential", credential),
         patch(
-            "apps.workspaces.tasks._run_pipeline_with_progress",
+            "apps.workspaces.services.materialize._run_pipeline_with_progress",
             side_effect=completed_pipeline_run,
         ),
-        patch("apps.workspaces.tasks.SchemaManager", return_value=MagicMock()),
-        patch("apps.workspaces.tasks.build_and_promote_cube_schema"),
+        patch("apps.workspaces.services.materialize.SchemaManager", return_value=MagicMock()),
+        patch("apps.workspaces.services.materialize.build_and_promote_cube_schema"),
         patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
     ):
-        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+        result = await materialize.materialize_workspace_core(str(workspace.id), str(user.id))
     await WorkspaceViewSchema.objects.acreate(
         workspace=workspace, schema_name="ws_view", state=SchemaState.ACTIVE
     )
@@ -307,9 +307,10 @@ async def test_a_load_refused_for_an_expired_sign_in_records_the_skip(workspace,
     }
     denial = {"status": "denied", "error_code": ErrorCode.AUTH_TOKEN_EXPIRED, "tenants": [entry]}
     with patch(
-        "apps.workspaces.tasks._materialization_write_denial", AsyncMock(return_value=denial)
+        "apps.workspaces.services.materialize._materialization_write_denial",
+        AsyncMock(return_value=denial),
     ):
-        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+        result = await materialize.materialize_workspace_core(str(workspace.id), str(user.id))
 
     assert result["status"] == "denied"
     (source,) = await aworkspace_source_freshness(workspace.id, user.id)
@@ -326,9 +327,10 @@ async def test_a_role_denial_leaves_the_source_records_alone(workspace, tenant, 
         "tenants": [],
     }
     with patch(
-        "apps.workspaces.tasks._materialization_write_denial", AsyncMock(return_value=denial)
+        "apps.workspaces.services.materialize._materialization_write_denial",
+        AsyncMock(return_value=denial),
     ):
-        await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+        await materialize.materialize_workspace_core(str(workspace.id), str(user.id))
 
     assert (
         await WorkspaceTenant.objects.filter(workspace=workspace, last_load__isnull=False).acount()
@@ -397,9 +399,10 @@ async def test_a_denial_about_the_requester_keeps_the_last_real_load(workspace, 
     }
     denial = {"status": "denied", "error_code": code, "tenants": [entry]}
     with patch(
-        "apps.workspaces.tasks._materialization_write_denial", AsyncMock(return_value=denial)
+        "apps.workspaces.services.materialize._materialization_write_denial",
+        AsyncMock(return_value=denial),
     ):
-        await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+        await materialize.materialize_workspace_core(str(workspace.id), str(user.id))
 
     (source,) = await aworkspace_source_freshness(workspace.id)
     assert source["last_load"] == REFRESHED
@@ -486,9 +489,10 @@ async def test_a_headless_load_refused_for_an_expired_sign_in_records_the_skip(
     }
     denial = {"status": "denied", "error_code": ErrorCode.AUTH_TOKEN_EXPIRED, "tenants": [entry]}
     with patch(
-        "apps.workspaces.tasks._materialization_write_denial", AsyncMock(return_value=denial)
+        "apps.workspaces.services.materialize._materialization_write_denial",
+        AsyncMock(return_value=denial),
     ):
-        await workspaces_tasks.materialize_workspace_blocking(str(workspace.id), str(user.id))
+        await materialize.materialize_workspace_blocking(str(workspace.id), str(user.id))
 
     (source,) = await aworkspace_source_freshness(workspace.id, user.id)
     assert source["not_refreshed"] is True
