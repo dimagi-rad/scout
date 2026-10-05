@@ -41,7 +41,8 @@ export function parseOutput(output: unknown): unknown {
 
 export function isFailedOutput(output: unknown): boolean {
   return output !== null && typeof output === "object" && "status" in output
-    && (output.status === "error" || output.status === "denied")
+    && typeof output.status === "string"
+    && ["error", "denied", "blocked", "invalid_data_requirements"].includes(output.status)
 }
 
 export function getSubagentToolData(part: { type: string; data?: unknown }) {

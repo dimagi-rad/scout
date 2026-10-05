@@ -442,3 +442,17 @@ it("keeps failed helper summaries visible at completion", () => {
   expect(screen.getByTestId("tool-call-artifact_manager")).toHaveAttribute("aria-expanded", "true")
   expect(screen.getByText("The chart could not be saved.")).toBeVisible()
 })
+
+it.each(["blocked", "invalid_data_requirements"])("keeps %s helper outcomes visible", (status) => {
+  const message = liveMessage("artifact_manager", { status, message: "Please resolve the data requirements." })
+  render(<ChatMessage message={message} isActiveMessage={false} />)
+  expect(screen.getByTestId("tool-call-artifact_manager")).toHaveAttribute("aria-expanded", "true")
+  expect(screen.getByText("Please resolve the data requirements.")).toBeVisible()
+})
+
+it("shows plain-string helper validation errors", () => {
+  const message = liveMessage("artifact_manager", "Please provide an artifact task.")
+  render(<ChatMessage message={message} isActiveMessage={false} />)
+  expect(screen.getByTestId("tool-call-artifact_manager")).toHaveAttribute("aria-expanded", "true")
+  expect(screen.getByText("Please provide an artifact task.")).toBeVisible()
+})

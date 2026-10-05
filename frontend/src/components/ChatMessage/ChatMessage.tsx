@@ -459,7 +459,9 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   const isSubagentCard = toolName in SUBAGENT_TOOL_LABELS && !isNested
   const isErrored = part.state === "output-error"
   const helperOutput = isSubagentCard && hasOutput ? parseOutput(part.output) : null
-  const helperFailed = isErrored || isFailedOutput(helperOutput)
+  const helperUnstructuredOutput = isSubagentCard && hasOutput
+    && (helperOutput === null || typeof helperOutput !== "object" || Array.isArray(helperOutput))
+  const helperFailed = isErrored || helperUnstructuredOutput || isFailedOutput(helperOutput)
 
   // Scope the job to THIS tool-call card via toolCallId, else the progress block
   // and Stop button would render on every historical run_materialization card.
@@ -512,7 +514,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   // `.slice(0, 2000)` silently dropped the tail with no marker (13#4).
   const fallbackText = isErrored
     ? (part.errorText ?? "The tool reported an error.")
-    : hasOutput && part.output != null && !richOutput && !isSubagentCard
+    : hasOutput && part.output != null && !richOutput && (!isSubagentCard || helperUnstructuredOutput)
       ? formatToolOutput(part.output)
       : null
 
