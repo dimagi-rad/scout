@@ -138,6 +138,7 @@ describe("Memory page, workspace section", () => {
         workspaceMemory({ id: "w2", content: "Mine", is_mine: true, can_edit: true }),
       ],
       can_add: true,
+      total: 2,
     })
     render(<MemoryPage />)
 
@@ -152,7 +153,11 @@ describe("Memory page, workspace section", () => {
   })
 
   it("hides the add form from read-only members", async () => {
-    workspaceMocked.list.mockResolvedValue({ results: [workspaceMemory()], can_add: false })
+    workspaceMocked.list.mockResolvedValue({
+      results: [workspaceMemory()],
+      total: 1,
+      can_add: false,
+    })
     render(<MemoryPage />)
 
     expect(await screen.findByTestId("memory-workspace-read-only")).toBeInTheDocument()
@@ -160,7 +165,7 @@ describe("Memory page, workspace section", () => {
   })
 
   it("lets writers add a workspace memory", async () => {
-    workspaceMocked.list.mockResolvedValue({ results: [], can_add: true })
+    workspaceMocked.list.mockResolvedValue({ results: [], total: 0, can_add: true })
     workspaceMocked.create.mockResolvedValue(
       workspaceMemory({ id: "w3", content: "Count households once", is_mine: true, can_edit: true }),
     )
@@ -174,5 +179,15 @@ describe("Memory page, workspace section", () => {
 
     expect(workspaceMocked.create).toHaveBeenCalledWith("ws-1", "Count households once")
     expect(await screen.findByTestId("memory-workspace-content-w3")).toBeInTheDocument()
+  })
+
+  it("says how many older memories the list leaves out", async () => {
+    workspaceMocked.list.mockResolvedValue({
+      results: [workspaceMemory()],
+      total: 3,
+      can_add: true,
+    })
+    render(<MemoryPage />)
+    expect(await screen.findByTestId("memory-workspace-hidden-count")).toHaveTextContent("2 older")
   })
 })

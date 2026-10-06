@@ -17,6 +17,7 @@ from apps.knowledge.services.retriever import LEARNINGS_CHAR_CAP, KnowledgeRetri
 from apps.memory.models import WorkspaceMemoryEvent
 from apps.memory.services import MemoryLimitReached
 from apps.memory.workspace import MAX_WORKSPACE_MEMORIES, asave_workspace_memory
+from apps.memory.workspace_views import MAX_LISTED_MEMORIES
 from apps.users.models import Tenant
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from tests.tenant_access import grant_tenant_access
@@ -154,12 +155,14 @@ class TestRoleMatrix:
         response = await (await _client(write_user)).delete(_detail_url(workspace, memory.id))
         assert response.status_code == 403
 
-    async def test_list_shows_every_active_memory(self, workspace, read_user):
+    async def test_list_shows_legacy_rows_past_the_limit_up_to_a_bound(self, workspace, read_user):
         await AgentLearning.objects.abulk_create(
-            AgentLearning(workspace=workspace, description=f"Legacy {i}") for i in range(60)
+            AgentLearning(workspace=workspace, description=f"Legacy {i}")
+            for i in range(MAX_LISTED_MEMORIES + 10)
         )
-        rows = (await (await _client(read_user)).get(_list_url(workspace))).json()["results"]
-        assert len(rows) == 60
+        body = (await (await _client(read_user)).get(_list_url(workspace))).json()
+        assert len(body["results"]) == MAX_LISTED_MEMORIES > MAX_WORKSPACE_MEMORIES
+        assert body["total"] == MAX_LISTED_MEMORIES + 10
 
     async def test_list_marks_what_the_viewer_may_edit(
         self, workspace, write_user, second_writer, manager
@@ -306,6 +309,17 @@ class TestTool:
         )
         assert "save_workspace_memory" not in {t.name for t in tools}
 
+    async def test_concurrent_saves_keep_one_row(self, workspace, write_user):
+        results = await asyncio.gather(
+            *(_memory(workspace, write_user, "Exclude archived cases") for _ in range(5))
+        )
+        assert len({m.pk for m in results}) == 1
+        assert await AgentLearning.objects.filter(workspace=workspace).acount() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+class TestConcurrency:
     async def test_concurrent_edit_and_delete_do_not_fail(self, workspace, write_user, manager):
         memory = await _memory(workspace, write_user, "Contested rule")
         for _ in range(5):
@@ -319,14 +333,8 @@ class TestTool:
             )
             assert edit.status_code in {200, 404}
             assert delete.status_code in {204, 404}
+            await AgentLearning.objects.filter(workspace=workspace).adelete()
             memory = await _memory(workspace, write_user, "Contested rule")
-
-    async def test_concurrent_saves_keep_one_row(self, workspace, write_user):
-        results = await asyncio.gather(
-            *(_memory(workspace, write_user, "Exclude archived cases") for _ in range(5))
-        )
-        assert len({m.pk for m in results}) == 1
-        assert await AgentLearning.objects.filter(workspace=workspace).acount() == 1
 
 
 @pytest.mark.asyncio

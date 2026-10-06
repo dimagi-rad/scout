@@ -186,19 +186,8 @@ class AgentLearning(models.Model):
         ordering = ["-confidence_score", "-times_applied"]
         indexes = [
             models.Index(fields=["workspace", "is_active", "-confidence_score"]),
+            models.Index(fields=["workspace", "is_active", "-created_at"]),
         ]
 
     def __str__(self):
         return f"Learning: {self.description[:80]}..."
-
-    def increase_confidence(self, amount: float = 0.1) -> float:
-        """Increase the confidence score, capping at 1.0."""
-        self.confidence_score = min(1.0, self.confidence_score + amount)
-        self.save(update_fields=["confidence_score"])
-        return self.confidence_score
-
-    def decrease_confidence(self, amount: float = 0.1) -> float:
-        """Decrease the confidence score, flooring at 0.0."""
-        self.confidence_score = max(0.0, self.confidence_score - amount)
-        self.save(update_fields=["confidence_score"])
-        return self.confidence_score

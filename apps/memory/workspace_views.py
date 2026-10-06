@@ -22,6 +22,10 @@ from apps.users.decorators import async_login_required
 from apps.workspaces.access import access_denied_response, aresolve_workspace_access_ex
 from apps.workspaces.models import WorkspaceRole
 
+# New saves stop at MAX_WORKSPACE_MEMORIES; only legacy rows can exceed it, so
+# this bounds the response for a workspace that predates the limit.
+MAX_LISTED_MEMORIES = 200
+
 _CHANGE_DENIED = "Only the memory's author or a workspace manager can change it."
 
 
@@ -67,13 +71,14 @@ async def workspace_memory_list_view(request, workspace_id):
         workspace, role, err = await _access(user, workspace_id)
         if err is not None:
             return err
-        rows = (
-            AgentLearning.objects.filter(workspace=workspace, is_active=True)
-            .select_related("discovered_by_user")
-            .order_by("-created_at", "pk")
-        )
+        active = AgentLearning.objects.filter(workspace=workspace, is_active=True)
+        rows = active.select_related("discovered_by_user").order_by("-created_at", "pk")[
+            :MAX_LISTED_MEMORIES
+        ]
         memories = [_serialize(m, user, role) async for m in rows]
-        return JsonResponse({"results": memories, "can_add": can_add(role)})
+        return JsonResponse(
+            {"results": memories, "total": await active.acount(), "can_add": can_add(role)}
+        )
 
     if request.method == "POST":
         workspace, role, err = await _access(user, workspace_id, WorkspaceRole.READ_WRITE)

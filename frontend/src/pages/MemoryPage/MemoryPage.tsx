@@ -24,7 +24,7 @@ interface MemorySectionProps<T extends { id: string }> {
   placeholder: string
   // Changing it reloads the list (another account or another workspace).
   scopeKey: string | undefined
-  load: (signal: AbortSignal) => Promise<{ results: T[]; canAdd: boolean }>
+  load: (signal: AbortSignal) => Promise<{ results: T[]; canAdd: boolean; total?: number }>
   create: (content: string) => Promise<T>
   update: (id: string, content: string) => Promise<T>
   remove: (id: string) => Promise<void>
@@ -53,6 +53,7 @@ function MemorySection<T extends { id: string }>({
   const isCurrentAccount = useIsCurrentAccount()
   const [memories, setMemories] = useState<T[]>([])
   const [canAdd, setCanAdd] = useState(false)
+  const [hiddenCount, setHiddenCount] = useState(0)
   const [status, setStatus] = useState<LoadStatus>("loading")
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [draft, setDraft] = useState("")
@@ -78,6 +79,7 @@ function MemorySection<T extends { id: string }>({
         if (controller.signal.aborted) return
         setMemories(data.results)
         setCanAdd(data.canAdd)
+        setHiddenCount(Math.max(0, (data.total ?? data.results.length) - data.results.length))
         setStatus("loaded")
       })
       .catch(() => {
@@ -165,6 +167,11 @@ function MemorySection<T extends { id: string }>({
             onUpdate={handleUpdate}
             onDelete={handleRemove}
           />
+          {hiddenCount > 0 && (
+            <p className="text-sm text-muted-foreground" data-testid={`${prefix}-hidden-count`}>
+              {hiddenCount} older memories aren’t shown. Delete some to see the rest.
+            </p>
+          )}
           {canAdd ? (
             <div className="space-y-2">
               <Textarea
@@ -256,7 +263,7 @@ export function MemoryPage() {
             scopeKey={`${userId}:${workspaceId}`}
             load={async (signal) => {
               const data = await workspaceMemoryApi.list(workspaceId, signal)
-              return { results: data.results, canAdd: data.can_add }
+              return { results: data.results, canAdd: data.can_add, total: data.total }
             }}
             create={(content) => workspaceMemoryApi.create(workspaceId, content)}
             update={(id, content) => workspaceMemoryApi.update(workspaceId, id, content)}

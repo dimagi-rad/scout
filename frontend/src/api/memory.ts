@@ -35,6 +35,7 @@ export interface WorkspaceMemory {
 
 interface WorkspaceMemoryList {
   results: WorkspaceMemory[]
+  total: number
   can_add: boolean
 }
 
