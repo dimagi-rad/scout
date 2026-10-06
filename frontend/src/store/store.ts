@@ -8,6 +8,7 @@ import { createRecipeSlice, type RecipeSlice } from "./recipeSlice"
 import { createDomainSlice, type DomainSlice } from "./domainSlice"
 import type { AccountSessionScope } from "./accountSession"
 import { clearAllDrafts, clearOtherUsersDrafts } from "@/components/ChatPanel/draftStorage"
+import { newLocalThreadId } from "./localThreads"
 
 export type AppStore = ArtifactSlice & AuthSlice & UiSlice & DatasetSlice & KnowledgeSlice & RecipeSlice & DomainSlice & AccountSessionScope
 
@@ -55,7 +56,7 @@ export function createAppStore() {
     // Clear before UI subscribers run; seed workspace-owned state after selecting a workspace.
     store.setState({
       workspaceGeneration: state.workspaceGeneration + 1,
-      threadId: crypto.randomUUID(),
+      threadId: newLocalThreadId(),
       artifacts: [], artifactsStatus: "idle", artifactsError: null, artifactSearch: "",
       activeArtifactId: null,
       threads: [], threadsStatus: "idle", threadsAccessDenialReason: null,

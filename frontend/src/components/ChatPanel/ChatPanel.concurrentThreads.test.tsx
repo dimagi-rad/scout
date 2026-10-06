@@ -28,7 +28,6 @@ const WS = "11111111-1111-1111-1111-111111111111"
 const WS_OTHER = "22222222-2222-2222-2222-222222222222"
 const THREAD_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 const THREAD_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-const THREAD_C = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 const A_PARTIAL = "Running recipe X, step one"
 const A_FINAL = "Recipe X is done."
 const B_HISTORY = "Earlier answer in chat B."
@@ -71,7 +70,8 @@ function mockServer({
 }: {
   aEnds?: "ok" | "overload" | "error" | "held"
   holdB?: boolean
-  /** Holds this thread's history load, answering with what was saved when it was asked. */
+  /** Holds this thread's history load ("new": any other thread), answering with what
+   *  was saved when it was asked. */
   holdHistoryOf?: string | null
 } = {}) {
   let loadBHistory!: () => void
@@ -136,7 +136,8 @@ function mockServer({
     if (messages) {
       messageLoads.push(messages[1])
       const snapshot = saved.get(messages[1]) ?? []
-      if (holdHistoryOf === messages[1]) {
+      const isNew = messages[1] !== THREAD_A && messages[1] !== THREAD_B
+      if (holdHistoryOf === messages[1] || (holdHistoryOf === "new" && isNew)) {
         holdHistoryOf = null
         await bHistoryGate
       }
@@ -309,7 +310,6 @@ describe("concurrent chat threads (#847)", () => {
 
   it("does not show a switched-to thread as a new chat while its history loads", async () => {
     const server = mockServer({ holdHistoryOf: THREAD_B })
-    useAppStore.setState({ threads: [listed(THREAD_A), listed(THREAD_B)] })
     render(<MemoryRouter><ChatPanel /></MemoryRouter>)
     await screen.findByText("Chat A history.")
 
@@ -343,28 +343,39 @@ describe("concurrent chat threads (#847)", () => {
   })
 
   it("opens a new chat ready to type, and its history load never replaces a turn sent meanwhile", async () => {
-    const server = mockServer({ holdB: true, holdHistoryOf: THREAD_C })
+    const server = mockServer({ holdB: true, holdHistoryOf: "new" })
     render(<MemoryRouter><ChatPanel /></MemoryRouter>)
     await screen.findByText("Chat A history.")
 
-    await showThread(THREAD_C)
-    // Not a listed thread, so nothing to wait for before typing.
+    await act(async () => useAppStore.getState().uiActions.newThread())
+    // Made up by this tab, so there is no history to wait for before typing.
     expect(screen.getByTestId("chat-input-prominent")).toBeInTheDocument()
     await send("hello C")
     await screen.findByText("hello C")
 
-    // C's history, asked for before the send, lands mid-turn.
+    // Its history, asked for before the send, lands mid-turn.
     await act(async () => server.loadBHistory())
     expect(screen.getByText("hello C")).toBeInTheDocument()
 
     await act(async () => server.finishB())
     await screen.findByText(B_REPLY)
-    // Reloaded once the turn ended, so the server's copy now shows.
-    await waitFor(() =>
-      expect(server.messageLoads.filter((id) => id === THREAD_C)).toHaveLength(2),
-    )
-    await screen.findByText("hello C")
-    expect(screen.getByText(B_REPLY)).toBeInTheDocument()
+    expect(screen.getByText("hello C")).toBeInTheDocument()
+  })
+
+  it("waits for the history of a thread the list does not show", async () => {
+    // The list loads late and holds only the latest threads; a reload or deep link can
+    // open a thread missing from it.
+    const server = mockServer({ holdHistoryOf: THREAD_B })
+    useAppStore.setState({ threads: [], threadsStatus: "loading" })
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await screen.findByText("Chat A history.")
+
+    await showThread(THREAD_B)
+    expect(screen.getByTestId("chat-history-loading")).toBeInTheDocument()
+    expect(screen.queryByTestId("chat-input-prominent")).toBeNull()
+
+    await act(async () => server.loadBHistory())
+    await screen.findByText(B_HISTORY)
   })
 
   it("starts no title polls for a left chat that finishes after the panel is gone", async () => {

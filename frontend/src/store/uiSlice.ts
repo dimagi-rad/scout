@@ -9,6 +9,7 @@ import {
   RECHECKABLE_REASONS,
   type AccessDenialReason,
 } from "@/lib/accessReasons"
+import { newLocalThreadId } from "./localThreads"
 
 export type { AccessDenialReason }
 
@@ -88,7 +89,7 @@ export interface UiSlice {
 export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice> = (set, get) => {
   const requests = createWorkspaceRequestGuard(get)
   return {
-    threadId: crypto.randomUUID(),
+    threadId: newLocalThreadId(),
     activeArtifactId: null,
     threads: [],
     threadsStatus: "idle",
@@ -97,7 +98,7 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
     accessRetryOutcome: null,
     uiActions: {
       newThread: () => {
-        set({ threadId: crypto.randomUUID(), activeArtifactId: null })
+        set({ threadId: newLocalThreadId(), activeArtifactId: null })
       },
       selectThread: async (id: string) => {
         const isCurrent = requests.start()

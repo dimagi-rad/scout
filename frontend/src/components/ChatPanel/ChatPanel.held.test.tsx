@@ -38,6 +38,8 @@ interface Server {
   editConflict: boolean
   /** Holds the saved-history load until resolved. */
   messagesGate: Promise<void> | null
+  /** Answer a held send with a reply that starts and never ends, for Stop. */
+  stallHeldReply: boolean
 }
 
 function request(parts: { id: string; text: string }[], overrides: Partial<PendingRequest> = {}) {
@@ -79,6 +81,19 @@ function replyResponse(text: string) {
   })
 }
 
+function stalledReplyResponse() {
+  return createUIMessageStreamResponse({
+    stream: createUIMessageStream({
+      execute: async ({ writer }) => {
+        writer.write({ type: "start", messageId: crypto.randomUUID() })
+        writer.write({ type: "text-start", id: "reply" })
+        writer.write({ type: "text-delta", id: "reply", delta: "Partial answer" })
+        await new Promise(() => {})
+      },
+    }),
+  })
+}
+
 function failingReplyResponse() {
   return createUIMessageStreamResponse({
     stream: createUIMessageStream({
@@ -110,6 +125,7 @@ function mockServer(): Server {
     streamed: [],
     editConflict: false,
     messagesGate: null,
+    stallHeldReply: false,
   }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
@@ -123,6 +139,7 @@ function mockServer(): Server {
         return heldResponse(server.pending)
       }
       if (body.data.pendingRequestVersion && server.heldSendGate) await server.heldSendGate
+      if (body.data.pendingRequestVersion && server.stallHeldReply) return stalledReplyResponse()
       if (body.data.pendingRequestVersion && server.failHeldSendMidStream) {
         return failingReplyResponse()
       }
@@ -321,6 +338,68 @@ describe("a message sent while the chat's data loads", () => {
 
     await screen.findByText("Earlier answer.")
     expect(screen.getByText(`echo: ${QUESTION}`)).toBeInTheDocument()
+  })
+
+  it("keeps a reply that failed after a Send now during the history load", async () => {
+    const server = mockServer()
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    server.messages = [{ id: "earlier", role: "assistant", parts: [{ type: "text", text: "Earlier answer." }] }]
+    let loadHistory: () => void = () => {}
+    server.messagesGate = new Promise((resolve) => (loadHistory = resolve))
+    let answer: () => void = () => {}
+    server.heldSendGate = new Promise((resolve) => (answer = resolve))
+    server.failHeldSendMidStream = true
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    renderChat()
+
+    const card = await screen.findByTestId("pending-request-card")
+    await act(async () => {
+      fireEvent.click(within(card).getByTestId("pending-request-send-now"))
+    })
+    await waitFor(() => expect(server.chatBodies).toHaveLength(2))
+    await act(async () => loadHistory())
+    await act(async () => answer())
+
+    // The apology exists only here; the server has no copy to reload.
+    await screen.findByText("Sorry, something went wrong.")
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(screen.getByText("Earlier answer.")).toBeInTheDocument()
+    expect(screen.getByText("Sorry, something went wrong.")).toBeInTheDocument()
+    consoleError.mockRestore()
+  })
+
+  it("keeps a stopped reply after a Send now during the history load", async () => {
+    const server = mockServer()
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    server.messages = [{ id: "earlier", role: "assistant", parts: [{ type: "text", text: "Earlier answer." }] }]
+    let loadHistory: () => void = () => {}
+    server.messagesGate = new Promise((resolve) => (loadHistory = resolve))
+    server.stallHeldReply = true
+    renderChat()
+
+    const card = await screen.findByTestId("pending-request-card")
+    await act(async () => {
+      fireEvent.click(within(card).getByTestId("pending-request-send-now"))
+    })
+    await screen.findByText("Partial answer")
+    await act(async () => loadHistory())
+    await screen.findByText("Earlier answer.")
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stop response" }))
+    })
+    await screen.findByTestId("chat-stopped-notice")
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(screen.getByText("Earlier answer.")).toBeInTheDocument()
+    expect(screen.getByText("Partial answer")).toBeInTheDocument()
   })
 
   it("offers Send now once its load ended without answering it, naming its version", async () => {

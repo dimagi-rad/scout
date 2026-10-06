@@ -5,6 +5,7 @@ import { useLocation } from "react-router-dom"
 import { getCsrfToken, api, ApiError } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
+import { forgetLocalThread, isLocalThread } from "@/store/localThreads"
 import { turnArtifactOwners } from "@/components/ChatMessage/artifactReferences"
 import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
 import { workspaceApi } from "@/api/workspaces"
@@ -210,9 +211,6 @@ export function ChatPanel() {
   const [heldSends] = useState(() => new Map<string, HeldSend>())
   // The chat whose server history is loaded; a fresh chat is empty until then.
   const [loadedChatKey, setLoadedChatKey] = useState<string | null>(null)
-  // Chats whose history load landed mid-turn, so it was not applied; reloaded once
-  // the turn ends.
-  const [historyStaleChats] = useState(() => new Set<string>())
   // A left chat can finish after the panel is gone; it must not start polls then.
   const mountedRef = useRef(true)
   useEffect(() => {
@@ -470,17 +468,22 @@ export function ChatPanel() {
           UIMessage[] | { messages: UIMessage[]; pending_request: PendingRequest | null }
         >(`/api/workspaces/${activeDomainId}/threads/${threadId}/messages/?include=pending`)
         if (cancelled) return
-        // A turn sent while this loaded must not be replaced; reload once it ends.
-        if (isChatRunning(chat)) {
-          historyStaleChats.add(loadKey)
-          return
-        }
         // A server from before held requests ignores ``include`` and sends the bare list.
         const loaded = Array.isArray(response)
           ? { messages: response, pending_request: null }
           : response
-        setMessages(loaded.messages)
         setLoadedChatKey(loadKey)
+        if (isChatRunning(chat)) {
+          // A turn sent while this loaded stays; the history goes in ahead of it. The
+          // stream only ever rewrites the last message, so this is safe mid-turn, and
+          // unlike a reload after the turn it keeps a stopped or failed reply.
+          setMessages((current) => {
+            const shown = new Set(current.map((message) => message.id))
+            return [...loaded.messages.filter((message) => !shown.has(message.id)), ...current]
+          })
+          return
+        }
+        setMessages(loaded.messages)
         held.onMessagesLoaded(loaded.pending_request)
         // The reloaded conversation carries whatever the resume streamed.
         resetResumeStreamRef.current()
@@ -497,12 +500,9 @@ export function ChatPanel() {
           return
         }
         // New thread or transient fetch failure — start with empty.
-        if (isChatRunning(chat)) {
-          historyStaleChats.add(loadKey)
-          return
-        }
-        setMessages([])
         setLoadedChatKey(loadKey)
+        if (isChatRunning(chat)) return
+        setMessages([])
         resetResumeStreamRef.current()
       }
     }
@@ -543,12 +543,6 @@ export function ChatPanel() {
   // tokens. The Thread.updated_at bump from the resume task triggers the
   // sidebar refetch, so the user still sees the green-dot indicator and can
   // click into the thread to get the new agent message on a fresh load.
-  useEffect(() => {
-    if (isStreaming || !historyStaleChats.has(chatKey)) return
-    historyStaleChats.delete(chatKey)
-    setMessageReloadKey((k) => k + 1)
-  }, [chatKey, isStreaming, historyStaleChats])
-
   useEffect(() => {
     if (isStreaming) return
     if (threadId && recentlyCompletedThreadIds.includes(threadId)) {
@@ -688,6 +682,7 @@ export function ChatPanel() {
     }
     resetOverloadState()
     setStoppedNotice(false)
+    forgetLocalThread(threadId)
     void sendMessage({ text })
   }
 
@@ -708,6 +703,7 @@ export function ChatPanel() {
     })
     resetOverloadState()
     setStoppedNotice(false)
+    forgetLocalThread(threadId)
     void sendMessage({ id: messageId, role: "user", parts: [{ type: "text", text }] })
   }
 
@@ -798,10 +794,11 @@ export function ChatPanel() {
     )
   }
 
-  // Until a listed thread's history arrives, it is not a new, empty chat. One not
-  // in the list (New chat) has none to wait for.
+  // Until a thread's history arrives, it is not a new, empty chat; only one this tab
+  // just made up (New chat) has none to wait for. The list can't tell: it loads late
+  // and holds only the latest threads.
   const historyPending =
-    loadedChatKey !== chatKey && !isChatRunning(chat) && currentThread !== undefined
+    loadedChatKey !== chatKey && !isChatRunning(chat) && !isLocalThread(threadId)
   if (visibleMessages.length === 0 && !held.pending && historyPending) {
     return (
       <div className="flex h-full min-w-0 flex-col" data-testid="chat-history-loading">
