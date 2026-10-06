@@ -14,7 +14,7 @@ from typing import Any
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.cache import cache
-from django.db import close_old_connections
+from django.db import connections
 from django.db.models import Q
 from django.http import Http404, HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
@@ -31,7 +31,7 @@ from apps.artifacts.services.recovery import (
     admit_artifact_recovery,
     current_artifact_data_state,
 )
-from apps.common.capacity import CapacityExhausted, CapacityResource, reraise_if_capacity
+from apps.common.capacity import CapacityExhausted, busy_response, reraise_if_capacity
 from apps.common.http import parse_json_object
 from apps.common.utils import creator_display_name
 from apps.semantic.services.date_context import DateContextError, date_context
@@ -45,13 +45,17 @@ from .services.data_export import (
     EXPORT_ROW_LIMIT,
     EXPORT_TIMEOUT_MESSAGE,
     EXPORT_TIMEOUT_SECONDS,
+    QUERY_SOURCE,
+    STATIC_SOURCE,
+    LeasedStreamingResponse,
+    acquire_export_lease,
     audit_query_shape,
     export_datasets,
     export_error_response,
     export_filename,
-    export_slot,
     find_planned_query,
     iter_csv,
+    leased_stream,
     run_export_query,
     static_tabular_datasets,
 )
@@ -1228,8 +1232,8 @@ def _log_safe(value: str) -> str:
 class _ArtifactDataExportBase(View):
     """Shared access for the data export endpoints (#846).
 
-    Downloading raw rows takes READ_WRITE: read-only members can view an
-    artifact's charts but not take its data away. POST carries the same date
+    Bulk download takes READ_WRITE. READ members still see the rows View Data
+    shows (500 per query); the gate limits bulk extraction, not access. POST carries the same date
     runtime as query-data so the export matches what the viewer is looking at.
     """
 
@@ -1316,7 +1320,7 @@ class ArtifactDataExportCsvView(_ArtifactDataExportBase):
                 user,
                 artifact,
                 dataset=static_key,
-                source="static",
+                source=STATIC_SOURCE,
                 columns=table.columns,
                 rows=table.rows[:EXPORT_ROW_LIMIT],
                 truncated=len(table.rows) > EXPORT_ROW_LIMIT,
@@ -1331,45 +1335,55 @@ class ArtifactDataExportCsvView(_ArtifactDataExportBase):
             return JsonResponse(
                 {"error": data_state["message"], "data_recovery": data_state}, status=409
             )
-        slot = export_slot()
-        if slot is None:
-            raise CapacityExhausted(CapacityResource.CUBE, "Artifact data export slots are full")
+        lease = await acquire_export_lease(artifact.workspace_id)
+        if lease is None:
+            # A local throttle, not a full pool: answer busy without the capacity
+            # alert, whose rate-limit window would then hide a real Cube exhaustion.
+            return busy_response()
+        handed_off = False
         try:
-            with slot:
+            try:
                 result = await run_export_query(artifact.workspace, planned, user_id=str(user.id))
-        except TimeoutError:
-            logger.warning(
-                "Artifact data export timed out after %ss: artifact=%s query=%s",
-                EXPORT_TIMEOUT_SECONDS,
-                artifact.id,
-                _log_safe(query_name),
+            except TimeoutError:
+                logger.warning(
+                    "Artifact data export timed out after %ss: artifact=%s query=%s",
+                    EXPORT_TIMEOUT_SECONDS,
+                    artifact.id,
+                    _log_safe(query_name),
+                )
+                return JsonResponse({"error": EXPORT_TIMEOUT_MESSAGE}, status=504)
+            except Exception as exc:
+                reraise_if_capacity(exc)
+                logger.exception("Artifact data export failed: artifact=%s", artifact.id)
+                return JsonResponse({"error": "The export query failed."}, status=500)
+            raise_if_capacity_exhausted(result)
+            error = result.get("error")
+            if error:
+                return export_error_response(error)
+            response = await self._csv_response(
+                user,
+                artifact,
+                dataset=query_name,
+                source=QUERY_SOURCE,
+                columns=result.get("columns", []),
+                rows=result.get("rows", []),
+                truncated=bool(result.get("truncated")),
+                query=result.get("semantic_query"),
+                lease=lease,
             )
-            return JsonResponse({"error": EXPORT_TIMEOUT_MESSAGE}, status=504)
-        except Exception as exc:
-            reraise_if_capacity(exc)
-            logger.exception("Artifact data export failed: artifact=%s", artifact.id)
-            return JsonResponse({"error": "The export query failed."}, status=500)
-        raise_if_capacity_exhausted(result)
-        error = result.get("error")
-        if error:
-            return export_error_response(error)
-        return await self._csv_response(
-            user,
-            artifact,
-            dataset=query_name,
-            source="query",
-            columns=result.get("columns", []),
-            rows=result.get("rows", []),
-            truncated=bool(result.get("truncated")),
-            query=result.get("semantic_query"),
-        )
+            handed_off = True
+            return response
+        finally:
+            if not handed_off:
+                lease.release()
 
     async def _csv_response(
-        self, user, artifact, *, dataset, source, columns, rows, truncated, query
+        self, user, artifact, *, dataset, source, columns, rows, truncated, query, lease=None
     ) -> StreamingHttpResponse:
-        # With CONN_MAX_AGE=0 the request's connection otherwise stays open until
-        # request_finished, which under ASGI fires after the last streamed byte.
-        await sync_to_async(close_old_connections)()
+        # Otherwise the request's connection stays open until request_finished,
+        # which under ASGI fires after the last streamed byte. Runs on the request's
+        # thread-sensitive thread, which owns the connections the ORM calls opened.
+        await sync_to_async(connections.close_all)()
         audit_logger.info(
             "Artifact data export started: user=%s workspace=%s artifact=%s source=%s dataset=%r "
             "rows=%d truncated=%s query=%s",
@@ -1383,8 +1397,11 @@ class ArtifactDataExportCsvView(_ArtifactDataExportBase):
             json.dumps(audit_query_shape(query), sort_keys=True) if query is not None else "-",
         )
         filename = export_filename(artifact.title, dataset, truncated=truncated)
-        response = StreamingHttpResponse(
-            iter_csv(columns, rows), content_type="text/csv; charset=utf-8"
+        chunks = iter_csv(columns, rows)
+        response = LeasedStreamingResponse(
+            leased_stream(chunks, lease) if lease is not None else chunks,
+            content_type="text/csv; charset=utf-8",
+            lease=lease,
         )
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
         response["Cache-Control"] = "no-store"

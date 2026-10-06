@@ -4,21 +4,25 @@ import asyncio
 import csv
 import io
 import logging
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
+from django.core.cache import cache
+from django.db import connection
 from django.test import AsyncClient
 
 from apps.artifacts.models import Artifact, ArtifactType
 from apps.artifacts.services import data_export
 from apps.artifacts.services.data_export import (
     EXPORT_ROW_LIMIT,
+    acquire_export_lease,
     csv_safe_cell,
     export_error_response,
     export_filename,
-    export_slot,
     iter_csv,
 )
 from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
@@ -35,6 +39,12 @@ from tests.tenant_access import usable_connection
 from tests.test_artifact_date_resolution import CONTEXT, story
 
 RUN = "apps.artifacts.services.data_export.run_semantic_query"
+
+
+@pytest.fixture(autouse=True)
+def no_leaked_export_leases():
+    yield
+    assert data_export._active_exports == 0
 
 
 @pytest.fixture(autouse=True)
@@ -409,6 +419,7 @@ async def test_post_applies_the_viewers_date_controls(workspace, artifact, manag
         ("+7", "+7"),
         ("plain", "plain"),
         (" =cmd", "' =cmd"),
+        (" -5", " -5"),
         ("\n=cmd", "'\n=cmd"),
         ("\uff1dSUM(1)", "'\uff1dSUM(1)"),
         ("-\u0661\u0662", "'-\u0661\u0662"),
@@ -449,35 +460,100 @@ async def test_csv_export_is_post_only_and_csrf_protected(workspace, artifact, m
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_full_cube_pool_or_export_slots_are_busy(workspace, artifact, manager_client):
+async def test_full_cube_pool_or_export_capacity_is_busy(workspace, artifact, manager_client):
     full = query_error(
         "CONNECTION_ERROR", "full", category=CAPACITY_EXHAUSTED_CATEGORY, retryable=True
     )
     with patch(RUN, new=AsyncMock(return_value=full)):
         pool_full = await _export(manager_client, _csv_url(workspace, artifact))
-    held = [export_slot(), export_slot()]
+    assert pool_full.status_code == 503
+
+    held = [await acquire_export_lease("elsewhere-1"), await acquire_export_lease("elsewhere-2")]
     try:
         with patch(RUN, new=AsyncMock()) as run:
             slots_full = await _export(manager_client, _csv_url(workspace, artifact))
         run.assert_not_awaited()
     finally:
-        for slot in held:
-            slot.__exit__(None, None, None)
-    assert pool_full.status_code == 503
+        for lease in held:
+            lease.release()
     assert slots_full.status_code == 503
-    assert export_slot() is not None
+
+    # Another process already exporting from this workspace holds its lock.
+    await cache.aset(f"artifact-data-export:{workspace.id}", 1)
+    try:
+        with patch(RUN, new=AsyncMock()) as run:
+            workspace_busy = await _export(manager_client, _csv_url(workspace, artifact))
+        run.assert_not_awaited()
+    finally:
+        await cache.adelete(f"artifact-data-export:{workspace.id}")
+    assert workspace_busy.status_code == 503
 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_db_connection_is_released_before_streaming(workspace, artifact, manager_client):
+async def test_lease_is_held_while_streaming_and_released_after(
+    workspace, artifact, manager_client
+):
+    with patch(RUN, new=AsyncMock(return_value=_result([["North", "3"]]))):
+        response = await _export(manager_client, _csv_url(workspace, artifact))
+        assert data_export._active_exports == 1
+        assert await cache.aget(f"artifact-data-export:{workspace.id}") == 1
+        await _body(response)
+    assert data_export._active_exports == 0
+    assert await cache.aget(f"artifact-data-export:{workspace.id}") is None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_lease_is_released_when_the_body_is_never_read(workspace, artifact, manager_client):
+    with patch(RUN, new=AsyncMock(return_value=_result([["North", "3"]]))):
+        response = await _export(manager_client, _csv_url(workspace, artifact))
+    assert data_export._active_exports == 1
+    response.close()
+    assert data_export._active_exports == 0
+    response.close()
+    assert data_export._active_exports == 0
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        TimeoutError(),
+        RuntimeError("boom"),
+        query_error("VALIDATION_ERROR", "bad", category="invalid_query"),
+    ],
+    ids=["timeout", "exception", "error_result"],
+)
+async def test_lease_is_released_on_failure(workspace, artifact, manager_client, outcome):
+    run = (
+        AsyncMock(side_effect=outcome)
+        if isinstance(outcome, Exception)
+        else AsyncMock(return_value=outcome)
+    )
+    with patch(RUN, new=run):
+        response = await _export(manager_client, _csv_url(workspace, artifact))
+    assert response.status_code >= 500
+    assert data_export._active_exports == 0
+    assert await cache.aget(f"artifact-data-export:{workspace.id}") is None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_db_connection_is_closed_while_streaming(workspace, artifact, manager_client):
+    async def probe(_columns, _rows):
+        # Runs inside the request's ThreadSensitiveContext, so this checks the
+        # connection on the thread the view's ORM calls used.
+        closed = await sync_to_async(lambda: connection.connection is None)()
+        yield str(closed).encode()
+
     with (
         patch(RUN, new=AsyncMock(return_value=_result([["North", "3"]]))),
-        patch("apps.artifacts.views.close_old_connections") as close,
+        patch("apps.artifacts.views.iter_csv", probe),
     ):
         response = await _export(manager_client, _csv_url(workspace, artifact))
-        close.assert_called_once()
-    await _body(response)
+        assert await _body(response) == "True"
 
 
 @pytest.mark.parametrize(
@@ -487,6 +563,7 @@ async def test_db_connection_is_released_before_streaming(workspace, artifact, m
         ("transient_runtime_failure", "connection reset", 503),
         ("data_unavailable", "Data not loaded", 409),
         ("invalid_query", "Unknown member", 502),
+        ("runtime_failure", "Cube query execution failed: KeyError", 500),
     ],
 )
 def test_export_error_status(category, message, status):
@@ -531,3 +608,21 @@ def test_compiled_cube_query_limit(monkeypatch, workspace, max_limit, expected):
     kwargs = {} if max_limit is None else {"max_limit": max_limit}
     compiled = query_service._compile_semantic_query(workspace, spec, **kwargs)
     assert compiled["cube_query"]["limit"] == expected
+
+
+@pytest.mark.asyncio
+async def test_cube_timeout_is_a_504(monkeypatch):
+    monkeypatch.setattr(
+        query_service,
+        "_compile_semantic_query_for_async",
+        lambda *args: {"cube_query": {}, "model": None, "cube_schema": None, "limit": 1},
+    )
+    monkeypatch.setattr(query_service, "load_workspace_context", AsyncMock(return_value=None))
+    monkeypatch.setattr(query_service, "build_cube_security_context", lambda *a, **k: {})
+    monkeypatch.setattr(
+        query_service.CubeClient,
+        "execute_query",
+        AsyncMock(side_effect=query_service.CubeConnectionError("Cube query timed out after 60s.")),
+    )
+    result = await query_service.run_semantic_query(SimpleNamespace(id="w"), {"measures": []})
+    assert export_error_response(result["error"]).status_code == 504

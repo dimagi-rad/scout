@@ -15,11 +15,13 @@ import csv
 import io
 import json
 import re
+import threading
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from django.http import JsonResponse
+from django.core.cache import cache
+from django.http import JsonResponse, StreamingHttpResponse
 
 from apps.semantic.services.query import run_semantic_query
 
@@ -34,6 +36,8 @@ CSV_CHUNK_ROWS = 1_000
 # Per process: an export holds a tenant Cube connection slot and up to 50k rows
 # in memory, so a burst of exports must not starve dashboard queries.
 MAX_CONCURRENT_EXPORTS = 2
+# Only a crashed process leaves the lock behind; this frees it without a release.
+EXPORT_LOCK_TTL_SECONDS = 600
 EXPORT_TIMEOUT_MESSAGE = "The export took too long. Add filters to narrow it and try again."
 
 QUERY_SOURCE = "query"
@@ -64,7 +68,8 @@ def csv_safe_cell(value: Any) -> Any:
         text = value if isinstance(value, str) else str(value)
     # Some importers trim before evaluating, so leading whitespace does not hide a formula.
     # Cube returns numeric measures as strings; a negative number is data, not a formula.
-    if text.lstrip(" \n").startswith(_FORMULA_PREFIXES) and not _PLAIN_NUMBER.fullmatch(text):
+    stripped = text.lstrip(" \n")
+    if stripped.startswith(_FORMULA_PREFIXES) and not _PLAIN_NUMBER.fullmatch(stripped):
         return "'" + text
     return text
 
@@ -158,29 +163,77 @@ async def run_export_query(workspace, planned: PlannedQuery, *, user_id: str) ->
         )
 
 
-class _ExportSlot:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        global _active_exports
-        _active_exports -= 1
-
-
 _active_exports = 0
+# release() also runs in the worker thread that calls StreamingHttpResponse.close().
+_counter_lock = threading.Lock()
 
 
-def export_slot() -> _ExportSlot | None:
-    """Claim one of this process's export slots, or None when all are busy.
+class ExportLease:
+    """One process slot plus the workspace's export lock, held until the CSV is sent."""
 
-    A plain counter rather than an asyncio.Semaphore: it never waits, so it is not
-    bound to an event loop, and a full house is answered at once with a busy 503.
+    def __init__(self, lock_key: str) -> None:
+        self._lock_key = lock_key
+        self._released = False
+
+    def release(self) -> None:
+        """Idempotent: the stream's end, response.close() and error paths all call it."""
+        global _active_exports
+        with _counter_lock:
+            if self._released:
+                return
+            self._released = True
+            _active_exports -= 1
+        cache.delete(self._lock_key)
+
+
+async def acquire_export_lease(workspace_id) -> ExportLease | None:
+    """Claim a process slot and the workspace's export lock, or None when either is taken.
+
+    Never waits, so a full house is answered at once with a busy 503. The process
+    cap bounds memory (a result stays referenced until its last byte is sent); the
+    cross-process workspace lock keeps exports from taking every Cube query lane
+    of one tenant (DRIVER_POOL_MAX in cube_config/cube.js) away from its dashboards.
     """
     global _active_exports
-    if _active_exports >= MAX_CONCURRENT_EXPORTS:
+    with _counter_lock:
+        if _active_exports >= MAX_CONCURRENT_EXPORTS:
+            return None
+        _active_exports += 1
+    key = f"artifact-data-export:{workspace_id}"
+    try:
+        locked = await cache.aadd(key, 1, EXPORT_LOCK_TTL_SECONDS)
+    except BaseException:
+        with _counter_lock:
+            _active_exports -= 1
+        raise
+    if not locked:
+        with _counter_lock:
+            _active_exports -= 1
         return None
-    _active_exports += 1
-    return _ExportSlot()
+    return ExportLease(key)
+
+
+async def leased_stream(chunks: AsyncIterator[bytes], lease: ExportLease) -> AsyncIterator[bytes]:
+    try:
+        async for chunk in chunks:
+            yield chunk
+    finally:
+        lease.release()
+
+
+class LeasedStreamingResponse(StreamingHttpResponse):
+    """Releases its lease on close(), which Django calls even if the body was never read."""
+
+    def __init__(self, *args, lease: ExportLease | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._lease = lease
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            if self._lease is not None:
+                self._lease.release()
 
 
 def export_error_response(error: Any) -> JsonResponse:
@@ -190,10 +243,13 @@ def export_error_response(error: Any) -> JsonResponse:
     message = error.get("message") or "The export query failed."
     if category == "data_unavailable":
         return JsonResponse({"error": message}, status=409)
-    if category in {"transient_runtime_failure", "runtime_failure"}:
+    if category == "transient_runtime_failure":
+        # Pinned to CubeClient's wording by test_cube_timeout_is_a_504.
         if "timed out" in message:
             return JsonResponse({"error": EXPORT_TIMEOUT_MESSAGE}, status=504)
         return JsonResponse({"error": message}, status=503)
+    if category == "runtime_failure":
+        return JsonResponse({"error": "The export query failed."}, status=500)
     return JsonResponse({"error": message}, status=502)
 
 
