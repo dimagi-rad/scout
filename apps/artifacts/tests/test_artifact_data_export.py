@@ -49,6 +49,8 @@ def no_leaked_export_leases():
     leaked = data_export.active_exports()
     # Reset first so one failure cannot cascade into every later test.
     data_export._active_leases.clear()
+    for cleanup in data_export._lock_cleanups:
+        cleanup.cancel()
     data_export._lock_cleanups.clear()
     assert leaked == 0
 
@@ -747,3 +749,16 @@ async def test_a_cache_outage_on_acquire_fails_closed(caplog):
         assert await acquire_export_lease(uuid.uuid4().hex) is None
     assert data_export.active_exports() == 0
     assert "Could not take artifact export lock" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_add_that_landed_but_errored_does_not_orphan_the_lock():
+    ws = uuid.uuid4().hex
+
+    async def add_then_fail(key, value, ttl):
+        await cache.aset(key, value, ttl)
+        raise TimeoutError("reply lost")
+
+    with patch.object(cache, "aadd", add_then_fail):
+        assert await acquire_export_lease(ws) is None
+    assert await cache.aget(f"artifact-data-export:{ws}") is None

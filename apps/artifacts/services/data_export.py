@@ -299,6 +299,8 @@ async def acquire_export_lease(workspace_id) -> ExportLease | None:
         # Fail closed: without the lock, exports could take the tenant's Cube lanes.
         logger.warning("Could not take artifact export lock %s", key, exc_info=True)
         _free_process_slot(lease_id)
+        # The SET NX may have landed before the reply failed; a no-op otherwise.
+        await _adelete_own_lock(key, lease_id)
         return None
     except BaseException:
         _free_process_slot(lease_id)
