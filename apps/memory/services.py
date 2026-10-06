@@ -18,6 +18,9 @@ if TYPE_CHECKING:
     from apps.users.models import User
 
 MAX_MEMORY_CHARS = 500
+# Workspace memories explain data rules ("visits count only when ..."), so they
+# get more room than a personal preference does.
+MAX_WORKSPACE_MEMORY_CHARS = 1000
 MIN_MEMORY_CHARS = 3
 MAX_PERSONAL_MEMORIES = 50
 # The block is re-billed on every LLM call of every turn, so it is capped like the
@@ -45,14 +48,14 @@ def has_personal_memory(user: Any) -> TypeGuard[User]:
     return user is not None and getattr(user, "is_authenticated", False) is True
 
 
-def normalize_memory(text: str) -> str:
+def normalize_memory(text: str, max_chars: int = MAX_MEMORY_CHARS) -> str:
     """One line of plain text: the line break is what would let a memory open its own
     prompt section, so collapsing whitespace is enough and the text is otherwise kept."""
     text = _WHITESPACE_RE.sub(" ", text or "").strip()
     if len(text) < MIN_MEMORY_CHARS:
         raise MemoryValidationError("A memory needs at least a few words.")
-    if len(text) > MAX_MEMORY_CHARS:
-        raise MemoryValidationError(f"A memory can be at most {MAX_MEMORY_CHARS} characters.")
+    if len(text) > max_chars:
+        raise MemoryValidationError(f"A memory can be at most {max_chars} characters.")
     return text
 
 
