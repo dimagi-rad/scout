@@ -38,6 +38,8 @@ import type {
   ListTablesOutput,
   GetMetadataOutput,
 } from "./ToolOutput"
+import { MemorySavedChip } from "./MemorySavedChip"
+import { savedMemory } from "./savedMemory"
 
 function inputSql(input: unknown): string | undefined {
   if (input != null && typeof input === "object" && "sql" in input) {
@@ -867,6 +869,11 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
               const buttons = renderArtifacts(i)
               if (buttons.length) return <Fragment key={i}>{buttons}</Fragment>
             }
+
+            const saved = toolPart.state === "output-available"
+              ? savedMemory(getToolName(part), toolPart.output)
+              : null
+            if (saved) return <MemorySavedChip key={i} {...saved} />
 
             const toolCallId = toolPart.toolCallId
             const recentTermination =
