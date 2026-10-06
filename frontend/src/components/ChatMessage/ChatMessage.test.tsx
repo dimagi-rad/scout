@@ -479,3 +479,19 @@ it.each(["needs_data_model", "invalid_data_requirements"])("keeps published arti
   expect(screen.getByTestId("tool-call-artifact_manager")).toHaveAttribute("aria-expanded", "true")
   expect(screen.getByTestId("chat-artifact-published")).toBeInTheDocument()
 })
+
+describe("artifact link card title", () => {
+  it("shows the artifact title on the card and keeps it across later versions", () => {
+    const message = {
+      id: "titled", role: "assistant", parts: [
+        { type: "tool-artifact_write", toolCallId: "t1", state: "output-available", input: {},
+          output: { status: "created", artifact: { id: "a", version: 1, title: "Sales dashboard" } } },
+        { type: "tool-artifact_write", toolCallId: "t2", state: "output-available", input: {},
+          output: { status: "updated", artifact: { id: "a", version: 2 } } },
+      ],
+    } as unknown as UIMessage
+    render(<ChatMessage message={message} isActiveMessage={false} />)
+    expect(screen.getByTestId("chat-artifact-title-a")).toHaveTextContent("Sales dashboard")
+    expect(screen.getByTestId("chat-artifact-a")).toHaveAttribute("data-artifact-version", "2")
+  })
+})

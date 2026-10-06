@@ -792,6 +792,7 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         "status": status,
         "artifact_id": artifact.get("id") if isinstance(artifact, dict) else None,
         "artifact_version": artifact.get("version") if isinstance(artifact, dict) else None,
+        "artifact_title": artifact.get("title") if isinstance(artifact, dict) else None,
         "touched_blocks": touched_blocks,
         "diagnostics": diagnostics or [],
         "runtime_summary": (

@@ -87,7 +87,7 @@ async def test_nested_local_tool_events_are_buffered_until_tool_message_id():
 def test_artifact_manager_summary_is_compact():
     artifact_result = {
         "status": "created",
-        "artifact": {"id": "artifact-1", "version": 2},
+        "artifact": {"id": "artifact-1", "version": 2, "title": "Sales dashboard"},
         "diagnostics": [],
         "manifest": {"entries": [{"block_id": "q"}, {"block_id": "chart"}]},
         "runtime": {"summary": "3/3 queries ok"},
@@ -115,6 +115,7 @@ def test_artifact_manager_summary_is_compact():
         "status": "done",
         "artifact_id": "artifact-1",
         "artifact_version": 2,
+        "artifact_title": "Sales dashboard",
         "touched_blocks": ["title", "q", "chart"],
         "diagnostics": [],
         "runtime_summary": "3/3 queries ok",

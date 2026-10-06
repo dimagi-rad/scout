@@ -10,6 +10,7 @@ interface ArtifactToolPart {
 export interface MessageArtifact {
   id: string
   version?: number
+  title?: string
   afterIndex: number
 }
 
@@ -118,17 +119,19 @@ export function messageArtifacts(message: UIMessage): ReadonlyMap<string, Messag
     const tool = isToolUIPart(part) ? part as ArtifactToolPart : null
     if (tool?.state !== "output-available" && part.type !== "data-subagent-tool-output") return
     const rawOutput = child?.output ?? tool?.output
-    const output = parseOutput(rawOutput) as { artifact_version?: unknown; artifact?: { version?: unknown } }
+    const output = parseOutput(rawOutput) as { artifact_version?: unknown; artifact_title?: unknown; artifact?: { version?: unknown; title?: unknown } }
     const id = extractArtifactIdFromOutput(output)
     if (!id) return
     const rawVersion = output.artifact_version ?? output.artifact?.version
     const version = typeof rawVersion === "number" ? rawVersion : undefined
+    const rawTitle = output.artifact_title ?? output.artifact?.title
+    const title = typeof rawTitle === "string" && rawTitle.trim() ? rawTitle.trim() : undefined
     const parentId = child?.parentToolCallId ?? tool?.parentToolCallId
     const afterIndex = parentId ? parentIndices.get(parentId) : index
     if (afterIndex === undefined) return
     const previous = artifacts.get(id)
     if (previous && (previous.version ?? 0) > (version ?? 0)) return
-    artifacts.set(id, { id, version, afterIndex })
+    artifacts.set(id, { id, version, title: title ?? previous?.title, afterIndex })
   })
   artifactCache.set(message.parts, artifacts)
   return artifacts
