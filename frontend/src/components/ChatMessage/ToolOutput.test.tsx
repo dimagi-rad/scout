@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi, afterEach, beforeEach } from "vitest"
 import { render, screen } from "@testing-library/react"
+import { useAppStore } from "@/store/store"
 import userEvent from "@testing-library/user-event"
 import {
   GetMetadataOutput,
   QueryToolOutput,
+  SemanticQueryToolOutput,
   ListTablesOutput,
   type GetMetadataOutput as GetMetadataOutputType,
   type QueryOutput,
@@ -136,5 +138,81 @@ describe("ListTablesOutput (arch #246 13#6)", () => {
     render(<ListTablesOutput output={output} />)
     expect(screen.getByText("Could not reach the database.")).toBeInTheDocument()
     expect(screen.getByText("CONNECTION_ERROR")).toBeInTheDocument()
+  })
+})
+
+const data = { columns: ["a", "b"], rows: [["=x", 1], ["y", null]], row_count: 2 }
+
+describe("Download CSV button", () => {
+  const setRole = (role: string | null) =>
+    useAppStore.setState({
+      activeDomainId: "ws1",
+      domains: role ? [{ id: "ws1", role }] : [],
+    } as never)
+  beforeEach(() => setRole("read_write"))
+  afterEach(() => vi.restoreAllMocks())
+
+  it.each(["read", null])("is hidden for role %s", (role) => {
+    setRole(role)
+    render(<QueryToolOutput output={{ success: true, data }} />)
+    expect(screen.queryByTestId("query-result-download")).not.toBeInTheDocument()
+  })
+
+  it("is shown for manage", () => {
+    setRole("manage")
+    render(<QueryToolOutput output={{ success: true, data }} />)
+    expect(screen.getByTestId("query-result-download")).toBeInTheDocument()
+  })
+
+  it("downloads the visible rows as CSV for query results", async () => {
+    const blobs: Blob[] = []
+    vi.spyOn(URL, "createObjectURL").mockImplementation((b: Blob | MediaSource) => {
+      blobs.push(b as Blob)
+      return "blob:x"
+    })
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {})
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {})
+    render(<QueryToolOutput output={{ success: true, data }} />)
+    const button = screen.getByTestId("query-result-download")
+    expect(button).toHaveTextContent("Download CSV")
+    await userEvent.click(button)
+    expect(click).toHaveBeenCalledTimes(1)
+    // Blob.text() strips the UTF-8 BOM, so check the raw bytes for it separately.
+    const bytes = new Uint8Array(await blobs[0].arrayBuffer())
+    expect([...bytes.slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf])
+    expect(await blobs[0].text()).toBe("a,b\r\n'=x,1\r\ny,\r\n")
+  })
+
+  it("labels truncated results with the row count", () => {
+    render(<QueryToolOutput output={{ success: true, data: { ...data, truncated: true } }} />)
+    expect(screen.getByTestId("query-result-download")).toHaveTextContent("Download first 2 rows")
+  })
+
+  it("labels truncated semantic results too", () => {
+    render(<SemanticQueryToolOutput output={{ success: true, data: { ...data, truncated: true } }} />)
+    expect(screen.getByTestId("query-result-download")).toHaveTextContent("Download first 2 rows")
+  })
+
+  it("uses the role of the workspace passed in, not the active one", () => {
+    useAppStore.setState({
+      activeDomainId: "ws1",
+      domains: [{ id: "ws1", role: "manage" }, { id: "ws2", role: "read" }],
+    } as never)
+    render(<QueryToolOutput output={{ success: true, data }} workspaceId="ws2" />)
+    expect(screen.queryByTestId("query-result-download")).not.toBeInTheDocument()
+  })
+
+  it("is offered for semantic queries too, and hidden when there are no rows", () => {
+    const { unmount } = render(
+      <SemanticQueryToolOutput output={{ success: true, data }} />,
+    )
+    expect(screen.getByTestId("query-result-download")).toBeInTheDocument()
+    unmount()
+    render(
+      <SemanticQueryToolOutput
+        output={{ success: true, data: { columns: ["a"], rows: [], row_count: 0 } }}
+      />,
+    )
+    expect(screen.queryByTestId("query-result-download")).not.toBeInTheDocument()
   })
 })
