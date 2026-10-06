@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { Download, Loader2 } from "lucide-react"
 
 import { api } from "@/api/client"
@@ -52,6 +52,8 @@ export function ArtifactDataDownload({ artifactId, workspaceId, runtime }: Artif
   const [loadingList, setLoadingList] = useState(false)
   const [downloading, setDownloading] = useState<string | null>(null)
   const [notice, setNotice] = useState<{ tone: "info" | "error"; text: string } | null>(null)
+  const [listError, setListError] = useState<string | null>(null)
+  const listRequest = useRef(0)
 
   // The server enforces READ_WRITE; read-only members never see the control.
   if (!canWrite) return null
@@ -59,14 +61,18 @@ export function ArtifactDataDownload({ artifactId, workspaceId, runtime }: Artif
   const base = `/api/workspaces/${workspaceId}/artifacts/${artifactId}/data-export/`
 
   async function loadDatasets() {
+    const request = ++listRequest.current
     setLoadingList(true)
-    setNotice(null)
+    setListError(null)
     try {
-      setListing(runtime ? await api.post<ExportListing>(base, runtime) : await api.get<ExportListing>(base))
+      const result = runtime ? await api.post<ExportListing>(base, runtime) : await api.get<ExportListing>(base)
+      if (listRequest.current === request) setListing(result)
     } catch (e) {
-      setNotice({ tone: "error", text: e instanceof Error ? e.message : "Could not list the artifact's data." })
+      if (listRequest.current === request) {
+        setListError(e instanceof Error ? e.message : "Could not list the artifact's data.")
+      }
     } finally {
-      setLoadingList(false)
+      if (listRequest.current === request) setLoadingList(false)
     }
   }
 
@@ -75,7 +81,8 @@ export function ArtifactDataDownload({ artifactId, workspaceId, runtime }: Artif
     setNotice(null)
     try {
       const url = `${base}csv/?${dataset.source}=${encodeURIComponent(dataset.name)}`
-      const { blob, headers } = await api.download(url, runtime)
+      // Always a POST: the endpoint takes no GET, so a cross-site page cannot trigger it.
+      const { blob, headers } = await api.download(url, runtime ?? {})
       saveBlob(blob, filenameFrom(headers, `${dataset.name}.csv`))
       if (headers.get("X-Scout-Export-Truncated") === "true") {
         const limit = Number(headers.get("X-Scout-Export-Row-Limit") ?? listing?.row_limit ?? 0)
@@ -121,14 +128,17 @@ export function ArtifactDataDownload({ artifactId, workspaceId, runtime }: Artif
         <DropdownMenuContent align="end" data-testid="artifact-download-menu">
           <DropdownMenuLabel>CSV, one file per dataset</DropdownMenuLabel>
           {loadingList && <DropdownMenuItem disabled>Loading…</DropdownMenuItem>}
-          {!loadingList && listing?.datasets.length === 0 && (
+          {!loadingList && listError && (
+            <DropdownMenuItem disabled data-testid="artifact-download-list-error">{listError}</DropdownMenuItem>
+          )}
+          {!loadingList && !listError && listing?.datasets.length === 0 && (
             <DropdownMenuItem disabled>No downloadable data</DropdownMenuItem>
           )}
-          {!loadingList && listing?.datasets.map((dataset) => (
+          {!loadingList && !listError && listing?.datasets.map((dataset) => (
             <DropdownMenuItem
               key={`${dataset.source}:${dataset.name}`}
               onSelect={() => void download(dataset)}
-              data-testid={`artifact-download-dataset-${dataset.name}`}
+              data-testid={`artifact-download-${dataset.source}-${dataset.name}`}
             >
               {dataset.name}
             </DropdownMenuItem>

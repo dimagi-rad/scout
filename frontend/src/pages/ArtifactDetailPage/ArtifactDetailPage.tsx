@@ -106,7 +106,7 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
             onViewData={handleViewData}
             onExportPdf={() => canvasRef.current?.exportPdf()}
             exportDisabled={!artifact}
-          download={artifact ? { artifactId, workspaceId, runtime } : undefined}
+            download={artifact ? { artifactId, workspaceId, runtime } : undefined}
           />
         </div>
       </div>

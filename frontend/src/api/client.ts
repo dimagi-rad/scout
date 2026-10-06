@@ -129,8 +129,9 @@ export const api = {
         headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
         body: JSON.stringify(body),
       }
-    // Every download is a read, so a busy 503 is safe to repeat even as a POST.
-    const res = await fetchWithBusyRetry(() => fetch(prefixedUrl, init), { autoRetry: true })
+    // A busy 503 here means the export capacity is full; repeating it on its own
+    // would only add load, so the user retries.
+    const res = await fetchWithBusyRetry(() => fetch(prefixedUrl, init), { autoRetry: false })
     if (!res.ok) {
       throw await responseError(res)
     }

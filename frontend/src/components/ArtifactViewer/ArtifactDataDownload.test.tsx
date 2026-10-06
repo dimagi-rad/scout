@@ -54,9 +54,9 @@ describe("ArtifactDataDownload", () => {
     render(<ArtifactDataDownload artifactId={ARTIFACT_ID} workspaceId={WORKSPACE_ID} />)
     await user.click(screen.getByTestId("artifact-download-data"))
     expect(get).toHaveBeenCalledWith(base)
-    await user.click(await screen.findByTestId("artifact-download-dataset-by_region"))
+    await user.click(await screen.findByTestId("artifact-download-query-by_region"))
 
-    expect(download).toHaveBeenCalledWith(`${base}csv/?query=by_region`, undefined)
+    expect(download).toHaveBeenCalledWith(`${base}csv/?query=by_region`, {})
     expect(click).toHaveBeenCalled()
     expect(await screen.findByTestId("artifact-download-notice")).toHaveTextContent(
       "Only the first 50,000 rows",
@@ -79,7 +79,7 @@ describe("ArtifactDataDownload", () => {
 
     render(<ArtifactDataDownload artifactId={ARTIFACT_ID} workspaceId={WORKSPACE_ID} runtime={runtime} />)
     await user.click(screen.getByTestId("artifact-download-data"))
-    await user.click(await screen.findByTestId("artifact-download-dataset-q.sessions"))
+    await user.click(await screen.findByTestId("artifact-download-query-q.sessions"))
 
     expect(post).toHaveBeenCalledWith(base, runtime)
     expect(download).toHaveBeenCalledWith(`${base}csv/?query=q.sessions`, runtime)
