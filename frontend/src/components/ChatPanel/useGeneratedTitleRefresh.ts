@@ -9,6 +9,16 @@ export interface TitleRefreshTrigger {
   turn: number
 }
 
+/** Calls ``tick`` on the title-refresh schedule; returns a canceller. */
+export function scheduleTitleRefresh(tick: () => void): () => void {
+  let elapsed = 0
+  const timers = TITLE_REFRESH_DELAYS_MS.map((delay) => {
+    elapsed += delay
+    return setTimeout(tick, elapsed)
+  })
+  return () => timers.forEach(clearTimeout)
+}
+
 /**
  * Refetch the thread list after a turn until the thread's generated title arrives.
  *
@@ -30,12 +40,6 @@ export function useGeneratedTitleRefresh({
 }) {
   useEffect(() => {
     if (!workspaceId || !titlePending || trigger?.threadId !== threadId) return
-    const timers: ReturnType<typeof setTimeout>[] = []
-    let elapsed = 0
-    for (const delay of TITLE_REFRESH_DELAYS_MS) {
-      elapsed += delay
-      timers.push(setTimeout(() => void refresh(workspaceId), elapsed))
-    }
-    return () => timers.forEach(clearTimeout)
+    return scheduleTitleRefresh(() => void refresh(workspaceId))
   }, [workspaceId, threadId, titlePending, trigger, refresh])
 }

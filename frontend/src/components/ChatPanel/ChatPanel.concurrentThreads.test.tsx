@@ -224,7 +224,8 @@ describe("concurrent chat threads (#847)", () => {
     await act(async () => server.finishB())
     await screen.findByText(B_REPLY)
 
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    // A retry would be a third POST; give it the chance to happen.
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)))
     expect(server.chatThreads).toEqual([THREAD_A, THREAD_B])
     expect(screen.queryByTestId("chat-overload")).toBeNull()
   })

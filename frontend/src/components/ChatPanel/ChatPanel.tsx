@@ -33,7 +33,7 @@ import {
 } from "./ChatStatus"
 import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
 import {
-  TITLE_REFRESH_DELAYS_MS,
+  scheduleTitleRefresh,
   useGeneratedTitleRefresh,
   type TitleRefreshTrigger,
 } from "./useGeneratedTitleRefresh"
@@ -207,9 +207,9 @@ export function ChatPanel() {
   // Each thread's chat runs on its own, so another thread's send must not replace it.
   const [heldSends] = useState(() => new Map<string, HeldSend>())
   // Title polls for threads whose turn finished out of view.
-  const [titleTimers] = useState(() => new Map<string, ReturnType<typeof setTimeout>[]>())
+  const [titleTimers] = useState(() => new Map<string, () => void>())
   useEffect(() => () => {
-    for (const timers of titleTimers.values()) timers.forEach(clearTimeout)
+    for (const cancel of titleTimers.values()) cancel()
     titleTimers.clear()
   }, [titleTimers])
   const heldHandlerRef = useRef(held.onHeld)
@@ -267,13 +267,9 @@ export function ChatPanel() {
         ?.title_source === "first_message"
     if (!stillThere()) return
     void fetchThreadsRef.current(workspaceId)
-    for (const timer of titleTimers.get(finishedThreadId) ?? []) clearTimeout(timer)
-    let elapsed = 0
-    titleTimers.set(finishedThreadId, TITLE_REFRESH_DELAYS_MS.map((delay) => {
-      elapsed += delay
-      return setTimeout(() => {
-        if (stillThere() && titlePending()) void fetchThreadsRef.current(workspaceId)
-      }, elapsed)
+    titleTimers.get(finishedThreadId)?.()
+    titleTimers.set(finishedThreadId, scheduleTitleRefresh(() => {
+      if (stillThere() && titlePending()) void fetchThreadsRef.current(workspaceId)
     }))
   }
 
@@ -391,6 +387,7 @@ export function ChatPanel() {
     setBusyNotice(false)
     setOverloadNotice(false)
     clearError()
+    // endHeldSend and refreshThreadsAfterBackgroundTurn are per-render but read only refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, chat, heldSends, cancelBusyRetry, clearError])
 
@@ -537,7 +534,7 @@ export function ChatPanel() {
       prev.chatKey === chatKey && prev.status === "streaming" && status === "ready" && activeDomainId
     ) {
       fetchThreads(activeDomainId)
-      setTitleRefreshTrigger((prev) => ({ threadId, turn: (prev?.turn ?? 0) + 1 }))
+      setTitleRefreshTrigger((previous) => ({ threadId, turn: (previous?.turn ?? 0) + 1 }))
       if (threadPanelOpen && threadPanelMode === "files") {
         void loadThreadArtifacts()
       }
