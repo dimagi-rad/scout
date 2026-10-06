@@ -150,6 +150,8 @@ beforeEach(() => {
     domainsStatus: "loaded", activeDomainId: WS, threadId: THREAD,
     threads: [], threadsStatus: "loaded", threadsAccessDenialReason: null, accessRetryOutcome: null,
   })
+  // Selecting the workspace made a new local chat; these tests are of a saved thread.
+  useAppStore.setState({ threadId: THREAD })
 })
 
 afterEach(() => {
@@ -264,5 +266,56 @@ describe("a busy stream part followed by a slow finish", () => {
 
     await screen.findByTestId("chat-busy-notice", {}, { timeout: 3000 })
     expect(api.chatPosts).toHaveLength(2)
+  })
+})
+
+describe("a stream-busy retry's budget", () => {
+  it("is not refilled by leaving the thread and coming back mid-turn", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const chatPosts: number[] = []
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === "/api/chat/") {
+        chatPosts.push(chatPosts.length)
+        // The first post is busy at once; the retry is busy only after the user is back.
+        if (chatPosts.length === 1) return busyStreamResponse()
+        return createUIMessageStreamResponse({
+          stream: createUIMessageStream({
+            execute: async ({ writer }) => {
+              writer.write({ type: "start", messageId: crypto.randomUUID() })
+              await gate
+              writer.write({
+                type: "data-chat-status",
+                data: { kind: "retryable-error", reason: "busy", retryAfter: 5 },
+                transient: true,
+              })
+              writer.write({ type: "finish", finishReason: "stop" })
+            },
+          }),
+        })
+      }
+      if (url.endsWith("/messages/?include=pending")) return Response.json([])
+      if (url.endsWith("/viewed/")) return new Response(null, { status: 204 })
+      if (url.endsWith("/canvas/")) return Response.json({ canvas: null, objects: [] })
+      if (url.endsWith("/threads/")) return Response.json([])
+      if (url.endsWith("/artifacts/")) return Response.json({ results: [] })
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await act(async () => {})
+    await send("How many visits last week?")
+    await waitFor(() => expect(chatPosts).toHaveLength(2))
+
+    await act(async () => {
+      useAppStore.setState({ threadId: "cccccccc-cccc-cccc-cccc-cccccccccccc" })
+    })
+    await act(async () => {
+      useAppStore.setState({ threadId: THREAD })
+    })
+    await act(async () => release())
+
+    await screen.findByTestId("chat-busy-notice", {}, { timeout: 3000 })
+    expect(chatPosts).toHaveLength(2)
   })
 })

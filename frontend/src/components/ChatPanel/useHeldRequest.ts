@@ -40,7 +40,8 @@ export interface HeldRequest {
    *  message it came from); the card shows them instead, until messages reload. */
   hiddenMessageIds: ReadonlySet<string>
   onHeld: (pending: PendingRequest) => void
-  onMessagesLoaded: (pending: PendingRequest | null) => void
+  /** ``keepHidden``: a turn is running, so the messages it hid are still its own. */
+  onMessagesLoaded: (pending: PendingRequest | null, opts?: { keepHidden?: boolean }) => void
   add: (text: string) => Promise<AddOutcome>
   /** Hide the request before the client sends it itself; ``restore`` undoes it. */
   takeForSend: () => PendingRequest | null
@@ -138,15 +139,16 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
   )
 
   const onMessagesLoaded = useCallback(
-    (loaded: PendingRequest | null) => {
+    (loaded: PendingRequest | null, opts?: { keepHidden?: boolean }) => {
       // The poll and local changes own the request itself: a load that left before
       // a hold or an add must not undo it. A load that found the request gone ends
       // the "answering" overlay, since its messages now carry the request.
       setSeen((prev) => {
         const sent = loaded === null ? null : prev.sent
-        return sent === prev.sent && prev.hiddenMessageIds.size === 0
+        const hidden = opts?.keepHidden ? prev.hiddenMessageIds : new Set<string>()
+        return sent === prev.sent && hidden.size === 0 && prev.hiddenMessageIds.size === 0
           ? prev
-          : { ...prev, sent, hiddenMessageIds: new Set() }
+          : { ...prev, sent, hiddenMessageIds: hidden }
       })
     },
     [],

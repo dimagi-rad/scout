@@ -118,6 +118,7 @@ export function ChatComposer({
           type="submit"
           size="icon"
           disabled={!input.trim() || blocked}
+          title={blocked ? "Loading the conversation..." : undefined}
           aria-label={adding ? "Add to request" : "Send message"}
           data-testid={adding ? "chat-add-to-request" : "chat-send"}
         >

@@ -123,7 +123,9 @@ export function ChatPanel() {
   const [overloadNotice, setOverloadNotice] = useState(false)
   // Connection-limit "busy" turns; the shared BusyNotice shows their progress.
   const busyHitRef = useRef<{ retryAfter: number | null } | null>(null)
-  const busyAttemptsRef = useRef(0)
+  // Per chat, so leaving and returning mid-turn can't refill a stream-busy retry that
+  // would append the user message again.
+  const [busyAttempts] = useState(() => new Map<string, number>())
   const busyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [busyToken] = useState(() => Symbol("chat-busy"))
   const [busyNotice, setBusyNotice] = useState(false)
@@ -199,6 +201,7 @@ export function ChatPanel() {
   // The shown chat, for callbacks and async results that may land after a switch.
   const contextRef = useRef({ workspaceId: activeDomainId, threadId })
   contextRef.current = { workspaceId: activeDomainId, threadId }
+  const historyLoadingRef = useRef(false)
   const pathPrefix = useLocation().pathname.startsWith("/embed") ? "/embed" : ""
 
   const held = useHeldRequest(activeDomainId, threadId)
@@ -378,7 +381,6 @@ export function ChatPanel() {
     if (busyTimerRef.current) clearTimeout(busyTimerRef.current)
     busyTimerRef.current = null
     busyHitRef.current = null
-    busyAttemptsRef.current = 0
     busyTracker.settle(busyToken)
   }, [busyToken])
 
@@ -387,6 +389,7 @@ export function ChatPanel() {
     retriedChats.delete(chatKey)
     setOverloadNotice(false)
     setBusyNotice(false)
+    busyAttempts.delete(chatKey)
     cancelBusyRetry()
   }
 
@@ -430,6 +433,7 @@ export function ChatPanel() {
     && !isLocalThread(threadId)
     && !isStreaming
     && !(loaded.chat === chat && loaded.reloadKey === messageReloadKey)
+  historyLoadingRef.current = historyLoading
   const historyLoadFailed =
     historyFailed?.chat === chat && historyFailed.reloadKey === messageReloadKey
 
@@ -484,8 +488,8 @@ export function ChatPanel() {
     let cancelled = false
     const reloadKey = messageReloadKey
     // A turn still streaming holds the conversation in memory, ahead of the server's;
-    // its history loaded before it could start.
-    if (isChatRunning(chat)) {
+    // its history loaded before it could start. A chat this tab just made up has none.
+    if (isChatRunning(chat) || isLocalThread(threadId)) {
       writeSavedThreadId(activeDomainId, threadId)
       void Promise.resolve().then(() => {
         if (cancelled) return
@@ -516,7 +520,7 @@ export function ChatPanel() {
         // A shown thread can't send until its history loads, so only a new chat (no
         // history) or a retry timer can have started a turn; the live turn wins.
         if (!isChatRunning(chat)) setMessages(history.messages)
-        held.onMessagesLoaded(history.pending_request)
+        held.onMessagesLoaded(history.pending_request, { keepHidden: isChatRunning(chat) })
         // The reloaded conversation carries whatever the resume streamed.
         resetResumeStreamRef.current()
         if (activeDomainId && threadId) {
@@ -644,20 +648,21 @@ export function ChatPanel() {
     const maxBusyRetries = streamBusy ? 1 : BUSY_MAX_AUTO_RETRIES
     if (busy) {
       hitRetryableRef.current = false
-      if (busyAttemptsRef.current < maxBusyRetries) {
-        busyAttemptsRef.current += 1
+      const attempts = busyAttempts.get(chatKey) ?? 0
+      if (attempts < maxBusyRetries) {
+        busyAttempts.set(chatKey, attempts + 1)
         busyTracker.startRetry(busyToken)
         busyTimerRef.current = setTimeout(() => {
           busyTimerRef.current = null
           void regenerate()
-        }, busyRetryDelayMs(busy.retryAfter, busyAttemptsRef.current))
+        }, busyRetryDelayMs(busy.retryAfter, attempts + 1))
       } else {
-        busyAttemptsRef.current = 0
+        busyAttempts.delete(chatKey)
         setBusyNotice(true)
       }
       return
     }
-    busyAttemptsRef.current = 0
+    busyAttempts.delete(chatKey)
 
     const action = decideOverloadAction({
       hitRetryable: hitRetryableRef.current,
@@ -674,7 +679,7 @@ export function ChatPanel() {
       // The turn (or its retry) finished cleanly.
       retriedChats.delete(chatKey)
     }
-  }, [chatKey, status, regenerate, busyToken, busyError, retriedChats])
+  }, [chatKey, status, regenerate, busyToken, busyError, retriedChats, busyAttempts])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -761,7 +766,7 @@ export function ChatPanel() {
   }
 
   async function handleSend(text: string) {
-    // The composer blocks this; keep the typed text rather than drop it.
+    // Defensive: the composer blocks this; keep the typed text rather than drop it.
     if (historyLoading && !held.adding) {
       setInput(text)
       return
@@ -769,6 +774,11 @@ export function ChatPanel() {
     if (held.adding) {
       const sentFrom = threadId
       const outcome = await held.add(text)
+      if (outcome === "send" && contextRef.current.threadId === sentFrom && historyLoadingRef.current) {
+        // The request is gone, but a turn still can't start before the history lands.
+        setInput(text)
+        return
+      }
       if (outcome === "added") {
         setAddFailed(null)
         return
@@ -806,6 +816,7 @@ export function ChatPanel() {
 
   function handleStop() {
     setStoppedNotice(true)
+    busyAttempts.delete(chatKey)
     cancelBusyRetry()
     void stop()
   }
