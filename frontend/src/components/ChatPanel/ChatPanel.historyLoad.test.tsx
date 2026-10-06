@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { useAppStore } from "@/store/store"
+import { newLocalThreadId } from "@/store/localThreads"
 import type { WorkspaceListItem } from "@/api/workspaces"
 import { ChatPanel } from "./ChatPanel"
 
@@ -164,5 +165,33 @@ describe("a thread's history load", () => {
     await screen.findByText("Saved answer.")
     expect(server.messageLoads).toEqual(["stall", "ok"])
   })
-})
 
+  it("explains the disabled Send button while loading", async () => {
+    mockServer(["hold"])
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await screen.findByTestId("chat-history-loading")
+    await act(async () => typeText("draft"))
+    expect(screen.getByRole("button", { name: "Send message" }).closest("[title]"))
+      .toHaveAttribute("title", "Loading the conversation...")
+  })
+
+  it("does not fetch history for a chat this tab just made up", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (/\/messages\//.test(url)) return Response.json({ error: "boom" }, { status: 500 })
+      if (/\/viewed\/$/.test(url)) return new Response(null, { status: 204 })
+      if (/\/threads\/$/.test(url)) return Response.json([])
+      return Response.json({}, { status: 404 })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    useAppStore.setState({ threadId: newLocalThreadId() })
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await act(async () => typeText("hello"))
+
+    expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled()
+    expect(screen.queryByTestId("chat-history-retry")).toBeNull()
+    expect(screen.queryByText("Couldn't load earlier messages.")).toBeNull()
+    expect(fetchMock.mock.calls.map(([url]) => String(url)).filter((url) => /\/messages\//.test(url)))
+      .toEqual([])
+  })
+})

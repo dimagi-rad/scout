@@ -91,7 +91,11 @@ beforeEach(() => {
       id: WS, name: "W", display_name: "W", is_auto_created: false, role: "manage", tenants: [],
       member_count: 1, schema_status: "available", last_synced_at: null, created_at: "2026-01-01",
     }],
-    domainsStatus: "loaded", activeDomainId: WS, threadId: THREAD,
+    domainsStatus: "loaded", activeDomainId: WS,
+  })
+  // Selecting the workspace made a new local chat; these tests are of a saved thread.
+  useAppStore.setState({
+    threadId: THREAD,
     threads: [], threadsStatus: "loaded", threadsAccessDenialReason: null,
   })
 })

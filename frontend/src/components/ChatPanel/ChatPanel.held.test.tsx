@@ -40,6 +40,8 @@ interface Server {
   messagesGate: Promise<void> | null
   /** Answer a held send with a reply that starts and never ends, for Stop. */
   stallHeldReply: boolean
+  /** Holds the answer to a part POST until resolved. */
+  partGate: Promise<void> | null
 }
 
 function request(parts: { id: string; text: string }[], overrides: Partial<PendingRequest> = {}) {
@@ -126,6 +128,7 @@ function mockServer(): Server {
     editConflict: false,
     messagesGate: null,
     stallHeldReply: false,
+    partGate: null,
   }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
@@ -182,6 +185,7 @@ function mockServer(): Server {
     if (url.endsWith("/pending-request/parts/")) {
       const part = JSON.parse(options?.body as string)
       server.partPosts.push(part)
+      if (server.partGate) await server.partGate
       if (server.partStatus !== 200) {
         return Response.json({ error: "pending_request_conflict" }, { status: server.partStatus })
       }
@@ -236,7 +240,11 @@ function seedStore() {
       id: WS, name: "W", display_name: "W", is_auto_created: false, role: "manage", tenants: [],
       member_count: 1, schema_status: "available", last_synced_at: null, created_at: "2026-01-01",
     }],
-    domainsStatus: "loaded", activeDomainId: WS, threadId: THREAD,
+    domainsStatus: "loaded", activeDomainId: WS,
+  })
+  // Selecting the workspace made a new local chat; these tests are of a saved thread.
+  useAppStore.setState({
+    threadId: THREAD,
     threads: [], threadsStatus: "loaded", threadsAccessDenialReason: null, accessRetryOutcome: null,
   })
 }
@@ -306,6 +314,37 @@ describe("a message sent while the chat's data loads", () => {
     expect(server.chatBodies).toHaveLength(2)
     expect(server.chatBodies[1].data).not.toHaveProperty("pendingRequestVersion")
   })
+
+  it("keeps the text when the request was claimed but the history is reloading", async () => {
+    const server = mockServer()
+    renderChat()
+    await waitFor(() => expect(server.messageLoads).toBe(1))
+    await act(async () => {})
+    await type(QUESTION, "Send message")
+    await screen.findByTestId("pending-request-card")
+
+    let finishAdd: () => void = () => {}
+    server.partGate = new Promise((resolve) => (finishAdd = resolve))
+    server.partStatus = 409
+    await type(FOLLOW_UP, "Add to request")
+    // The request was claimed meanwhile; the next poll finds it gone and reloads.
+    let loadHistory: () => void = () => {}
+    server.messagesGate = new Promise((resolve) => (loadHistory = resolve))
+    server.pending = null
+    await waitFor(() => expect(server.messageLoads).toBe(2), { timeout: 8000 })
+
+    // Typed while the add was in flight; the returned text joins it instead of replacing it.
+    await act(async () => {
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "Typed meanwhile" } })
+    })
+    await act(async () => finishAdd())
+    await waitFor(() =>
+      expect((screen.getByRole("textbox") as HTMLInputElement).value)
+        .toMatch(new RegExp(`Typed meanwhile\\s*${FOLLOW_UP}`)),
+    )
+    expect(server.chatBodies).toHaveLength(1)
+    await act(async () => loadHistory())
+  }, 15_000)
 
   it("waits for the chat's history before Send now, then shows it once", async () => {
     const server = mockServer()
