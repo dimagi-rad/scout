@@ -8,11 +8,11 @@ Every conversation's system prompt includes the workspace's knowledge, in this o
 
 1. **Knowledge Base**: every knowledge entry, ordered by title.
 2. **Table Context**: table annotations (see [Table knowledge](#table-knowledge)).
-3. **Workspace Memory**: up to 50 active workspace memories, ordered by confidence, times applied, then newest. Each is one line, with a `Tables:` sub-line when tables are set.
+3. **Workspace Memory**: up to 50 active workspace memories, newest first. Each is one line, with a `Tables:` sub-line when tables are set.
 
 Personal memory is not part of this context. It is added to interactive chats as its own `## Saved Personal Preferences` block after the stable prompt.
 
-The combined knowledge context is capped at 6,000 characters. Anything past the cap, including workspace memory when entries are long, is cut off with a note pointing to the Knowledge page, so keep entries short. SQL code blocks and lines that start with a SQL statement are replaced with a placeholder before they reach the agent, because the agent queries through the semantic model rather than writing SQL from examples.
+The combined knowledge context is capped at 6,000 characters. Anything past the cap, including workspace memory when entries are long, is cut off with a note pointing to the Knowledge page, so keep entries short. SQL code blocks and lines that start with a SQL statement are replaced with a placeholder before they reach the agent (for a workspace memory, every line but its first), because the agent queries through the semantic model rather than writing SQL from examples.
 
 ## Knowledge entries
 

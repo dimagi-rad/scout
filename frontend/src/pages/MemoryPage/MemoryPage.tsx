@@ -30,6 +30,8 @@ interface MemorySectionProps<T extends { id: string }> {
   remove: (id: string) => Promise<void>
   toListItem: (memory: T) => MemoryListItem
   readOnlyNote?: string
+  // Matches the server's list order, so a new memory doesn't jump on reload.
+  newestFirst: boolean
 }
 
 function MemorySection<T extends { id: string }>({
@@ -46,6 +48,7 @@ function MemorySection<T extends { id: string }>({
   remove,
   toListItem,
   readOnlyNote,
+  newestFirst,
 }: MemorySectionProps<T>) {
   const isCurrentAccount = useIsCurrentAccount()
   const [memories, setMemories] = useState<T[]>([])
@@ -97,10 +100,15 @@ function MemorySection<T extends { id: string }>({
         setAddError("That memory is already saved.")
         return
       }
-      setMemories((current) => [saved, ...current.filter((m) => m.id !== saved.id)])
+      setMemories((current) => {
+        const rest = current.filter((m) => m.id !== saved.id)
+        return newestFirst ? [saved, ...rest] : [...rest, saved]
+      })
       setDraft("")
     } catch (error) {
-      if (isCurrentAccount()) setAddError(errorText(error, "Couldn’t save this memory. Try again."))
+      if (stillCurrent(startedFor)) {
+        setAddError(errorText(error, "Couldn’t save this memory. Try again."))
+      }
     } finally {
       if (isCurrentAccount()) setAdding(false)
     }
@@ -220,6 +228,7 @@ export function MemoryPage() {
       <div className="space-y-10">
         <MemorySection<PersonalMemory>
           layer="personal"
+          newestFirst={false}
           icon={<User className="h-4 w-4 text-muted-foreground" />}
           title="Personal"
           description="Your formats, habits and preferences. Scout applies them in every workspace, and only you can see them."
@@ -238,6 +247,7 @@ export function MemoryPage() {
         {workspaceId && (
           <MemorySection<WorkspaceMemory>
             layer="workspace"
+            newestFirst
             icon={<Users className="h-4 w-4 text-muted-foreground" />}
             title={workspaceName ? `Workspace: ${workspaceName}` : "Workspace"}
             description="How this workspace's data should be combined or interpreted. Shared with every member and applied in all of their chats here."
