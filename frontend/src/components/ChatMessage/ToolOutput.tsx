@@ -1,4 +1,7 @@
-import { AlertTriangle, CheckCircle, XCircle, Clock, Database, Hash } from "lucide-react"
+import { AlertTriangle, CheckCircle, XCircle, Clock, Database, Hash, Download } from "lucide-react"
+import { useAppStore } from "@/store/store"
+import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
+import { csvFilename, downloadCsv, toCsv } from "@/lib/csv"
 import { SqlBlock } from "@/components/SqlBlock"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
@@ -36,6 +39,38 @@ function formatCell(cell: unknown): string {
     }
   }
   return String(cell)
+}
+
+// Exports exactly the rows already in the browser; `truncated` means the server
+// capped the result, so the label says so rather than implying the full dataset.
+function DownloadCsvButton({
+  columns,
+  rows,
+  truncated,
+}: {
+  columns: string[]
+  rows: unknown[][]
+  truncated?: boolean
+}) {
+  const title = useAppStore((s) => s.threads.find((t) => t.id === s.threadId)?.title)
+  const { role } = useWorkspaceRole()
+  // UX gate only; fail closed while the role is unknown. Exports are write-role
+  // (read_write/manage) — the server enforces it for server-side exports.
+  if (rows.length === 0 || role === null || role === "read") return null
+  const label = truncated
+    ? `Download first ${rows.length.toLocaleString()} rows`
+    : "Download CSV"
+  return (
+    <button
+      type="button"
+      data-testid="query-result-download"
+      onClick={() => downloadCsv(csvFilename(title), toCsv(columns, rows))}
+      className="inline-flex items-center gap-1 rounded border border-border/50 px-2 py-1 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground transition-colors"
+    >
+      <Download className="w-3 h-3" />
+      {label}
+    </button>
+  )
 }
 
 // MCP error-envelope error object (mcp_server/envelope.py).
@@ -90,6 +125,10 @@ export function QueryToolOutput({ output, sql }: { output: QueryOutput; sql?: st
 
   const { columns, rows, row_count, truncated, sql_executed, tables_accessed } = output.data
   const displaySql = sql_executed || sql
+
+  const downloadButton = (
+    <DownloadCsvButton columns={columns} rows={rows} truncated={truncated} />
+  )
 
   const resultsTable = rows.length > 0 && (
     <div className="overflow-x-auto rounded border border-border/50">
@@ -193,6 +232,7 @@ export function QueryToolOutput({ output, sql }: { output: QueryOutput; sql?: st
             </TabsTrigger>
           </TabsList>
           <TabsContent value="results" className="mt-2 space-y-2">
+            {downloadButton}
             {resultsTable}
             {tablesFooter}
           </TabsContent>
@@ -202,6 +242,7 @@ export function QueryToolOutput({ output, sql }: { output: QueryOutput; sql?: st
         </Tabs>
       ) : (
         <>
+          {downloadButton}
           {resultsTable}
           {tablesFooter}
         </>
@@ -249,6 +290,8 @@ export function SemanticQueryToolOutput({ output }: { output: SemanticQueryOutpu
           <pre className="text-xs whitespace-pre-wrap">{JSON.stringify(semantic_query, null, 2)}</pre>
         </div>
       )}
+
+      <DownloadCsvButton columns={columns} rows={rows} truncated={truncated} />
 
       {rows.length > 0 && (
         <div className="overflow-x-auto rounded border border-border/50">
