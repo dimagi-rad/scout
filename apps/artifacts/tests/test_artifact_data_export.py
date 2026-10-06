@@ -5,6 +5,7 @@ import csv
 import io
 import logging
 import time
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -637,36 +638,99 @@ async def test_cube_timeout_is_a_504(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stream_end_alone_releases_the_lease():
-    lease = await acquire_export_lease("stream-only")
+    ws = uuid.uuid4().hex
+    lease = await acquire_export_lease(ws)
 
     async def chunks():
         yield b"a"
 
     assert [c async for c in data_export.leased_stream(chunks(), lease)] == [b"a"]
     assert data_export.active_exports() == 0
-    assert await cache.aget("artifact-data-export:stream-only") is None
+    assert await cache.aget(f"artifact-data-export:{ws}") is None
 
 
 @pytest.mark.asyncio
-async def test_a_stale_release_does_not_free_a_newer_exports_lock():
-    first = await acquire_export_lease("reused")
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_a_stale_release_does_not_free_a_newer_exports_lock(asynchronous):
+    ws = uuid.uuid4().hex
+    first = await acquire_export_lease(ws)
     # The first lease outlived its lock TTL and another export took the lock.
-    await cache.aset("artifact-data-export:reused", "newer-lease")
-    first.release()
-    assert await cache.aget("artifact-data-export:reused") == "newer-lease"
-    await cache.adelete("artifact-data-export:reused")
+    await cache.aset(f"artifact-data-export:{ws}", "newer-lease")
+    if asynchronous:
+        await first.arelease()
+    else:
+        first.release()
+    assert await cache.aget(f"artifact-data-export:{ws}") == "newer-lease"
+    await cache.adelete(f"artifact-data-export:{ws}")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lock_delete_is_logged_and_still_frees_the_slot(caplog):
+    lease = await acquire_export_lease(uuid.uuid4().hex)
+    with patch.object(cache, "aget", AsyncMock(side_effect=ConnectionError("redis down"))):
+        await lease.arelease()
+    assert data_export.active_exports() == 0
+    assert "Could not release artifact export lock" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_acquire_frees_the_lock_once_the_add_lands():
+    ws = uuid.uuid4().hex
+    landed = asyncio.Event()
+
+    async def slow_add(key, value, ttl):
+        await landed.wait()
+        await cache.aset(key, value, ttl)
+        return True
+
+    with patch.object(cache, "aadd", slow_add):
+        task = asyncio.ensure_future(acquire_export_lease(ws))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        landed.set()
+        await asyncio.gather(*data_export._lock_cleanups)
+    assert data_export.active_exports() == 0
+    assert await cache.aget(f"artifact-data-export:{ws}") is None
 
 
 @pytest.mark.asyncio
 async def test_a_slot_never_released_is_reclaimed_after_the_ttl(monkeypatch):
-    leaked = [await acquire_export_lease(f"leak-{i}") for i in range(2)]
-    assert await acquire_export_lease("leak-3") is None
-    later = time.monotonic() + data_export.EXPORT_LOCK_TTL_SECONDS + 1
-    monkeypatch.setattr(data_export.time, "monotonic", lambda: later)
-    lease = await acquire_export_lease("leak-3")
+    leaked = [await acquire_export_lease(uuid.uuid4().hex) for _ in range(2)]
+    assert await acquire_export_lease(uuid.uuid4().hex) is None
+    later = time.monotonic() + data_export.EXPORT_SLOT_TTL_SECONDS + 1
+    monkeypatch.setattr(data_export, "_now", lambda: later)
+    lease = await acquire_export_lease(uuid.uuid4().hex)
     assert lease is not None
     lease.release()
     for stale in leaked:
         stale.release()
-        await cache.adelete(f"artifact-data-export:{stale._lock_key.rsplit(':', 1)[1]}")
     assert data_export.active_exports() == 0
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_the_workspace_lock_is_held_during_the_query(workspace, artifact, manager_client):
+    seen = []
+
+    async def run(*args, **kwargs):
+        seen.append(await cache.aget(f"artifact-data-export:{workspace.id}"))
+        return _result([["North", "3"]])
+
+    with patch(RUN, new=run):
+        response = await _export(manager_client, _csv_url(workspace, artifact))
+        await _body(response)
+    assert seen and seen[0] is not None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_a_cancelled_export_frees_slot_and_lock(workspace, artifact, manager_client):
+    with (
+        patch(RUN, new=AsyncMock(side_effect=asyncio.CancelledError())),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await _export(manager_client, _csv_url(workspace, artifact))
+    assert data_export.active_exports() == 0
+    assert await cache.aget(f"artifact-data-export:{workspace.id}") is None

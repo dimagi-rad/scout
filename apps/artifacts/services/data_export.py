@@ -4,7 +4,8 @@ Each request exports one dataset: a live semantic query the artifact declares,
 or a tabular entry of its static ``data``. Cube's /load cannot stream, so the
 whole result (up to EXPORT_ROW_LIMIT rows) is in memory before the first byte;
 only the CSV encoding is chunked. Memory is bounded by one dataset per request
-and MAX_CONCURRENT_EXPORTS per process, not by streaming. A zip of every
+and MAX_CONCURRENT_EXPORTS per process, not by streaming; past the slot TTL the
+bound is best-effort (a download slower than that loses its slot). A zip of every
 dataset would hold all of them at once.
 """
 
@@ -39,10 +40,12 @@ CSV_CHUNK_ROWS = 1_000
 # Per process: an export holds a tenant Cube connection slot and up to 50k rows
 # in memory, so a burst of exports must not starve dashboard queries.
 MAX_CONCURRENT_EXPORTS = 2
-# Frees the lock, and reclaims a process slot, when no release ever ran (a crashed
-# process, or a response Django dropped without close()). nginx's 60s send_timeout
-# ends a stalled download well before this.
-EXPORT_LOCK_TTL_SECONDS = 600
+# The workspace lock spans only the query (EXPORT_TIMEOUT_SECONDS), so a lock no
+# release ever freed (a killed process, a failed Redis delete) clears soon after.
+EXPORT_LOCK_TTL_SECONDS = EXPORT_TIMEOUT_SECONDS + 30
+# Reclaims a process slot whose response Django dropped without close(). A live
+# download slower than this can be reclaimed too, briefly admitting one extra export.
+EXPORT_SLOT_TTL_SECONDS = 600
 EXPORT_TIMEOUT_MESSAGE = "The export took too long. Add filters to narrow it and try again."
 
 logger = logging.getLogger(__name__)
@@ -181,14 +184,18 @@ def active_exports() -> int:
         return len(_active_leases)
 
 
+def _now() -> float:
+    return time.monotonic()
+
+
 def _claim_process_slot() -> str | None:
     """A slot id, or None when full. Slots older than the lock TTL are reclaimed:
     a response Django drops without close() (a disconnect during middleware)
     would otherwise hold its slot until the process restarts."""
-    now = time.monotonic()
+    now = _now()
     with _leases_lock:
         for lease_id, acquired in list(_active_leases.items()):
-            if now - acquired > EXPORT_LOCK_TTL_SECONDS:
+            if now - acquired > EXPORT_SLOT_TTL_SECONDS:
                 del _active_leases[lease_id]
         if len(_active_leases) >= MAX_CONCURRENT_EXPORTS:
             return None
@@ -207,8 +214,9 @@ class ExportLease:
     held only while the Cube query runs: the lanes it protects are free once
     the query returns, and a slow download must not block the workspace's next export.
 
-    The lock stores this lease's id, so a late release never deletes a lock that
-    expired and was re-taken by another export.
+    The lock stores this lease's id, so a late release does not delete a lock that
+    expired and was re-taken by another export (best-effort: get-then-delete is not
+    atomic, and the lock TTL far exceeds the query it guards).
     """
 
     def __init__(self, lease_id: str, lock_key: str) -> None:
@@ -257,6 +265,19 @@ async def _adelete_own_lock(key: str, lease_id: str) -> None:
         logger.warning("Could not release artifact export lock %s", key, exc_info=True)
 
 
+# Strong references so the event loop does not garbage-collect pending cleanups.
+_lock_cleanups: set[asyncio.Task] = set()
+
+
+async def _free_lock_once_added(add: asyncio.Future, key: str, lease_id: str) -> None:
+    try:
+        locked = await add
+    except BaseException:
+        return
+    if locked:
+        await _adelete_own_lock(key, lease_id)
+
+
 async def acquire_export_lease(workspace_id) -> ExportLease | None:
     """Claim a process slot and the workspace's export lock, or None when either is taken.
 
@@ -269,12 +290,16 @@ async def acquire_export_lease(workspace_id) -> ExportLease | None:
     if lease_id is None:
         return None
     key = f"artifact-data-export:{workspace_id}"
+    add = asyncio.ensure_future(cache.aadd(key, lease_id, EXPORT_LOCK_TTL_SECONDS))
     try:
-        locked = await cache.aadd(key, lease_id, EXPORT_LOCK_TTL_SECONDS)
+        locked = await asyncio.shield(add)
     except BaseException:
-        # A cancelled aadd may still have set the key in its worker thread.
         _free_process_slot(lease_id)
-        _delete_own_lock(key, lease_id)
+        # The add keeps running in its worker thread after a cancel; free the
+        # lock once it lands rather than leave it ownerless for the TTL.
+        cleanup = asyncio.ensure_future(_free_lock_once_added(add, key, lease_id))
+        _lock_cleanups.add(cleanup)
+        cleanup.add_done_callback(_lock_cleanups.discard)
         raise
     if not locked:
         _free_process_slot(lease_id)
