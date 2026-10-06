@@ -304,9 +304,8 @@ def _build_tools(
         # Not gated on write_capable: it writes only the user's own private rows.
         tools.append(create_personal_memory_tool(user))
         # Offered to every role so the agent can explain a refusal; the tool
-        # itself checks for a write role on each call.
-        tools.append(create_workspace_memory_tool(workspace, user))
-    elif write_capable:
+        # itself checks for a write role on each call. Headless recipe runs don't
+        # get it: no one is there to see the chip or undo a save steered by data.
         tools.append(create_workspace_memory_tool(workspace, user))
     if write_capable:
         tools.append(create_recipe_tool(workspace, user))

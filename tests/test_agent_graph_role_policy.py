@@ -191,7 +191,7 @@ async def test_graph_resolves_live_role_for_bound_tools_and_prompt(
         assert "canvas_read" in names
     assert ("run_materialization" in names) is writer
     assert ("artifact_manager" in names) is writer
-    assert ("save_workspace_memory" in names) is (writer or interactive)
+    assert ("save_workspace_memory" in names) is interactive
     assert ("save_as_recipe" in names) is writer
     assert ("canvas_manager" in names) is (writer and interactive)
     assert prompt.call_args.kwargs["write_capable"] is writer
