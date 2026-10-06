@@ -1,4 +1,4 @@
-import { useChat } from "@ai-sdk/react"
+import { Chat, useChat } from "@ai-sdk/react"
 import { DefaultChatTransport, generateId, type UIMessage } from "ai"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useLocation } from "react-router-dom"
@@ -38,6 +38,7 @@ import { classifyChatError } from "./chatErrors"
 import { PendingRequestCard } from "./PendingRequestCard"
 import { useHeldRequest, type EditOutcome } from "./useHeldRequest"
 import { useResumeStream } from "./useResumeStream"
+import { isChatRunning, threadChatKey, useThreadChat } from "./threadChats"
 import {
   busyRetryAfter,
   decideOverloadAction,
@@ -50,6 +51,18 @@ import {
   busyRetryDelayMs,
   busyTracker,
 } from "@/api/busy"
+
+interface HeldSend {
+  messageId: string
+  version: number
+  requestId: string
+  workspaceId: string | null
+  threadId: string
+  /** What the user typed with it, which only this message carries. */
+  extra?: string
+  /** A reply began streaming, so the server took the message: never undo it. */
+  streamed: boolean
+}
 
 /** Drops the messages a held request took in, and the empty reply each held turn left. */
 function withoutHeldMessages(messages: UIMessage[], heldIds: ReadonlySet<string>): UIMessage[] {
@@ -88,11 +101,14 @@ export function ChatPanel() {
     useState<"idle" | "loading" | "loaded" | "error">("idle")
   const [threadArtifactsError, setThreadArtifactsError] = useState<string | null>(null)
   const threadArtifactsRequestRef = useRef(0)
-  const prevStatusRef = useRef<string>("")
+  const prevStatusRef = useRef<{ chatKey: string; status: string }>({ chatKey: "", status: "" })
   // Transient-overload auto-retry bookkeeping; see ./overloadRetry.
   const hitRetryableRef = useRef(false)
   const retriedRef = useRef(false)
-  const prevRetryStatusRef = useRef<string>("")
+  const prevRetryStatusRef = useRef<{ chatKey: string; status: string }>({
+    chatKey: "",
+    status: "",
+  })
   const [overloadNotice, setOverloadNotice] = useState(false)
   // Connection-limit "busy" turns; the shared BusyNotice shows their progress.
   const busyHitRef = useRef<{ retryAfter: number | null } | null>(null)
@@ -171,9 +187,6 @@ export function ChatPanel() {
   // even though useChat caches the transport from the first render.
   const contextRef = useRef({ workspaceId: activeDomainId, threadId })
   contextRef.current = { workspaceId: activeDomainId, threadId }
-  // The thread whose turn useChat is running. A switch does not abort it, so its
-  // outcome can land while another thread is shown.
-  const turnThreadRef = useRef<string | null>(null)
   const pathPrefix = useLocation().pathname.startsWith("/embed") ? "/embed" : ""
 
   const held = useHeldRequest(activeDomainId, threadId)
@@ -184,23 +197,16 @@ export function ChatPanel() {
   const resumeStream = useResumeStream(activeDomainId, threadId, resumeAnswering)
   const resetResumeStreamRef = useRef(resumeStream.reset)
   resetResumeStreamRef.current = resumeStream.reset
-  // The user message that sends a held request itself ("Send now"), and the
-  // request version it showed; a retry of that message names the version too.
-  const heldSendRef = useRef<{
-    messageId: string
-    version: number
-    requestId: string
-    workspaceId: string | null
-    threadId: string
-    /** What the user typed with it, which only this message carries. */
-    extra?: string
-    /** A reply began streaming, so the server took the message: never undo it. */
-    streamed: boolean
-  } | null>(null)
+  // Per thread, the user message that sends a held request itself ("Send now"), and
+  // the request version it showed; a retry of that message names the version too.
+  // Each thread's chat runs on its own, so another thread's send must not replace it.
+  const [heldSends] = useState(() => new Map<string, HeldSend>())
   const heldHandlerRef = useRef(held.onHeld)
   heldHandlerRef.current = held.onHeld
   const settleSendRef = useRef(held.settleSend)
   settleSendRef.current = held.settleSend
+  const restoreHeldRef = useRef(held.restore)
+  restoreHeldRef.current = held.restore
   const returnToComposerRef = useRef(returnToComposer)
   returnToComposerRef.current = returnToComposer
   // Leaving the chat drops useChat's view of a held send, so nothing would end its
@@ -208,46 +214,81 @@ export function ChatPanel() {
   // returned here, unlike for an abandoned busy retry: the send's outcome is
   // unknown, and a draft left after one that went out would be sent again.
   useEffect(() => () => {
-    const sending = heldSendRef.current
-    if (sending) settleSendRef.current(sending.threadId)
-  }, [])
+    for (const sending of heldSends.values()) settleSendRef.current(sending.threadId)
+    heldSends.clear()
+  }, [heldSends])
 
-  const [transport] = useState(
-    () =>
-      new DefaultChatTransport({
+  const fetchThreadsRef = useRef(fetchThreads)
+  fetchThreadsRef.current = fetchThreads
+
+  const createChat = (chatWorkspaceId: string | null, chatThreadId: string) => {
+    const context = { workspaceId: chatWorkspaceId, threadId: chatThreadId }
+    const shown = () =>
+      contextRef.current.workspaceId === chatWorkspaceId
+      && contextRef.current.threadId === chatThreadId
+    const threadChat: Chat<UIMessage> = new Chat<UIMessage>({
+      transport: new DefaultChatTransport({
         api: `${BASE_PATH}/api/chat/`,
         credentials: "include",
         headers: () => ({ "X-CSRFToken": getCsrfToken() }),
-        body: () => ({ data: contextRef.current }),
+        body: () => ({ data: context }),
         prepareSendMessagesRequest: ({ body, id, messages, trigger, messageId }) => {
-          const sending = heldSendRef.current
+          const sending = heldSends.get(chatThreadId)
           const data =
             sending && messages.at(-1)?.id === sending.messageId
               ? {
-                  ...contextRef.current,
+                  ...context,
                   pendingRequestVersion: sending.version,
                   pendingRequestId: sending.requestId,
                 }
-              : contextRef.current
+              : context
           return { body: { ...body, data, id, messages, trigger, messageId } }
         },
       }),
-  )
+      onData: (part) => {
+        if (part.type === "data-pending-request") {
+          heldHandlerRef.current(part.data as PendingRequest)
+          return
+        }
+        // Retries act on the shown chat only; a left chat's turn just finishes.
+        if (!shown()) return
+        const retryAfter = busyRetryAfter(part)
+        if (retryAfter !== undefined) busyHitRef.current = { retryAfter }
+        else if (isRetryableErrorPart(part)) hitRetryableRef.current = true
+      },
+      onFinish: ({ messages, isError }) => {
+        // The shown chat handles both from its status effects.
+        if (shown()) return
+        const sending = heldSends.get(chatThreadId)
+        if (sending) {
+          heldSends.delete(chatThreadId)
+          // No reply was pushed after it, so the server refused it.
+          const refused = isError && messages.at(-1)?.id === sending.messageId
+          if (refused) {
+            threadChat.messages = threadChat.messages.filter(
+              (message) => message.id !== sending.messageId,
+            )
+            restoreHeldRef.current(sending.threadId)
+            if (sending.extra) {
+              returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra)
+            }
+          } else {
+            settleSendRef.current(sending.threadId)
+          }
+        }
+        if (chatWorkspaceId && contextRef.current.workspaceId === chatWorkspaceId) {
+          void fetchThreadsRef.current(chatWorkspaceId)
+        }
+      },
+    })
+    return threadChat
+  }
+  const chat = useThreadChat(activeDomainId, threadId, createChat)
+  const chatKey = threadChatKey(activeDomainId, threadId)
 
   const {
     messages, sendMessage, status, stop, error, setMessages, regenerate, clearError,
-  } = useChat({
-    transport,
-    onData: (part) => {
-      if (part.type === "data-pending-request") {
-        heldHandlerRef.current(part.data as PendingRequest)
-        return
-      }
-      const retryAfter = busyRetryAfter(part)
-      if (retryAfter !== undefined) busyHitRef.current = { retryAfter }
-      else if (isRetryableErrorPart(part)) hitRetryableRef.current = true
-    },
-  })
+  } = useChat({ chat })
   const busyError = error !== undefined && isBusyChatError(error)
   const visibleMessages = useMemo(() => held.hiddenMessageIds.size
     ? withoutHeldMessages(messages, held.hiddenMessageIds)
@@ -274,23 +315,32 @@ export function ChatPanel() {
   // A pending busy retry, or a notice whose Retry would regenerate, belongs to this
   // thread; never replay it into another. threadId is the trigger: this cleanup runs
   // on every thread change, so the dependency must stay even though it isn't read.
-  // setMessages does not clear useChat's error, so drop the error notice explicitly.
+  // clearError is the left chat's, so its error notice does not wait for a return.
   useEffect(() => () => {
     // A held send waiting on a busy retry, or out of them, is abandoned with it:
     // stop hiding its request, and return text that only the unsent message carried.
-    const sending = heldSendRef.current
+    // One still in flight ends in its chat's onFinish instead.
+    const sending = heldSends.get(threadId)
     if (sending && (busyTimerRef.current || busyNoticeRef.current)) {
-      heldSendRef.current = null
+      heldSends.delete(threadId)
       settleSendRef.current(sending.threadId)
       if (!sending.streamed && sending.extra) {
         returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra)
       }
     }
     cancelBusyRetry()
+    hitRetryableRef.current = false
+    retriedRef.current = false
     setBusyNotice(false)
     setOverloadNotice(false)
     clearError()
-  }, [threadId, cancelBusyRetry, clearError])
+  }, [threadId, heldSends, cancelBusyRetry, clearError])
+
+  // A chat that failed while another was shown is reloaded from the server, so a
+  // Retry on its stale error would resend whatever turn is now last.
+  useEffect(() => {
+    if (!isChatRunning(chat)) chat.clearError()
+  }, [chat])
 
   const isStreaming = status === "streaming" || status === "submitted"
 
@@ -342,6 +392,11 @@ export function ChatPanel() {
   // workspace's localStorage; a 404 instead drops the saved id and starts fresh.
   useEffect(() => {
     if (!threadId || !activeDomainId) return
+    // A turn still streaming holds the conversation in memory, ahead of the server's.
+    if (isChatRunning(chat)) {
+      writeSavedThreadId(activeDomainId, threadId)
+      return
+    }
     let cancelled = false
 
     async function loadMessages() {
@@ -422,16 +477,21 @@ export function ChatPanel() {
   }, [threadId, recentlyCompletedThreadIds, isStreaming])
 
   // Refresh thread list when streaming finishes so new threads appear.
+  // Keyed by chat: a switch from a streaming chat to an idle one is not a finish.
   useEffect(() => {
-    if (prevStatusRef.current === "streaming" && status === "ready" && activeDomainId) {
+    const prev = prevStatusRef.current
+    prevStatusRef.current = { chatKey, status }
+    if (
+      prev.chatKey === chatKey && prev.status === "streaming" && status === "ready" && activeDomainId
+    ) {
       fetchThreads(activeDomainId)
       setTitleRefreshTrigger((prev) => ({ threadId, turn: (prev?.turn ?? 0) + 1 }))
       if (threadPanelOpen && threadPanelMode === "files") {
         void loadThreadArtifacts()
       }
     }
-    prevStatusRef.current = status
   }, [
+    chatKey,
     status,
     activeDomainId,
     threadId,
@@ -445,8 +505,9 @@ export function ChatPanel() {
   // retry also hits it, surface a notice instead. See ./overloadRetry.
   useEffect(() => {
     const prev = prevRetryStatusRef.current
-    prevRetryStatusRef.current = status
-    const wasRunning = prev === "streaming" || prev === "submitted"
+    prevRetryStatusRef.current = { chatKey, status }
+    if (prev.chatKey !== chatKey) return
+    const wasRunning = prev.status === "streaming" || prev.status === "submitted"
     // "error" counts only for a busy 503; a hard failure after an overload part must
     // keep its error notice, not be silently re-posted.
     // submitted -> streaming is mid-run; acting on it would drop a busy part that
@@ -454,14 +515,6 @@ export function ChatPanel() {
     if (!wasRunning || (status !== "ready" && status !== "error")) return
     // Any finished run releases this thread's "retrying" slot, hard errors included.
     busyTracker.settle(busyToken)
-    if (turnThreadRef.current !== contextRef.current.threadId) {
-      // The turn belongs to a thread the user has left: regenerate (a busy retry or the
-      // notice's Retry) would resend the shown thread's last message instead.
-      busyHitRef.current = null
-      hitRetryableRef.current = false
-      if (status === "error") clearError()
-      return
-    }
     if (status === "error" && !busyError) {
       busyHitRef.current = null
       return
@@ -504,7 +557,7 @@ export function ChatPanel() {
       retriedRef.current = false
       setOverloadNotice(true)
     }
-  }, [status, regenerate, busyToken, busyError, clearError])
+  }, [chatKey, status, regenerate, busyToken, busyError])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -517,7 +570,8 @@ export function ChatPanel() {
   // there if it never went out). Only a send refused before any reply started is
   // undone here: a reply that failed mid-stream already saved the message.
   useEffect(() => {
-    const sending = heldSendRef.current
+    // A send from a chat the user left ends in that chat's onFinish.
+    const sending = heldSends.get(threadId)
     if (!sending) return
     if (status === "streaming") {
       sending.streamed = true
@@ -528,7 +582,7 @@ export function ChatPanel() {
     // chat ends it (the thread-change cleanup).
     if (status === "error" && busyError) return
     if (status !== "ready" && status !== "error") return
-    heldSendRef.current = null
+    heldSends.delete(threadId)
     const refused = status === "error" && !sending.streamed
     if (!refused) {
       held.settleSend(sending.threadId)
@@ -537,22 +591,20 @@ export function ChatPanel() {
     setMessages((current) => current.filter((message) => message.id !== sending.messageId))
     // A notice with Retry would resend whatever turn is now last, so those are
     // cleared and the card is the way on. Notices without one (a final reason, a
-    // reconnect remedy, a stale thread) stay, while their chat is the one open:
-    // they say what the card cannot.
+    // reconnect remedy, a stale thread) stay: they say what the card cannot.
     const refusal = error ? classifyChatError(error).kind : "generic"
-    const elsewhere = sending.threadId !== contextRef.current.threadId
-    if (elsewhere || refusal === "generic" || refusal === "access-retry") clearError()
+    if (refusal === "generic" || refusal === "access-retry") clearError()
     held.restore(sending.threadId)
     if (sending.extra) returnToComposer(sending.workspaceId, sending.threadId, sending.extra)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, busyError])
+  }, [threadId, status, busyError])
 
   function sendText(text: string) {
     // A held send left behind its busy notice is replaced by this turn, which
     // carries the held text itself; only the text typed with it would be lost.
-    const stale = heldSendRef.current
+    const stale = heldSends.get(threadId)
     if (stale) {
-      heldSendRef.current = null
+      heldSends.delete(threadId)
       held.settleSend(stale.threadId)
       if (!stale.streamed && stale.extra) {
         returnToComposer(stale.workspaceId, stale.threadId, stale.extra)
@@ -560,7 +612,6 @@ export function ChatPanel() {
     }
     resetOverloadState()
     setStoppedNotice(false)
-    turnThreadRef.current = threadId
     void sendMessage({ text })
   }
 
@@ -570,7 +621,7 @@ export function ChatPanel() {
       ? `${pendingRequestText(pending)}${PART_SEPARATOR}${extra}`
       : pendingRequestText(pending)
     const messageId = generateId()
-    heldSendRef.current = {
+    heldSends.set(threadId, {
       messageId,
       version: pending.version,
       requestId: pending.request_id,
@@ -578,10 +629,9 @@ export function ChatPanel() {
       threadId,
       extra,
       streamed: false,
-    }
+    })
     resetOverloadState()
     setStoppedNotice(false)
-    turnThreadRef.current = threadId
     void sendMessage({ id: messageId, role: "user", parts: [{ type: "text", text }] })
   }
 
@@ -647,7 +697,6 @@ export function ChatPanel() {
   function handleRetry() {
     resetOverloadState()
     setStoppedNotice(false)
-    turnThreadRef.current = threadId
     void regenerate()
   }
 
