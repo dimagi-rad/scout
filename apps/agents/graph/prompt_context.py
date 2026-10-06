@@ -8,6 +8,7 @@ freshness).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from datetime import UTC, datetime
@@ -25,7 +26,7 @@ from apps.agents.prompts.base_system import select_base_system_prompt
 from apps.agents.prompts.memory_prompt import MEMORY_GUIDANCE
 from apps.common.identifiers import view_name
 from apps.knowledge.services.retriever import KnowledgeRetriever
-from apps.memory.services import apersonal_memory_prompt, has_personal_memory, prompt_hash
+from apps.memory.services import has_personal_memory
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, aget_active_semantic_model
 from apps.workspaces.models import SchemaState, WorkspaceDataRecovery, WorkspaceViewSchema
 from apps.workspaces.services.load_activity import (
@@ -70,7 +71,6 @@ def _system_prompt_cache_key(
     interactive: bool = True,
     canvas_write: bool = False,
     write_capable: bool = False,
-    personal_memory: str = "",
 ) -> str:
     """Build a cache key from workspace + user properties that affect the prompt.
 
@@ -84,20 +84,16 @@ def _system_prompt_cache_key(
     headless (blocking) runs. Includes ``canvas_write`` because write-capable
     chats get different dataset-editing instructions from read-only chats.
     Includes ``write_capable`` because it selects the artifact prompt and the
-    read-only or write-capable materialization guidance. Includes a hash of the
-    rendered personal memory so a saved, edited or deleted memory applies on the
-    user's next message rather than after the TTL.
+    read-only or write-capable materialization guidance.
     """
-    instructions_hash = prompt_hash(workspace.system_prompt or "")
+    prompt_hash = hashlib.md5(
+        (workspace.system_prompt or "").encode(), usedforsecurity=False
+    ).hexdigest()[:8]
     user_id = getattr(user, "id", "anon")
     mode = "i" if interactive else "h"
     canvas_mode = "cw" if canvas_write else "cr"
     tool_mode = "rw" if write_capable else "ro"
-    memory_hash = prompt_hash(personal_memory)
-    return (
-        f"{workspace.id}:{user_id}:{instructions_hash}:{mode}:{canvas_mode}:{tool_mode}:"
-        f"{memory_hash}"
-    )
+    return f"{workspace.id}:{user_id}:{prompt_hash}:{mode}:{canvas_mode}:{tool_mode}"
 
 
 async def _semantic_catalog_context(workspace) -> str:
@@ -432,7 +428,9 @@ _MULTI_TENANT_NAMESPACE_HINT = (
 )
 
 
-def _build_cached_system_message(stable: str, volatile: str) -> SystemMessage:
+def _build_cached_system_message(
+    stable: str, volatile: str, personal_memory: str = ""
+) -> SystemMessage:
     """Build a list-content SystemMessage with an Anthropic cache breakpoint.
 
     A ``cache_control`` breakpoint on the stable prefix's last block caches tool
@@ -440,8 +438,16 @@ def _build_cached_system_message(stable: str, volatile: str) -> SystemMessage:
     messages; arch #254, finding 02#3). The volatile suffix follows WITHOUT a
     breakpoint, so a new materialization changes only post-breakpoint bytes and
     leaves the cached prefix intact.
+
+    The user's personal memory gets its own block and breakpoint after the stable
+    one, so the stable prefix stays identical for every member of a workspace and
+    one user's memory edit doesn't rewrite it.
     """
     blocks: list[dict] = [{"type": "text", "text": stable, "cache_control": PROMPT_CACHE_CONTROL}]
+    if personal_memory:
+        blocks.append(
+            {"type": "text", "text": personal_memory, "cache_control": PROMPT_CACHE_CONTROL}
+        )
     if volatile and volatile.strip():
         blocks.append({"type": "text", "text": volatile})
     return SystemMessage(content=blocks)
@@ -467,8 +473,6 @@ async def _build_system_prompt(
     finding 02#3). ``volatile_suffix`` may be "".
     """
     has_tenants = await workspace.tenants.aexists()
-    remembers = interactive and has_personal_memory(user)
-    personal_memory = await apersonal_memory_prompt(user) if remembers else ""
     stable = await _build_stable_system_prompt(
         workspace,
         user,
@@ -476,8 +480,7 @@ async def _build_system_prompt(
         interactive,
         canvas_write,
         write_capable,
-        remembers=remembers,
-        personal_memory=personal_memory,
+        remembers=interactive and has_personal_memory(user),
     )
     volatile = ""
     if has_tenants:
@@ -576,12 +579,8 @@ async def _build_stable_system_prompt(
     write_capable: bool,
     *,
     remembers: bool = False,
-    personal_memory: str = "",
 ) -> str:
-    key = _system_prompt_cache_key(
-        workspace, user, interactive, canvas_write, write_capable, personal_memory
-    )
-    cache_key = f"{key}:{has_tenants}"
+    cache_key = f"{_system_prompt_cache_key(workspace, user, interactive, canvas_write, write_capable)}:{has_tenants}"
     cached = _system_prompt_cache.get(cache_key)
     if cached is not None:
         value, timestamp = cached
@@ -599,8 +598,6 @@ async def _build_stable_system_prompt(
 
     if remembers:
         stable_sections.append(MEMORY_GUIDANCE)
-        if personal_memory:
-            stable_sections.append(personal_memory)
 
     retriever = KnowledgeRetriever(workspace)
     knowledge_context = await retriever.retrieve()
