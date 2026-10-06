@@ -128,6 +128,8 @@ export function ChatPanel() {
     recentlyCompletedThreadIds,
     recentTerminationsByToolCallId,
     notifyJobLikelyStarted,
+    setPendingRequest,
+    refresh: refreshJobs,
   } = useWorkspaceJobs()
   const activeMaterializationJob = jobsByThreadId[threadId] ?? null
   // A load the caller has no job for here (a teammate's, or a refresh) still
@@ -183,8 +185,7 @@ export function ChatPanel() {
     refresh: fetchThreads,
   })
 
-  // Use a ref so the transport body closure always reads fresh values,
-  // even though useChat caches the transport from the first render.
+  // The shown chat, for callbacks and async results that may land after a switch.
   const contextRef = useRef({ workspaceId: activeDomainId, threadId })
   contextRef.current = { workspaceId: activeDomainId, threadId }
   const pathPrefix = useLocation().pathname.startsWith("/embed") ? "/embed" : ""
@@ -220,6 +221,10 @@ export function ChatPanel() {
 
   const fetchThreadsRef = useRef(fetchThreads)
   fetchThreadsRef.current = fetchThreads
+  const setPendingRequestRef = useRef(setPendingRequest)
+  setPendingRequestRef.current = setPendingRequest
+  const refreshJobsRef = useRef(refreshJobs)
+  refreshJobsRef.current = refreshJobs
 
   const createChat = (chatWorkspaceId: string | null, chatThreadId: string) => {
     const context = { workspaceId: chatWorkspaceId, threadId: chatThreadId }
@@ -247,7 +252,14 @@ export function ChatPanel() {
       }),
       onData: (part) => {
         if (part.type === "data-pending-request") {
-          heldHandlerRef.current(part.data as PendingRequest)
+          const pending = part.data as PendingRequest
+          // onHeld also hides the shown thread's messages; a left chat reloads on return.
+          if (shown()) {
+            heldHandlerRef.current(pending)
+          } else {
+            setPendingRequestRef.current(pending.thread_id, pending)
+            void refreshJobsRef.current()
+          }
           return
         }
         // Retries act on the shown chat only; a left chat's turn just finishes.

@@ -40,10 +40,14 @@ function workspace(): WorkspaceListItem {
   }
 }
 
-/** Chat A's turn streams its first words, then waits for ``finishA``. */
-function mockServer() {
+/** Chat A's turn streams its first words, then waits for ``finishA`` and ends as ``aEnds``. */
+function mockServer(
+  { aEnds = "ok", holdB = false }: { aEnds?: "ok" | "overload" | "error"; holdB?: boolean } = {},
+) {
   let finishA!: () => void
   const aGate = new Promise<void>((resolve) => (finishA = resolve))
+  let finishB!: () => void
+  const bGate = new Promise<void>((resolve) => (finishB = resolve))
   const saved = new Map<string, UIMessage[]>([
     [THREAD_A, [textMessage("a-old", "assistant", "Chat A history.")]],
     [THREAD_B, [textMessage("b-old", "assistant", B_HISTORY)]],
@@ -65,8 +69,19 @@ function mockServer() {
             if (isA) {
               writer.write({ type: "text-delta", id: "t", delta: A_PARTIAL })
               await aGate
+              if (aEnds === "error") {
+                writer.write({ type: "error", errorText: "Agent failed" })
+                return
+              }
+              if (aEnds === "overload") {
+                writer.write({
+                  type: "data-chat-status",
+                  data: { kind: "retryable-error", reason: "overloaded" },
+                })
+              }
               writer.write({ type: "text-delta", id: "t", delta: `. ${A_FINAL}` })
             } else {
+              if (holdB) await bGate
               writer.write({ type: "text-delta", id: "t", delta: B_REPLY })
             }
             writer.write({ type: "text-end", id: "t" })
@@ -89,7 +104,7 @@ function mockServer() {
     if (/^\/api\/workspaces\/[^/]+\/threads\/$/.test(url)) return Response.json([])
     throw new Error(`Unexpected request: ${url}`)
   }))
-  return { finishA, chatThreads, messageLoads }
+  return { finishA, finishB, chatThreads, messageLoads }
 }
 
 async function send(text: string) {
@@ -167,5 +182,60 @@ describe("concurrent chat threads (#847)", () => {
 
     await act(async () => server.finishA())
     await screen.findByText(`${A_PARTIAL}. ${A_FINAL}`)
+  })
+
+  it("does not retry the shown chat for an overload in a left chat", async () => {
+    const server = mockServer({ aEnds: "overload", holdB: true })
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await screen.findByText("Chat A history.")
+    await send("run recipe X")
+    await screen.findByText(A_PARTIAL)
+
+    await showThread(THREAD_B)
+    await screen.findByText(B_HISTORY)
+    // A's overload lands mid-turn in B, so B's finish must not read it as its own.
+    await send("what about B?")
+    await act(async () => server.finishA())
+    await act(async () => server.finishB())
+    await screen.findByText(B_REPLY)
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(server.chatThreads).toEqual([THREAD_A, THREAD_B])
+    expect(screen.queryByTestId("chat-overload")).toBeNull()
+  })
+
+  it("does not show a left chat's failure when it is shown again", async () => {
+    const server = mockServer({ aEnds: "error" })
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await screen.findByText("Chat A history.")
+    await send("run recipe X")
+    await screen.findByText(A_PARTIAL)
+
+    await showThread(THREAD_B)
+    await screen.findByText(B_HISTORY)
+    await act(async () => server.finishA())
+    expect(screen.queryByTestId("chat-error")).toBeNull()
+
+    const loadsBeforeReturn = server.messageLoads.length
+    await showThread(THREAD_A)
+    await screen.findByText("Chat A history.")
+    // It reloads from the server, so a Retry on the old error would resend another turn.
+    await waitFor(() =>
+      expect(server.messageLoads.slice(loadsBeforeReturn)).toContain(THREAD_A),
+    )
+    expect(screen.queryByTestId("chat-error")).toBeNull()
+  })
+
+  it("starts a new chat ready to send while another is running", async () => {
+    mockServer()
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await screen.findByText("Chat A history.")
+    await send("run recipe X")
+    await screen.findByText(A_PARTIAL)
+
+    await act(async () => useAppStore.getState().uiActions.newThread())
+    await screen.findByTestId("chat-input-prominent")
+    expect(screen.queryByText(A_PARTIAL)).toBeNull()
+    expect(screen.queryByRole("button", { name: "Stop response" })).toBeNull()
   })
 })
