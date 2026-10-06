@@ -34,6 +34,7 @@ import {
 } from "./ChatStatus"
 import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
 import {
+  TITLE_REFRESH_DELAYS_MS,
   scheduleTitleRefresh,
   useGeneratedTitleRefresh,
   type TitleRefreshTrigger,
@@ -43,6 +44,9 @@ import { classifyChatError } from "./chatErrors"
 import { PendingRequestCard } from "./PendingRequestCard"
 import { useHeldRequest, type EditOutcome } from "./useHeldRequest"
 import { useResumeStream } from "./useResumeStream"
+import { HISTORY_LOAD_TIMEOUT_MS } from "./historyLoad"
+import { Loader2 } from "lucide-react"
+import { Button } from "@/components/ui/button"
 import { isChatRunning, threadChatKey, useThreadChat } from "./threadChats"
 import {
   busyRetryAfter,
@@ -214,6 +218,9 @@ export function ChatPanel() {
     chat: null,
     reloadKey: 0,
   })
+  // The load that failed or timed out, offered for retry.
+  const [historyFailed, setHistoryFailed] =
+    useState<{ chat: Chat<UIMessage>; reloadKey: number } | null>(null)
   // A left chat can finish after the panel is gone; it must not start polls then.
   const mountedRef = useRef(true)
   useEffect(() => {
@@ -285,9 +292,15 @@ export function ChatPanel() {
     if (!stillThere()) return
     void fetchThreadsRef.current(workspaceId)
     titleTimers.get(finishedThreadId)?.()
-    titleTimers.set(finishedThreadId, scheduleTitleRefresh(() => {
+    let ticks = 0
+    const cancel = scheduleTitleRefresh(() => {
+      ticks += 1
+      if (ticks === TITLE_REFRESH_DELAYS_MS.length && titleTimers.get(finishedThreadId) === cancel) {
+        titleTimers.delete(finishedThreadId)
+      }
       if (stillThere() && titlePending()) void fetchThreadsRef.current(workspaceId)
-    }))
+    })
+    titleTimers.set(finishedThreadId, cancel)
   }
 
   const createChat = (
@@ -413,9 +426,12 @@ export function ChatPanel() {
   // made up (New chat) has no history to wait for; the thread list can't tell, as it
   // loads late and holds only the latest threads.
   const historyLoading =
-    !isLocalThread(threadId)
+    activeDomainId !== null
+    && !isLocalThread(threadId)
     && !isStreaming
     && !(loaded.chat === chat && loaded.reloadKey === messageReloadKey)
+  const historyLoadFailed =
+    historyFailed?.chat === chat && historyFailed.reloadKey === messageReloadKey
 
   const loadThreadArtifacts = useCallback(async () => {
     if (!activeDomainId || !threadId) return
@@ -477,11 +493,17 @@ export function ChatPanel() {
       return () => { cancelled = true }
     }
 
+    const abort = new AbortController()
+    const timeout = setTimeout(() => abort.abort(), HISTORY_LOAD_TIMEOUT_MS)
+
     async function loadMessages() {
       try {
         const response = await api.get<
           UIMessage[] | { messages: UIMessage[]; pending_request: PendingRequest | null }
-        >(`/api/workspaces/${activeDomainId}/threads/${threadId}/messages/?include=pending`)
+        >(
+          `/api/workspaces/${activeDomainId}/threads/${threadId}/messages/?include=pending`,
+          abort.signal,
+        )
         if (cancelled) return
         // A server from before held requests ignores ``include`` and sends the bare list.
         const history = Array.isArray(response)
@@ -506,15 +528,22 @@ export function ChatPanel() {
           newThread()
           return
         }
-        // New thread or transient fetch failure — start with empty.
+        // A failure or timeout must not block sending for good: unblock, keep what is
+        // shown, and offer a retry.
         setLoaded({ chat, reloadKey })
-        if (!isChatRunning(chat)) setMessages([])
+        setHistoryFailed({ chat, reloadKey })
         resetResumeStreamRef.current()
+      } finally {
+        clearTimeout(timeout)
       }
     }
 
     loadMessages()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      abort.abort()
+      clearTimeout(timeout)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, activeDomainId, messageReloadKey])
 
@@ -638,6 +667,9 @@ export function ChatPanel() {
     } else if (action === "notify") {
       retriedChats.delete(chatKey)
       setOverloadNotice(true)
+    } else {
+      // The turn (or its retry) finished cleanly.
+      retriedChats.delete(chatKey)
     }
   }, [chatKey, status, regenerate, busyToken, busyError, retriedChats])
 
@@ -806,17 +838,8 @@ export function ChatPanel() {
     )
   }
 
-  if (visibleMessages.length === 0 && !held.pending && historyLoading) {
-    return (
-      <div className="flex h-full min-w-0 flex-col" data-testid="chat-history-loading">
-        {loadBanners}
-        {staleBanner}
-        <div className="min-h-0 flex-1" />
-      </div>
-    )
-  }
-
-  if (visibleMessages.length === 0 && !held.pending) {
+  // While loading, or after a failed load, it is not shown as a new, empty chat.
+  if (visibleMessages.length === 0 && !held.pending && !historyLoading && !historyLoadFailed) {
     return (
       <div className="flex h-full min-w-0 flex-col">
         {loadBanners}
@@ -859,6 +882,28 @@ export function ChatPanel() {
               onRetryDispatched={notifyJobLikelyStarted}
             />
           ))}
+          {historyLoading && (
+            <div
+              className="flex items-center gap-2 text-sm text-muted-foreground"
+              data-testid="chat-history-loading"
+            >
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              Loading conversation…
+            </div>
+          )}
+          {historyLoadFailed && (
+            <div className="flex items-center gap-2 text-sm text-destructive">
+              <span>Couldn't load this conversation.</span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setMessageReloadKey((k) => k + 1)}
+                data-testid="chat-history-retry"
+              >
+                Retry
+              </Button>
+            </div>
+          )}
           {held.pending && held.phase && (
             <PendingRequestCard
               pending={held.pending}
