@@ -125,7 +125,22 @@ class AgentLearningAdmin(admin.ModelAdmin):
             },
         ),
     )
-    readonly_fields = ["times_applied", "created_at"]
+    # Workspace memory content changes only through the Memory page and the agent
+    # tool, which enforce author-or-manager edits and record WorkspaceMemoryEvents.
+    readonly_fields = [
+        "workspace",
+        "description",
+        "applies_to_tables",
+        "discovered_by_user",
+        "times_applied",
+        "created_at",
+    ]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
     @admin.display(description="Description")
     def description_short(self, obj):
