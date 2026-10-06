@@ -3,7 +3,7 @@
 from rest_framework import serializers
 
 from apps.common.utils import creator_display_name
-from apps.knowledge.models import AgentLearning, KnowledgeEntry
+from apps.knowledge.models import KnowledgeEntry
 
 
 class KnowledgeEntrySerializer(serializers.ModelSerializer):
@@ -30,33 +30,3 @@ class KnowledgeEntrySerializer(serializers.ModelSerializer):
     def get_created_by_name(self, obj):
 
         return creator_display_name(obj.created_by)
-
-
-class AgentLearningSerializer(serializers.ModelSerializer):
-    type = serializers.SerializerMethodField()
-
-    class Meta:
-        model = AgentLearning
-        fields = [
-            "id",
-            "type",
-            "description",
-            "category",
-            "applies_to_tables",
-            "original_error",
-            "confidence_score",
-            "times_applied",
-            "is_active",
-            "created_at",
-        ]
-        read_only_fields = [
-            "id",
-            "type",
-            "original_error",
-            "confidence_score",
-            "times_applied",
-            "created_at",
-        ]
-
-    def get_type(self, obj) -> str:
-        return "learning"

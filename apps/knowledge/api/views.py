@@ -15,12 +15,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.common.http import string_field
-from apps.knowledge.models import AgentLearning, KnowledgeEntry
+from apps.knowledge.models import KnowledgeEntry
 from apps.knowledge.utils import parse_frontmatter, render_frontmatter
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
-from .serializers import AgentLearningSerializer, KnowledgeEntrySerializer
+from .serializers import KnowledgeEntrySerializer
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +39,9 @@ KNOWLEDGE_TYPES = {
         # Join created_by so the page slice doesn't N+1 (arch #254, 05#7).
         "select_related": ["created_by"],
     },
-    "learning": {
-        "model": AgentLearning,
-        "serializer": AgentLearningSerializer,
-        "search_fields": ["description", "original_error", "original_sql", "corrected_sql"],
-        "select_related": [],
-    },
 }
+# AgentLearning rows are workspace memory now (#849): listed and changed only through
+# /api/workspaces/<id>/memory/, which enforces author-or-manager edits and audits them.
 
 
 class KnowledgeListCreateView(APIView):
@@ -145,9 +141,7 @@ class KnowledgeListCreateView(APIView):
             return err
         if item_type == "learning":
             return Response(
-                {
-                    "error": "AgentLearning entries are created automatically by the agent and cannot be manually created."
-                },
+                {"error": "Workspace memories are managed on the Memory page."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if not item_type or item_type not in KNOWLEDGE_TYPES:
@@ -167,12 +161,8 @@ class KnowledgeListCreateView(APIView):
 
         instance = serializer.save(workspace=workspace)
 
-        if item_type == "entry":
-            instance.created_by = request.user
-            instance.save(update_fields=["created_by"])
-        elif item_type == "learning":
-            instance.discovered_by_user = request.user
-            instance.save(update_fields=["discovered_by_user"])
+        instance.created_by = request.user
+        instance.save(update_fields=["created_by"])
 
         response_serializer = serializer_class(instance)
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)

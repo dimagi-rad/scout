@@ -8,6 +8,7 @@ from django.urls import include, path
 
 from apps.chat.urls import workspace_thread_urlpatterns
 from apps.chat.views import chat_view
+from apps.memory.urls import workspace_memory_urlpatterns
 from apps.workspaces.api.access_views import workspace_access_verify_view
 from apps.workspaces.api.workspace_views import (
     MyInvitesView,
@@ -63,6 +64,7 @@ workspace_urlpatterns = [
     path("artifacts/", include("apps.artifacts.urls")),
     path("recipes/", include("apps.recipes.urls")),
     path("knowledge/", include("apps.knowledge.urls")),
+    path("memory/", include((workspace_memory_urlpatterns, "workspace_memory"))),
     path("", include("apps.semantic.urls")),
     path("threads/", include((workspace_thread_urlpatterns, "chat_threads"))),
     path("", include("apps.workspaces.api.urls")),
