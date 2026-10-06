@@ -15,6 +15,7 @@ from apps.knowledge.services.retriever import (
     KNOWLEDGE_CONTEXT_CHAR_BUDGET,
     LEARNINGS_CHAR_CAP,
     MAX_COLUMN_NOTES_PER_TABLE,
+    WORKSPACE_MEMORY_HEADING,
     KnowledgeRetriever,
     _fit_section,
 )
@@ -129,7 +130,7 @@ class TestLearningsNotCrowdedOut:
         result = await KnowledgeRetriever(workspace).retrieve()
 
         assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET
-        assert "## Learned Corrections" in result
+        assert WORKSPACE_MEMORY_HEADING in result
         for description in descriptions:
             assert description in result
         assert "### stg_visits" in result
@@ -156,7 +157,7 @@ class TestLearningsNotCrowdedOut:
         for description in descriptions:
             assert description in result
         # Display order is unchanged: learnings still come last.
-        assert result.index("## Knowledge Base") < result.index("## Learned Corrections")
+        assert result.index("## Knowledge Base") < result.index(WORKSPACE_MEMORY_HEADING)
 
     @pytest.mark.asyncio
     async def test_truncation_never_cuts_mid_line(self, workspace, user):
@@ -235,7 +236,7 @@ class TestLearningsNotCrowdedOut:
     @pytest.mark.asyncio
     async def test_section_filling_remaining_budget_exactly(self, workspace, user):
         """A later section must not slip through untrimmed when nothing is left."""
-        learning_heading = "## Learned Corrections\n\n- "
+        learning_heading = WORKSPACE_MEMORY_HEADING + "\n\n- "
         await AgentLearning.objects.acreate(
             workspace=workspace,
             description="L" * (LEARNINGS_CHAR_CAP - len(learning_heading)),
@@ -284,7 +285,7 @@ class TestLearningsNotCrowdedOut:
 
         assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET
         assert "Monthly Recurring Revenue" in result
-        learnings = result[result.index("## Learned Corrections") :].split("\n\n*(")[0]
+        learnings = result[result.index(WORKSPACE_MEMORY_HEADING) :].split("\n\n*(")[0]
         # Entries leave most of the budget unused, so learnings get it back.
         assert len(learnings) > LEARNINGS_CHAR_CAP
 
@@ -308,7 +309,7 @@ class TestLearningsNotCrowdedOut:
 
         assert len(result) <= KNOWLEDGE_CONTEXT_CHAR_BUDGET
         assert "### Entry 0" in result
-        assert "## Learned Corrections" in result
+        assert WORKSPACE_MEMORY_HEADING in result
 
     @pytest.mark.asyncio
     async def test_no_truncation_notice_when_cap_alone_fits(self, workspace, user):

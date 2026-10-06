@@ -74,7 +74,9 @@ def test_compact_tool_message_leaves_multi_block_content_alone():
 @pytest.mark.asyncio
 async def test_agent_tool_node_compacts_mcp_results_only():
     mcp = _mcp_message("list_datasets")
-    local = ToolMessage(content='{\n  "ok": true\n}', tool_call_id="tc-2", name="save_learning")
+    local = ToolMessage(
+        content='{\n  "ok": true\n}', tool_call_id="tc-2", name="save_workspace_memory"
+    )
     node = _make_injecting_tool_node(_base_node([mcp, local]), {})
 
     result = await node(_state("list_datasets"))
