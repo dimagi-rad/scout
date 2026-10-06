@@ -46,6 +46,15 @@ def create_personal_memory_tool(user: User):
             result = await asave_personal_memory(user, memory)
         except MemoryValidationError as exc:
             return {"status": "error", "layer": "personal", "message": str(exc)}
+        except Exception:
+            # ToolNode re-raises anything but a ToolInvocationError, which would end
+            # the user's turn over a memory save.
+            logger.exception("Failed to save personal memory for user %s", user.pk)
+            return {
+                "status": "error",
+                "layer": "personal",
+                "message": "Saving to memory failed. Tell the user it was not saved.",
+            }
         logger.info(
             "Personal memory %s for user %s (created=%s)",
             result.memory.id,

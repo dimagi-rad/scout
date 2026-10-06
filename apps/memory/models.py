@@ -4,6 +4,7 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.db.models.functions import Lower
 
 
 class PersonalMemory(models.Model):
@@ -26,6 +27,11 @@ class PersonalMemory(models.Model):
     class Meta:
         ordering = ["created_at", "id"]
         indexes = [models.Index(fields=["user", "created_at"])]
+        constraints = [
+            models.UniqueConstraint(
+                "user", Lower("content"), name="unique_personal_memory_per_user"
+            )
+        ]
 
     def __str__(self):
         return self.content[:50]
