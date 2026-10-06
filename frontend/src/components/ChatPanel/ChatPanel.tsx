@@ -206,6 +206,16 @@ export function ChatPanel() {
   // the request version it showed; a retry of that message names the version too.
   // Each thread's chat runs on its own, so another thread's send must not replace it.
   const [heldSends] = useState(() => new Map<string, HeldSend>())
+  // The chat whose server history is loaded; a fresh chat is empty until then.
+  const [loadedChatKey, setLoadedChatKey] = useState<string | null>(null)
+  // A left chat can finish after the panel is gone; it must not start polls then.
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
   // Title polls for threads whose turn finished out of view.
   const [titleTimers] = useState(() => new Map<string, () => void>())
   useEffect(() => () => {
@@ -261,6 +271,7 @@ export function ChatPanel() {
 
   /** The shown thread polls for its generated title; a thread finished out of view does it here. */
   function refreshThreadsAfterBackgroundTurn(workspaceId: string, finishedThreadId: string) {
+    if (!mountedRef.current) return
     const stillThere = () => useAppStore.getState().activeDomainId === workspaceId
     const titlePending = () =>
       useAppStore.getState().threads.find((thread) => thread.id === finishedThreadId)
@@ -383,7 +394,6 @@ export function ChatPanel() {
     }
     cancelBusyRetry()
     hitRetryableRef.current = false
-    retriedRef.current = false
     setBusyNotice(false)
     setOverloadNotice(false)
     clearError()
@@ -447,18 +457,21 @@ export function ChatPanel() {
       return
     }
     let cancelled = false
+    const loadKey = chatKey
 
     async function loadMessages() {
       try {
         const response = await api.get<
           UIMessage[] | { messages: UIMessage[]; pending_request: PendingRequest | null }
         >(`/api/workspaces/${activeDomainId}/threads/${threadId}/messages/?include=pending`)
-        if (cancelled) return
+        // A turn sent while this loaded holds the conversation now; don't replace it.
+        if (cancelled || isChatRunning(chat)) return
         // A server from before held requests ignores ``include`` and sends the bare list.
         const loaded = Array.isArray(response)
           ? { messages: response, pending_request: null }
           : response
         setMessages(loaded.messages)
+        setLoadedChatKey(loadKey)
         held.onMessagesLoaded(loaded.pending_request)
         // The reloaded conversation carries whatever the resume streamed.
         resetResumeStreamRef.current()
@@ -475,7 +488,9 @@ export function ChatPanel() {
           return
         }
         // New thread or transient fetch failure — start with empty.
+        if (isChatRunning(chat)) return
         setMessages([])
+        setLoadedChatKey(loadKey)
         resetResumeStreamRef.current()
       }
     }
@@ -761,6 +776,18 @@ export function ChatPanel() {
     return (
       <div className="flex-1 flex items-center justify-center text-muted-foreground">
         Select a domain to start chatting
+      </div>
+    )
+  }
+
+  // Until a switched-to thread's history arrives, it is not a new, empty chat.
+  const historyPending = loadedChatKey !== chatKey && !isChatRunning(chat)
+  if (visibleMessages.length === 0 && !held.pending && historyPending) {
+    return (
+      <div className="flex h-full min-w-0 flex-col" data-testid="chat-history-loading">
+        {loadBanners}
+        {staleBanner}
+        <div className="min-h-0 flex-1" />
       </div>
     )
   }

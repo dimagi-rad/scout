@@ -366,6 +366,38 @@ describe("a message sent while the chat's data loads", () => {
     consoleError.mockRestore()
   })
 
+  it("keeps a held send whose reply failed mid-stream after a switch, and does not return its text", async () => {
+    const server = mockServer()
+    useAppStore.setState({
+      user: { id: "u1", email: "u@x", name: "U", is_staff: false, onboarding_complete: true },
+    })
+    seedStore()
+    const sentFrom = useAppStore.getState().threadId
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: sentFrom,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    server.failHeldSendMidStream = true
+    let release: () => void = () => {}
+    server.heldSendGate = new Promise((resolve) => (release = resolve))
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    renderChat()
+    await screen.findByTestId("pending-request-card")
+
+    await type(FOLLOW_UP, "Send message")
+    await waitFor(() => expect(server.chatBodies).toHaveLength(2))
+    await act(async () => {
+      useAppStore.setState({ threadId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" })
+    })
+    // The reply starts, then fails, while the chat is out of view: the server took it.
+    await act(async () => release())
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)))
+
+    expect(readDraft({ userId: "u1", workspaceId: WS, threadId: sentFrom })).toBe("")
+    consoleError.mockRestore()
+  })
+
   it("keeps a held send whose reply failed after it began, and does not return its text", async () => {
     const server = mockServer()
     server.pending = request([{ id: "p1", text: QUESTION }], {

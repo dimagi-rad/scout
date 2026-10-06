@@ -24,6 +24,7 @@ vi.mock("@/contexts/WorkspaceJobsContext", () => ({
 }))
 
 const WS = "11111111-1111-1111-1111-111111111111"
+const WS_OTHER = "22222222-2222-2222-2222-222222222222"
 const THREAD_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 const THREAD_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 const A_PARTIAL = "Running recipe X, step one"
@@ -54,9 +55,13 @@ const heldInA = {
 } satisfies PendingRequest
 
 /** Chat A's turn streams its first words, then waits for ``finishA`` and ends as ``aEnds``. */
-function mockServer(
-  { aEnds = "ok", holdB = false }: { aEnds?: "ok" | "overload" | "error" | "held"; holdB?: boolean } = {},
-) {
+function mockServer({
+  aEnds = "ok",
+  holdB = false,
+  holdBHistory = false,
+}: { aEnds?: "ok" | "overload" | "error" | "held"; holdB?: boolean; holdBHistory?: boolean } = {}) {
+  let loadBHistory!: () => void
+  const bHistoryGate = new Promise<void>((resolve) => (loadBHistory = resolve))
   let finishA!: () => void
   const aGate = new Promise<void>((resolve) => (finishA = resolve))
   let finishB!: () => void
@@ -116,6 +121,7 @@ function mockServer(
     const messages = url.match(/^\/api\/workspaces\/[^/]+\/threads\/([^/]+)\/messages\//)
     if (messages) {
       messageLoads.push(messages[1])
+      if (holdBHistory && messages[1] === THREAD_B) await bHistoryGate
       return Response.json(saved.get(messages[1]) ?? [])
     }
     if (/\/threads\/[^/]+\/viewed\/$/.test(url)) return new Response(null, { status: 204 })
@@ -125,7 +131,7 @@ function mockServer(
     }
     throw new Error(`Unexpected request: ${url}`)
   }))
-  return { finishA, finishB, chatThreads, messageLoads, threadLists }
+  return { finishA, finishB, loadBHistory, chatThreads, messageLoads, threadLists }
 }
 
 async function send(text: string) {
@@ -281,5 +287,39 @@ describe("concurrent chat threads (#847)", () => {
       expect(jobs.setPendingRequest).toHaveBeenCalledWith(THREAD_A, heldInA),
     )
     expect(screen.getByText(B_HISTORY)).toBeInTheDocument()
+  })
+
+  it("does not show a switched-to thread as a new chat while its history loads", async () => {
+    const server = mockServer({ holdBHistory: true })
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await screen.findByText("Chat A history.")
+
+    await showThread(THREAD_B)
+    expect(screen.getByTestId("chat-history-loading")).toBeInTheDocument()
+    expect(screen.queryByTestId("chat-input-prominent")).toBeNull()
+    expect(screen.queryByText("Chat A history.")).toBeNull()
+
+    await act(async () => server.loadBHistory())
+    await screen.findByText(B_HISTORY)
+  })
+
+  it("keeps a turn left in another workspace out of the new one", async () => {
+    const server = mockServer({ aEnds: "held" })
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await screen.findByText("Chat A history.")
+    await send("run recipe X")
+    await screen.findByText(A_PARTIAL)
+
+    await act(async () => {
+      useAppStore.setState({ activeDomainId: WS_OTHER })
+    })
+    jobs.setPendingRequest.mockClear()
+    const listsBefore = server.threadLists.count
+    await act(async () => server.finishA())
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)))
+
+    expect(jobs.setPendingRequest).not.toHaveBeenCalled()
+    expect(server.threadLists.count).toBe(listsBefore)
+    expect(screen.queryByText(A_PARTIAL, { exact: false })).toBeNull()
   })
 })
