@@ -106,4 +106,5 @@ urlpatterns = [
     # workspace_id comes from the request body, not the URL
     path("api/chat/", chat_view, name="chat"),
     path("api/auth/", include("apps.users.auth_urls")),
+    path("api/memory/", include("apps.memory.urls")),
 ]
