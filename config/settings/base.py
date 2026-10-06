@@ -85,6 +85,7 @@ INSTALLED_APPS = [
     "apps.users",
     "apps.workspaces",
     "apps.knowledge",
+    "apps.memory",
     "apps.agents",
     "apps.artifacts",
     "apps.recipes",

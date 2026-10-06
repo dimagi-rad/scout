@@ -31,8 +31,10 @@ from apps.agents.tool_results import compact_tool_results
 from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
+from apps.agents.tools.memory_tool import create_personal_memory_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.chat.constants import SYSTEM_RESUME_MARKER
+from apps.memory.services import has_personal_memory
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -297,6 +299,9 @@ def _build_tools(
                     conversation_id=conversation_id,
                 )
             )
+    if interactive and has_personal_memory(user):
+        # Not gated on write_capable: it writes only the user's own private rows.
+        tools.append(create_personal_memory_tool(user))
     if write_capable:
         tools.append(create_recipe_tool(workspace, user))
     if not interactive and write_capable:

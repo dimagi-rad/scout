@@ -37,6 +37,7 @@ from apps.agents.prompts.base_system import (
     READ_ONLY_BASE_SYSTEM_PROMPT,
 )
 from apps.knowledge.models import KnowledgeEntry
+from apps.memory.models import PersonalMemory
 from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, WorkspaceTenant, WorkspaceViewSchema
 from tests.tenant_access import grant_tenant_access
@@ -161,6 +162,8 @@ async def test_assembled_graph_matches_snapshot(
     await KnowledgeEntry.objects.acreate(
         workspace=workspace, title="Active user", content="Logged a visit in the last 30 days."
     )
+    # Shows where a reader's personal memory lands in chat, and that headless runs omit it.
+    await PersonalMemory.objects.acreate(user=read_user, content="Show district totals as a table.")
     if multi:
         other = await Tenant.objects.acreate(
             provider="commcare", external_id="other", canonical_name="Other"

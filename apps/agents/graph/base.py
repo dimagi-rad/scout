@@ -52,6 +52,7 @@ from apps.agents.graph.tool_binding import (
     _make_injecting_tool_node,
 )
 from apps.agents.llm_request import MAIN_AGENT_EFFORT, chat_model_kwargs
+from apps.memory.services import apersonal_memory_prompt, has_personal_memory
 from apps.semantic.services.date_context import agent_date_context
 from apps.workspaces.access import aresolve_workspace_access_ex
 from apps.workspaces.models import WorkspaceRole
@@ -159,6 +160,10 @@ async def build_agent_graph(
         conversation_id=conversation_id,
     )
     volatile_prompt += agent_date_context()
+    # Read every turn rather than cached, so a memory edit applies on the next message.
+    personal_memory = (
+        await apersonal_memory_prompt(user) if interactive and has_personal_memory(user) else ""
+    )
     logger.debug(
         "System prompt assembled: %d stable + %d volatile chars for workspace %s",
         len(stable_prompt),
@@ -215,7 +220,7 @@ async def build_agent_graph(
                         answered_ids.add(tc_id)
 
         messages = [
-            _build_cached_system_message(stable_prompt, volatile_prompt),
+            _build_cached_system_message(stable_prompt, volatile_prompt, personal_memory),
             *repaired,
         ]
         # cache_control lands on the last eligible message block, caching the

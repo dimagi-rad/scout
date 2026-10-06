@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom"
 import {
   MessageSquare,
   BookOpen,
+  Brain,
   ChefHat,
   Database,
   LayoutDashboard,
@@ -282,6 +283,12 @@ export function Sidebar() {
             to={`${pathPrefix}/knowledge`}
             icon={BookOpen}
             label="Knowledge"
+            onNavigate={collapseSidebar}
+          />
+          <NavItem
+            to={`${pathPrefix}/memory`}
+            icon={Brain}
+            label="Memory"
             onNavigate={collapseSidebar}
           />
           <NavItem

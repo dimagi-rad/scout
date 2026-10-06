@@ -8,6 +8,7 @@ import { ArtifactDemoPage } from "@/pages/ArtifactDemoPage"
 import { ArtifactsPage } from "@/pages/ArtifactsPage"
 import { DatasetBrowserPage } from "@/pages/DatasetBrowserPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
+import { MemoryPage } from "@/pages/MemoryPage"
 import { RecipesPage } from "@/pages/RecipesPage"
 import { ConnectionsPage } from "@/pages/ConnectionsPage"
 import { WorkspacesPage } from "@/pages/WorkspacesPage"
@@ -37,6 +38,7 @@ export const router = createBrowserRouter([
       { path: "knowledge", element: <KnowledgePage /> },
       { path: "knowledge/new", element: <KnowledgePage /> },
       { path: "knowledge/:id", element: <KnowledgePage /> },
+      { path: "memory", element: <MemoryPage /> },
       { path: "recipes", element: <RecipesPage /> },
       { path: "recipes/:id", element: <RecipesPage /> },
       { path: "recipes/:id/runs/:runId", element: <RecipesPage /> },
