@@ -70,6 +70,18 @@ describe("Memory page, personal section", () => {
     )
   })
 
+  it("says so when the memory is already saved", async () => {
+    mocked.create.mockResolvedValue(memory)
+    render(<MemoryPage />)
+    await screen.findByTestId("memory-personal-item-m1")
+    await userEvent.type(
+      screen.getByTestId("memory-personal-add-input"),
+      "show district totals as a table",
+    )
+    await userEvent.click(screen.getByTestId("memory-personal-add"))
+    expect(await screen.findByRole("alert")).toHaveTextContent("already saved")
+  })
+
   it("edits a memory in place", async () => {
     mocked.update.mockResolvedValue({ ...memory, content: "Show totals as a sorted table" })
     render(<MemoryPage />)

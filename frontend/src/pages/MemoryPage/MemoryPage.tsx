@@ -93,9 +93,11 @@ function MemorySection<T extends { id: string }>({
     try {
       const saved = await create(draft)
       if (!stillCurrent(startedFor)) return
-      setMemories((current) =>
-        current.some((m) => m.id === saved.id) ? current : [saved, ...current],
-      )
+      if (memories.some((m) => m.id === saved.id)) {
+        setAddError("That memory is already saved.")
+        return
+      }
+      setMemories((current) => [saved, ...current.filter((m) => m.id !== saved.id)])
       setDraft("")
     } catch (error) {
       if (isCurrentAccount()) setAddError(errorText(error, "Couldn’t save this memory. Try again."))
