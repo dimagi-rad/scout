@@ -240,11 +240,13 @@ function seedStore() {
       id: WS, name: "W", display_name: "W", is_auto_created: false, role: "manage", tenants: [],
       member_count: 1, schema_status: "available", last_synced_at: null, created_at: "2026-01-01",
     }],
-    domainsStatus: "loaded", activeDomainId: WS, threadId: THREAD,
-    threads: [], threadsStatus: "loaded", threadsAccessDenialReason: null, accessRetryOutcome: null,
+    domainsStatus: "loaded", activeDomainId: WS,
   })
   // Selecting the workspace made a new local chat; these tests are of a saved thread.
-  useAppStore.setState({ threadId: THREAD })
+  useAppStore.setState({
+    threadId: THREAD,
+    threads: [], threadsStatus: "loaded", threadsAccessDenialReason: null, accessRetryOutcome: null,
+  })
 }
 
 beforeEach(() => {
@@ -331,8 +333,15 @@ describe("a message sent while the chat's data loads", () => {
     server.pending = null
     await waitFor(() => expect(server.messageLoads).toBe(2), { timeout: 8000 })
 
+    // Typed while the add was in flight; the returned text joins it instead of replacing it.
+    await act(async () => {
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "Typed meanwhile" } })
+    })
     await act(async () => finishAdd())
-    await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue(FOLLOW_UP))
+    await waitFor(() =>
+      expect((screen.getByRole("textbox") as HTMLInputElement).value)
+        .toMatch(new RegExp(`Typed meanwhile\\s*${FOLLOW_UP}`)),
+    )
     expect(server.chatBodies).toHaveLength(1)
     await act(async () => loadHistory())
   }, 15_000)

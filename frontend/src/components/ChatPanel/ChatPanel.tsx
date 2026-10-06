@@ -776,7 +776,8 @@ export function ChatPanel() {
       const outcome = await held.add(text)
       if (outcome === "send" && contextRef.current.threadId === sentFrom && historyLoadingRef.current) {
         // The request is gone, but a turn still can't start before the history lands.
-        setInput(text)
+        setAddFailed(null)
+        returnToComposer(activeDomainId, sentFrom, text)
         return
       }
       if (outcome === "added") {

@@ -145,8 +145,11 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
       // the "answering" overlay, since its messages now carry the request.
       setSeen((prev) => {
         const sent = loaded === null ? null : prev.sent
-        const hidden = opts?.keepHidden ? prev.hiddenMessageIds : new Set<string>()
-        return sent === prev.sent && hidden.size === 0 && prev.hiddenMessageIds.size === 0
+        // With the request gone nothing shows the hidden messages, so they must reappear.
+        const keep = opts?.keepHidden && loaded !== null
+        const hidden =
+          keep || prev.hiddenMessageIds.size === 0 ? prev.hiddenMessageIds : new Set<string>()
+        return sent === prev.sent && hidden === prev.hiddenMessageIds
           ? prev
           : { ...prev, sent, hiddenMessageIds: hidden }
       })

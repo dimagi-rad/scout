@@ -38,7 +38,15 @@ describe("onMessagesLoaded", () => {
     const { result } = renderHook(() => useHeldRequest("w1", "t1"))
     act(() => result.current.onHeld(HELD))
 
-    act(() => result.current.onMessagesLoaded(null, { keepHidden: true }))
+    act(() => result.current.onMessagesLoaded(HELD, { keepHidden: true }))
     expect([...result.current.hiddenMessageIds]).toEqual(["m1"])
+  })
+
+  it("shows the hidden messages again once the request is gone, even mid-turn", () => {
+    const { result } = renderHook(() => useHeldRequest("w1", "t1"))
+    act(() => result.current.onHeld(HELD))
+
+    act(() => result.current.onMessagesLoaded(null, { keepHidden: true }))
+    expect(result.current.hiddenMessageIds.size).toBe(0)
   })
 })

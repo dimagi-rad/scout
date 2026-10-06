@@ -114,20 +114,21 @@ export function ChatComposer({
           <Square className="w-4 h-4" aria-hidden="true" />
         </Button>
       ) : (
-        <Button
-          type="submit"
-          size="icon"
-          disabled={!input.trim() || blocked}
-          title={blocked ? "Loading the conversation..." : undefined}
-          aria-label={adding ? "Add to request" : "Send message"}
-          data-testid={adding ? "chat-add-to-request" : "chat-send"}
-        >
-          {adding ? (
-            <Plus className="w-4 h-4" aria-hidden="true" />
-          ) : (
-            <Send className="w-4 h-4" aria-hidden="true" />
-          )}
-        </Button>
+        <span title={blocked ? "Loading the conversation..." : undefined}>
+          <Button
+            type="submit"
+            size="icon"
+            disabled={!input.trim() || blocked}
+            aria-label={adding ? "Add to request" : "Send message"}
+            data-testid={adding ? "chat-add-to-request" : "chat-send"}
+          >
+            {adding ? (
+              <Plus className="w-4 h-4" aria-hidden="true" />
+            ) : (
+              <Send className="w-4 h-4" aria-hidden="true" />
+            )}
+          </Button>
+        </span>
       )}
     </form>
   )
