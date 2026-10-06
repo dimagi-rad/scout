@@ -64,6 +64,7 @@ export function ArtifactDataDownload({ artifactId, workspaceId, runtime }: Artif
     const request = ++listRequest.current
     setLoadingList(true)
     setListError(null)
+    setNotice(null)
     try {
       const result = runtime ? await api.post<ExportListing>(base, runtime) : await api.get<ExportListing>(base)
       if (listRequest.current === request) setListing(result)
@@ -126,7 +127,7 @@ export function ArtifactDataDownload({ artifactId, workspaceId, runtime }: Artif
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" data-testid="artifact-download-menu">
-          <DropdownMenuLabel>CSV, one file per dataset</DropdownMenuLabel>
+          <DropdownMenuLabel>CSV of the full data behind each chart</DropdownMenuLabel>
           {loadingList && <DropdownMenuItem disabled>Loading…</DropdownMenuItem>}
           {!loadingList && listError && (
             <DropdownMenuItem disabled data-testid="artifact-download-list-error">{listError}</DropdownMenuItem>
