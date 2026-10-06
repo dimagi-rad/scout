@@ -1343,7 +1343,12 @@ class ArtifactDataExportCsvView(_ArtifactDataExportBase):
         handed_off = False
         try:
             try:
-                result = await run_export_query(artifact.workspace, planned, user_id=str(user.id))
+                try:
+                    result = await run_export_query(
+                        artifact.workspace, planned, user_id=str(user.id)
+                    )
+                finally:
+                    await lease.arelease_lock()
             except TimeoutError:
                 logger.warning(
                     "Artifact data export timed out after %ss: artifact=%s query=%s",
@@ -1383,6 +1388,8 @@ class ArtifactDataExportCsvView(_ArtifactDataExportBase):
         # Otherwise the request's connection stays open until request_finished,
         # which under ASGI fires after the last streamed byte. Runs on the request's
         # thread-sensitive thread, which owns the connections the ORM calls opened.
+        # close_all rather than close_old_connections so CONN_MAX_AGE > 0 cannot
+        # quietly keep it open for the whole download.
         await sync_to_async(connections.close_all)()
         audit_logger.info(
             "Artifact data export started: user=%s workspace=%s artifact=%s source=%s dataset=%r "

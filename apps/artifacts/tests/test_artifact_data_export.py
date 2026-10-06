@@ -4,6 +4,7 @@ import asyncio
 import csv
 import io
 import logging
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -44,7 +45,10 @@ RUN = "apps.artifacts.services.data_export.run_semantic_query"
 @pytest.fixture(autouse=True)
 def no_leaked_export_leases():
     yield
-    assert data_export._active_exports == 0
+    leaked = data_export.active_exports()
+    # Reset first so one failure cannot cascade into every later test.
+    data_export._active_leases.clear()
+    assert leaked == 0
 
 
 @pytest.fixture(autouse=True)
@@ -479,7 +483,7 @@ async def test_full_cube_pool_or_export_capacity_is_busy(workspace, artifact, ma
     assert slots_full.status_code == 503
 
     # Another process already exporting from this workspace holds its lock.
-    await cache.aset(f"artifact-data-export:{workspace.id}", 1)
+    await cache.aset(f"artifact-data-export:{workspace.id}", "other-lease")
     try:
         with patch(RUN, new=AsyncMock()) as run:
             workspace_busy = await _export(manager_client, _csv_url(workspace, artifact))
@@ -496,10 +500,11 @@ async def test_lease_is_held_while_streaming_and_released_after(
 ):
     with patch(RUN, new=AsyncMock(return_value=_result([["North", "3"]]))):
         response = await _export(manager_client, _csv_url(workspace, artifact))
-        assert data_export._active_exports == 1
-        assert await cache.aget(f"artifact-data-export:{workspace.id}") == 1
+        assert data_export.active_exports() == 1
+        # The workspace lock only covers the Cube query, not the download.
+        assert await cache.aget(f"artifact-data-export:{workspace.id}") is None
         await _body(response)
-    assert data_export._active_exports == 0
+    assert data_export.active_exports() == 0
     assert await cache.aget(f"artifact-data-export:{workspace.id}") is None
 
 
@@ -508,11 +513,11 @@ async def test_lease_is_held_while_streaming_and_released_after(
 async def test_lease_is_released_when_the_body_is_never_read(workspace, artifact, manager_client):
     with patch(RUN, new=AsyncMock(return_value=_result([["North", "3"]]))):
         response = await _export(manager_client, _csv_url(workspace, artifact))
-    assert data_export._active_exports == 1
+    assert data_export.active_exports() == 1
     response.close()
-    assert data_export._active_exports == 0
+    assert data_export.active_exports() == 0
     response.close()
-    assert data_export._active_exports == 0
+    assert data_export.active_exports() == 0
 
 
 @pytest.mark.django_db(transaction=True)
@@ -535,7 +540,7 @@ async def test_lease_is_released_on_failure(workspace, artifact, manager_client,
     with patch(RUN, new=run):
         response = await _export(manager_client, _csv_url(workspace, artifact))
     assert response.status_code >= 500
-    assert data_export._active_exports == 0
+    assert data_export.active_exports() == 0
     assert await cache.aget(f"artifact-data-export:{workspace.id}") is None
 
 
@@ -543,8 +548,8 @@ async def test_lease_is_released_on_failure(workspace, artifact, manager_client,
 @pytest.mark.asyncio
 async def test_db_connection_is_closed_while_streaming(workspace, artifact, manager_client):
     async def probe(_columns, _rows):
-        # Runs inside the request's ThreadSensitiveContext, so this checks the
-        # connection on the thread the view's ORM calls used.
+        # The view's ORM calls and this probe share asgiref's thread-sensitive
+        # executor thread, and DB connections are per thread.
         closed = await sync_to_async(lambda: connection.connection is None)()
         yield str(closed).encode()
 
@@ -569,6 +574,8 @@ async def test_db_connection_is_closed_while_streaming(workspace, artifact, mana
 def test_export_error_status(category, message, status):
     response = export_error_response({"category": category, "message": message})
     assert response.status_code == status
+    if status == 500:
+        assert "KeyError" not in response.content.decode()
 
 
 def test_filename_cannot_inject_headers():
@@ -626,3 +633,40 @@ async def test_cube_timeout_is_a_504(monkeypatch):
     )
     result = await query_service.run_semantic_query(SimpleNamespace(id="w"), {"measures": []})
     assert export_error_response(result["error"]).status_code == 504
+
+
+@pytest.mark.asyncio
+async def test_stream_end_alone_releases_the_lease():
+    lease = await acquire_export_lease("stream-only")
+
+    async def chunks():
+        yield b"a"
+
+    assert [c async for c in data_export.leased_stream(chunks(), lease)] == [b"a"]
+    assert data_export.active_exports() == 0
+    assert await cache.aget("artifact-data-export:stream-only") is None
+
+
+@pytest.mark.asyncio
+async def test_a_stale_release_does_not_free_a_newer_exports_lock():
+    first = await acquire_export_lease("reused")
+    # The first lease outlived its lock TTL and another export took the lock.
+    await cache.aset("artifact-data-export:reused", "newer-lease")
+    first.release()
+    assert await cache.aget("artifact-data-export:reused") == "newer-lease"
+    await cache.adelete("artifact-data-export:reused")
+
+
+@pytest.mark.asyncio
+async def test_a_slot_never_released_is_reclaimed_after_the_ttl(monkeypatch):
+    leaked = [await acquire_export_lease(f"leak-{i}") for i in range(2)]
+    assert await acquire_export_lease("leak-3") is None
+    later = time.monotonic() + data_export.EXPORT_LOCK_TTL_SECONDS + 1
+    monkeypatch.setattr(data_export.time, "monotonic", lambda: later)
+    lease = await acquire_export_lease("leak-3")
+    assert lease is not None
+    lease.release()
+    for stale in leaked:
+        stale.release()
+        await cache.adelete(f"artifact-data-export:{stale._lock_key.rsplit(':', 1)[1]}")
+    assert data_export.active_exports() == 0

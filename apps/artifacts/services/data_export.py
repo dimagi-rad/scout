@@ -14,8 +14,11 @@ import asyncio
 import csv
 import io
 import json
+import logging
 import re
+import secrets
 import threading
+import time
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -36,9 +39,13 @@ CSV_CHUNK_ROWS = 1_000
 # Per process: an export holds a tenant Cube connection slot and up to 50k rows
 # in memory, so a burst of exports must not starve dashboard queries.
 MAX_CONCURRENT_EXPORTS = 2
-# Only a crashed process leaves the lock behind; this frees it without a release.
+# Frees the lock, and reclaims a process slot, when no release ever ran (a crashed
+# process, or a response Django dropped without close()). nginx's 60s send_timeout
+# ends a stalled download well before this.
 EXPORT_LOCK_TTL_SECONDS = 600
 EXPORT_TIMEOUT_MESSAGE = "The export took too long. Add filters to narrow it and try again."
+
+logger = logging.getLogger(__name__)
 
 QUERY_SOURCE = "query"
 STATIC_SOURCE = "static"
@@ -163,27 +170,91 @@ async def run_export_query(workspace, planned: PlannedQuery, *, user_id: str) ->
         )
 
 
-_active_exports = 0
-# release() also runs in the worker thread that calls StreamingHttpResponse.close().
-_counter_lock = threading.Lock()
+# lease id -> monotonic acquire time. release() also runs in the worker thread
+# that calls StreamingHttpResponse.close(), hence the lock.
+_active_leases: dict[str, float] = {}
+_leases_lock = threading.Lock()
+
+
+def active_exports() -> int:
+    with _leases_lock:
+        return len(_active_leases)
+
+
+def _claim_process_slot() -> str | None:
+    """A slot id, or None when full. Slots older than the lock TTL are reclaimed:
+    a response Django drops without close() (a disconnect during middleware)
+    would otherwise hold its slot until the process restarts."""
+    now = time.monotonic()
+    with _leases_lock:
+        for lease_id, acquired in list(_active_leases.items()):
+            if now - acquired > EXPORT_LOCK_TTL_SECONDS:
+                del _active_leases[lease_id]
+        if len(_active_leases) >= MAX_CONCURRENT_EXPORTS:
+            return None
+        lease_id = secrets.token_hex(16)
+        _active_leases[lease_id] = now
+        return lease_id
+
+
+def _free_process_slot(lease_id: str) -> bool:
+    with _leases_lock:
+        return _active_leases.pop(lease_id, None) is not None
 
 
 class ExportLease:
-    """One process slot plus the workspace's export lock, held until the CSV is sent."""
+    """A process slot, held until the CSV is sent, plus the workspace's export lock,
+    held only while the Cube query runs: the lanes it protects are free once
+    the query returns, and a slow download must not block the workspace's next export.
 
-    def __init__(self, lock_key: str) -> None:
+    The lock stores this lease's id, so a late release never deletes a lock that
+    expired and was re-taken by another export.
+    """
+
+    def __init__(self, lease_id: str, lock_key: str) -> None:
+        self.id = lease_id
         self._lock_key = lock_key
-        self._released = False
+        self._slot_held = True
+        self._lock_held = True
+        self._guard = threading.Lock()
+
+    def _take(self, attr: str) -> bool:
+        with self._guard:
+            held = getattr(self, attr)
+            setattr(self, attr, False)
+            return held
+
+    async def arelease_lock(self) -> None:
+        if self._take("_lock_held"):
+            await _adelete_own_lock(self._lock_key, self.id)
+
+    async def arelease(self) -> None:
+        await self.arelease_lock()
+        if self._take("_slot_held"):
+            _free_process_slot(self.id)
 
     def release(self) -> None:
-        """Idempotent: the stream's end, response.close() and error paths all call it."""
-        global _active_exports
-        with _counter_lock:
-            if self._released:
-                return
-            self._released = True
-            _active_exports -= 1
-        cache.delete(self._lock_key)
+        """Idempotent; for sync callers such as response.close() in a worker thread."""
+        if self._take("_lock_held"):
+            _delete_own_lock(self._lock_key, self.id)
+        if self._take("_slot_held"):
+            _free_process_slot(self.id)
+
+
+def _delete_own_lock(key: str, lease_id: str) -> None:
+    try:
+        if cache.get(key) == lease_id:
+            cache.delete(key)
+    except Exception:
+        logger.warning("Could not release artifact export lock %s", key, exc_info=True)
+
+
+async def _adelete_own_lock(key: str, lease_id: str) -> None:
+    try:
+        if await cache.aget(key) == lease_id:
+            await cache.adelete(key)
+    except Exception:
+        logger.warning("Could not release artifact export lock %s", key, exc_info=True)
 
 
 async def acquire_export_lease(workspace_id) -> ExportLease | None:
@@ -194,23 +265,21 @@ async def acquire_export_lease(workspace_id) -> ExportLease | None:
     cross-process workspace lock keeps exports from taking every Cube query lane
     of one tenant (DRIVER_POOL_MAX in cube_config/cube.js) away from its dashboards.
     """
-    global _active_exports
-    with _counter_lock:
-        if _active_exports >= MAX_CONCURRENT_EXPORTS:
-            return None
-        _active_exports += 1
+    lease_id = _claim_process_slot()
+    if lease_id is None:
+        return None
     key = f"artifact-data-export:{workspace_id}"
     try:
-        locked = await cache.aadd(key, 1, EXPORT_LOCK_TTL_SECONDS)
+        locked = await cache.aadd(key, lease_id, EXPORT_LOCK_TTL_SECONDS)
     except BaseException:
-        with _counter_lock:
-            _active_exports -= 1
+        # A cancelled aadd may still have set the key in its worker thread.
+        _free_process_slot(lease_id)
+        _delete_own_lock(key, lease_id)
         raise
     if not locked:
-        with _counter_lock:
-            _active_exports -= 1
+        _free_process_slot(lease_id)
         return None
-    return ExportLease(key)
+    return ExportLease(lease_id, key)
 
 
 async def leased_stream(chunks: AsyncIterator[bytes], lease: ExportLease) -> AsyncIterator[bytes]:
@@ -218,7 +287,7 @@ async def leased_stream(chunks: AsyncIterator[bytes], lease: ExportLease) -> Asy
         async for chunk in chunks:
             yield chunk
     finally:
-        lease.release()
+        await lease.arelease()
 
 
 class LeasedStreamingResponse(StreamingHttpResponse):
