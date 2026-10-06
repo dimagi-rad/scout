@@ -14,14 +14,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
-import type { KnowledgeItem, KnowledgeType, LearningItem } from "@/store/knowledgeSlice"
+import type { KnowledgeItem, KnowledgeType } from "@/store/knowledgeSlice"
 
 interface KnowledgeFormProps {
   open: boolean
@@ -36,9 +29,6 @@ interface FormState {
   title: string
   content: string
   tags: string
-  description: string
-  category: string
-  applies_to_tables: string
 }
 
 const initialFormState: FormState = {
@@ -46,21 +36,7 @@ const initialFormState: FormState = {
   title: "",
   content: "",
   tags: "",
-  description: "",
-  category: "other",
-  applies_to_tables: "",
 }
-
-const categoryOptions = [
-  { value: "type_mismatch", label: "Column type mismatch" },
-  { value: "filter_required", label: "Missing required filter" },
-  { value: "join_pattern", label: "Correct join pattern" },
-  { value: "aggregation", label: "Aggregation gotcha" },
-  { value: "naming", label: "Column/table naming convention" },
-  { value: "data_quality", label: "Data quality issue" },
-  { value: "business_logic", label: "Business logic correction" },
-  { value: "other", label: "Other" },
-]
 
 export function KnowledgeForm({
   open,
@@ -75,7 +51,6 @@ export function KnowledgeForm({
   const [error, setError] = useState<string | null>(null)
 
   const isEdit = !!item
-  const isLearning = item?.type === "learning"
 
   useEffect(() => {
     if (item) {
@@ -85,10 +60,6 @@ export function KnowledgeForm({
         formData.title = item.title || ""
         formData.content = item.content || ""
         formData.tags = item.tags?.join(", ") || ""
-      } else if (item.type === "learning") {
-        formData.description = item.description || ""
-        formData.category = item.category || "other"
-        formData.applies_to_tables = item.applies_to_tables?.join(", ") || ""
       }
 
       setForm(formData)
@@ -126,10 +97,6 @@ export function KnowledgeForm({
         data.title = form.title
         data.content = form.content
         data.tags = parseCommaSeparated(form.tags)
-      } else if (form.type === "learning") {
-        data.description = form.description
-        data.category = form.category
-        data.applies_to_tables = parseCommaSeparated(form.applies_to_tables)
       }
 
       await onSave(data)
@@ -142,114 +109,6 @@ export function KnowledgeForm({
     } finally {
       if (isCurrentAccount()) setLoading(false)
     }
-  }
-
-  if (isLearning && item && item.type === "learning") {
-    const learningItem = item as LearningItem
-    return (
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>{readOnly ? "View Learning" : "Edit Learning"}</DialogTitle>
-            <DialogDescription>
-              {readOnly
-                ? READ_ONLY_HINT
-                : "Edit the description, category, and tables for this learning."}
-            </DialogDescription>
-          </DialogHeader>
-
-          <form onSubmit={handleSubmit}>
-            {error && (
-              <div className="mb-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                {error}
-              </div>
-            )}
-
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="description">Description</Label>
-                <Textarea
-                  id="description"
-                  name="description"
-                  readOnly={readOnly}
-                  value={form.description}
-                  onChange={handleChange}
-                  rows={3}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="category">Category</Label>
-                <Select
-                  value={form.category}
-                  onValueChange={(v) => setForm((prev) => ({ ...prev, category: v }))}
-                  disabled={readOnly}
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {categoryOptions.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="applies_to_tables">Applies to Tables</Label>
-                <Input
-                  id="applies_to_tables"
-                  name="applies_to_tables"
-                  readOnly={readOnly}
-                  value={form.applies_to_tables}
-                  onChange={handleChange}
-                  placeholder="users, orders, products"
-                />
-              </div>
-
-              {learningItem.original_error && (
-                <div className="space-y-2">
-                  <Label>Original Error</Label>
-                  <div className="rounded-md border p-3 bg-muted/50 text-sm text-destructive">
-                    {learningItem.original_error}
-                  </div>
-                </div>
-              )}
-
-              {learningItem.confidence_score !== undefined && (
-                <div className="space-y-2">
-                  <Label>Confidence</Label>
-                  <div className="flex items-center gap-2">
-                    <div className="h-2 flex-1 rounded-full bg-muted">
-                      <div
-                        className="h-2 rounded-full bg-primary"
-                        style={{ width: `${learningItem.confidence_score * 100}%` }}
-                      />
-                    </div>
-                    <span className="text-sm font-medium">
-                      {Math.round(learningItem.confidence_score * 100)}%
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <DialogFooter className="mt-6">
-              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-                {readOnly ? "Close" : "Cancel"}
-              </Button>
-              {!readOnly && (
-                <Button type="submit" disabled={loading}>
-                  {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                  Save Changes
-                </Button>
-              )}
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-    )
   }
 
   return (

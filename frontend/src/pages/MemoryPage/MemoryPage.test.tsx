@@ -1,11 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { personalMemoryApi } from "@/api/memory"
+import { personalMemoryApi, workspaceMemoryApi } from "@/api/memory"
+import { useAppStore } from "@/store/store"
 import { MemoryPage } from "./MemoryPage"
 
 vi.mock("@/api/memory", () => ({
   personalMemoryApi: {
+    list: vi.fn(),
+    create: vi.fn(),
+    update: vi.fn(),
+    remove: vi.fn(),
+  },
+  workspaceMemoryApi: {
     list: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
@@ -21,10 +28,24 @@ const memory = {
 }
 
 const mocked = vi.mocked(personalMemoryApi)
+const workspaceMocked = vi.mocked(workspaceMemoryApi)
+
+const workspaceMemory = (overrides: Record<string, unknown> = {}) => ({
+  id: "w1",
+  content: "Exclude test visits",
+  tables: [],
+  author_name: "Ana",
+  is_mine: false,
+  can_edit: false,
+  created_at: "2026-10-01T10:00:00Z",
+  updated_at: "2026-10-01T10:00:00Z",
+  ...overrides,
+})
 
 describe("Memory page, personal section", () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    useAppStore.setState({ activeDomainId: null })
     mocked.list.mockResolvedValue({ results: [memory], limit: 50 })
   })
 
@@ -88,5 +109,58 @@ describe("Memory page, personal section", () => {
     await userEvent.click(screen.getByTestId("memory-personal-retry"))
     expect(await screen.findByTestId("memory-personal-item-m1")).toBeInTheDocument()
     expect(screen.getByTestId("memory-personal-add-input")).toBeInTheDocument()
+  })
+})
+
+describe("Memory page, workspace section", () => {
+  beforeEach(() => {
+    vi.resetAllMocks()
+    mocked.list.mockResolvedValue({ results: [], limit: 50 })
+    useAppStore.setState({ activeDomainId: "ws-1" })
+  })
+
+  it("shows every member the workspace's memories, editable only where allowed", async () => {
+    workspaceMocked.list.mockResolvedValue({
+      results: [
+        workspaceMemory(),
+        workspaceMemory({ id: "w2", content: "Mine", is_mine: true, can_edit: true }),
+      ],
+      can_add: true,
+    })
+    render(<MemoryPage />)
+
+    expect(await screen.findByTestId("memory-workspace-content-w1")).toHaveTextContent(
+      "Exclude test visits",
+    )
+    expect(workspaceMocked.list).toHaveBeenCalledWith("ws-1", expect.anything())
+    expect(screen.queryByTestId("memory-workspace-edit-w1")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("memory-workspace-delete-w1")).not.toBeInTheDocument()
+    expect(screen.getByTestId("memory-workspace-edit-w2")).toBeInTheDocument()
+    expect(screen.getByTestId("memory-workspace-item-w1")).toHaveTextContent("Ana")
+  })
+
+  it("hides the add form from read-only members", async () => {
+    workspaceMocked.list.mockResolvedValue({ results: [workspaceMemory()], can_add: false })
+    render(<MemoryPage />)
+
+    expect(await screen.findByTestId("memory-workspace-read-only")).toBeInTheDocument()
+    expect(screen.queryByTestId("memory-workspace-add-input")).not.toBeInTheDocument()
+  })
+
+  it("lets writers add a workspace memory", async () => {
+    workspaceMocked.list.mockResolvedValue({ results: [], can_add: true })
+    workspaceMocked.create.mockResolvedValue(
+      workspaceMemory({ id: "w3", content: "Count households once", is_mine: true, can_edit: true }),
+    )
+    render(<MemoryPage />)
+
+    await userEvent.type(
+      await screen.findByTestId("memory-workspace-add-input"),
+      "Count households once",
+    )
+    await userEvent.click(screen.getByTestId("memory-workspace-add"))
+
+    expect(workspaceMocked.create).toHaveBeenCalledWith("ws-1", "Count households once")
+    expect(await screen.findByTestId("memory-workspace-content-w3")).toBeInTheDocument()
   })
 })

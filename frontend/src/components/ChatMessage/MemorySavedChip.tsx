@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { Link, useLocation } from "react-router-dom"
 import { Brain } from "lucide-react"
-import { personalMemoryApi } from "@/api/memory"
+import { personalMemoryApi, workspaceMemoryApi } from "@/api/memory"
 import { ApiError } from "@/api/client"
 import type { MemoryLayer, SavedMemory } from "./savedMemory"
 
@@ -12,21 +12,29 @@ const LAYER_LABELS: Record<MemoryLayer, string> = {
 
 type UndoState = "idle" | "pending" | "undone" | "error"
 
-async function forget(layer: MemoryLayer, memoryId: string) {
+async function forget(layer: MemoryLayer, memoryId: string, workspaceId?: string) {
   if (layer === "personal") await personalMemoryApi.remove(memoryId)
+  else if (workspaceId) await workspaceMemoryApi.remove(workspaceId, memoryId)
 }
 
-export function MemorySavedChip({ layer, memory, memoryId, created }: SavedMemory) {
+export function MemorySavedChip({
+  layer,
+  memory,
+  memoryId,
+  created,
+  workspaceId,
+}: SavedMemory & { workspaceId?: string }) {
   const location = useLocation()
   const prefix = location.pathname.startsWith("/embed") ? "/embed" : ""
   const [undo, setUndo] = useState<UndoState>("idle")
-  const canUndo = created && !!memoryId && layer === "personal"
+  // The agent saved it as this user, so they are its author and may delete it.
+  const canUndo = created && !!memoryId && (layer === "personal" || !!workspaceId)
 
   const handleUndo = async () => {
     if (!memoryId || undo === "pending") return
     setUndo("pending")
     try {
-      await forget(layer, memoryId)
+      await forget(layer, memoryId, workspaceId)
       setUndo("undone")
     } catch (error) {
       // Already gone (deleted on the Memory page) is what Undo wanted anyway.

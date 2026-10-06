@@ -16,7 +16,6 @@ export type {
   KnowledgeType,
   KnowledgeItem,
   KnowledgeEntryItem,
-  LearningItem,
   PaginationInfo,
   KnowledgeStatus,
   KnowledgeSlice,

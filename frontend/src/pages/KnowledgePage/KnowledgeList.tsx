@@ -7,7 +7,6 @@ import {
   getKnowledgeItemName,
   type KnowledgeItem,
   type KnowledgeType,
-  type LearningItem,
 } from "@/store/knowledgeSlice"
 
 interface KnowledgeListProps {
@@ -24,28 +23,17 @@ interface KnowledgeListProps {
 const typeFilters: { value: KnowledgeType | null; label: string }[] = [
   { value: null, label: "All" },
   { value: "entry", label: "Entries" },
-  { value: "learning", label: "Learnings" },
 ]
 
 const typeBadgeStyles: Record<KnowledgeType, string> = {
   entry: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
-  learning: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400",
 }
 
 function getItemDescription(item: KnowledgeItem): string | null {
   switch (item.type) {
     case "entry":
       return item.content ? item.content.slice(0, 120) + (item.content.length > 120 ? "..." : "") : null
-    case "learning":
-      return item.original_error || null
   }
-}
-
-function getRelatedTables(item: KnowledgeItem): string[] {
-  if (item.type === "learning") {
-    return item.applies_to_tables || []
-  }
-  return []
 }
 
 export function KnowledgeList({
@@ -92,9 +80,6 @@ export function KnowledgeList({
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {items.map((item) => {
             const title = getKnowledgeItemName(item)
-            const relatedTables = getRelatedTables(item)
-            const isLearning = item.type === "learning"
-            const learningItem = isLearning ? (item as LearningItem) : null
 
             return (
             <Card key={item.id} className="flex flex-col">
@@ -108,11 +93,6 @@ export function KnowledgeList({
                       >
                         {item.type}
                       </Badge>
-                      {learningItem?.confidence_score !== undefined && (
-                        <span className="text-xs text-muted-foreground">
-                          {Math.round(learningItem.confidence_score * 100)}% confidence
-                        </span>
-                      )}
                     </div>
                     <h3 className="font-medium truncate" title={title}>
                       {title}
@@ -125,21 +105,6 @@ export function KnowledgeList({
                   <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
                     {getItemDescription(item)}
                   </p>
-                )}
-
-                {relatedTables.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mb-3">
-                    {relatedTables.slice(0, 3).map((table) => (
-                      <Badge key={table} variant="outline" className="text-xs">
-                        {table}
-                      </Badge>
-                    ))}
-                    {relatedTables.length > 3 && (
-                      <Badge variant="outline" className="text-xs">
-                        +{relatedTables.length - 3}
-                      </Badge>
-                    )}
-                  </div>
                 )}
 
                 {item.type === "entry" && item.tags && item.tags.length > 0 && (

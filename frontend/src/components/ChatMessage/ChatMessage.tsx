@@ -873,7 +873,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
             const saved = toolPart.state === "output-available"
               ? savedMemory(getToolName(part), toolPart.output)
               : null
-            if (saved) return <MemorySavedChip key={i} {...saved} />
+            if (saved) return <MemorySavedChip key={i} {...saved} workspaceId={workspaceId} />
 
             const toolCallId = toolPart.toolCallId
             const recentTermination =
