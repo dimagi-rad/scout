@@ -118,4 +118,22 @@ export const api = {
     }
     return res.blob()
   },
+  /** Fetch a file, keeping its headers; a body makes it a POST. */
+  download: async (url: string, body?: unknown): Promise<{ blob: Blob; headers: Headers }> => {
+    const prefixedUrl = url.startsWith("/") ? `${BASE_PATH}${url}` : url
+    const init: RequestInit = body === undefined
+      ? { credentials: "include" }
+      : {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+        body: JSON.stringify(body),
+      }
+    // Every download is a read, so a busy 503 is safe to repeat even as a POST.
+    const res = await fetchWithBusyRetry(() => fetch(prefixedUrl, init), { autoRetry: true })
+    if (!res.ok) {
+      throw await responseError(res)
+    }
+    return { blob: await res.blob(), headers: res.headers }
+  },
 }

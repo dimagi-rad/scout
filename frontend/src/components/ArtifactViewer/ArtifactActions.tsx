@@ -1,12 +1,14 @@
 import { Database, FileDown, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { ArtifactDataDownload, type ArtifactDataDownloadTarget } from "./ArtifactDataDownload"
 
 interface ArtifactActionsProps {
   onViewData: () => void
   onExportPdf: () => void
   onClose?: () => void
   exportDisabled?: boolean
+  download?: ArtifactDataDownloadTarget
 }
 
 export function ArtifactActions({
@@ -14,9 +16,11 @@ export function ArtifactActions({
   onExportPdf,
   onClose,
   exportDisabled,
+  download,
 }: ArtifactActionsProps) {
   return (
     <div className="flex items-center gap-2">
+      {download && <ArtifactDataDownload {...download} />}
       <Button
         type="button"
         variant="outline"
