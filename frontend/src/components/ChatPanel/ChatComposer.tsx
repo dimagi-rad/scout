@@ -17,6 +17,8 @@ interface ChatComposerProps {
   placeholder?: string
   /** "add" while the chat's data loads: the text joins the held request instead. */
   mode?: "send" | "add"
+  /** The chat can't start a turn yet (its history is loading); typing still works. */
+  sendBlocked?: boolean
 }
 
 export function ChatComposer({
@@ -27,8 +29,10 @@ export function ChatComposer({
   onStop,
   placeholder = "Ask about your data...",
   mode = "send",
+  sendBlocked = false,
 }: ChatComposerProps) {
   const adding = mode === "add"
+  const blocked = sendBlocked && !adding
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const { canWrite } = useWorkspaceRole()
 
@@ -43,7 +47,7 @@ export function ChatComposer({
 
   function submit() {
     const text = input.trim()
-    if (!text || isStreaming) return
+    if (!text || isStreaming || blocked) return
     setInput("")
     onSend(resolveSlashCommand(text))
   }
@@ -113,7 +117,7 @@ export function ChatComposer({
         <Button
           type="submit"
           size="icon"
-          disabled={!input.trim()}
+          disabled={!input.trim() || blocked}
           aria-label={adding ? "Add to request" : "Send message"}
           data-testid={adding ? "chat-add-to-request" : "chat-send"}
         >
