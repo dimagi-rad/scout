@@ -37,14 +37,6 @@ export function MemoryItemList({ testIdPrefix, items, emptyText, onUpdate, onDel
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
-  if (items.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground" data-testid={`${testIdPrefix}-empty`}>
-        {emptyText}
-      </p>
-    )
-  }
-
   const startEdit = (item: MemoryListItem) => {
     setEditingId(item.id)
     setDraft(item.content)
@@ -81,87 +73,94 @@ export function MemoryItemList({ testIdPrefix, items, emptyText, onUpdate, onDel
 
   return (
     <>
-      <ul className="divide-y rounded-md border" data-testid={`${testIdPrefix}-list`}>
-        {items.map((item) => (
-          <li key={item.id} className="p-3" data-testid={`${testIdPrefix}-item-${item.id}`}>
-            {editingId === item.id ? (
-              <div className="space-y-2">
-                <Textarea
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  aria-label="Edit memory"
-                  data-testid={`${testIdPrefix}-edit-input-${item.id}`}
-                />
-                {editError && (
-                  <p className="text-sm text-destructive" role="alert">
-                    {editError}
-                  </p>
-                )}
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    onClick={saveEdit}
-                    disabled={saving || !draft.trim()}
-                    data-testid={`${testIdPrefix}-save-${item.id}`}
-                  >
-                    {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                    Save
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setEditingId(null)}
-                    disabled={saving}
-                    data-testid={`${testIdPrefix}-cancel-${item.id}`}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="whitespace-pre-wrap break-words text-sm" data-testid={`${testIdPrefix}-content-${item.id}`}>
-                    {item.content}
-                  </p>
-                  {item.meta && <p className="mt-1 text-xs text-muted-foreground">{item.meta}</p>}
-                </div>
-                {item.canEdit && (
-                  <div className="flex shrink-0 gap-1">
+      {items.length === 0 && (
+        <p className="text-sm text-muted-foreground" data-testid={`${testIdPrefix}-empty`}>
+          {emptyText}
+        </p>
+      )}
+      {items.length > 0 && (
+        <ul className="divide-y rounded-md border" data-testid={`${testIdPrefix}-list`}>
+          {items.map((item) => (
+            <li key={item.id} className="p-3" data-testid={`${testIdPrefix}-item-${item.id}`}>
+              {editingId === item.id ? (
+                <div className="space-y-2">
+                  <Textarea
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    aria-label="Edit memory"
+                    data-testid={`${testIdPrefix}-edit-input-${item.id}`}
+                  />
+                  {editError && (
+                    <p className="text-sm text-destructive" role="alert">
+                      {editError}
+                    </p>
+                  )}
+                  <div className="flex gap-2">
                     <Button
-                      size="icon"
-                      variant="ghost"
-                      aria-label="Edit memory"
-                      onClick={() => startEdit(item)}
-                      data-testid={`${testIdPrefix}-edit-${item.id}`}
+                      size="sm"
+                      onClick={saveEdit}
+                      disabled={saving || !draft.trim()}
+                      data-testid={`${testIdPrefix}-save-${item.id}`}
                     >
-                      <Pencil className="h-4 w-4" />
+                      {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                      Save
                     </Button>
                     <Button
-                      size="icon"
-                      variant="ghost"
-                      aria-label="Delete memory"
-                      onClick={() => {
-                        setDeleteError(null)
-                        setDeleteItem(item)
-                      }}
-                      data-testid={`${testIdPrefix}-delete-${item.id}`}
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setEditingId(null)}
+                      disabled={saving}
+                      data-testid={`${testIdPrefix}-cancel-${item.id}`}
                     >
-                      <Trash2 className="h-4 w-4" />
+                      Cancel
                     </Button>
                   </div>
-                )}
-              </div>
-            )}
-          </li>
-        ))}
-      </ul>
+                </div>
+              ) : (
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="whitespace-pre-wrap break-words text-sm" data-testid={`${testIdPrefix}-content-${item.id}`}>
+                      {item.content}
+                    </p>
+                    {item.meta && <p className="mt-1 text-xs text-muted-foreground">{item.meta}</p>}
+                  </div>
+                  {item.canEdit && (
+                    <div className="flex shrink-0 gap-1">
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label="Edit memory"
+                        onClick={() => startEdit(item)}
+                        data-testid={`${testIdPrefix}-edit-${item.id}`}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label="Delete memory"
+                        onClick={() => {
+                          setDeleteError(null)
+                          setDeleteItem(item)
+                        }}
+                        data-testid={`${testIdPrefix}-delete-${item.id}`}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
 
       <AlertDialog open={!!deleteItem} onOpenChange={(open) => !deleting && !open && setDeleteItem(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete memory</AlertDialogTitle>
-            <AlertDialogDescription>
+            <AlertDialogDescription className="line-clamp-4 break-words">
               Scout will stop applying “{deleteItem?.content}” in future conversations.
             </AlertDialogDescription>
           </AlertDialogHeader>

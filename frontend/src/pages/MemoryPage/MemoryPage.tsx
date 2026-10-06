@@ -19,6 +19,8 @@ function PersonalMemorySection() {
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
 
+  const [loadAttempt, setLoadAttempt] = useState(0)
+
   useEffect(() => {
     const controller = new AbortController()
     setStatus("loading")
@@ -32,7 +34,7 @@ function PersonalMemorySection() {
         if (!controller.signal.aborted) setStatus("error")
       })
     return () => controller.abort()
-  }, [userId])
+  }, [userId, loadAttempt])
 
   const add = async () => {
     if (!draft.trim() || adding) return
@@ -79,43 +81,58 @@ function PersonalMemorySection() {
         </p>
       )}
       {status === "error" && (
-        <p className="text-sm text-destructive" data-testid="memory-personal-error">
-          Couldn’t load your memories. Try again.
-        </p>
+        <div className="flex items-center gap-3">
+          <p className="text-sm text-destructive" data-testid="memory-personal-error">
+            Couldn’t load your memories.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setLoadAttempt((n) => n + 1)}
+            data-testid="memory-personal-retry"
+          >
+            Try again
+          </Button>
+        </div>
       )}
       {status === "loaded" && (
-        <MemoryItemList
-          testIdPrefix="memory-personal"
-          items={memories.map((m) => ({ id: m.id, content: m.content, canEdit: true }))}
-          emptyText="Nothing saved yet. Ask Scout to remember a preference, or add one below."
-          onUpdate={update}
-          onDelete={remove}
-        />
+        <>
+          <MemoryItemList
+            testIdPrefix="memory-personal"
+            items={memories.map((m) => ({ id: m.id, content: m.content, canEdit: true }))}
+            emptyText="Nothing saved yet. Ask Scout to remember a preference, or add one below."
+            onUpdate={update}
+            onDelete={remove}
+          />
+          <div className="space-y-2">
+            <Textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="e.g. Show district totals as a table, sorted by district name."
+              aria-label="New personal memory"
+              data-testid="memory-personal-add-input"
+            />
+            {addError && (
+              <p className="text-sm text-destructive" role="alert">
+                {addError}
+              </p>
+            )}
+            <Button
+              size="sm"
+              onClick={add}
+              disabled={adding || !draft.trim()}
+              data-testid="memory-personal-add"
+            >
+              {adding ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Plus className="mr-2 h-4 w-4" />
+              )}
+              Add memory
+            </Button>
+          </div>
+        </>
       )}
-
-      <div className="space-y-2">
-        <Textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder="e.g. Show district totals as a table, sorted by district name."
-          aria-label="New personal memory"
-          data-testid="memory-personal-add-input"
-        />
-        {addError && (
-          <p className="text-sm text-destructive" role="alert">
-            {addError}
-          </p>
-        )}
-        <Button
-          size="sm"
-          onClick={add}
-          disabled={adding || !draft.trim()}
-          data-testid="memory-personal-add"
-        >
-          {adding ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
-          Add memory
-        </Button>
-      </div>
     </section>
   )
 }

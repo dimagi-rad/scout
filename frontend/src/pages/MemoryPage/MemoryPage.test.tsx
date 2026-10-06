@@ -79,9 +79,14 @@ describe("Memory page, personal section", () => {
     ).toBeInTheDocument()
   })
 
-  it("says so when the list fails to load", async () => {
-    mocked.list.mockRejectedValue(new Error("boom"))
+  it("hides the add form until the list loads, and retries a failed load", async () => {
+    mocked.list.mockRejectedValueOnce(new Error("boom"))
     render(<MemoryPage />)
     expect(await screen.findByTestId("memory-personal-error")).toBeInTheDocument()
+    expect(screen.queryByTestId("memory-personal-add-input")).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId("memory-personal-retry"))
+    expect(await screen.findByTestId("memory-personal-item-m1")).toBeInTheDocument()
+    expect(screen.getByTestId("memory-personal-add-input")).toBeInTheDocument()
   })
 })

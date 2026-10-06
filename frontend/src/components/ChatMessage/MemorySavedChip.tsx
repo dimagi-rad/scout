@@ -20,7 +20,7 @@ export function MemorySavedChip({ layer, memory }: SavedMemory) {
       <span className="shrink-0 font-medium">
         Saved to memory · <span data-testid="memory-saved-chip-layer">{LAYER_LABELS[layer]}</span>
       </span>
-      <span className="truncate text-violet-800/80 dark:text-violet-200/80" title={memory}>
+      <span className="min-w-0 truncate text-violet-800/80 dark:text-violet-200/80" title={memory}>
         {memory}
       </span>
       <Link
