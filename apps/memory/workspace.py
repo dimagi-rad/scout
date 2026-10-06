@@ -89,7 +89,9 @@ def _audit(event: WorkspaceMemoryEvent) -> None:
 def _lock_workspace(workspace_id) -> None:
     # Serializes a workspace's memory writes so concurrent saves can't both pass
     # the duplicate and limit checks.
-    Workspace.objects.select_for_update().filter(pk=workspace_id).first()
+    # NO KEY: a plain FOR UPDATE would also block (and deadlock with) the key-share
+    # lock every insert referencing the workspace takes, audit events included.
+    Workspace.objects.select_for_update(no_key=True).filter(pk=workspace_id).first()
 
 
 def _duplicate(workspace_id, content: str, *, excluding=None) -> AgentLearning | None:
@@ -112,9 +114,18 @@ def _check_fits(workspace_id, candidate: AgentLearning, *, replacing=None) -> No
             f"This workspace already has {MAX_WORKSPACE_MEMORIES} memories. "
             "A manager can delete some on the Memory page."
         )
-    if len(format_workspace_memories(rows)) > LEARNINGS_CHAR_CAP:
+    size = len(format_workspace_memories(rows))
+    if replacing is not None:
+        # An edit that doesn't grow the section is always allowed, so a workspace
+        # already over the cap (rows saved before the cap existed) can shrink.
+        current = AgentLearning.objects.filter(workspace_id=workspace_id, is_active=True)
+        if size <= len(format_workspace_memories(list(current))):
+            return
+    if size > LEARNINGS_CHAR_CAP:
         raise MemoryLimitReached(
-            "This workspace's memory is full. Shorten or delete some memories on the "
+            "This workspace's memory is full, so this edit can only make the memory shorter."
+            if replacing is not None
+            else "This workspace's memory is full. Shorten or delete some memories on the "
             "Memory page (a manager can delete any of them) before adding more."
         )
 
@@ -198,6 +209,8 @@ async def aupdate_workspace_memory(memory: AgentLearning, user, text: str, table
 @sync_to_async
 def _delete(memory: AgentLearning, user) -> None:
     with transaction.atomic():
+        # Same lock order as _create and _update: workspace row, then memory row.
+        _lock_workspace(memory.workspace_id)
         if not AgentLearning.objects.filter(pk=memory.pk).delete()[0]:
             return
         event = WorkspaceMemoryEvent.objects.create(
