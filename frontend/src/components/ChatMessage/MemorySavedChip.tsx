@@ -37,8 +37,10 @@ export function MemorySavedChip({
       await forget(layer, memoryId, workspaceId)
       setUndo("undone")
     } catch (error) {
-      // Already gone (deleted on the Memory page) is what Undo wanted anyway.
-      setUndo(error instanceof ApiError && error.status === 404 ? "undone" : "error")
+      // A personal memory already gone is what Undo wanted. A workspace 404 could
+      // also mean the wrong workspace, so it isn't taken as success.
+      const gone = error instanceof ApiError && error.status === 404 && layer === "personal"
+      setUndo(gone ? "undone" : "error")
     }
   }
 

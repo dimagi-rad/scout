@@ -75,7 +75,7 @@ The graph is built per turn with two inputs that change its tools and prompts:
 | `canvas_manager` | no | yes | no |
 | `save_as_recipe` | no | yes | yes |
 | `save_personal_memory` | yes | yes | no |
-| `save_workspace_memory` | offered, but refuses (`denied`) | yes | yes |
+| `save_workspace_memory` | offered, but refuses (`denied`) | yes | no |
 
 Canvas tools need a conversation ID as well as an interactive run.
 
@@ -236,7 +236,7 @@ See [Artifact types](artifact-types.md) for the story document format.
 Save a note about how to combine or interpret this workspace's data, for future conversations.
 
 **Parameters:**
-- `memory` (string, required): The note (3 to 1,000 chars)
+- `memory` (string, required): The note (3 to 500 chars)
 - `tables` (list, optional): Table names this applies to
 
 Returns a status:
@@ -245,7 +245,7 @@ Returns a status:
 - `denied`: the user is a Read member
 - `error`: the save failed
 
-The tool is bound in every interactive chat, but refuses Read members server-side. Headless (recipe) runs get it only for write-capable users. Saves are audited. Active memories are injected into future prompts by the knowledge retriever.
+The tool is bound in every interactive chat, but refuses Read members server-side. Headless (recipe) runs don't get it. A save is refused (`error`) once the workspace's 50 active memories, rendered, would pass the 3,000-character memory share of the knowledge budget. Saves are audited. Active memories are injected into future prompts by the knowledge retriever.
 
 ### save_personal_memory
 

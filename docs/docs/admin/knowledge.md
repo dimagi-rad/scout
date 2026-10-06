@@ -39,12 +39,12 @@ last 30 days. Exclude users whose username starts with "test".
 
 Memory is a separate feature from knowledge entries: short notes the agent or a member saves so later conversations start with them. There are two layers, managed on the **Memory** page (see [Memory](#memory-page)).
 
-- **Workspace memory**: notes about how to combine or interpret this workspace's data, shared with every member. The agent saves them with its `save_workspace_memory` tool, and members can add them by hand. Each is 3 to 1,000 characters and can list the tables it applies to.
+- **Workspace memory**: notes about how to combine or interpret this workspace's data, shared with every member. The agent saves them with its `save_workspace_memory` tool, and members can add them by hand. Each is 3 to 500 characters and can list the tables it applies to. A workspace holds up to 50 active memories, and saves are refused once they would no longer all fit in the prompt, so every saved memory reaches the agent.
 - **Personal memory**: a member's private preferences, such as how they like answers presented. Saved with `save_personal_memory`, 3 to 500 characters each, up to 50 per person and 3,400 characters in total. Personal memory is private to its owner, applies in all their workspaces, and goes only into interactive chats, not recipe runs.
 
 The agent saves a memory only when the user asks, or for a clearly lasting preference or confirmed fact, never for a one-off instruction. Presentation preferences go to personal memory and facts about the dataset go to workspace memory. If an identical active workspace memory (ignoring case) already exists, the save returns `already_saved` and nothing changes.
 
-Both tools are offered in every interactive chat. Read members can save personal memory, but a workspace save from a Read member is refused. Recipe runs get `save_workspace_memory` only for Read-Write and Manager users. Each save shows a **Saved to memory** chip in chat with **Undo** and a link to the Memory page.
+Both tools are offered in every interactive chat. Read members can save personal memory, but a workspace save from a Read member is refused. Recipe runs get neither tool. Each save shows a **Saved to memory** chip in chat with **Undo** and a link to the Memory page.
 
 ### Memory page
 
