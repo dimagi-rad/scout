@@ -154,6 +154,13 @@ class TestRoleMatrix:
         response = await (await _client(write_user)).delete(_detail_url(workspace, memory.id))
         assert response.status_code == 403
 
+    async def test_list_shows_every_active_memory(self, workspace, read_user):
+        await AgentLearning.objects.abulk_create(
+            AgentLearning(workspace=workspace, description=f"Legacy {i}") for i in range(60)
+        )
+        rows = (await (await _client(read_user)).get(_list_url(workspace))).json()["results"]
+        assert len(rows) == 60
+
     async def test_list_marks_what_the_viewer_may_edit(
         self, workspace, write_user, second_writer, manager
     ):
@@ -299,6 +306,21 @@ class TestTool:
         )
         assert "save_workspace_memory" not in {t.name for t in tools}
 
+    async def test_concurrent_edit_and_delete_do_not_fail(self, workspace, write_user, manager):
+        memory = await _memory(workspace, write_user, "Contested rule")
+        for _ in range(5):
+            edit, delete = await asyncio.gather(
+                (await _client(write_user)).patch(
+                    _detail_url(workspace, memory.id),
+                    json.dumps({"content": "Edited contested rule"}),
+                    content_type="application/json",
+                ),
+                (await _client(manager)).delete(_detail_url(workspace, memory.id)),
+            )
+            assert edit.status_code in {200, 404}
+            assert delete.status_code in {204, 404}
+            memory = await _memory(workspace, write_user, "Contested rule")
+
     async def test_concurrent_saves_keep_one_row(self, workspace, write_user):
         results = await asyncio.gather(
             *(_memory(workspace, write_user, "Exclude archived cases") for _ in range(5))
@@ -396,6 +418,42 @@ class TestPrompt:
         assert len(await KnowledgeRetriever(workspace)._format_agent_learnings()) <= (
             LEARNINGS_CHAR_CAP
         )
+
+    async def test_legacy_sql_after_the_first_line_is_still_redacted(self, workspace):
+        await AgentLearning.objects.acreate(
+            workspace=workspace, description="Revenue rule:\nSELECT sum(amount) FROM orders"
+        )
+        context = await KnowledgeRetriever(workspace).retrieve()
+        assert "Revenue rule:" in context
+        assert "SELECT sum" not in context
+
+    async def test_a_workspace_already_over_the_cap_can_still_shrink(self, workspace, write_user):
+        # Rows saved before the cap existed can leave a workspace over it.
+        await AgentLearning.objects.abulk_create(
+            AgentLearning(workspace=workspace, description=f"Legacy {i:02d} " + "q" * 300)
+            for i in range(12)
+        )
+        mine = await AgentLearning.objects.acreate(
+            workspace=workspace,
+            description="Mine, from before the cap",
+            discovered_by_user=write_user,
+        )
+        with pytest.raises(MemoryLimitReached):
+            await _memory(workspace, write_user, "One more")
+
+        client = await _client(write_user)
+        shorter = await client.patch(
+            _detail_url(workspace, mine.id),
+            json.dumps({"content": "Mine"}),
+            content_type="application/json",
+        )
+        longer = await client.patch(
+            _detail_url(workspace, mine.id),
+            json.dumps({"content": "A much longer version of my memory"}),
+            content_type="application/json",
+        )
+        assert shorter.status_code == 200
+        assert longer.status_code == 400
 
     async def test_read_only_prompt_explains_the_refusal(self, workspace, read_user):
         prompt, _ = await _build_system_prompt(workspace, read_user, write_capable=False)
