@@ -99,7 +99,7 @@ Loads of the same tenant never run concurrently.
 
 A workspace is a layer on top of one or more tenants and is the main interface
 to Scout. It holds threads, artifacts, recipes, knowledge (TableKnowledge,
-KnowledgeEntry, AgentLearning), its semantic model, and a custom
+KnowledgeEntry), its memory (AgentLearning, shown as workspace memory), its semantic model, and a custom
 `system_prompt` for the agent.
 
 ### Auto-created workspaces
@@ -166,10 +166,13 @@ Each workspace member has one role.
 | View threads they own, artifacts, recipes, runs and knowledge | yes | yes | yes |
 | Chat with the agent | yes | yes | yes |
 | Run recipes | yes | yes | yes |
-| Agent write tools (artifacts, recipes, learnings, materialization) | no | yes | yes |
+| Agent write tools (artifacts, recipes, workspace memory, materialization) | no | yes | yes |
 | Share their own threads | no | yes | yes |
 | Edit or soft-delete artifacts and recipes | no | yes | yes |
-| Create and edit knowledge entries, edit learnings | no | yes | yes |
+| Create and edit knowledge entries | no | yes | yes |
+| Save personal memory (`save_personal_memory`) | yes | yes | yes |
+| Add workspace memory (read members are offered `save_workspace_memory`, which refuses them) | no | yes | yes |
+| Edit or delete workspace memory | no | own (while read_write or higher) | any |
 | Refresh data, retry or cancel loads, repair artifact data | no | yes | yes |
 | Edit the semantic model through the Semantic Canvas | no | yes | yes |
 | Add, remove and change the roles of members; manage invites | no | no | yes |
@@ -271,11 +274,26 @@ A recipe is a saved prompt template with typed variables, created by the agent's
   them as a zip.
 - **TableKnowledge**: table descriptions, column notes, data-quality notes and
   related tables. They are edited only through the Django admin.
-- **AgentLearning**: corrections the agent saves with `save_learning`. They
-  can't be created by hand; read-write members can edit or delete them.
 
-All members can view workspace knowledge. All three are included in the
-agent's prompt (see [Agent architecture](agent.md#4-knowledge-context)).
+All members can view workspace knowledge. Knowledge entries and table
+knowledge are included in the agent's prompt (see
+[Agent architecture](agent.md#4-knowledge-context)).
+
+## Memory
+
+Memory is managed on its own Memory page, not the Knowledge page, and has two
+layers:
+
+- **Workspace memory** (AgentLearning): notes the agent saves with
+  `save_workspace_memory`, or members add on the Memory page. Every member can
+  view them. Read-write and manage members can add them; only the author (while
+  still read-write or higher) or a manager can edit or delete one. Every
+  create, edit and delete is recorded as a WorkspaceMemoryEvent (actor,
+  action, source, text before and after) and logged to `scout.memory.audit`.
+  Active workspace memories go into the agent's knowledge context.
+- **Personal memory**: private preferences saved with `save_personal_memory`.
+  They belong to one user, apply in all their workspaces, and are injected
+  into interactive chats only, as their own system block.
 
 ---
 

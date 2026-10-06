@@ -1,6 +1,6 @@
 # Knowledge
 
-The knowledge layer tells the agent what a workspace's data *means*: metric definitions, business rules, and corrections learned from earlier mistakes. Each workspace has its own knowledge.
+The knowledge layer tells the agent what a workspace's data *means*: metric definitions, business rules, and corrections learned from earlier mistakes (kept as [memory](#memory)). Each workspace has its own knowledge.
 
 ## How the agent uses it
 
@@ -8,9 +8,11 @@ Every conversation's system prompt includes the workspace's knowledge, in this o
 
 1. **Knowledge Base**: every knowledge entry, ordered by title.
 2. **Table Context**: table annotations (see [Table knowledge](#table-knowledge)).
-3. **Learned Corrections**: the 20 highest-confidence active agent learnings.
+3. **Workspace Memory**: up to 50 active workspace memories, ordered by confidence, times applied, then newest. Each is one line, with a `Tables:` sub-line when tables are set.
 
-The combined knowledge context is capped at 6,000 characters. Anything past the cap, including learnings when entries are long, is cut off with a note pointing to the Knowledge page, so keep entries short. SQL code blocks and lines that start with a SQL statement are replaced with a placeholder before they reach the agent, because the agent queries through the semantic model rather than writing SQL from examples.
+Personal memory is not part of this context. It is added to interactive chats as its own `## Saved Personal Preferences` block after the stable prompt.
+
+The combined knowledge context is capped at 6,000 characters. Anything past the cap, including workspace memory when entries are long, is cut off with a note pointing to the Knowledge page, so keep entries short. SQL code blocks and lines that start with a SQL statement are replaced with a placeholder before they reach the agent, because the agent queries through the semantic model rather than writing SQL from examples.
 
 ## Knowledge entries
 
@@ -33,16 +35,28 @@ An active frontline worker is one who submitted at least one visit in the
 last 30 days. Exclude users whose username starts with "test".
 ```
 
-## Agent learnings
+## Memory
 
-Learnings are corrections the agent saves with its `save_learning` tool after it finds and fixes a mistake, such as a filter a question needs or a field that means something other than its name suggests. Each learning has:
+Memory is a separate feature from knowledge entries: short notes the agent or a member saves so later conversations start with them. There are two layers, managed on the **Memory** page (see [Memory](#memory-page)).
 
-- **Description**: the correction, in at least 20 characters.
-- **Category**: one of type mismatch, missing required filter, join pattern, aggregation gotcha, naming convention, data quality issue, business logic correction, or other.
-- **Tables**: the tables it applies to.
-- **Confidence**: starts at 0.5. When the agent saves a learning with the same description again, confidence rises by 0.1 and the times-applied count goes up by one.
+- **Workspace memory**: notes about how to combine or interpret this workspace's data, shared with every member. The agent saves them with its `save_workspace_memory` tool, and members can add them by hand. Each is 3 to 1,000 characters and can list the tables it applies to.
+- **Personal memory**: a member's private preferences, such as how they like answers presented. Saved with `save_personal_memory`, 3 to 500 characters each, up to 50 per person and 3,400 characters in total. Personal memory is private to its owner, applies in all their workspaces, and goes only into interactive chats, not recipe runs.
 
-The agent only has `save_learning` in conversations with **Read-Write** and **Manager** members. Learnings cannot be created by hand, but they can be edited and deleted on the Knowledge page.
+The agent saves a memory only when the user asks, or for a clearly lasting preference or confirmed fact, never for a one-off instruction. Presentation preferences go to personal memory and facts about the dataset go to workspace memory. If an identical active workspace memory (ignoring case) already exists, the save returns `already_saved` and nothing changes.
+
+Both tools are offered in every interactive chat. Read members can save personal memory, but a workspace save from a Read member is refused. Recipe runs get `save_workspace_memory` only for Read-Write and Manager users. Each save shows a **Saved to memory** chip in chat with **Undo** and a link to the Memory page.
+
+### Memory page
+
+Open **Memory** in the sidebar. The **Personal** section shows only your own memories. The **Workspace** section shows the active workspace's memories.
+
+| Action | Who can do it |
+|--------|---------------|
+| View workspace memory | Any workspace member |
+| Add workspace memory | Read-Write and Manager |
+| Edit or delete a workspace memory | Its author (while still Read-Write or higher), or a Manager |
+
+Every create, edit, and delete of workspace memory is recorded with the actor, the source (a chat or the Memory page), and the text before and after, and is logged to the `scout.memory.audit` logger.
 
 ## Table knowledge
 
@@ -52,7 +66,7 @@ There is no page for table knowledge in the Scout UI. It is edited in the Django
 
 ## The Knowledge page
 
-Open **Knowledge** in the sidebar. It lists entries and learnings, with a type filter (**All**, **Entries**, **Learnings**) and a search box.
+Open **Knowledge** in the sidebar. It lists knowledge entries, with a search box. Memory is on its own page.
 
 | Action | Who can do it |
 |--------|---------------|
@@ -60,13 +74,13 @@ Open **Knowledge** in the sidebar. It lists entries and learnings, with a type f
 | **New** entry, **Import** | Read-Write and Manager |
 | **Edit** and **Delete** | Read-Write and Manager |
 
-When editing a learning you can change its description, category, and tables. Its original error and confidence are shown for reference but cannot be edited. Deleting asks for confirmation first.
+Deleting asks for confirmation first.
 
 ## Import and export
 
 ### Exporting
 
-**Export** downloads the workspace's knowledge entries as a zip file, with one markdown file per entry. Learnings and table knowledge are not included. Each file has YAML frontmatter:
+**Export** downloads the workspace's knowledge entries as a zip file, with one markdown file per entry. Memory and table knowledge are not included. Each file has YAML frontmatter:
 
 ```markdown
 ---
