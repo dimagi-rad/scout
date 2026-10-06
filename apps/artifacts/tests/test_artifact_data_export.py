@@ -13,8 +13,21 @@ from django.test import AsyncClient
 
 from apps.artifacts.models import Artifact, ArtifactType
 from apps.artifacts.services import data_export
-from apps.artifacts.services.data_export import EXPORT_ROW_LIMIT, csv_safe_cell, iter_csv
-from apps.semantic.services.query import MAX_SEMANTIC_LIMIT, _coerce_limit
+from apps.artifacts.services.data_export import (
+    EXPORT_ROW_LIMIT,
+    csv_safe_cell,
+    export_error_response,
+    export_filename,
+    export_slot,
+    iter_csv,
+)
+from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
+from apps.semantic.services import query as query_service
+from apps.semantic.services.query import (
+    CAPACITY_EXHAUSTED_CATEGORY,
+    MAX_SEMANTIC_LIMIT,
+    _coerce_limit,
+)
 from apps.semantic.services.query_outcomes import query_error
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
@@ -126,6 +139,10 @@ def _list_url(workspace, artifact):
     return f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/data-export/"
 
 
+async def _export(client, url, body=None):
+    return await client.post(url, body or {}, content_type="application/json")
+
+
 async def _body(response) -> str:
     chunks = [chunk async for chunk in response.streaming_content]
     return b"".join(chunks).decode("utf-8")
@@ -142,7 +159,11 @@ def _result(rows, *, truncated=False):
         "rows": rows,
         "row_count": len(rows),
         "truncated": truncated,
-        "semantic_query": {"measures": ["visits.count"], "limit": EXPORT_ROW_LIMIT},
+        "semantic_query": {
+            "measures": ["visits.count"],
+            "filters": [{"field": "visits.region", "operator": "equals", "values": ["North"]}],
+            "limit": EXPORT_ROW_LIMIT,
+        },
     }
 
 
@@ -162,7 +183,7 @@ async def test_export_requires_read_write(workspace, artifact, role_client, allo
     run = AsyncMock(return_value=_result([["North", "3"]]))
     with patch(RUN, new=run):
         listing = await client.get(_list_url(workspace, artifact))
-        response = await client.get(_csv_url(workspace, artifact))
+        response = await _export(client, _csv_url(workspace, artifact))
     if not allowed:
         assert listing.status_code == 403
         assert response.status_code == 403
@@ -170,7 +191,7 @@ async def test_export_requires_read_write(workspace, artifact, role_client, allo
         return
     assert listing.status_code == 200
     assert response.status_code == 200
-    assert response["Content-Type"] == "text/csv"
+    assert response["Content-Type"] == "text/csv; charset=utf-8"
     assert _rows(await _body(response)) == [["visits.region", "visits.count"], ["North", "3"]]
 
 
@@ -179,8 +200,8 @@ async def test_export_requires_read_write(workspace, artifact, role_client, allo
 async def test_non_member_and_anonymous_cannot_export(workspace, artifact, outsider_client):
     run = AsyncMock(return_value=_result([]))
     with patch(RUN, new=run):
-        denied = await outsider_client.get(_csv_url(workspace, artifact))
-        anonymous = await _client().get(_csv_url(workspace, artifact))
+        denied = await _export(outsider_client, _csv_url(workspace, artifact))
+        anonymous = await _export(_client(), _csv_url(workspace, artifact))
         anonymous_list = await _client().get(_list_url(workspace, artifact))
     assert denied.status_code == 403
     assert anonymous.status_code == 401
@@ -196,10 +217,10 @@ async def test_cannot_export_another_workspaces_artifact(workspace, manager_clie
     run = AsyncMock(return_value=_result([["South", "9"]]))
     with patch(RUN, new=run):
         # Own workspace in the URL, foreign artifact id: not found in this workspace.
-        via_own = await client.get(_csv_url(workspace, foreign))
-        via_own_static = await client.get(_csv_url(workspace, foreign, "?static=targets"))
+        via_own = await _export(client, _csv_url(workspace, foreign))
+        via_own_static = await _export(client, _csv_url(workspace, foreign, "?static=targets"))
         # The foreign workspace itself: not a member.
-        via_foreign = await client.get(_csv_url(other, foreign))
+        via_foreign = await _export(client, _csv_url(other, foreign))
     assert via_own.status_code == 404
     assert via_own_static.status_code == 404
     assert via_foreign.status_code == 403
@@ -213,7 +234,7 @@ async def test_export_runs_the_query_at_the_export_cap_in_its_workspace(
 ):
     run = AsyncMock(return_value=_result([["North", "3"]]))
     with patch(RUN, new=run):
-        response = await manager_client.get(_csv_url(workspace, artifact))
+        response = await _export(manager_client, _csv_url(workspace, artifact))
     assert response.status_code == 200
     await _body(response)
     run.assert_awaited_once()
@@ -236,7 +257,7 @@ async def test_a_capped_export_says_so_in_headers_and_filename_not_in_the_data(
 ):
     rows = [["r", str(i)] for i in range(5)]
     with patch(RUN, new=AsyncMock(return_value=_result(rows, truncated=True))):
-        response = await manager_client.get(_csv_url(workspace, artifact))
+        response = await _export(manager_client, _csv_url(workspace, artifact))
     assert response.status_code == 200
     assert response["X-Scout-Export-Truncated"] == "true"
     assert response["X-Scout-Export-Row-Limit"] == str(EXPORT_ROW_LIMIT)
@@ -259,8 +280,8 @@ async def test_static_tabular_data_exports_and_is_listed(workspace, artifact, ma
     client = manager_client
     with patch(RUN, new=AsyncMock()) as run:
         listing = await client.get(_list_url(workspace, artifact))
-        response = await client.get(_csv_url(workspace, artifact, "?static=targets"))
-        missing = await client.get(_csv_url(workspace, artifact, "?static=story_doc"))
+        response = await _export(client, _csv_url(workspace, artifact, "?static=targets"))
+        missing = await _export(client, _csv_url(workspace, artifact, "?static=story_doc"))
     run.assert_not_awaited()
     assert listing.json() == {
         "datasets": [
@@ -288,7 +309,7 @@ async def test_dataset_must_be_named_and_exist(workspace, artifact, manager_clie
     artifact.source_queries = [{"name": "legacy", "sql": "SELECT 1"}]
     await artifact.asave(update_fields=["source_queries"])
     with patch(RUN, new=AsyncMock()) as run:
-        response = await manager_client.get(_csv_url(workspace, artifact, query))
+        response = await _export(manager_client, _csv_url(workspace, artifact, query))
     assert response.status_code == (404 if "query=" in query and "static" not in query else 400)
     run.assert_not_awaited()
 
@@ -304,7 +325,7 @@ async def test_unqueryable_surface_is_a_conflict(workspace, artifact, manager_cl
         ),
         patch(RUN, new=AsyncMock()) as run,
     ):
-        response = await manager_client.get(_csv_url(workspace, artifact))
+        response = await _export(manager_client, _csv_url(workspace, artifact))
     assert response.status_code == 409
     run.assert_not_awaited()
 
@@ -317,7 +338,7 @@ async def test_query_failures_are_json_errors(workspace, artifact, manager_clien
         return_value=query_error("VALIDATION_ERROR", "Unknown member", category="invalid_query")
     )
     with patch(RUN, new=failed):
-        response = await client.get(_csv_url(workspace, artifact))
+        response = await _export(client, _csv_url(workspace, artifact))
     assert response.status_code == 502
     assert response.json() == {"error": "Unknown member"}
 
@@ -326,7 +347,7 @@ async def test_query_failures_are_json_errors(workspace, artifact, manager_clien
 
     monkeypatch.setattr(data_export, "EXPORT_TIMEOUT_SECONDS", 0.01)
     with patch(RUN, new=slow):
-        timed_out = await client.get(_csv_url(workspace, artifact))
+        timed_out = await _export(client, _csv_url(workspace, artifact))
     assert timed_out.status_code == 504
 
 
@@ -334,17 +355,20 @@ async def test_query_failures_are_json_errors(workspace, artifact, manager_clien
 @pytest.mark.asyncio
 async def test_export_writes_an_audit_line(workspace, artifact, manager, manager_client, caplog):
     with (
-        caplog.at_level(logging.INFO, logger="apps.artifacts.views"),
+        caplog.at_level(logging.INFO, logger="scout.export.audit"),
         patch(RUN, new=AsyncMock(return_value=_result([["North", "3"]]))),
     ):
-        response = await manager_client.get(_csv_url(workspace, artifact))
+        response = await _export(manager_client, _csv_url(workspace, artifact))
     await _body(response)
-    [line] = [r.getMessage() for r in caplog.records if "Artifact data export:" in r.getMessage()]
+    [line] = [
+        r.getMessage() for r in caplog.records if "Artifact data export started:" in r.getMessage()
+    ]
     assert f"user={manager.id}" in line
     assert f"artifact={artifact.id}" in line
     assert "dataset='by_region'" in line
     assert "rows=1" in line
     assert '"measures": ["visits.count"]' in line
+    assert "North" not in line
 
 
 @pytest.mark.django_db(transaction=True)
@@ -384,6 +408,13 @@ async def test_post_applies_the_viewers_date_controls(workspace, artifact, manag
         ("-1.25e3", "-1.25e3"),
         ("+7", "+7"),
         ("plain", "plain"),
+        (" =cmd", "' =cmd"),
+        ("\n=cmd", "'\n=cmd"),
+        ("\uff1dSUM(1)", "'\uff1dSUM(1)"),
+        ("-\u0661\u0662", "'-\u0661\u0662"),
+        ({"a": 1}, '{"a": 1}'),
+        (["=x"], '["=x"]'),
+        (True, "true"),
         (None, ""),
         (-3, -3),
         (2.5, 2.5),
@@ -401,3 +432,102 @@ async def test_iter_csv_is_rfc4180_and_chunked(monkeypatch):
     assert len(chunks) == 2
     text = b"".join(chunks).decode()
     assert text == ('﻿\'=col,b\r\n"say ""hi""","a,b"\r\n"line\nbreak",\'=1+1\r\nx,\r\n')
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_csv_export_is_post_only_and_csrf_protected(workspace, artifact, manager):
+    client = AsyncClient(enforce_csrf_checks=True)
+    await asyncio.to_thread(client.force_login, manager)
+    with patch(RUN, new=AsyncMock(return_value=_result([]))) as run:
+        via_get = await client.get(_csv_url(workspace, artifact))
+        no_token = await _export(client, _csv_url(workspace, artifact))
+    assert via_get.status_code == 405
+    assert no_token.status_code == 403
+    run.assert_not_awaited()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_full_cube_pool_or_export_slots_are_busy(workspace, artifact, manager_client):
+    full = query_error(
+        "CONNECTION_ERROR", "full", category=CAPACITY_EXHAUSTED_CATEGORY, retryable=True
+    )
+    with patch(RUN, new=AsyncMock(return_value=full)):
+        pool_full = await _export(manager_client, _csv_url(workspace, artifact))
+    held = [export_slot(), export_slot()]
+    try:
+        with patch(RUN, new=AsyncMock()) as run:
+            slots_full = await _export(manager_client, _csv_url(workspace, artifact))
+        run.assert_not_awaited()
+    finally:
+        for slot in held:
+            slot.__exit__(None, None, None)
+    assert pool_full.status_code == 503
+    assert slots_full.status_code == 503
+    assert export_slot() is not None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_db_connection_is_released_before_streaming(workspace, artifact, manager_client):
+    with (
+        patch(RUN, new=AsyncMock(return_value=_result([["North", "3"]]))),
+        patch("apps.artifacts.views.close_old_connections") as close,
+    ):
+        response = await _export(manager_client, _csv_url(workspace, artifact))
+        close.assert_called_once()
+    await _body(response)
+
+
+@pytest.mark.parametrize(
+    ("category", "message", "status"),
+    [
+        ("transient_runtime_failure", "Cube query timed out after 60s.", 504),
+        ("transient_runtime_failure", "connection reset", 503),
+        ("data_unavailable", "Data not loaded", 409),
+        ("invalid_query", "Unknown member", 502),
+    ],
+)
+def test_export_error_status(category, message, status):
+    response = export_error_response({"category": category, "message": message})
+    assert response.status_code == status
+
+
+def test_filename_cannot_inject_headers():
+    name = export_filename('a"b\r\nSet-Cookie: x=1', "q.\u00e9", truncated=False)
+    assert name == "a-b-set-cookie-x-1-q.csv"
+    assert export_filename("\u65e5\u672c", "", truncated=True) == (
+        f"artifact-data-first-{EXPORT_ROW_LIMIT}-rows.csv"
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("max_limit", "expected"), [(None, MAX_SEMANTIC_LIMIT), (EXPORT_ROW_LIMIT, EXPORT_ROW_LIMIT)]
+)
+def test_compiled_cube_query_limit(monkeypatch, workspace, max_limit, expected):
+    model = SemanticModel.objects.create(workspace=workspace, name="m")
+    visits = SemanticDataset.objects.create(
+        semantic_model=model,
+        workspace=workspace,
+        name="visits",
+        label="Visits",
+        table_name="raw_visits",
+        schema_name="tenant_schema",
+    )
+    SemanticField.objects.create(
+        dataset=visits,
+        name="count",
+        label="Count",
+        field_type=SemanticField.FieldType.MEASURE,
+        data_type="integer",
+        expression="*",
+        measure_type=SemanticField.MeasureType.COUNT,
+    )
+    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: model)
+    monkeypatch.setattr(query_service, "get_active_cube_schema", lambda *a, **k: None)
+    spec = {"measures": ["visits.count"], "limit": 1_000_000}
+    kwargs = {} if max_limit is None else {"max_limit": max_limit}
+    compiled = query_service._compile_semantic_query(workspace, spec, **kwargs)
+    assert compiled["cube_query"]["limit"] == expected
