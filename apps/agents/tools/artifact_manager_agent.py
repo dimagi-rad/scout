@@ -792,6 +792,7 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         "status": status,
         "artifact_id": artifact.get("id") if isinstance(artifact, dict) else None,
         "artifact_version": artifact.get("version") if isinstance(artifact, dict) else None,
+        "artifact_title": artifact.get("title") if isinstance(artifact, dict) else None,
         "touched_blocks": touched_blocks,
         "diagnostics": diagnostics or [],
         "runtime_summary": (
@@ -813,6 +814,7 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
             status="error",
             artifact_id=None,
             artifact_version=None,
+            artifact_title=None,
             touched_blocks=[],
             message=denial,
             runtime_failures=[
@@ -831,6 +833,7 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
     if artifact_result.get("status") == "error":
         summary["artifact_id"] = None
         summary["artifact_version"] = None
+        summary["artifact_title"] = None
     if isinstance(runtime, dict):
         failures = runtime.get("failures")
         if isinstance(failures, list) and failures:

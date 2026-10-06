@@ -17,6 +17,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleDot,
+  ArrowUpRight,
   FileBarChart,
   Square,
   Wrench,
@@ -50,15 +51,16 @@ function renderToolOutput(
   toolName: string,
   rawOutput: unknown,
   input?: unknown,
+  workspaceId?: string,
 ): React.ReactNode | null {
   const output = parseOutput(rawOutput)
   if (output == null || typeof output !== "object") return null
 
   switch (toolName) {
     case "query":
-      return <QueryToolOutput output={output as QueryOutput} sql={inputSql(input)} />
+      return <QueryToolOutput output={output as QueryOutput} sql={inputSql(input)} workspaceId={workspaceId} />
     case "semantic_query":
-      return <SemanticQueryToolOutput output={output as SemanticQueryOutput} />
+      return <SemanticQueryToolOutput output={output as SemanticQueryOutput} workspaceId={workspaceId} />
     case "semantic_catalog":
     case "describe_dataset":
       return <SemanticCatalogToolOutput output={output as SemanticCatalogOutput} />
@@ -491,7 +493,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
 
   const richOutput =
     hasOutput && part.output != null && !isErrored && !isSubagentCard
-      ? renderToolOutput(toolName, part.output, part.input)
+      ? renderToolOutput(toolName, part.output, part.input, workspaceId)
       : null
   // Fallback text for the <pre> view: an output-error part carries its message
   // in errorText (no `output`); otherwise show the raw output when no rich card
@@ -716,25 +718,35 @@ export function ChatReasoningPart({ part, index, isLatest, isActiveMessage }: { 
 interface ChatArtifactButtonProps {
   artifactId: string
   artifactVersion?: number
+  artifactTitle?: string
   isActive?: boolean
   onOpen?: (artifactId: string) => void
 }
 
-export function ChatArtifactButton({ artifactId, artifactVersion, isActive = false, onOpen }: ChatArtifactButtonProps) {
+export function ChatArtifactButton({ artifactId, artifactVersion, artifactTitle, isActive = false, onOpen }: ChatArtifactButtonProps) {
   return (
     <button
       type="button"
       data-testid={`chat-artifact-${artifactId}`}
       data-artifact-version={artifactVersion}
+      aria-label={artifactTitle ? `View Artifact: ${artifactTitle}` : "View Artifact"}
       onClick={() => onOpen?.(artifactId)}
-      className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm my-1 transition-colors hover:bg-muted ${
+      className={`group flex w-full max-w-md items-center gap-3 rounded-lg border px-4 py-3 text-left text-sm my-2 shadow-sm transition-colors hover:bg-muted ${
         isActive
           ? "border-primary bg-primary/5"
-          : "border-border"
+          : "border-primary/40"
       }`}
     >
-      <FileBarChart className="h-4 w-4 text-primary" />
-      <span>View Artifact</span>
+      <FileBarChart className="h-5 w-5 shrink-0 text-primary" />
+      <span className="flex min-w-0 flex-1 flex-col">
+        {artifactTitle && (
+          <span data-testid={`chat-artifact-title-${artifactId}`} className="truncate font-medium">
+            {artifactTitle}
+          </span>
+        )}
+        <span className={artifactTitle ? "text-xs text-muted-foreground" : "font-medium"}>View Artifact</span>
+      </span>
+      <ArrowUpRight className="h-4 w-4 shrink-0 text-primary" />
     </button>
   )
 }
@@ -827,6 +839,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
         key={artifact.id}
         artifactId={artifact.id}
         artifactVersion={artifact.version}
+        artifactTitle={artifact.title}
         isActive={activeArtifactId === artifact.id}
         onOpen={openArtifact}
       />
