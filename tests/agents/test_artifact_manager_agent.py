@@ -380,6 +380,7 @@ def test_artifact_manager_returns_missing_topic_model_to_parent_without_artifact
     assert summary["data_requirements"] == response["data_requirements"]
     assert summary["artifact_id"] is None
     assert summary["artifact_version"] is None
+    assert summary["artifact_title"] is None
     assert summary["runtime_summary"] == ""
 
 
@@ -454,6 +455,7 @@ def test_permission_denial_cannot_be_replaced_by_a_model_proposal(status):
     assert summary["message"] == denied["message"]
     assert summary["artifact_id"] is None
     assert summary["artifact_version"] is None
+    assert summary["artifact_title"] is None
     assert summary["touched_blocks"] == []
     assert "data_requirements" not in summary
     assert "requirement_errors" not in summary
