@@ -14,6 +14,7 @@ from apps.memory.services import (
     MAX_PERSONAL_MEMORIES,
     MemoryValidationError,
     asave_personal_memory,
+    aupdate_personal_memory,
     normalize_memory,
 )
 
@@ -119,6 +120,17 @@ class TestPersonalMemoryApi:
         assert response.status_code == 400
         await other.arefresh_from_db()
         assert other.content == "Use tables"
+
+    async def test_duplicate_check_matches_the_unique_constraint(self, user):
+        # "\u212a" is the Kelvin sign: UPPER() and LOWER() disagree on it.
+        await asave_personal_memory(user, "use \u212a units")
+        result = await asave_personal_memory(user, "use k units")
+        assert result.created is False
+
+    async def test_edit_of_a_deleted_memory_is_a_404(self, user):
+        memory = await PersonalMemory.objects.acreate(user=user, content="Soon deleted")
+        await PersonalMemory.objects.filter(pk=memory.pk).adelete()
+        assert await aupdate_personal_memory(memory, user, "Edited after delete") is None
 
     async def test_concurrent_saves_of_the_same_text_keep_one_row(self, user):
         results = await asyncio.gather(

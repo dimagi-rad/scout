@@ -440,8 +440,8 @@ def _build_cached_system_message(
     leaves the cached prefix intact.
 
     The user's personal memory gets its own block and breakpoint after the stable
-    one, so the stable prefix stays identical for every member of a workspace and
-    one user's memory edit doesn't rewrite it.
+    one, so the stable block's text is the same for every member of a workspace
+    (sharing Anthropic's cache) and one user's memory edit doesn't rewrite it.
     """
     blocks: list[dict] = [{"type": "text", "text": stable, "cache_control": PROMPT_CACHE_CONTROL}]
     if personal_memory:

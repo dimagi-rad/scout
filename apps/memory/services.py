@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, TypeGuard
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import Value
+from django.db.models.functions import Lower
 
 from apps.memory.models import PersonalMemory
 
@@ -84,7 +86,11 @@ def _lock_user(user_id) -> None:
 
 
 def _duplicate(user_id, content: str, *, excluding=None) -> PersonalMemory | None:
-    rows = PersonalMemory.objects.filter(user_id=user_id, content__iexact=content)
+    # Lower() on both sides, matching the unique constraint; iexact compares UPPER(),
+    # which disagrees for characters like the Kelvin sign.
+    rows = PersonalMemory.objects.annotate(lowered=Lower("content")).filter(
+        user_id=user_id, lowered=Lower(Value(content))
+    )
     if excluding is not None:
         rows = rows.exclude(pk=excluding.pk)
     return rows.first()
@@ -107,19 +113,26 @@ async def asave_personal_memory(user, text: str) -> SaveResult:
 
 
 @sync_to_async
-def _update(memory: PersonalMemory, user_id, content: str) -> PersonalMemory:
+def _update(memory: PersonalMemory, user_id, content: str) -> PersonalMemory | None:
     with transaction.atomic():
         _lock_user(user_id)
-        if _duplicate(user_id, content, excluding=memory) is not None:
+        # Re-read under the lock: a DELETE may have landed since the caller fetched it.
+        current = PersonalMemory.objects.filter(pk=memory.pk, user_id=user_id).first()
+        if current is None:
+            return None
+        if _duplicate(user_id, content, excluding=current) is not None:
             raise MemoryValidationError("You already have a memory that says this.")
-        _check_limits(user_id, content, replacing=memory)
-        memory.content = content
-        memory.save(update_fields=["content", "updated_at"])
-    return memory
+        _check_limits(user_id, content, replacing=current)
+        current.content = content
+        current.save(update_fields=["content", "updated_at"])
+    return current
 
 
-async def aupdate_personal_memory(memory: PersonalMemory, user, text: str) -> PersonalMemory:
-    """Edit ``memory``, which the caller has already checked belongs to ``user``."""
+async def aupdate_personal_memory(memory: PersonalMemory, user, text: str) -> PersonalMemory | None:
+    """Edit ``memory``, which the caller has already checked belongs to ``user``.
+
+    Returns None when it was deleted meanwhile.
+    """
     return await _update(memory, user.pk, normalize_memory(text))
 
 

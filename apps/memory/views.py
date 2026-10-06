@@ -65,10 +65,12 @@ async def personal_memory_detail_view(request, memory_id):
         if err is not None:
             return err
         try:
-            memory = await aupdate_personal_memory(memory, user, content or "")
+            updated = await aupdate_personal_memory(memory, user, content or "")
         except MemoryValidationError as exc:
             return JsonResponse({"error": str(exc)}, status=400)
-        return JsonResponse(_serialize(memory))
+        if updated is None:
+            return JsonResponse({"error": "Memory not found"}, status=404)
+        return JsonResponse(_serialize(updated))
 
     if request.method == "DELETE":
         await memory.adelete()
