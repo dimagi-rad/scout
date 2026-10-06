@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import { render, screen } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
+import { personalMemoryApi } from "@/api/memory"
 import type { UIMessage } from "ai"
 import { MemoryRouter } from "react-router-dom"
 import { ChatMessage } from "./ChatMessage"
+
+vi.mock("@/api/memory", () => ({ personalMemoryApi: { remove: vi.fn() } }))
 
 function memoryMessage(output: unknown, state = "output-available"): UIMessage {
   return {
@@ -30,6 +34,32 @@ function renderMessage(message: UIMessage, path = "/") {
 }
 
 describe("Saved to memory chip", () => {
+  beforeEach(() => vi.mocked(personalMemoryApi.remove).mockReset())
+
+  it("undoes a new save in one click", async () => {
+    vi.mocked(personalMemoryApi.remove).mockResolvedValue(undefined)
+    renderMessage(
+      memoryMessage({ status: "saved", layer: "personal", memory_id: "m1", memory: "Use tables" }),
+    )
+    await userEvent.click(screen.getByTestId("memory-saved-chip-undo"))
+
+    expect(personalMemoryApi.remove).toHaveBeenCalledWith("m1")
+    expect(await screen.findByText("Removed from memory", { exact: false })).toBeInTheDocument()
+    expect(screen.queryByTestId("memory-saved-chip-undo")).not.toBeInTheDocument()
+  })
+
+  it("offers no undo for a memory that already existed", () => {
+    renderMessage(
+      memoryMessage({
+        status: "already_saved",
+        layer: "personal",
+        memory_id: "m1",
+        memory: "Use tables",
+      }),
+    )
+    expect(screen.queryByTestId("memory-saved-chip-undo")).not.toBeInTheDocument()
+  })
+
   it("names the layer and the saved text, and links to the Memory page", () => {
     renderMessage(
       memoryMessage({
