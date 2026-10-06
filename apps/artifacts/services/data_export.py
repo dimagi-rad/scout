@@ -44,7 +44,8 @@ MAX_CONCURRENT_EXPORTS = 2
 # release ever freed (a killed process, a failed Redis delete) clears soon after.
 EXPORT_LOCK_TTL_SECONDS = EXPORT_TIMEOUT_SECONDS + 30
 # Reclaims a process slot whose response Django dropped without close(). A live
-# download slower than this can be reclaimed too, briefly admitting one extra export.
+# download slower than this can be reclaimed too, admitting extra exports while
+# it finishes, so the cap is best-effort past this horizon.
 EXPORT_SLOT_TTL_SECONDS = 600
 EXPORT_TIMEOUT_MESSAGE = "The export took too long. Add filters to narrow it and try again."
 
@@ -189,7 +190,7 @@ def _now() -> float:
 
 
 def _claim_process_slot() -> str | None:
-    """A slot id, or None when full. Slots older than the lock TTL are reclaimed:
+    """A slot id, or None when full. Slots older than EXPORT_SLOT_TTL_SECONDS are reclaimed:
     a response Django drops without close() (a disconnect during middleware)
     would otherwise hold its slot until the process restarts."""
     now = _now()
@@ -216,7 +217,7 @@ class ExportLease:
 
     The lock stores this lease's id, so a late release does not delete a lock that
     expired and was re-taken by another export (best-effort: get-then-delete is not
-    atomic, and the lock TTL far exceeds the query it guards).
+    atomic, and the lock TTL exceeds the query timeout).
     """
 
     def __init__(self, lease_id: str, lock_key: str) -> None:
@@ -272,7 +273,8 @@ _lock_cleanups: set[asyncio.Task] = set()
 async def _free_lock_once_added(add: asyncio.Future, key: str, lease_id: str) -> None:
     try:
         locked = await add
-    except BaseException:
+    except Exception:
+        logger.warning("Cancelled artifact export lock add failed: %s", key, exc_info=True)
         return
     if locked:
         await _adelete_own_lock(key, lease_id)
@@ -293,6 +295,11 @@ async def acquire_export_lease(workspace_id) -> ExportLease | None:
     add = asyncio.ensure_future(cache.aadd(key, lease_id, EXPORT_LOCK_TTL_SECONDS))
     try:
         locked = await asyncio.shield(add)
+    except Exception:
+        # Fail closed: without the lock, exports could take the tenant's Cube lanes.
+        logger.warning("Could not take artifact export lock %s", key, exc_info=True)
+        _free_process_slot(lease_id)
+        return None
     except BaseException:
         _free_process_slot(lease_id)
         # The add keeps running in its worker thread after a cancel; free the

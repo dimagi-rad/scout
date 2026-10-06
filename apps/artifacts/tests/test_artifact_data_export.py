@@ -49,6 +49,7 @@ def no_leaked_export_leases():
     leaked = data_export.active_exports()
     # Reset first so one failure cannot cascade into every later test.
     data_export._active_leases.clear()
+    data_export._lock_cleanups.clear()
     assert leaked == 0
 
 
@@ -677,10 +678,12 @@ async def test_a_failed_lock_delete_is_logged_and_still_frees_the_slot(caplog):
 async def test_a_cancelled_acquire_frees_the_lock_once_the_add_lands():
     ws = uuid.uuid4().hex
     landed = asyncio.Event()
+    added = asyncio.Event()
 
     async def slow_add(key, value, ttl):
         await landed.wait()
         await cache.aset(key, value, ttl)
+        added.set()
         return True
 
     with patch.object(cache, "aadd", slow_add):
@@ -689,7 +692,9 @@ async def test_a_cancelled_acquire_frees_the_lock_once_the_add_lands():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+        assert data_export._lock_cleanups
         landed.set()
+        await asyncio.wait_for(added.wait(), 5)
         await asyncio.gather(*data_export._lock_cleanups)
     assert data_export.active_exports() == 0
     assert await cache.aget(f"artifact-data-export:{ws}") is None
@@ -734,3 +739,11 @@ async def test_a_cancelled_export_frees_slot_and_lock(workspace, artifact, manag
         await _export(manager_client, _csv_url(workspace, artifact))
     assert data_export.active_exports() == 0
     assert await cache.aget(f"artifact-data-export:{workspace.id}") is None
+
+
+@pytest.mark.asyncio
+async def test_a_cache_outage_on_acquire_fails_closed(caplog):
+    with patch.object(cache, "aadd", AsyncMock(side_effect=ConnectionError("redis down"))):
+        assert await acquire_export_lease(uuid.uuid4().hex) is None
+    assert data_export.active_exports() == 0
+    assert "Could not take artifact export lock" in caplog.text
