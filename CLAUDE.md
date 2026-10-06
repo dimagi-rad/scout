@@ -77,6 +77,7 @@ processes; fix those errors before restarting. Warnings do not stop startup.
 | users | Custom User model, session auth, OAuth (Google/GitHub/CommCare) |
 | workspaces | Workspaces, DB connections (encrypted), memberships |
 | knowledge | Table/column knowledge, freeform knowledge entries, agent learnings |
+| memory | Personal memory: each user's private preferences, applied in every workspace |
 | agents | LangGraph agent graph, MCP client, tools, prompts |
 | chat | Streaming chat threads with LangGraph agent, Postgres checkpointer |
 | artifacts | Generated dashboards/charts with sandboxed React rendering |
