@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import type { PendingRequest } from "@/api/jobs"
 import { ApiError } from "@/api/client"
@@ -81,6 +81,11 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
     refresh,
   } = useWorkspaceJobs()
   const current = pendingByThreadId[threadId] ?? null
+  const currentRef = useRef(current)
+  // Read by a load that started before the request did, so it needs the live value.
+  useEffect(() => {
+    currentRef.current = current
+  })
   // What the last render saw, adjusted during render so a change never paints a
   // frame without its card. A request the poll stopped reporting was sent: it
   // shows as answering (``sent``) until the reloaded conversation carries it.
@@ -145,8 +150,9 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
       // the "answering" overlay, since its messages now carry the request.
       setSeen((prev) => {
         const sent = loaded === null ? null : prev.sent
-        // With the request gone nothing shows the hidden messages, so they must reappear.
-        const keep = opts?.keepHidden && loaded !== null
+        // Hidden messages stay while a running turn or a displayed request still stands
+        // in for them; with neither, nothing shows them and they must reappear.
+        const keep = opts?.keepHidden && (loaded !== null || currentRef.current !== null)
         const hidden =
           keep || prev.hiddenMessageIds.size === 0 ? prev.hiddenMessageIds : new Set<string>()
         return sent === prev.sent && hidden === prev.hiddenMessageIds

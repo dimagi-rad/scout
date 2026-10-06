@@ -1,18 +1,17 @@
 import { act, renderHook } from "@testing-library/react"
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import type { PendingRequest } from "@/api/jobs"
 import { useHeldRequest } from "./useHeldRequest"
 
-vi.mock("@/contexts/WorkspaceJobsContext", () => {
-  const jobs = {
-    pendingByThreadId: {},
-    setPendingRequest: vi.fn(),
-    hidePendingRequest: vi.fn(),
-    forgetPendingRequest: vi.fn(),
-    refresh: vi.fn(),
-  }
-  return { useWorkspaceJobs: () => jobs }
-})
+const jobs = vi.hoisted(() => ({
+  pendingByThreadId: {} as Record<string, unknown>,
+  setPendingRequest: vi.fn(),
+  hidePendingRequest: vi.fn(),
+  forgetPendingRequest: vi.fn(),
+  refresh: vi.fn(),
+}))
+
+vi.mock("@/contexts/WorkspaceJobsContext", () => ({ useWorkspaceJobs: () => jobs }))
 
 const HELD: PendingRequest = {
   thread_id: "t1",
@@ -25,6 +24,10 @@ const HELD: PendingRequest = {
 }
 
 describe("onMessagesLoaded", () => {
+  afterEach(() => {
+    delete jobs.pendingByThreadId.t1
+  })
+
   it("clears the hidden messages of a load that ended before any turn", () => {
     const { result } = renderHook(() => useHeldRequest("w1", "t1"))
     act(() => result.current.onHeld(HELD))
@@ -48,5 +51,14 @@ describe("onMessagesLoaded", () => {
 
     act(() => result.current.onMessagesLoaded(null, { keepHidden: true }))
     expect(result.current.hiddenMessageIds.size).toBe(0)
+  })
+
+  it("keeps them while the request is still displayed, even if the load predates it", () => {
+    jobs.pendingByThreadId.t1 = HELD
+    const { result } = renderHook(() => useHeldRequest("w1", "t1"))
+    act(() => result.current.onHeld(HELD))
+
+    act(() => result.current.onMessagesLoaded(null, { keepHidden: true }))
+    expect([...result.current.hiddenMessageIds]).toEqual(["m1"])
   })
 })

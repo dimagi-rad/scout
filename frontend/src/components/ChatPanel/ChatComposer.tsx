@@ -114,7 +114,7 @@ export function ChatComposer({
           <Square className="w-4 h-4" aria-hidden="true" />
         </Button>
       ) : (
-        <span title={blocked ? "Loading the conversation..." : undefined}>
+        <span className="flex" title={blocked ? "Loading the conversation..." : undefined}>
           <Button
             type="submit"
             size="icon"

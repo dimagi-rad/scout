@@ -171,7 +171,7 @@ describe("a thread's history load", () => {
     render(<MemoryRouter><ChatPanel /></MemoryRouter>)
     await screen.findByTestId("chat-history-loading")
     await act(async () => typeText("draft"))
-    expect(screen.getByRole("button", { name: "Send message" }).parentElement)
+    expect(screen.getByRole("button", { name: "Send message" }).closest("[title]"))
       .toHaveAttribute("title", "Loading the conversation...")
   })
 
