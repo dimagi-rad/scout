@@ -34,7 +34,9 @@ WORKSPACE_MEMORY_HEADING = (
 )
 
 
-WORKSPACE_MEMORY_ORDER = ("-confidence_score", "-times_applied", "-created_at", "pk")
+# Newest first: memories are no longer ranked by confidence, so recency decides
+# which legacy rows a workspace over the limit keeps in the prompt.
+WORKSPACE_MEMORY_ORDER = ("-created_at", "-confidence_score", "pk")
 
 
 def _one_line(value: str) -> str:
@@ -45,16 +47,18 @@ def format_workspace_memories(learnings) -> str:
     """Render workspace memories (AgentLearning rows) for the prompt, or "" for none.
 
     Members other than the reader wrote these, so each renders as one line: a
-    memory must not be able to open a heading of its own. Only fenced SQL is
-    redacted; the statement-line rule would swallow a one-line memory that merely
-    starts with "With" or "Update".
+    memory must not be able to open a heading of its own. The statement-line SQL
+    rule skips the first line, which it would swallow whole when a note merely
+    starts with "With" or "Update"; later lines exist only in legacy rows.
     """
     if not learnings:
         return ""
     # The framing lives in the heading so a budget cut can't keep it without a memory.
     lines: list[str] = [WORKSPACE_MEMORY_HEADING, ""]
     for learning in learnings:
-        lines.append(f"- {_one_line(_SQL_FENCE_RE.sub(_SQL_REDACTION, learning.description))}")
+        first, _, rest = _SQL_FENCE_RE.sub(_SQL_REDACTION, learning.description).partition("\n")
+        text = f"{first}\n{_SQL_STATEMENT_LINE_RE.sub(_SQL_REDACTION, rest)}" if rest else first
+        lines.append(f"- {_one_line(text)}")
         if learning.applies_to_tables:
             tables_str = ", ".join(
                 f"`{_one_line(str(t)).replace('`', '')}`" for t in learning.applies_to_tables

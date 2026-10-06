@@ -81,10 +81,9 @@ class KnowledgeListCreateView(APIView):
         start_index = (page - 1) * page_size
         end_index = start_index + page_size
 
-        # Paginate in the DB, not in Python (arch #254, finding 05#7). The list
-        # merges two models by created_at desc; fetch only up to end_index per
-        # model, merge, then slice — so serialization is bounded by page*page_size
-        # per type rather than the full table.
+        # Paginate in the DB, not in Python (arch #254, finding 05#7): fetch only up
+        # to end_index per type, merge by created_at desc, then slice — so
+        # serialization is bounded by page*page_size per type, not the full table.
         total_count = 0
         candidates = []
         for type_name in types_to_query:
@@ -139,6 +138,7 @@ class KnowledgeListCreateView(APIView):
         item_type, err = string_field(request.data, "type")
         if err:
             return err
+        # Kept so a stale client gets a pointer rather than "invalid type".
         if item_type == "learning":
             return Response(
                 {"error": "Workspace memories are managed on the Memory page."},

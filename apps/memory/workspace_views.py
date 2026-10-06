@@ -12,7 +12,6 @@ from apps.knowledge.models import AgentLearning
 from apps.memory.models import WorkspaceMemoryEvent
 from apps.memory.services import MemoryValidationError
 from apps.memory.workspace import (
-    MAX_WORKSPACE_MEMORIES,
     adelete_workspace_memory,
     asave_workspace_memory,
     aupdate_workspace_memory,
@@ -71,7 +70,7 @@ async def workspace_memory_list_view(request, workspace_id):
         rows = (
             AgentLearning.objects.filter(workspace=workspace, is_active=True)
             .select_related("discovered_by_user")
-            .order_by("-created_at", "pk")[:MAX_WORKSPACE_MEMORIES]
+            .order_by("-created_at", "pk")
         )
         memories = [_serialize(m, user, role) async for m in rows]
         return JsonResponse({"results": memories, "can_add": can_add(role)})
