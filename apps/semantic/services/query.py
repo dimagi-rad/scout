@@ -82,12 +82,18 @@ async def run_semantic_query(
     *,
     user_id: str = "",
     readiness: QueryReadiness | None = None,
+    max_limit: int = MAX_SEMANTIC_LIMIT,
 ) -> dict[str, Any]:
-    """Execute a structured semantic query and return tabular results."""
+    """Execute a structured semantic query and return tabular results.
+
+    ``max_limit`` caps the row limit; only the authorized data export raises it
+    above the agent-facing ``MAX_SEMANTIC_LIMIT``.
+    """
     try:
         compiled = await sync_to_async(_compile_semantic_query_for_async, thread_sensitive=True)(
             workspace,
             query_spec,
+            max_limit,
         )
     except SemanticCatalogUnavailable as exc:
         return await query_readiness_error(
@@ -185,15 +191,19 @@ async def run_semantic_query(
     }
 
 
-def _compile_semantic_query_for_async(workspace, query_spec: dict[str, Any]) -> dict[str, Any]:
+def _compile_semantic_query_for_async(
+    workspace, query_spec: dict[str, Any], max_limit: int = MAX_SEMANTIC_LIMIT
+) -> dict[str, Any]:
     try:
         close_old_connections()
-        return _compile_semantic_query(workspace, query_spec)
+        return _compile_semantic_query(workspace, query_spec, max_limit=max_limit)
     finally:
         close_old_connections()
 
 
-def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, Any]:
+def _compile_semantic_query(
+    workspace, query_spec: dict[str, Any], *, max_limit: int = MAX_SEMANTIC_LIMIT
+) -> dict[str, Any]:
     query_spec = resolve_query_dates(query_spec)
     model = get_active_semantic_model(workspace)
 
@@ -203,7 +213,7 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
     granularity = query_spec.get("granularity") or ""
     filters = _as_list(query_spec.get("filters"))
     order_by = _as_list(query_spec.get("order_by") or query_spec.get("orderBy"))
-    limit = _coerce_limit(query_spec.get("limit", 100))
+    limit = _coerce_limit(query_spec.get("limit", 100), max_limit)
 
     if not measures and not dimensions and not time_dimension:
         raise SemanticQueryError("Provide at least one measure, dimension, or time_dimension.")
@@ -377,12 +387,12 @@ def _as_list(value: Any) -> list:
     return [value]
 
 
-def _coerce_limit(value: Any) -> int:
+def _coerce_limit(value: Any, max_limit: int = MAX_SEMANTIC_LIMIT) -> int:
     try:
         limit = int(value)
     except (TypeError, ValueError):
         limit = 100
-    return max(1, min(limit, MAX_SEMANTIC_LIMIT))
+    return max(1, min(limit, max_limit))
 
 
 def _resolve_member(

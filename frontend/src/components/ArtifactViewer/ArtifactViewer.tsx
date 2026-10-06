@@ -19,14 +19,15 @@ export function ArtifactViewer({ artifactId, workspaceId, className, onClose }: 
   const canvasRef = useRef<ArtifactCanvasHandle>(null)
   const { artifact, isLoading, error } = useArtifactDetail(artifactId, workspaceId)
   const [dateSources, setDateSources] = useArtifactDateSources(artifact)
+  const runtime = artifact?.type === "story" ? {
+    as_of: artifact.date_context?.as_of, timezone: artifact.date_context?.timezone, sources: dateSources,
+  } : undefined
   const {
     queryData,
     isLoading: isDataLoading,
     error: dataError,
     refetch: refetchData,
-  } = useArtifactQueryData(artifactId, workspaceId, artifact?.type === "story" ? {
-    as_of: artifact.date_context?.as_of, timezone: artifact.date_context?.timezone, sources: dateSources,
-  } : undefined, dataOpen)
+  } = useArtifactQueryData(artifactId, workspaceId, runtime, dataOpen)
 
   function handleViewData() {
     setDataOpen(true)
@@ -45,6 +46,7 @@ export function ArtifactViewer({ artifactId, workspaceId, className, onClose }: 
           onExportPdf={() => canvasRef.current?.exportPdf()}
           onClose={onClose}
           exportDisabled={!artifact}
+          download={artifact ? { artifactId, workspaceId, runtime } : undefined}
         />
       </div>
 

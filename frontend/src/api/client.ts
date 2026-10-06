@@ -118,4 +118,21 @@ export const api = {
     }
     return res.blob()
   },
+  /** POST for a file, keeping its headers. */
+  download: async (url: string, body: unknown): Promise<{ blob: Blob; headers: Headers }> => {
+    const prefixedUrl = url.startsWith("/") ? `${BASE_PATH}${url}` : url
+    const init: RequestInit = {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+      body: JSON.stringify(body),
+    }
+    // A busy 503 here means the export capacity is full; repeating it on its own
+    // would only add load, so the user retries.
+    const res = await fetchWithBusyRetry(() => fetch(prefixedUrl, init), { autoRetry: false })
+    if (!res.ok) {
+      throw await responseError(res)
+    }
+    return { blob: await res.blob(), headers: res.headers }
+  },
 }

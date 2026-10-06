@@ -112,5 +112,11 @@ LOGGING = {
             "level": "INFO",
             "propagate": False,
         },
+        # Who downloaded which artifact data (#846); pinned like the audits above.
+        "scout.export.audit": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
     },
 }

@@ -11,10 +11,12 @@ import logging
 import secrets
 from typing import Any
 
+from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.cache import cache
+from django.db import connections
 from django.db.models import Q
-from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
+from django.http import Http404, HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from django.views import View
 
@@ -29,15 +31,34 @@ from apps.artifacts.services.recovery import (
     admit_artifact_recovery,
     current_artifact_data_state,
 )
-from apps.common.capacity import CapacityExhausted
+from apps.common.capacity import CapacityExhausted, busy_response, reraise_if_capacity
 from apps.common.http import parse_json_object
 from apps.common.utils import creator_display_name
 from apps.semantic.services.date_context import DateContextError, date_context
+from apps.semantic.services.query import raise_if_capacity_exhausted
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
 
 from .models import Artifact, ArtifactSemanticQuery, ArtifactType
+from .services.data_export import (
+    EXPORT_ROW_LIMIT,
+    EXPORT_TIMEOUT_MESSAGE,
+    EXPORT_TIMEOUT_SECONDS,
+    QUERY_SOURCE,
+    STATIC_SOURCE,
+    LeasedStreamingResponse,
+    acquire_export_lease,
+    audit_query_shape,
+    export_datasets,
+    export_error_response,
+    export_filename,
+    find_planned_query,
+    iter_csv,
+    leased_stream,
+    run_export_query,
+    static_tabular_datasets,
+)
 from .services.export import ArtifactExporter
 from .services.graph_manifest import (
     build_artifact_semantic_query_manifest,
@@ -49,6 +70,8 @@ from .services.graph_manifest import (
 from .services.versioning import latest_visible_version_ids
 
 logger = logging.getLogger(__name__)
+# Pinned so a level change on apps.* cannot mute the data-export audit trail.
+audit_logger = logging.getLogger("scout.export.audit")
 
 # Short TTL for live-artifact query results (arch #254, finding 09#9). Live
 # artifacts re-executed ALL their source queries serially on every open with no
@@ -1199,4 +1222,197 @@ class ArtifactExportView(LoginRequiredJsonMixin, View):
             return JsonResponse({"error": str(error)}, status=400)
         response = HttpResponse(content, content_type="text/html")
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
+
+
+def _log_safe(value: str) -> str:
+    return value.replace("\r", "\\r").replace("\n", "\\n")
+
+
+class _ArtifactDataExportBase(View):
+    """Shared access for the data export endpoints (#846).
+
+    Bulk download takes READ_WRITE. READ members still see the rows View Data
+    shows (500 per query); the gate limits bulk extraction, not access. POST carries the same date
+    runtime as query-data so the export matches what the viewer is looking at.
+    """
+
+    async def _resolve(self, request: HttpRequest, workspace_id, artifact_id):
+        user = await request.auser()
+        if not user.is_authenticated:
+            return None, None, None, JsonResponse({"error": "Authentication required"}, status=401)
+        workspace, err = await aresolve_workspace(
+            user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
+        if err:
+            return None, None, None, err
+        runtime = None
+        if request.method == "POST":
+            runtime, err = parse_json_object(request, allow_empty=True)
+            if err:
+                return None, None, None, err
+        try:
+            artifact = await Artifact.objects.select_related("workspace").aget(
+                pk=artifact_id, workspace=workspace
+            )
+        except Artifact.DoesNotExist:
+            return None, None, None, JsonResponse({"error": "Artifact not found"}, status=404)
+        derive_missing_semantic_query_manifest(artifact)
+        try:
+            plan = plan_artifact_queries(artifact, runtime)
+        except DateContextError:
+            return (
+                None,
+                None,
+                None,
+                JsonResponse({"error": "Invalid artifact date context."}, status=400),
+            )
+        return user, artifact, plan, None
+
+
+class ArtifactDataExportListView(_ArtifactDataExportBase):
+    """
+    GET/POST /api/workspaces/<workspace_id>/artifacts/<artifact_id>/data-export/
+    Lists the datasets an artifact can export, without running any query.
+    """
+
+    async def post(self, request: HttpRequest, workspace_id, artifact_id) -> JsonResponse:
+        return await self.get(request, workspace_id, artifact_id)
+
+    async def get(self, request: HttpRequest, workspace_id, artifact_id) -> JsonResponse:
+        _user, artifact, plan, err = await self._resolve(request, workspace_id, artifact_id)
+        if err:
+            return err
+        return JsonResponse(
+            {"datasets": export_datasets(plan, artifact.data), "row_limit": EXPORT_ROW_LIMIT}
+        )
+
+
+class ArtifactDataExportCsvView(_ArtifactDataExportBase):
+    """
+    POST /api/workspaces/<workspace_id>/artifacts/<artifact_id>/data-export/csv/
+        ?query=<name> | ?static=<key>
+
+    Streams one dataset as CSV, capped at EXPORT_ROW_LIMIT rows. A capped export
+    says so in X-Scout-Export-Truncated and in its filename, never inside the data.
+    POST only: prod's session cookie is SameSite=None for embeds, so a GET would
+    let any cross-site page fire 50k-row Cube queries as the viewer; POST gets CSRF.
+    """
+
+    http_method_names = ["post", "options"]
+
+    async def post(self, request: HttpRequest, workspace_id, artifact_id) -> HttpResponse:
+        user, artifact, plan, err = await self._resolve(request, workspace_id, artifact_id)
+        if err:
+            return err
+        query_name = request.GET.get("query")
+        static_key = request.GET.get("static")
+        if (query_name is None) == (static_key is None):
+            return JsonResponse(
+                {"error": "Name exactly one dataset with ?query= or ?static=."}, status=400
+            )
+
+        if static_key is not None:
+            table = static_tabular_datasets(artifact.data).get(static_key)
+            if table is None:
+                return JsonResponse({"error": "Dataset not found"}, status=404)
+            return await self._csv_response(
+                user,
+                artifact,
+                dataset=static_key,
+                source=STATIC_SOURCE,
+                columns=table.columns,
+                rows=table.rows[:EXPORT_ROW_LIMIT],
+                truncated=len(table.rows) > EXPORT_ROW_LIMIT,
+                query=None,
+            )
+
+        planned = find_planned_query(plan, query_name)
+        if planned is None:
+            return JsonResponse({"error": "Dataset not found"}, status=404)
+        data_state = await current_artifact_data_state(artifact)
+        if not data_state["queryable"]:
+            return JsonResponse(
+                {"error": data_state["message"], "data_recovery": data_state}, status=409
+            )
+        lease = await acquire_export_lease(artifact.workspace_id)
+        if lease is None:
+            # A local throttle, not a full pool: answer busy without the capacity
+            # alert, whose rate-limit window would then hide a real Cube exhaustion.
+            return busy_response()
+        handed_off = False
+        try:
+            try:
+                try:
+                    result = await run_export_query(
+                        artifact.workspace, planned, user_id=str(user.id)
+                    )
+                finally:
+                    await lease.arelease_lock()
+            except TimeoutError:
+                logger.warning(
+                    "Artifact data export timed out after %ss: artifact=%s query=%s",
+                    EXPORT_TIMEOUT_SECONDS,
+                    artifact.id,
+                    _log_safe(query_name),
+                )
+                return JsonResponse({"error": EXPORT_TIMEOUT_MESSAGE}, status=504)
+            except Exception as exc:
+                reraise_if_capacity(exc)
+                logger.exception("Artifact data export failed: artifact=%s", artifact.id)
+                return JsonResponse({"error": "The export query failed."}, status=500)
+            raise_if_capacity_exhausted(result)
+            error = result.get("error")
+            if error:
+                return export_error_response(error)
+            response = await self._csv_response(
+                user,
+                artifact,
+                dataset=query_name,
+                source=QUERY_SOURCE,
+                columns=result.get("columns", []),
+                rows=result.get("rows", []),
+                truncated=bool(result.get("truncated")),
+                query=result.get("semantic_query"),
+                lease=lease,
+            )
+            handed_off = True
+            return response
+        finally:
+            if not handed_off:
+                lease.release()
+
+    async def _csv_response(
+        self, user, artifact, *, dataset, source, columns, rows, truncated, query, lease=None
+    ) -> StreamingHttpResponse:
+        # Otherwise the request's connection stays open until request_finished,
+        # which under ASGI fires after the last streamed byte. Runs on the request's
+        # thread-sensitive thread, which owns the connections the ORM calls opened.
+        # close_all rather than close_old_connections so CONN_MAX_AGE > 0 cannot
+        # quietly keep it open for the whole download.
+        await sync_to_async(connections.close_all)()
+        audit_logger.info(
+            "Artifact data export started: user=%s workspace=%s artifact=%s source=%s dataset=%r "
+            "rows=%d truncated=%s query=%s",
+            user.id,
+            artifact.workspace_id,
+            artifact.id,
+            source,
+            _log_safe(dataset),
+            len(rows),
+            truncated,
+            json.dumps(audit_query_shape(query), sort_keys=True) if query is not None else "-",
+        )
+        filename = export_filename(artifact.title, dataset, truncated=truncated)
+        chunks = iter_csv(columns, rows)
+        response = LeasedStreamingResponse(
+            leased_stream(chunks, lease) if lease is not None else chunks,
+            content_type="text/csv; charset=utf-8",
+            lease=lease,
+        )
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Cache-Control"] = "no-store"
+        response["X-Scout-Export-Row-Count"] = str(len(rows))
+        response["X-Scout-Export-Row-Limit"] = str(EXPORT_ROW_LIMIT)
+        response["X-Scout-Export-Truncated"] = "true" if truncated else "false"
         return response

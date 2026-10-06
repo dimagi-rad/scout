@@ -53,14 +53,15 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
   const canvasRef = useRef<ArtifactCanvasHandle>(null)
   const { artifact, isLoading, error } = useArtifactDetail(artifactId, workspaceId)
   const [dateSources, setDateSources] = useArtifactDateSources(artifact)
+  const runtime = artifact?.type === "story" ? {
+    as_of: artifact.date_context?.as_of, timezone: artifact.date_context?.timezone, sources: dateSources,
+  } : undefined
   const {
     queryData,
     isLoading: isDataLoading,
     error: dataError,
     refetch: refetchData,
-  } = useArtifactQueryData(artifactId, workspaceId, artifact?.type === "story" ? {
-    as_of: artifact.date_context?.as_of, timezone: artifact.date_context?.timezone, sources: dateSources,
-  } : undefined, dataOpen)
+  } = useArtifactQueryData(artifactId, workspaceId, runtime, dataOpen)
 
   useEffect(() => {
     if (adoptedWorkspaceRef.current) {
@@ -105,6 +106,7 @@ function ArtifactDetailContent({ artifactId, workspaceId }: { artifactId: string
             onViewData={handleViewData}
             onExportPdf={() => canvasRef.current?.exportPdf()}
             exportDisabled={!artifact}
+            download={artifact ? { artifactId, workspaceId, runtime } : undefined}
           />
         </div>
       </div>

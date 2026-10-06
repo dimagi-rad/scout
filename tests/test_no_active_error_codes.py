@@ -93,7 +93,7 @@ async def test_semantic_query_reports_a_missing_model_by_its_own_code(monkeypatc
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_semantic_query_reports_unloaded_data_by_its_own_code(monkeypatch, workspace):
-    def compiled(_workspace, _spec):
+    def compiled(_workspace, _spec, _max_limit):
         return {"model": None, "cube_schema": None}
 
     async def not_loaded(_workspace_id):
