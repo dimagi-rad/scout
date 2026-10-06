@@ -47,13 +47,15 @@ function DownloadCsvButton({
   columns,
   rows,
   truncated,
+  workspaceId,
 }: {
   columns: string[]
   rows: unknown[][]
   truncated?: boolean
+  workspaceId?: string
 }) {
   const title = useAppStore((s) => s.threads.find((t) => t.id === s.threadId)?.title)
-  const { role } = useWorkspaceRole()
+  const { role } = useWorkspaceRole(workspaceId)
   // UX gate only; fail closed while the role is unknown. Exports are write-role
   // (read_write/manage) — the server enforces it for server-side exports.
   if (rows.length === 0 || role === null || role === "read") return null
@@ -113,7 +115,15 @@ export interface QueryOutput {
 
 // `sql` is the tool-call input; the error envelope carries no sql_executed,
 // so it is the only way to show what was attempted when the query fails.
-export function QueryToolOutput({ output, sql }: { output: QueryOutput; sql?: string }) {
+export function QueryToolOutput({
+  output,
+  sql,
+  workspaceId,
+}: {
+  output: QueryOutput
+  sql?: string
+  workspaceId?: string
+}) {
   if (!output.success || !output.data) {
     return (
       <div className="space-y-3">
@@ -127,7 +137,7 @@ export function QueryToolOutput({ output, sql }: { output: QueryOutput; sql?: st
   const displaySql = sql_executed || sql
 
   const downloadButton = (
-    <DownloadCsvButton columns={columns} rows={rows} truncated={truncated} />
+    <DownloadCsvButton columns={columns} rows={rows} truncated={truncated} workspaceId={workspaceId} />
   )
 
   const resultsTable = rows.length > 0 && (
@@ -269,7 +279,13 @@ export interface SemanticQueryOutput {
   schema?: string
 }
 
-export function SemanticQueryToolOutput({ output }: { output: SemanticQueryOutput }) {
+export function SemanticQueryToolOutput({
+  output,
+  workspaceId,
+}: {
+  output: SemanticQueryOutput
+  workspaceId?: string
+}) {
   if (!output.success || !output.data) {
     return <ToolErrorRow error={output.error} fallback="Semantic query failed" />
   }
@@ -291,7 +307,7 @@ export function SemanticQueryToolOutput({ output }: { output: SemanticQueryOutpu
         </div>
       )}
 
-      <DownloadCsvButton columns={columns} rows={rows} truncated={truncated} />
+      <DownloadCsvButton columns={columns} rows={rows} truncated={truncated} workspaceId={workspaceId} />
 
       {rows.length > 0 && (
         <div className="overflow-x-auto rounded border border-border/50">

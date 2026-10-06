@@ -1,6 +1,9 @@
 // Leading characters that make Excel/Sheets evaluate a cell as a formula (OWASP CSV injection).
 const FORMULA_PREFIX = /^[=+\-@\t\r]/
 
+// Numeric text (Postgres numeric arrives as a string) cannot be a formula; prefixing would corrupt it.
+const PLAIN_NUMBER = /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/
+
 function csvCell(value: unknown): string {
   if (value === null || value === undefined) return ""
   let text: string
@@ -13,8 +16,9 @@ function csvCell(value: unknown): string {
   } else {
     text = String(value)
   }
-  // Numbers are exempt: a negative number is data, not a formula, and prefixing would stringify it.
-  if (typeof value !== "number" && typeof value !== "bigint" && FORMULA_PREFIX.test(text)) {
+  const isNumeric = typeof value === "number" || typeof value === "bigint" || PLAIN_NUMBER.test(text)
+  // Fullwidth forms (＝ ＋ － ＠) are formula starters in some CJK-locale spreadsheets.
+  if (!isNumeric && FORMULA_PREFIX.test(text.normalize("NFKC"))) {
     text = `'${text}`
   }
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
@@ -47,7 +51,11 @@ export function downloadCsv(filename: string, csv: string): void {
   a.href = url
   a.download = filename
   document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
+  try {
+    a.click()
+  } finally {
+    document.body.removeChild(a)
+    // Revoking synchronously can cancel the download in older Safari/Firefox.
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
 }

@@ -165,13 +165,12 @@ describe("Download CSV button", () => {
   })
 
   it("downloads the visible rows as CSV for query results", async () => {
-    const urlSpy = vi.fn(() => "blob:x")
     const blobs: Blob[] = []
-    URL.createObjectURL = vi.fn((b: Blob | MediaSource) => {
+    vi.spyOn(URL, "createObjectURL").mockImplementation((b: Blob | MediaSource) => {
       blobs.push(b as Blob)
-      return urlSpy()
+      return "blob:x"
     })
-    URL.revokeObjectURL = vi.fn()
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {})
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {})
     render(<QueryToolOutput output={{ success: true, data }} />)
     const button = screen.getByTestId("query-result-download")
@@ -187,6 +186,20 @@ describe("Download CSV button", () => {
   it("labels truncated results with the row count", () => {
     render(<QueryToolOutput output={{ success: true, data: { ...data, truncated: true } }} />)
     expect(screen.getByTestId("query-result-download")).toHaveTextContent("Download first 2 rows")
+  })
+
+  it("labels truncated semantic results too", () => {
+    render(<SemanticQueryToolOutput output={{ success: true, data: { ...data, truncated: true } }} />)
+    expect(screen.getByTestId("query-result-download")).toHaveTextContent("Download first 2 rows")
+  })
+
+  it("uses the role of the workspace passed in, not the active one", () => {
+    useAppStore.setState({
+      activeDomainId: "ws1",
+      domains: [{ id: "ws1", role: "manage" }, { id: "ws2", role: "read" }],
+    } as never)
+    render(<QueryToolOutput output={{ success: true, data }} workspaceId="ws2" />)
+    expect(screen.queryByTestId("query-result-download")).not.toBeInTheDocument()
   })
 
   it("is offered for semantic queries too, and hidden when there are no rows", () => {

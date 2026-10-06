@@ -36,6 +36,18 @@ describe("toCsv", () => {
     expect(toCsv(["n"], [[-5], [-1.5]])).toBe("n\r\n-5\r\n-1.5\r\n")
   })
 
+  it("leaves numeric strings (Postgres numeric) alone", () => {
+    expect(toCsv(["n"], [["-12.50"], ["+5"], ["-1e3"], [".5"]])).toBe("n\r\n-12.50\r\n+5\r\n-1e3\r\n.5\r\n")
+  })
+
+  it("still neutralises non-numeric text starting with a minus", () => {
+    expect(toCsv(["n"], [["-1+1"], ["-"]])).toBe("n\r\n'-1+1\r\n'-\r\n")
+  })
+
+  it("neutralises fullwidth formula starters", () => {
+    expect(toCsv(["c"], [["＝1+1"]])).toBe("c\r\n'＝1+1\r\n")
+  })
+
   it("quotes after prefixing when needed", () => {
     expect(toCsv(["c"], [["=a,b"]])).toBe("c\r\n\"'=a,b\"\r\n")
   })
