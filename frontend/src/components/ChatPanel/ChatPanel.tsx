@@ -32,7 +32,11 @@ import {
   ChatThinkingIndicator,
 } from "./ChatStatus"
 import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
-import { useGeneratedTitleRefresh, type TitleRefreshTrigger } from "./useGeneratedTitleRefresh"
+import {
+  TITLE_REFRESH_DELAYS_MS,
+  useGeneratedTitleRefresh,
+  type TitleRefreshTrigger,
+} from "./useGeneratedTitleRefresh"
 import { readDraft, writeDraft } from "./draftStorage"
 import { classifyChatError } from "./chatErrors"
 import { PendingRequestCard } from "./PendingRequestCard"
@@ -226,7 +230,42 @@ export function ChatPanel() {
   const refreshJobsRef = useRef(refreshJobs)
   refreshJobsRef.current = refreshJobs
 
-  const createChat = (chatWorkspaceId: string | null, chatThreadId: string) => {
+  /** The held send is over: settled if the server took it, else undone and handed back. */
+  function endHeldSend(sending: HeldSend, refused: boolean, target: Chat<UIMessage>) {
+    heldSends.delete(sending.threadId)
+    if (!refused) {
+      settleSendRef.current(sending.threadId)
+      return
+    }
+    target.messages = target.messages.filter((message) => message.id !== sending.messageId)
+    restoreHeldRef.current(sending.threadId)
+    if (sending.extra) {
+      returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra)
+    }
+  }
+
+  /** The shown thread polls for its generated title; a thread finished out of view does it here. */
+  function refreshThreadsAfterBackgroundTurn(workspaceId: string, finishedThreadId: string) {
+    const stillThere = () => useAppStore.getState().activeDomainId === workspaceId
+    const titlePending = () =>
+      useAppStore.getState().threads.find((thread) => thread.id === finishedThreadId)
+        ?.title_source === "first_message"
+    if (!stillThere()) return
+    void fetchThreadsRef.current(workspaceId)
+    let elapsed = 0
+    for (const delay of TITLE_REFRESH_DELAYS_MS) {
+      elapsed += delay
+      setTimeout(() => {
+        if (stillThere() && titlePending()) void fetchThreadsRef.current(workspaceId)
+      }, elapsed)
+    }
+  }
+
+  const createChat = (
+    chatWorkspaceId: string | null,
+    chatThreadId: string,
+    release: () => void,
+  ) => {
     const context = { workspaceId: chatWorkspaceId, threadId: chatThreadId }
     const shown = () =>
       contextRef.current.workspaceId === chatWorkspaceId
@@ -273,24 +312,12 @@ export function ChatPanel() {
         if (shown()) return
         const sending = heldSends.get(chatThreadId)
         if (sending) {
-          heldSends.delete(chatThreadId)
-          // No reply was pushed after it, so the server refused it.
-          const refused = isError && messages.at(-1)?.id === sending.messageId
-          if (refused) {
-            threadChat.messages = threadChat.messages.filter(
-              (message) => message.id !== sending.messageId,
-            )
-            restoreHeldRef.current(sending.threadId)
-            if (sending.extra) {
-              returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra)
-            }
-          } else {
-            settleSendRef.current(sending.threadId)
-          }
+          // Nothing streamed if no reply was pushed after it.
+          const streamed = sending.streamed || messages.at(-1)?.id !== sending.messageId
+          endHeldSend(sending, isError && !streamed, threadChat)
         }
-        if (chatWorkspaceId && contextRef.current.workspaceId === chatWorkspaceId) {
-          void fetchThreadsRef.current(chatWorkspaceId)
-        }
+        release()
+        if (chatWorkspaceId) refreshThreadsAfterBackgroundTurn(chatWorkspaceId, chatThreadId)
       },
     })
     return threadChat
@@ -339,6 +366,10 @@ export function ChatPanel() {
       if (!sending.streamed && sending.extra) {
         returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra)
       }
+    } else if (sending && !isChatRunning(chat)) {
+      // Its turn ended in the same commit as the switch, before the status effect
+      // saw it; the outcome is unknown, so show the server's copy, as on unmount.
+      endHeldSend(sending, false, chat)
     }
     cancelBusyRetry()
     hitRetryableRef.current = false
@@ -346,7 +377,8 @@ export function ChatPanel() {
     setBusyNotice(false)
     setOverloadNotice(false)
     clearError()
-  }, [threadId, heldSends, cancelBusyRetry, clearError])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId, chat, heldSends, cancelBusyRetry, clearError])
 
   // A chat that failed while another was shown is reloaded from the server, so a
   // Retry on its stale error would resend whatever turn is now last.
@@ -594,20 +626,14 @@ export function ChatPanel() {
     // chat ends it (the thread-change cleanup).
     if (status === "error" && busyError) return
     if (status !== "ready" && status !== "error") return
-    heldSends.delete(threadId)
     const refused = status === "error" && !sending.streamed
-    if (!refused) {
-      held.settleSend(sending.threadId)
-      return
-    }
-    setMessages((current) => current.filter((message) => message.id !== sending.messageId))
+    endHeldSend(sending, refused, chat)
+    if (!refused) return
     // A notice with Retry would resend whatever turn is now last, so those are
     // cleared and the card is the way on. Notices without one (a final reason, a
     // reconnect remedy, a stale thread) stay: they say what the card cannot.
     const refusal = error ? classifyChatError(error).kind : "generic"
     if (refusal === "generic" || refusal === "access-retry") clearError()
-    held.restore(sending.threadId)
-    if (sending.extra) returnToComposer(sending.workspaceId, sending.threadId, sending.extra)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, status, busyError])
 

@@ -54,6 +54,7 @@ function mockServer(
   ])
   const chatThreads: string[] = []
   const messageLoads: string[] = []
+  const threadLists = { count: 0 }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
     if (url === "/api/chat/") {
@@ -101,10 +102,13 @@ function mockServer(
       return Response.json(saved.get(messages[1]) ?? [])
     }
     if (/\/threads\/[^/]+\/viewed\/$/.test(url)) return new Response(null, { status: 204 })
-    if (/^\/api\/workspaces\/[^/]+\/threads\/$/.test(url)) return Response.json([])
+    if (/^\/api\/workspaces\/[^/]+\/threads\/$/.test(url)) {
+      threadLists.count += 1
+      return Response.json([])
+    }
     throw new Error(`Unexpected request: ${url}`)
   }))
-  return { finishA, finishB, chatThreads, messageLoads }
+  return { finishA, finishB, chatThreads, messageLoads, threadLists }
 }
 
 async function send(text: string) {
@@ -151,10 +155,14 @@ describe("concurrent chat threads (#847)", () => {
     await send("what about B?")
     await screen.findByText(B_REPLY)
     expect(server.chatThreads).toEqual([THREAD_A, THREAD_B])
+    await waitFor(() => expect(server.threadLists.count).toBeGreaterThan(0))
+    const listsBeforeAFinished = server.threadLists.count
 
     await act(async () => server.finishA())
+    // A finished out of view still updates the sidebar.
+    await waitFor(() => expect(server.threadLists.count).toBeGreaterThan(listsBeforeAFinished))
     // A's reply must not land in B when it finishes.
-    await waitFor(() => expect(screen.queryByText(A_FINAL, { exact: false })).toBeNull())
+    expect(screen.queryByText(A_FINAL, { exact: false })).toBeNull()
     expect(screen.getByText(B_REPLY)).toBeInTheDocument()
 
     await showThread(THREAD_A)
