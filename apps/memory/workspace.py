@@ -15,6 +15,12 @@ from django.db import transaction
 from django.db.models import Count, Max, Q
 
 from apps.knowledge.models import AgentLearning
+from apps.knowledge.services.retriever import (
+    LEARNINGS_CHAR_CAP,
+    WORKSPACE_MEMORY_ORDER,
+    KnowledgeRetriever,
+    format_workspace_memories,
+)
 from apps.memory.models import WorkspaceMemoryEvent
 from apps.memory.services import (
     MAX_WORKSPACE_MEMORY_CHARS,
@@ -27,7 +33,8 @@ from apps.workspaces.models import Workspace, WorkspaceRole
 
 audit_logger = logging.getLogger("scout.memory.audit")
 
-MAX_WORKSPACE_MEMORIES = 200
+# Matches how many the retriever injects, so no active memory is left out.
+MAX_WORKSPACE_MEMORIES = KnowledgeRetriever.MAX_AGENT_LEARNINGS
 MAX_TABLES = 20
 
 Source = WorkspaceMemoryEvent.Source
@@ -94,6 +101,24 @@ def _duplicate(workspace_id, content: str, *, excluding=None) -> AgentLearning |
     return rows.first()
 
 
+def _check_fits(workspace_id, candidate: AgentLearning, *, replacing=None) -> None:
+    """Refuse a write that would push any active memory out of the prompt."""
+    others = AgentLearning.objects.filter(workspace_id=workspace_id, is_active=True)
+    if replacing is not None:
+        others = others.exclude(pk=replacing)
+    rows = [*others.order_by(*WORKSPACE_MEMORY_ORDER), candidate]
+    if replacing is None and len(rows) > MAX_WORKSPACE_MEMORIES:
+        raise MemoryLimitReached(
+            f"This workspace already has {MAX_WORKSPACE_MEMORIES} memories. "
+            "A manager can delete some on the Memory page."
+        )
+    if len(format_workspace_memories(rows)) > LEARNINGS_CHAR_CAP:
+        raise MemoryLimitReached(
+            "This workspace's memory is full. Shorten or delete some memories on the "
+            "Memory page (a manager can delete any of them) before adding more."
+        )
+
+
 @sync_to_async
 def _create(workspace, user, content: str, tables: list[str], source: str) -> WorkspaceSaveResult:
     with transaction.atomic():
@@ -101,13 +126,10 @@ def _create(workspace, user, content: str, tables: list[str], source: str) -> Wo
         existing = _duplicate(workspace.pk, content)
         if existing is not None:
             return WorkspaceSaveResult(existing, created=False)
-        if AgentLearning.objects.filter(workspace_id=workspace.pk).count() >= (
-            MAX_WORKSPACE_MEMORIES
-        ):
-            raise MemoryLimitReached(
-                f"This workspace already has {MAX_WORKSPACE_MEMORIES} memories. "
-                "A manager can delete some on the Memory page."
-            )
+        _check_fits(
+            workspace.pk,
+            AgentLearning(description=content, applies_to_tables=tables, confidence_score=0.5),
+        )
         memory = AgentLearning.objects.create(
             workspace=workspace,
             description=content,
@@ -152,6 +174,7 @@ def _update(memory: AgentLearning, user, content: str, tables: list[str] | None)
         if tables is not None:
             locked.applies_to_tables = tables
             fields.append("applies_to_tables")
+        _check_fits(locked.workspace_id, locked, replacing=locked.pk)
         locked.save(update_fields=fields)
         event = WorkspaceMemoryEvent.objects.create(
             workspace_id=locked.workspace_id,

@@ -18,9 +18,7 @@ if TYPE_CHECKING:
     from apps.users.models import User
 
 MAX_MEMORY_CHARS = 500
-# Workspace memories explain data rules ("visits count only when ..."), so they
-# get more room than a personal preference does.
-MAX_WORKSPACE_MEMORY_CHARS = 1000
+MAX_WORKSPACE_MEMORY_CHARS = 500
 MIN_MEMORY_CHARS = 3
 MAX_PERSONAL_MEMORIES = 50
 # The block is re-billed on every LLM call of every turn, so it is capped like the
