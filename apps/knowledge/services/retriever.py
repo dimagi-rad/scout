@@ -97,7 +97,8 @@ MAX_COLUMN_NOTES_PER_TABLE = 40
 # Learnings (workspace memory) claim space first, but must not in turn evict every
 # curated entry and table. Space the others leave unused is handed back to them.
 # Saves are refused once the rendered memories would pass this cap, so every
-# memory a member saves reaches the prompt.
+# memory a member saves reaches the prompt (unless rows saved before the cap
+# already push a workspace past it).
 LEARNINGS_CHAR_CAP = KNOWLEDGE_CONTEXT_CHAR_BUDGET // 2
 
 

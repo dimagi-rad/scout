@@ -111,8 +111,8 @@ def _check_fits(workspace_id, candidate: AgentLearning, *, replacing=None) -> No
     rows = [*others.order_by(*WORKSPACE_MEMORY_ORDER), candidate]
     if replacing is None and len(rows) > MAX_WORKSPACE_MEMORIES:
         raise MemoryLimitReached(
-            f"This workspace already has {MAX_WORKSPACE_MEMORIES} memories. "
-            "A manager can delete some on the Memory page."
+            f"This workspace has {len(rows) - 1} memories, and the limit is "
+            f"{MAX_WORKSPACE_MEMORIES}. A manager can delete some on the Memory page."
         )
     size = len(format_workspace_memories(rows))
     if replacing is not None:
@@ -122,12 +122,14 @@ def _check_fits(workspace_id, candidate: AgentLearning, *, replacing=None) -> No
         if size <= len(format_workspace_memories(list(current))):
             return
     if size > LEARNINGS_CHAR_CAP:
-        raise MemoryLimitReached(
-            "This workspace's memory is full, so this edit can only make the memory shorter."
-            if replacing is not None
-            else "This workspace's memory is full. Shorten or delete some memories on the "
-            "Memory page (a manager can delete any of them) before adding more."
-        )
+        if replacing is not None:
+            message = "This workspace's memory is full, so this edit can only make it shorter."
+        else:
+            message = (
+                "This workspace's memory is full. Shorten or delete some memories on the "
+                "Memory page (a manager can delete any of them) before adding more."
+            )
+        raise MemoryLimitReached(message)
 
 
 @sync_to_async
