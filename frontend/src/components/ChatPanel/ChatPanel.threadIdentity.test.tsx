@@ -143,6 +143,10 @@ function renderChat(initialPath: string, sync = true, coldStart = false) {
 async function send(text: string) {
   await act(async () => {
     fireEvent.change(screen.getByRole("textbox"), { target: { value: text } })
+  })
+  // Sending waits for the thread's history to load.
+  await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled())
+  await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }))
   })
 }

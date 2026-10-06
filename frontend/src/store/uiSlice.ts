@@ -9,7 +9,7 @@ import {
   RECHECKABLE_REASONS,
   type AccessDenialReason,
 } from "@/lib/accessReasons"
-import { newLocalThreadId } from "./localThreads"
+import { forgetLocalThread, newLocalThreadId } from "./localThreads"
 
 export type { AccessDenialReason }
 
@@ -101,6 +101,8 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
         set({ threadId: newLocalThreadId(), activeArtifactId: null })
       },
       selectThread: async (id: string) => {
+        // Opened from the list: another tab may have sent in it, so it has history.
+        forgetLocalThread(id)
         const isCurrent = requests.start()
         set({ threadId: id, activeArtifactId: null })
         const workspaceId = get().activeDomainId

@@ -210,7 +210,10 @@ export function ChatPanel() {
   // Each thread's chat runs on its own, so another thread's send must not replace it.
   const [heldSends] = useState(() => new Map<string, HeldSend>())
   // The chat whose server history is loaded; a fresh chat is empty until then.
-  const [loadedChatKey, setLoadedChatKey] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState<{ chat: Chat<UIMessage> | null; reloadKey: number }>({
+    chat: null,
+    reloadKey: 0,
+  })
   // A left chat can finish after the panel is gone; it must not start polls then.
   const mountedRef = useRef(true)
   useEffect(() => {
@@ -405,6 +408,14 @@ export function ChatPanel() {
   }, [threadId, chat, heldSends, cancelBusyRetry, clearError])
 
   const isStreaming = status === "streaming" || status === "submitted"
+  // While a thread's history (re)loads it is not a new chat, and no turn may start: a
+  // turn racing the load would be duplicated or lost by it. Only a chat this tab just
+  // made up (New chat) has no history to wait for; the thread list can't tell, as it
+  // loads late and holds only the latest threads.
+  const historyLoading =
+    !isLocalThread(threadId)
+    && !isStreaming
+    && !(loaded.chat === chat && loaded.reloadKey === messageReloadKey)
 
   const loadThreadArtifacts = useCallback(async () => {
     if (!activeDomainId || !threadId) return
@@ -454,13 +465,17 @@ export function ChatPanel() {
   // workspace's localStorage; a 404 instead drops the saved id and starts fresh.
   useEffect(() => {
     if (!threadId || !activeDomainId) return
-    // A turn still streaming holds the conversation in memory, ahead of the server's.
+    let cancelled = false
+    const reloadKey = messageReloadKey
+    // A turn still streaming holds the conversation in memory, ahead of the server's;
+    // its history loaded before it could start.
     if (isChatRunning(chat)) {
       writeSavedThreadId(activeDomainId, threadId)
-      return
+      void Promise.resolve().then(() => {
+        if (!cancelled) setLoaded({ chat, reloadKey })
+      })
+      return () => { cancelled = true }
     }
-    let cancelled = false
-    const loadKey = chatKey
 
     async function loadMessages() {
       try {
@@ -469,22 +484,14 @@ export function ChatPanel() {
         >(`/api/workspaces/${activeDomainId}/threads/${threadId}/messages/?include=pending`)
         if (cancelled) return
         // A server from before held requests ignores ``include`` and sends the bare list.
-        const loaded = Array.isArray(response)
+        const history = Array.isArray(response)
           ? { messages: response, pending_request: null }
           : response
-        setLoadedChatKey(loadKey)
-        if (isChatRunning(chat)) {
-          // A turn sent while this loaded stays; the history goes in ahead of it. The
-          // stream only ever rewrites the last message, so this is safe mid-turn, and
-          // unlike a reload after the turn it keeps a stopped or failed reply.
-          setMessages((current) => {
-            const shown = new Set(current.map((message) => message.id))
-            return [...loaded.messages.filter((message) => !shown.has(message.id)), ...current]
-          })
-          return
-        }
-        setMessages(loaded.messages)
-        held.onMessagesLoaded(loaded.pending_request)
+        setLoaded({ chat, reloadKey })
+        // A shown thread can't send until its history loads, so only a new chat (no
+        // history) or a retry timer can have started a turn; the live turn wins.
+        if (!isChatRunning(chat)) setMessages(history.messages)
+        held.onMessagesLoaded(history.pending_request)
         // The reloaded conversation carries whatever the resume streamed.
         resetResumeStreamRef.current()
         if (activeDomainId && threadId) {
@@ -500,9 +507,8 @@ export function ChatPanel() {
           return
         }
         // New thread or transient fetch failure — start with empty.
-        setLoadedChatKey(loadKey)
-        if (isChatRunning(chat)) return
-        setMessages([])
+        setLoaded({ chat, reloadKey })
+        if (!isChatRunning(chat)) setMessages([])
         resetResumeStreamRef.current()
       }
     }
@@ -720,6 +726,11 @@ export function ChatPanel() {
   }
 
   async function handleSend(text: string) {
+    // The composer blocks this; keep the typed text rather than drop it.
+    if (historyLoading && !held.adding) {
+      setInput(text)
+      return
+    }
     if (held.adding) {
       const sentFrom = threadId
       const outcome = await held.add(text)
@@ -753,6 +764,7 @@ export function ChatPanel() {
   }
 
   function handleSendHeldNow() {
+    if (historyLoading) return
     const pending = held.takeForSend()
     if (pending) sendHeld(pending)
   }
@@ -794,12 +806,7 @@ export function ChatPanel() {
     )
   }
 
-  // Until a thread's history arrives, it is not a new, empty chat; only one this tab
-  // just made up (New chat) has none to wait for. The list can't tell: it loads late
-  // and holds only the latest threads.
-  const historyPending =
-    loadedChatKey !== chatKey && !isChatRunning(chat) && !isLocalThread(threadId)
-  if (visibleMessages.length === 0 && !held.pending && historyPending) {
+  if (visibleMessages.length === 0 && !held.pending && historyLoading) {
     return (
       <div className="flex h-full min-w-0 flex-col" data-testid="chat-history-loading">
         {loadBanners}
@@ -861,7 +868,7 @@ export function ChatPanel() {
               onEdit={handleEditHeld}
               onRemovePart={held.removePart}
               onAbandonEdit={(text) => returnToComposer(activeDomainId, threadId, text)}
-              actionsDisabled={isStreaming}
+              actionsDisabled={isStreaming || historyLoading}
               onDiscard={() => void held.discard()}
             />
           )}
@@ -920,6 +927,7 @@ export function ChatPanel() {
             setInput={setInput}
             onSend={handleSend}
             isStreaming={isStreaming}
+            sendBlocked={historyLoading}
             onStop={handleStop}
             mode={held.adding ? "add" : "send"}
           />

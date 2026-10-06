@@ -8,12 +8,15 @@ import type { PendingRequest } from "@/api/jobs"
 import type { Thread } from "@/store/uiSlice"
 import { ChatPanel } from "./ChatPanel"
 
-const jobs = vi.hoisted(() => ({ setPendingRequest: vi.fn() }))
+const jobs = vi.hoisted(() => ({
+  setPendingRequest: vi.fn(),
+  recentlyCompleted: [] as string[],
+}))
 
 vi.mock("@/contexts/WorkspaceJobsContext", () => ({
   useWorkspaceJobs: () => ({
     jobsByThreadId: {},
-    recentlyCompletedThreadIds: [],
+    recentlyCompletedThreadIds: jobs.recentlyCompleted,
     recentTerminationsByToolCallId: {},
     pendingByThreadId: {},
     setPendingRequest: jobs.setPendingRequest,
@@ -86,6 +89,13 @@ function mockServer({
   ])
   const chatThreads: string[] = []
   const messageLoads: string[] = []
+  const heldHistories = new Map<string, Promise<void>>()
+  /** Holds the thread's next history load until the returned release is called. */
+  function holdNextHistory(threadId: string) {
+    let release!: () => void
+    heldHistories.set(threadId, new Promise<void>((resolve) => (release = resolve)))
+    return () => release()
+  }
   const threadLists = { count: 0 }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
@@ -136,6 +146,11 @@ function mockServer({
     if (messages) {
       messageLoads.push(messages[1])
       const snapshot = saved.get(messages[1]) ?? []
+      const heldHistory = heldHistories.get(messages[1])
+      if (heldHistory) {
+        heldHistories.delete(messages[1])
+        await heldHistory
+      }
       const isNew = messages[1] !== THREAD_A && messages[1] !== THREAD_B
       if (holdHistoryOf === messages[1] || (holdHistoryOf === "new" && isNew)) {
         holdHistoryOf = null
@@ -150,7 +165,9 @@ function mockServer({
     }
     throw new Error(`Unexpected request: ${url}`)
   }))
-  return { finishA, finishB, loadBHistory, chatThreads, messageLoads, threadLists }
+  return {
+    finishA, finishB, loadBHistory, holdNextHistory, chatThreads, messageLoads, threadLists,
+  }
 }
 
 async function send(text: string) {
@@ -168,6 +185,7 @@ async function showThread(threadId: string) {
 
 beforeEach(() => {
   localStorage.clear()
+  jobs.recentlyCompleted = []
   // Selecting a workspace starts a fresh thread, so the thread is set after it.
   useAppStore.setState({ domains: [workspace()], domainsStatus: "loaded", activeDomainId: WS })
   useAppStore.setState({ threadId: THREAD_A, threads: [], threadsStatus: "loaded" })
@@ -446,6 +464,38 @@ function gate() {
   const promise = new Promise<void>((resolve) => (open = resolve))
   return { promise, open }
 }
+
+describe("sending waits for the shown thread's history (#847)", () => {
+  it("blocks Send while a finished resume reloads the thread, keeping the typed text", async () => {
+    const server = mockServer()
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await screen.findByText("Chat A history.")
+    const release = server.holdNextHistory(THREAD_A)
+
+    // A background resume of A finished, so A reloads its conversation.
+    jobs.recentlyCompleted = [THREAD_A]
+    await act(async () => useAppStore.setState({ threads: [listed(THREAD_A)] }))
+    await waitFor(() =>
+      expect(server.messageLoads.filter((id) => id === THREAD_A)).toHaveLength(2),
+    )
+    await act(async () => {
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "next question" } })
+    })
+    const sendButton = screen.getByRole("button", { name: "Send message" })
+    expect(sendButton).toBeDisabled()
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" })
+    })
+    expect(server.chatThreads).toEqual([])
+    expect(screen.getByRole("textbox")).toHaveValue("next question")
+
+    jobs.recentlyCompleted = []
+    await act(async () => release())
+    await waitFor(() => expect(sendButton).toBeEnabled())
+    await act(async () => fireEvent.click(sendButton))
+    expect(server.chatThreads).toEqual([THREAD_A])
+  })
+})
 
 describe("overload retries per chat (#847)", () => {
   it("still gives a chat its retry while another chat's retry runs", async () => {

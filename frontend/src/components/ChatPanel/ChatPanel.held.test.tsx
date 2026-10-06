@@ -307,7 +307,7 @@ describe("a message sent while the chat's data loads", () => {
     expect(server.chatBodies[1].data).not.toHaveProperty("pendingRequestVersion")
   })
 
-  it("loads the chat's history after a Send now that went out while it was loading", async () => {
+  it("waits for the chat's history before Send now, then shows it once", async () => {
     const server = mockServer()
     server.pending = request([{ id: "p1", text: QUESTION }], {
       thread_id: useAppStore.getState().threadId,
@@ -317,62 +317,30 @@ describe("a message sent while the chat's data loads", () => {
     server.messages = [{ id: "earlier", role: "assistant", parts: [{ type: "text", text: "Earlier answer." }] }]
     let loadHistory: () => void = () => {}
     server.messagesGate = new Promise((resolve) => (loadHistory = resolve))
-    let answer: () => void = () => {}
-    server.heldSendGate = new Promise((resolve) => (answer = resolve))
     renderChat()
 
     const card = await screen.findByTestId("pending-request-card")
+    // A turn racing the load would be duplicated or lost by it.
+    expect(within(card).getByTestId("pending-request-send-now")).toBeDisabled()
     await act(async () => {
       fireEvent.click(within(card).getByTestId("pending-request-send-now"))
     })
-    await waitFor(() => expect(server.chatBodies).toHaveLength(2))
-    // The history lands mid-turn, so it cannot be applied then.
-    await act(async () => loadHistory())
-    server.messagesGate = null
-    server.messages = [
-      ...server.messages,
-      { id: "sent", role: "user", parts: [{ type: "text", text: QUESTION }] },
-      { id: "echo", role: "assistant", parts: [{ type: "text", text: `echo: ${QUESTION}` }] },
-    ]
-    await act(async () => answer())
+    expect(server.chatBodies).toHaveLength(1)
 
+    await act(async () => loadHistory())
     await screen.findByText("Earlier answer.")
-    expect(screen.getByText(`echo: ${QUESTION}`)).toBeInTheDocument()
-  })
-
-  it("keeps a reply that failed after a Send now during the history load", async () => {
-    const server = mockServer()
-    server.pending = request([{ id: "p1", text: QUESTION }], {
-      thread_id: useAppStore.getState().threadId,
-      thread_job_state: "failed",
-    })
-    server.chatBodies.push({})
-    server.messages = [{ id: "earlier", role: "assistant", parts: [{ type: "text", text: "Earlier answer." }] }]
-    let loadHistory: () => void = () => {}
-    server.messagesGate = new Promise((resolve) => (loadHistory = resolve))
-    let answer: () => void = () => {}
-    server.heldSendGate = new Promise((resolve) => (answer = resolve))
-    server.failHeldSendMidStream = true
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
-    renderChat()
-
-    const card = await screen.findByTestId("pending-request-card")
+    await waitFor(() =>
+      expect(within(card).getByTestId("pending-request-send-now")).toBeEnabled(),
+    )
     await act(async () => {
       fireEvent.click(within(card).getByTestId("pending-request-send-now"))
     })
-    await waitFor(() => expect(server.chatBodies).toHaveLength(2))
-    await act(async () => loadHistory())
-    await act(async () => answer())
-
-    // The apology exists only here; the server has no copy to reload.
-    await screen.findByText("Sorry, something went wrong.")
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)))
-    expect(screen.getByText("Earlier answer.")).toBeInTheDocument()
-    expect(screen.getByText("Sorry, something went wrong.")).toBeInTheDocument()
-    consoleError.mockRestore()
+    await screen.findByText(`echo: ${QUESTION}`)
+    expect(screen.getAllByText("Earlier answer.")).toHaveLength(1)
+    expect(screen.getAllByText(`echo: ${QUESTION}`)).toHaveLength(1)
   })
 
-  it("keeps a stopped reply after a Send now during the history load", async () => {
+  it("keeps a stopped reply without reloading over it", async () => {
     const server = mockServer()
     server.pending = request([{ id: "p1", text: QUESTION }], {
       thread_id: useAppStore.getState().threadId,
@@ -380,24 +348,26 @@ describe("a message sent while the chat's data loads", () => {
     })
     server.chatBodies.push({})
     server.messages = [{ id: "earlier", role: "assistant", parts: [{ type: "text", text: "Earlier answer." }] }]
-    let loadHistory: () => void = () => {}
-    server.messagesGate = new Promise((resolve) => (loadHistory = resolve))
     server.stallHeldReply = true
     renderChat()
 
+    await screen.findByText("Earlier answer.")
     const card = await screen.findByTestId("pending-request-card")
+    await waitFor(() =>
+      expect(within(card).getByTestId("pending-request-send-now")).toBeEnabled(),
+    )
     await act(async () => {
       fireEvent.click(within(card).getByTestId("pending-request-send-now"))
     })
     await screen.findByText("Partial answer")
-    await act(async () => loadHistory())
-    await screen.findByText("Earlier answer.")
+    const loads = server.messageLoads
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Stop response" }))
     })
     await screen.findByTestId("chat-stopped-notice")
     await act(async () => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(server.messageLoads).toBe(loads)
     expect(screen.getByText("Earlier answer.")).toBeInTheDocument()
     expect(screen.getByText("Partial answer")).toBeInTheDocument()
   })
