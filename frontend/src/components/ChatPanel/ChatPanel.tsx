@@ -108,7 +108,9 @@ export function ChatPanel() {
   const prevStatusRef = useRef<{ chatKey: string; status: string }>({ chatKey: "", status: "" })
   // Transient-overload auto-retry bookkeeping; see ./overloadRetry.
   const hitRetryableRef = useRef(false)
-  const retriedRef = useRef(false)
+  // Chats whose turn already used its one overload retry; per chat, as a left
+  // chat's retry can still be running.
+  const [retriedChats] = useState(() => new Set<string>())
   const prevRetryStatusRef = useRef<{ chatKey: string; status: string }>({
     chatKey: "",
     status: "",
@@ -208,6 +210,9 @@ export function ChatPanel() {
   const [heldSends] = useState(() => new Map<string, HeldSend>())
   // The chat whose server history is loaded; a fresh chat is empty until then.
   const [loadedChatKey, setLoadedChatKey] = useState<string | null>(null)
+  // Chats whose history load landed mid-turn, so it was not applied; reloaded once
+  // the turn ends.
+  const [historyStaleChats] = useState(() => new Set<string>())
   // A left chat can finish after the panel is gone; it must not start polls then.
   const mountedRef = useRef(true)
   useEffect(() => {
@@ -365,7 +370,7 @@ export function ChatPanel() {
 
   function resetOverloadState() {
     hitRetryableRef.current = false
-    retriedRef.current = false
+    retriedChats.delete(chatKey)
     setOverloadNotice(false)
     setBusyNotice(false)
     cancelBusyRetry()
@@ -464,8 +469,12 @@ export function ChatPanel() {
         const response = await api.get<
           UIMessage[] | { messages: UIMessage[]; pending_request: PendingRequest | null }
         >(`/api/workspaces/${activeDomainId}/threads/${threadId}/messages/?include=pending`)
-        // A turn sent while this loaded holds the conversation now; don't replace it.
-        if (cancelled || isChatRunning(chat)) return
+        if (cancelled) return
+        // A turn sent while this loaded must not be replaced; reload once it ends.
+        if (isChatRunning(chat)) {
+          historyStaleChats.add(loadKey)
+          return
+        }
         // A server from before held requests ignores ``include`` and sends the bare list.
         const loaded = Array.isArray(response)
           ? { messages: response, pending_request: null }
@@ -488,7 +497,10 @@ export function ChatPanel() {
           return
         }
         // New thread or transient fetch failure — start with empty.
-        if (isChatRunning(chat)) return
+        if (isChatRunning(chat)) {
+          historyStaleChats.add(loadKey)
+          return
+        }
         setMessages([])
         setLoadedChatKey(loadKey)
         resetResumeStreamRef.current()
@@ -531,6 +543,12 @@ export function ChatPanel() {
   // tokens. The Thread.updated_at bump from the resume task triggers the
   // sidebar refetch, so the user still sees the green-dot indicator and can
   // click into the thread to get the new agent message on a fresh load.
+  useEffect(() => {
+    if (isStreaming || !historyStaleChats.has(chatKey)) return
+    historyStaleChats.delete(chatKey)
+    setMessageReloadKey((k) => k + 1)
+  }, [chatKey, isStreaming, historyStaleChats])
+
   useEffect(() => {
     if (isStreaming) return
     if (threadId && recentlyCompletedThreadIds.includes(threadId)) {
@@ -611,17 +629,17 @@ export function ChatPanel() {
 
     const action = decideOverloadAction({
       hitRetryable: hitRetryableRef.current,
-      alreadyRetried: retriedRef.current,
+      alreadyRetried: retriedChats.has(chatKey),
     })
     hitRetryableRef.current = false
     if (action === "retry") {
-      retriedRef.current = true
+      retriedChats.add(chatKey)
       void regenerate()
     } else if (action === "notify") {
-      retriedRef.current = false
+      retriedChats.delete(chatKey)
       setOverloadNotice(true)
     }
-  }, [chatKey, status, regenerate, busyToken, busyError])
+  }, [chatKey, status, regenerate, busyToken, busyError, retriedChats])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -780,8 +798,10 @@ export function ChatPanel() {
     )
   }
 
-  // Until a switched-to thread's history arrives, it is not a new, empty chat.
-  const historyPending = loadedChatKey !== chatKey && !isChatRunning(chat)
+  // Until a listed thread's history arrives, it is not a new, empty chat. One not
+  // in the list (New chat) has none to wait for.
+  const historyPending =
+    loadedChatKey !== chatKey && !isChatRunning(chat) && currentThread !== undefined
   if (visibleMessages.length === 0 && !held.pending && historyPending) {
     return (
       <div className="flex h-full min-w-0 flex-col" data-testid="chat-history-loading">

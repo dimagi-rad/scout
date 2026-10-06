@@ -36,6 +36,8 @@ interface Server {
   streamed: { id: number; run: string; text: string; done: boolean }[]
   /** Answer edits with 409 version, as when another tab changed the request. */
   editConflict: boolean
+  /** Holds the saved-history load until resolved. */
+  messagesGate: Promise<void> | null
 }
 
 function request(parts: { id: string; text: string }[], overrides: Partial<PendingRequest> = {}) {
@@ -107,6 +109,7 @@ function mockServer(): Server {
     patches: [],
     streamed: [],
     editConflict: false,
+    messagesGate: null,
   }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
@@ -179,6 +182,7 @@ function mockServer(): Server {
     }
     if (url.endsWith("/messages/?include=pending")) {
       server.messageLoads += 1
+      if (server.messagesGate) await server.messagesGate
       return Response.json({ messages: server.messages, pending_request: server.pending })
     }
     if (url.includes("/resume-stream/")) {
@@ -284,6 +288,39 @@ describe("a message sent while the chat's data loads", () => {
     await screen.findByText(`echo: ${FOLLOW_UP}`)
     expect(server.chatBodies).toHaveLength(2)
     expect(server.chatBodies[1].data).not.toHaveProperty("pendingRequestVersion")
+  })
+
+  it("loads the chat's history after a Send now that went out while it was loading", async () => {
+    const server = mockServer()
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    server.messages = [{ id: "earlier", role: "assistant", parts: [{ type: "text", text: "Earlier answer." }] }]
+    let loadHistory: () => void = () => {}
+    server.messagesGate = new Promise((resolve) => (loadHistory = resolve))
+    let answer: () => void = () => {}
+    server.heldSendGate = new Promise((resolve) => (answer = resolve))
+    renderChat()
+
+    const card = await screen.findByTestId("pending-request-card")
+    await act(async () => {
+      fireEvent.click(within(card).getByTestId("pending-request-send-now"))
+    })
+    await waitFor(() => expect(server.chatBodies).toHaveLength(2))
+    // The history lands mid-turn, so it cannot be applied then.
+    await act(async () => loadHistory())
+    server.messagesGate = null
+    server.messages = [
+      ...server.messages,
+      { id: "sent", role: "user", parts: [{ type: "text", text: QUESTION }] },
+      { id: "echo", role: "assistant", parts: [{ type: "text", text: `echo: ${QUESTION}` }] },
+    ]
+    await act(async () => answer())
+
+    await screen.findByText("Earlier answer.")
+    expect(screen.getByText(`echo: ${QUESTION}`)).toBeInTheDocument()
   })
 
   it("offers Send now once its load ended without answering it, naming its version", async () => {
