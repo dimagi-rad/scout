@@ -168,11 +168,11 @@ Artifacts have no public share links.
 
 | Method | Path | Role | Description |
 |--------|------|------|-------------|
-| GET | `…/knowledge/` | read | List knowledge entries and agent learnings. |
-| POST | `…/knowledge/` | read_write | Create a knowledge entry. Learnings can't be created here. |
-| GET | `…/knowledge/<item_id>/` | read | One entry or learning. |
-| PUT | `…/knowledge/<item_id>/` | read_write | Partial update of an entry or learning. |
-| DELETE | `…/knowledge/<item_id>/` | read_write | Delete an entry or learning. |
+| GET | `…/knowledge/` | read | List knowledge entries. Workspace memory is under `…/memory/`. |
+| POST | `…/knowledge/` | read_write | Create a knowledge entry. |
+| GET | `…/knowledge/<item_id>/` | read | One entry. |
+| PUT | `…/knowledge/<item_id>/` | read_write | Partial update of an entry. |
+| DELETE | `…/knowledge/<item_id>/` | read_write | Delete an entry. |
 | GET | `…/knowledge/export/` | read | Entries as a zip of markdown files with YAML frontmatter. |
 | POST | `…/knowledge/import/` | read_write | Import a zip of markdown files. |
 
@@ -180,13 +180,13 @@ Artifacts have no public share links.
 
 | Parameter | Description |
 |-----------|-------------|
-| `type` | `entry` or `learning`. Both when omitted. |
-| `search` | Case-insensitive match on entry title/content, or learning description, original error and SQL. |
+| `type` | `entry` (the only type). |
+| `search` | Case-insensitive match on entry title or content. |
 | `page` | Page number (default 1). |
 | `page_size` | Items per page (default 50, max 200). |
 
-The response has `results` (entries and learnings merged, newest first; each
-item has a `type` field) and `pagination` (`page`, `page_size`, `total_count`,
+The response has `results` (entries, newest first; each item has a `type`
+field) and `pagination` (`page`, `page_size`, `total_count`,
 `total_pages`, `has_next`, `has_previous`).
 
 ### Create an entry
@@ -209,6 +209,26 @@ frontmatter; files without one are skipped. An entry whose title matches an
 existing entry updates it in place. The response counts `created`, `updated`
 and `skipped` entries and lists per-file `errors`. It is 207 when any file
 failed, and the whole import rolls back on a database error.
+
+
+## Memory
+
+Memory carries preferences and data rules between chats (#849). Personal memory
+is private to its owner and applies in every workspace. Workspace memory is shared
+by a workspace's members.
+
+| Method | Path | Role | Description |
+|--------|------|------|-------------|
+| GET | `/api/memory/personal/` | signed in | Your personal memories. |
+| POST | `/api/memory/personal/` | signed in | Add one: `{"content": "..."}`. Returns 201, or 200 with the existing row for a repeat. |
+| PATCH | `/api/memory/personal/<memory_id>/` | owner | Edit `content`. Another user's id is a 404. |
+| DELETE | `/api/memory/personal/<memory_id>/` | owner | Delete. |
+| GET | `…/memory/` | read | The workspace's active memories, with `can_add` for the caller and `can_edit` per memory. |
+| POST | `…/memory/` | read_write | Add one: `{"content": "...", "tables": [...]}` (`tables` optional). |
+| PATCH | `…/memory/<memory_id>/` | author (read_write) or manage | Edit `content` and, optionally, `tables`. |
+| DELETE | `…/memory/<memory_id>/` | author (read_write) or manage | Delete. |
+
+Every workspace memory change is recorded with its actor and text.
 
 ## Semantic model
 

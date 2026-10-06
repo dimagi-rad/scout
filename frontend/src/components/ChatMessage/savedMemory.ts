@@ -2,6 +2,7 @@ import { parseOutput } from "./artifactReferences"
 
 export const MEMORY_TOOL_LAYERS: Record<string, MemoryLayer> = {
   save_personal_memory: "personal",
+  save_workspace_memory: "workspace",
 }
 
 export type MemoryLayer = "personal" | "workspace"

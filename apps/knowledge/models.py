@@ -4,7 +4,7 @@ Knowledge layer models for Scout data agent platform.
 Provides semantic knowledge beyond the auto-generated data dictionary:
 - TableKnowledge: Enriched table metadata
 - KnowledgeEntry: General-purpose knowledge (title + markdown + tags)
-- AgentLearning: Agent-discovered corrections
+- AgentLearning: Workspace memory, shared notes about the workspace's data
 """
 
 import uuid
@@ -115,11 +115,12 @@ class KnowledgeEntry(models.Model):
 
 class AgentLearning(models.Model):
     """
-    A correction the agent discovered through trial and error.
+    A workspace memory: a shared note about how this workspace's data should be
+    combined or interpreted, injected into every member's chats (#849).
 
-    When a query fails or produces suspicious results, the agent
-    investigates, fixes the issue, and saves the pattern so it
-    doesn't repeat the same mistake.
+    Saved by the agent from a chat or added on the Memory page. Rows from before
+    #849 are data-model corrections with a category and tables; neither is
+    required now.
     """
 
     CATEGORY_CHOICES = [
@@ -150,7 +151,9 @@ class AgentLearning(models.Model):
         choices=CATEGORY_CHOICES,
         default="other",
     )
-    applies_to_tables = models.JSONField(default=list, help_text="Tables this learning applies to.")
+    applies_to_tables = models.JSONField(
+        default=list, blank=True, help_text="Tables this memory applies to, if any."
+    )
 
     original_error = models.TextField(
         blank=True, help_text="The error message or suspicious result."
@@ -177,24 +180,14 @@ class AgentLearning(models.Model):
         settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-confidence_score", "-times_applied"]
         indexes = [
             models.Index(fields=["workspace", "is_active", "-confidence_score"]),
+            models.Index(fields=["workspace", "is_active", "-created_at"]),
         ]
 
     def __str__(self):
         return f"Learning: {self.description[:80]}..."
-
-    def increase_confidence(self, amount: float = 0.1) -> float:
-        """Increase the confidence score, capping at 1.0."""
-        self.confidence_score = min(1.0, self.confidence_score + amount)
-        self.save(update_fields=["confidence_score"])
-        return self.confidence_score
-
-    def decrease_confidence(self, amount: float = 0.1) -> float:
-        """Decrease the confidence score, flooring at 0.0."""
-        self.confidence_score = max(0.0, self.confidence_score - amount)
-        self.save(update_fields=["confidence_score"])
-        return self.confidence_score

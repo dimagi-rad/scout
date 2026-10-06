@@ -64,10 +64,11 @@ def test_read_graph_keeps_queries_and_artifact_inspection_but_filters_writes(wor
     assert "artifact_graph_overview" in tools
     assert "get_artifact_semantic_queries" in tools
     assert "canvas_read" in tools
+    # Offered so the agent can explain the refusal; the tool itself denies readers.
+    assert "save_workspace_memory" in tools
     assert {
         "run_materialization",
         "cancel_materialization",
-        "save_learning",
         "save_as_recipe",
         "artifact_manager",
         "artifact_write",
@@ -94,7 +95,7 @@ def test_write_graph_advertises_shared_mutations(workspace, write_user):
 
     assert {
         "run_materialization",
-        "save_learning",
+        "save_workspace_memory",
         "save_as_recipe",
         "artifact_manager",
         "canvas_manager",
@@ -190,7 +191,7 @@ async def test_graph_resolves_live_role_for_bound_tools_and_prompt(
         assert "canvas_read" in names
     assert ("run_materialization" in names) is writer
     assert ("artifact_manager" in names) is writer
-    assert ("save_learning" in names) is writer
+    assert ("save_workspace_memory" in names) is interactive
     assert ("save_as_recipe" in names) is writer
     assert ("canvas_manager" in names) is (writer and interactive)
     assert prompt.call_args.kwargs["write_capable"] is writer

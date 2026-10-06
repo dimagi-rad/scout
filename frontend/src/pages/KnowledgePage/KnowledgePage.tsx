@@ -165,7 +165,7 @@ export function KnowledgePage() {
         <div>
           <h1 className="text-2xl font-bold">Knowledge Base</h1>
           <p className="text-muted-foreground">
-            Manage knowledge entries and learnings
+            Manage knowledge entries. Notes Scout saves about this data are on the Memory page.
           </p>
         </div>
         <div className="flex items-center gap-2">

@@ -29,9 +29,11 @@ from apps.agents.subagents.events import (
 )
 from apps.agents.tool_results import compact_tool_results
 from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
-from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
-from apps.agents.tools.memory_tool import create_personal_memory_tool
+from apps.agents.tools.memory_tool import (
+    create_personal_memory_tool,
+    create_workspace_memory_tool,
+)
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.memory.services import has_personal_memory
@@ -267,7 +269,6 @@ def _build_tools(
     from apps.agents.tools.canvas_tool import create_canvas_read_tool  # noqa: PLC0415 — cycle
 
     if write_capable:
-        tools.append(create_save_learning_tool(workspace, user))
         tools.append(
             create_artifact_manager_tool(
                 workspace,
@@ -302,6 +303,10 @@ def _build_tools(
     if interactive and has_personal_memory(user):
         # Not gated on write_capable: it writes only the user's own private rows.
         tools.append(create_personal_memory_tool(user))
+        # Offered to every role so the agent can explain a refusal; the tool
+        # itself checks for a write role on each call. Headless recipe runs don't
+        # get it: no one is there to see the chip or undo a save steered by data.
+        tools.append(create_workspace_memory_tool(workspace, user))
     if write_capable:
         tools.append(create_recipe_tool(workspace, user))
     if not interactive and write_capable:

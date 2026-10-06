@@ -385,7 +385,7 @@ class TestAgentGraphAssembly:
         # MCP tool should be first
         assert "semantic_query" in tool_names
         # Local tools should also be present
-        assert "save_learning" in tool_names
+        assert "save_workspace_memory" in tool_names
         assert "artifact_manager" in tool_names
         assert "create_artifact" not in tool_names
         assert "update_artifact" not in tool_names
@@ -397,7 +397,7 @@ class TestAgentGraphAssembly:
         tool_names = [t.name for t in tools]
 
         # Only local tools
-        assert "save_learning" in tool_names
+        assert "save_workspace_memory" in tool_names
         assert "artifact_manager" in tool_names
         assert "create_artifact" not in tool_names
         assert "update_artifact" not in tool_names

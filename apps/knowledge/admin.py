@@ -92,12 +92,7 @@ class AgentLearningAdmin(admin.ModelAdmin):
     ]
     list_filter = ["workspace", "category", "is_active", ConfidenceRangeFilter]
     search_fields = ["description", "original_error"]
-    actions = [
-        "approve_learnings",
-        "reject_learnings",
-        "increase_confidence",
-        "decrease_confidence",
-    ]
+    actions = None
 
     fieldsets = (
         (None, {"fields": ("workspace", "description", "category")}),
@@ -125,7 +120,18 @@ class AgentLearningAdmin(admin.ModelAdmin):
             },
         ),
     )
-    readonly_fields = ["times_applied", "created_at"]
+
+    # Workspace memory changes only through the Memory page and the agent tool,
+    # which enforce author-or-manager edits, keep every memory within the prompt
+    # budget and record WorkspaceMemoryEvents. The admin is for inspection.
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
     @admin.display(description="Description")
     def description_short(self, obj):
@@ -145,34 +151,3 @@ class AgentLearningAdmin(admin.ModelAdmin):
             color,
             f"{score:.0%}",
         )
-
-    @admin.action(description="Approve learnings (activate + increase confidence)")
-    def approve_learnings(self, request, queryset):
-        count = 0
-        for learning in queryset:
-            learning.is_active = True
-            learning.confidence_score = min(1.0, learning.confidence_score + 0.1)
-            learning.save(update_fields=["is_active", "confidence_score"])
-            count += 1
-        self.message_user(request, f"Approved {count} learnings")
-
-    @admin.action(description="Reject learnings (deactivate)")
-    def reject_learnings(self, request, queryset):
-        count = queryset.update(is_active=False)
-        self.message_user(request, f"Rejected {count} learnings")
-
-    @admin.action(description="Increase confidence (+10%)")
-    def increase_confidence(self, request, queryset):
-        count = 0
-        for learning in queryset:
-            learning.increase_confidence(0.1)
-            count += 1
-        self.message_user(request, f"Increased confidence for {count} learnings")
-
-    @admin.action(description="Decrease confidence (-10%)")
-    def decrease_confidence(self, request, queryset):
-        count = 0
-        for learning in queryset:
-            learning.decrease_confidence(0.1)
-            count += 1
-        self.message_user(request, f"Decreased confidence for {count} learnings")

@@ -6,8 +6,8 @@ import pytest
 
 from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.canvas_tool import create_canvas_tools
-from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
+from apps.agents.tools.memory_tool import create_workspace_memory_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.artifacts.models import Artifact
 from apps.knowledge.models import AgentLearning
@@ -30,7 +30,7 @@ async def test_read_user_cannot_directly_invoke_local_mutation_sinks(
     )
 
     artifact_write = _by_name(create_artifact_graph_tools(workspace, read_user))["artifact_write"]
-    save_learning = create_save_learning_tool(workspace, read_user)
+    save_workspace_memory = create_workspace_memory_tool(workspace, read_user)
     save_recipe = create_recipe_tool(workspace, read_user)
     blocking_materialization = create_materialization_tool(workspace, read_user)
 
@@ -38,12 +38,8 @@ async def test_read_user_cannot_directly_invoke_local_mutation_sinks(
         await artifact_write.ainvoke(
             {"action": "create", "title": "Denied", "story_doc": {"schema_version": 1}}
         ),
-        await save_learning.ainvoke(
-            {
-                "description": "This detailed learning must not be saved by a reader.",
-                "category": "other",
-                "tables": ["cases"],
-            }
+        await save_workspace_memory.ainvoke(
+            {"memory": "This detailed memory must not be saved by a reader.", "tables": ["cases"]}
         ),
         await save_recipe.ainvoke(
             {
@@ -67,17 +63,13 @@ async def test_read_user_cannot_directly_invoke_local_mutation_sinks(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_tools_recheck_role_after_graph_construction(workspace, write_user):
-    tool = create_save_learning_tool(workspace, write_user)
+    tool = create_workspace_memory_tool(workspace, write_user)
     await WorkspaceMembership.objects.filter(workspace=workspace, user=write_user).aupdate(
         role=WorkspaceRole.READ
     )
 
     result = await tool.ainvoke(
-        {
-            "description": "A role downgrade after graph creation must deny this save.",
-            "category": "other",
-            "tables": ["cases"],
-        }
+        {"memory": "A role downgrade after graph creation must deny this save."}
     )
 
     assert result["status"] == "denied"

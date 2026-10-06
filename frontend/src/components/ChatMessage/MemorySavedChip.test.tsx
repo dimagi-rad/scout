@@ -1,21 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { personalMemoryApi } from "@/api/memory"
+import { personalMemoryApi, workspaceMemoryApi } from "@/api/memory"
 import type { UIMessage } from "ai"
 import { MemoryRouter } from "react-router-dom"
 import { ChatMessage } from "./ChatMessage"
 
-vi.mock("@/api/memory", () => ({ personalMemoryApi: { remove: vi.fn() } }))
+vi.mock("@/api/memory", () => ({
+  personalMemoryApi: { remove: vi.fn() },
+  workspaceMemoryApi: { remove: vi.fn() },
+}))
 
-function memoryMessage(output: unknown, state = "output-available"): UIMessage {
+function memoryMessage(
+  output: unknown,
+  state = "output-available",
+  toolName = "save_personal_memory",
+): UIMessage {
   return {
     id: "m1",
     role: "assistant",
     parts: [
       {
-        type: "tool-save_personal_memory",
-        toolName: "save_personal_memory",
+        type: `tool-${toolName}`,
+        toolName,
         toolCallId: "toolu_MEM",
         state,
         input: { memory: "Show district totals as a table" },
@@ -28,13 +35,16 @@ function memoryMessage(output: unknown, state = "output-available"): UIMessage {
 function renderMessage(message: UIMessage, path = "/") {
   render(
     <MemoryRouter initialEntries={[path]}>
-      <ChatMessage message={message} isActiveMessage={true} />
+      <ChatMessage message={message} isActiveMessage={true} workspaceId="ws-1" />
     </MemoryRouter>,
   )
 }
 
 describe("Saved to memory chip", () => {
-  beforeEach(() => vi.mocked(personalMemoryApi.remove).mockReset())
+  beforeEach(() => {
+    vi.mocked(personalMemoryApi.remove).mockReset()
+    vi.mocked(workspaceMemoryApi.remove).mockReset()
+  })
 
   it("undoes a new save in one click", async () => {
     vi.mocked(personalMemoryApi.remove).mockResolvedValue(undefined)
@@ -46,6 +56,32 @@ describe("Saved to memory chip", () => {
     expect(personalMemoryApi.remove).toHaveBeenCalledWith("m1")
     expect(await screen.findByText("Removed from memory", { exact: false })).toBeInTheDocument()
     expect(screen.queryByTestId("memory-saved-chip-undo")).not.toBeInTheDocument()
+  })
+
+  it("names the workspace layer and undoes through the workspace API", async () => {
+    vi.mocked(workspaceMemoryApi.remove).mockResolvedValue(undefined)
+    renderMessage(
+      memoryMessage(
+        { status: "saved", layer: "workspace", memory_id: "w1", memory: "Exclude test visits" },
+        "output-available",
+        "save_workspace_memory",
+      ),
+    )
+    expect(screen.getByTestId("memory-saved-chip-layer")).toHaveTextContent("Workspace")
+    await userEvent.click(screen.getByTestId("memory-saved-chip-undo"))
+    expect(workspaceMemoryApi.remove).toHaveBeenCalledWith("ws-1", "w1")
+  })
+
+  it("shows no chip when a read-only member's save is refused", () => {
+    renderMessage(
+      memoryMessage(
+        { status: "denied", layer: "workspace", message: "Read-write or manage role required" },
+        "output-available",
+        "save_workspace_memory",
+      ),
+    )
+    expect(screen.queryByTestId("memory-saved-chip")).not.toBeInTheDocument()
+    expect(screen.getByTestId("tool-call-save_workspace_memory")).toBeInTheDocument()
   })
 
   it("offers no undo for a memory that already existed", () => {

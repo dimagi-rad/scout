@@ -7,6 +7,15 @@ import pytest
 from apps.agents.graph.prompt_context import _build_system_prompt, _system_prompt_cache
 
 
+@pytest.fixture(autouse=True)
+def _no_workspace_memory_query(monkeypatch):
+    # These tests build prompts for MagicMock workspaces whose ids aren't UUIDs.
+    monkeypatch.setattr(
+        "apps.agents.graph.prompt_context.aworkspace_memory_fingerprint",
+        AsyncMock(return_value=""),
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_system_prompt_is_cached_across_calls():

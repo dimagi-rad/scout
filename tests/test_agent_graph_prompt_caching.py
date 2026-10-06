@@ -40,6 +40,10 @@ async def test_system_prompt_split_into_stable_and_volatile(monkeypatch):
     The stable section holds the frozen base prompt + knowledge; the volatile
     section holds tenant context / schema availability (row counts, timestamps).
     """
+    monkeypatch.setattr(
+        "apps.agents.graph.prompt_context.aworkspace_memory_fingerprint",
+        AsyncMock(return_value=""),
+    )
     prompt_context._system_prompt_cache.clear()
     workspace = MagicMock()
     workspace.id = "ws-split"
@@ -71,6 +75,10 @@ async def test_volatile_schema_not_in_stable_prefix(monkeypatch):
     Caching keys off exact prefix bytes; a per-materialization row count in the
     cached prefix would defeat every cache hit (02#3 prefix-stability half).
     """
+    monkeypatch.setattr(
+        "apps.agents.graph.prompt_context.aworkspace_memory_fingerprint",
+        AsyncMock(return_value=""),
+    )
     prompt_context._system_prompt_cache.clear()
     workspace = MagicMock()
     workspace.id = "ws-vol"

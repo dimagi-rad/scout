@@ -4,7 +4,8 @@ import type { DomainSlice } from "./domainSlice"
 import type { AccountSessionScope } from "./accountSession"
 import { createWorkspaceRequestGuard } from "./workspaceRequest"
 
-export type KnowledgeType = "entry" | "learning"
+// AgentLearning rows moved to the Memory page as workspace memory (#849).
+export type KnowledgeType = "entry"
 
 // Backend KnowledgeEntry model
 export interface KnowledgeEntryItem {
@@ -17,28 +18,12 @@ export interface KnowledgeEntryItem {
   updated_at: string
 }
 
-// Backend AgentLearning model
-export interface LearningItem {
-  id: string
-  type: "learning"
-  description: string
-  category?: string
-  applies_to_tables?: string[]
-  original_error?: string
-  confidence_score?: number
-  times_applied?: number
-  is_active?: boolean
-  created_at: string
-}
-
-export type KnowledgeItem = KnowledgeEntryItem | LearningItem
+export type KnowledgeItem = KnowledgeEntryItem
 
 export function getKnowledgeItemName(item: KnowledgeItem): string {
   switch (item.type) {
     case "entry":
       return item.title
-    case "learning":
-      return item.description.slice(0, 50) + (item.description.length > 50 ? "..." : "")
   }
 }
 

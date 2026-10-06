@@ -299,6 +299,10 @@ async def test_build_system_prompt_no_schema_status_call():
             "apps.agents.graph.prompt_context.aworkspace_source_freshness",
             AsyncMock(return_value=[]),
         ),
+        patch(
+            "apps.agents.graph.prompt_context.aworkspace_memory_fingerprint",
+            AsyncMock(return_value=""),
+        ),
     ):
         MockKR.return_value.retrieve = AsyncMock(return_value="")
 

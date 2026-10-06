@@ -23,10 +23,11 @@ from apps.agents.prompts.artifact_prompt import (
     ARTIFACT_READ_ONLY_PROMPT_ADDITION,
 )
 from apps.agents.prompts.base_system import select_base_system_prompt
-from apps.agents.prompts.memory_prompt import MEMORY_GUIDANCE
+from apps.agents.prompts.memory_prompt import memory_guidance
 from apps.common.identifiers import view_name
 from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.memory.services import has_personal_memory
+from apps.memory.workspace import aworkspace_memory_fingerprint
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, aget_active_semantic_model
 from apps.workspaces.models import SchemaState, WorkspaceDataRecovery, WorkspaceViewSchema
 from apps.workspaces.services.load_activity import (
@@ -580,7 +581,10 @@ async def _build_stable_system_prompt(
     *,
     remembers: bool = False,
 ) -> str:
-    cache_key = f"{_system_prompt_cache_key(workspace, user, interactive, canvas_write, write_capable)}:{has_tenants}"
+    key = _system_prompt_cache_key(workspace, user, interactive, canvas_write, write_capable)
+    # A workspace memory edit must apply on the next message, not after the TTL.
+    workspace_memory = await aworkspace_memory_fingerprint(workspace.id)
+    cache_key = f"{key}:{has_tenants}:{workspace_memory}"
     cached = _system_prompt_cache.get(cache_key)
     if cached is not None:
         value, timestamp = cached
@@ -597,7 +601,7 @@ async def _build_stable_system_prompt(
         stable_sections.append(f"\n## Workspace Instructions\n\n{workspace.system_prompt}\n")
 
     if remembers:
-        stable_sections.append(MEMORY_GUIDANCE)
+        stable_sections.append(memory_guidance(write_capable=write_capable))
 
     retriever = KnowledgeRetriever(workspace)
     knowledge_context = await retriever.retrieve()

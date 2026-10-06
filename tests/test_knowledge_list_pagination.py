@@ -44,9 +44,11 @@ def test_list_returns_only_requested_page(api_client, workspace, user):
     assert resp.status_code == status.HTTP_200_OK
     body = resp.json()
     assert len(body["results"]) == 10
-    assert body["pagination"]["total_count"] == 60
-    assert body["pagination"]["total_pages"] == 6
+    # AgentLearning rows are workspace memory, listed on the Memory page instead (#849).
+    assert body["pagination"]["total_count"] == 30
+    assert body["pagination"]["total_pages"] == 3
     assert body["pagination"]["has_next"] is True
+    assert {item["type"] for item in body["results"]} == {"entry"}
 
 
 @pytest.mark.django_db
