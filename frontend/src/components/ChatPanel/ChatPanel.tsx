@@ -488,7 +488,10 @@ export function ChatPanel() {
     if (isChatRunning(chat)) {
       writeSavedThreadId(activeDomainId, threadId)
       void Promise.resolve().then(() => {
-        if (!cancelled) setLoaded({ chat, reloadKey })
+        if (cancelled) return
+        setLoaded({ chat, reloadKey })
+        // Nothing was fetched, so a failed load stays failed and keeps its Retry.
+        setHistoryFailed((failed) => (failed?.chat === chat ? { chat, reloadKey } : failed))
       })
       return () => { cancelled = true }
     }
@@ -893,10 +896,11 @@ export function ChatPanel() {
           )}
           {historyLoadFailed && (
             <div className="flex items-center gap-2 text-sm text-destructive">
-              <span>Couldn't load this conversation.</span>
+              <span>Couldn't load earlier messages.</span>
               <Button
                 variant="outline"
                 size="sm"
+                disabled={isStreaming}
                 onClick={() => setMessageReloadKey((k) => k + 1)}
                 data-testid="chat-history-retry"
               >

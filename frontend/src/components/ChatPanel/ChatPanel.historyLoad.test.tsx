@@ -1,4 +1,4 @@
-import type { UIMessage } from "ai"
+import { createUIMessageStream, createUIMessageStreamResponse, type UIMessage } from "ai"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
@@ -40,9 +40,25 @@ function workspace(): WorkspaceListItem {
 function mockServer(loads: ("hold" | "stall" | "ok")[]) {
   let release!: () => void
   const held = new Promise<void>((resolve) => (release = resolve))
+  let finishReply!: () => void
+  const reply = new Promise<void>((resolve) => (finishReply = resolve))
   const messageLoads: string[] = []
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
+    if (url === "/api/chat/") {
+      return createUIMessageStreamResponse({
+        stream: createUIMessageStream({
+          execute: async ({ writer }) => {
+            writer.write({ type: "start" })
+            writer.write({ type: "text-start", id: "t" })
+            writer.write({ type: "text-delta", id: "t", delta: "New reply." })
+            await reply
+            writer.write({ type: "text-end", id: "t" })
+            writer.write({ type: "finish", finishReason: "stop" })
+          },
+        }),
+      })
+    }
     if (/\/threads\/[^/]+\/messages\//.test(url)) {
       const mode = loads.shift() ?? "ok"
       messageLoads.push(mode)
@@ -60,7 +76,7 @@ function mockServer(loads: ("hold" | "stall" | "ok")[]) {
     if (/\/threads\/$/.test(url)) return Response.json([])
     return Response.json({}, { status: 404 })
   }))
-  return { release, messageLoads }
+  return { release, finishReply, messageLoads }
 }
 
 function typeText(text: string) {
@@ -125,4 +141,28 @@ describe("a thread's history load", () => {
       expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled(),
     )
   })
+
+  it("keeps a failed load's Retry through a turn sent meanwhile, then loads on Retry", async () => {
+    const server = mockServer(["stall", "ok"])
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await screen.findByTestId("chat-history-retry")
+
+    await act(async () => typeText("hi"))
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Send message" })),
+    )
+    await screen.findByText("New reply.")
+    // Mid-turn a reload would be skipped, leaving nothing to retry afterwards.
+    expect(screen.getByTestId("chat-history-retry")).toBeDisabled()
+    await act(async () => fireEvent.click(screen.getByTestId("chat-history-retry")))
+
+    await act(async () => server.finishReply())
+    const retry = await screen.findByTestId("chat-history-retry")
+    await waitFor(() => expect(retry).toBeEnabled())
+    expect(screen.getByText("Couldn't load earlier messages.")).toBeInTheDocument()
+    await act(async () => fireEvent.click(retry))
+    await screen.findByText("Saved answer.")
+    expect(server.messageLoads).toEqual(["stall", "ok"])
+  })
 })
+

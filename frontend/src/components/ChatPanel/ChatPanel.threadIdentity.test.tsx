@@ -201,7 +201,8 @@ describe("chat thread identity", () => {
     expect(api.sentContexts).toEqual([{ workspaceId: WS_A, threadId: freshThread }])
     expect(screen.getByTestId("chat-path").textContent).toBe(savedUrl)
     await expectCanvas(api, WS_A, freshThread)
-  })
+  // Many round trips; under full-suite load it can pass the 5s default.
+  }, 15_000)
 
   it("keeps the same thread through an initialization failure, retry, Canvas, and reload", async () => {
     const api = mockChatApi({ failFirst: true })

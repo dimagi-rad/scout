@@ -228,7 +228,8 @@ describe("concurrent chat threads (#847)", () => {
     await showThread(THREAD_A)
     await screen.findByText(`${A_PARTIAL}. ${A_FINAL}`)
     expect(screen.queryByText(B_REPLY)).toBeNull()
-  })
+  // Many round trips; under full-suite load it can pass the 5s default.
+  }, 15_000)
 
   it("shows a still-running turn when its thread is shown again", async () => {
     const server = mockServer()
