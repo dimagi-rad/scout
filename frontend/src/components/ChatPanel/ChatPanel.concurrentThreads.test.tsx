@@ -4,7 +4,10 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import type { WorkspaceListItem } from "@/api/workspaces"
+import type { PendingRequest } from "@/api/jobs"
 import { ChatPanel } from "./ChatPanel"
+
+const jobs = vi.hoisted(() => ({ setPendingRequest: vi.fn() }))
 
 vi.mock("@/contexts/WorkspaceJobsContext", () => ({
   useWorkspaceJobs: () => ({
@@ -12,7 +15,7 @@ vi.mock("@/contexts/WorkspaceJobsContext", () => ({
     recentlyCompletedThreadIds: [],
     recentTerminationsByToolCallId: {},
     pendingByThreadId: {},
-    setPendingRequest: vi.fn(),
+    setPendingRequest: jobs.setPendingRequest,
     hidePendingRequest: vi.fn(),
     forgetPendingRequest: vi.fn(),
     refresh: vi.fn(),
@@ -40,9 +43,19 @@ function workspace(): WorkspaceListItem {
   }
 }
 
+const heldInA = {
+  thread_id: THREAD_A,
+  request_id: "r1",
+  version: 1,
+  parts: [{ id: "b-old", text: "held in A", added_at: "2026-10-02T00:00:00Z" }],
+  state: "waiting",
+  thread_job_id: "job-1",
+  thread_job_state: "pending",
+} satisfies PendingRequest
+
 /** Chat A's turn streams its first words, then waits for ``finishA`` and ends as ``aEnds``. */
 function mockServer(
-  { aEnds = "ok", holdB = false }: { aEnds?: "ok" | "overload" | "error"; holdB?: boolean } = {},
+  { aEnds = "ok", holdB = false }: { aEnds?: "ok" | "overload" | "error" | "held"; holdB?: boolean } = {},
 ) {
   let finishA!: () => void
   const aGate = new Promise<void>((resolve) => (finishA = resolve))
@@ -70,6 +83,10 @@ function mockServer(
             if (isA) {
               writer.write({ type: "text-delta", id: "t", delta: A_PARTIAL })
               await aGate
+              if (aEnds === "held") {
+                // A part id that matches a message in B shows whether B's view hides it.
+                writer.write({ type: "data-pending-request", data: heldInA, transient: true })
+              }
               if (aEnds === "error") {
                 writer.write({ type: "error", errorText: "Agent failed" })
                 return
@@ -245,5 +262,23 @@ describe("concurrent chat threads (#847)", () => {
     await screen.findByTestId("chat-input-prominent")
     expect(screen.queryByText(A_PARTIAL)).toBeNull()
     expect(screen.queryByRole("button", { name: "Stop response" })).toBeNull()
+  })
+
+  it("records a left chat's held request for its own thread without hiding the shown one's messages", async () => {
+    const server = mockServer({ aEnds: "held" })
+    render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await screen.findByText("Chat A history.")
+    await send("run recipe X")
+    await screen.findByText(A_PARTIAL)
+
+    await showThread(THREAD_B)
+    await screen.findByText(B_HISTORY)
+    jobs.setPendingRequest.mockClear()
+    await act(async () => server.finishA())
+
+    await waitFor(() =>
+      expect(jobs.setPendingRequest).toHaveBeenCalledWith(THREAD_A, heldInA),
+    )
+    expect(screen.getByText(B_HISTORY)).toBeInTheDocument()
   })
 })

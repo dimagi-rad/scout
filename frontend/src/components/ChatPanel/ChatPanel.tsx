@@ -206,6 +206,12 @@ export function ChatPanel() {
   // the request version it showed; a retry of that message names the version too.
   // Each thread's chat runs on its own, so another thread's send must not replace it.
   const [heldSends] = useState(() => new Map<string, HeldSend>())
+  // Title polls for threads whose turn finished out of view.
+  const [titleTimers] = useState(() => new Map<string, ReturnType<typeof setTimeout>[]>())
+  useEffect(() => () => {
+    for (const timers of titleTimers.values()) timers.forEach(clearTimeout)
+    titleTimers.clear()
+  }, [titleTimers])
   const heldHandlerRef = useRef(held.onHeld)
   heldHandlerRef.current = held.onHeld
   const settleSendRef = useRef(held.settleSend)
@@ -230,6 +236,15 @@ export function ChatPanel() {
   const refreshJobsRef = useRef(refreshJobs)
   refreshJobsRef.current = refreshJobs
 
+  /** The server refused the send: its turn failed before any reply was pushed after it. */
+  function heldSendRefused(sending: HeldSend, target: Chat<UIMessage>): boolean {
+    return (
+      target.status === "error"
+      && !sending.streamed
+      && target.messages.at(-1)?.id === sending.messageId
+    )
+  }
+
   /** The held send is over: settled if the server took it, else undone and handed back. */
   function endHeldSend(sending: HeldSend, refused: boolean, target: Chat<UIMessage>) {
     heldSends.delete(sending.threadId)
@@ -252,13 +267,14 @@ export function ChatPanel() {
         ?.title_source === "first_message"
     if (!stillThere()) return
     void fetchThreadsRef.current(workspaceId)
+    for (const timer of titleTimers.get(finishedThreadId) ?? []) clearTimeout(timer)
     let elapsed = 0
-    for (const delay of TITLE_REFRESH_DELAYS_MS) {
+    titleTimers.set(finishedThreadId, TITLE_REFRESH_DELAYS_MS.map((delay) => {
       elapsed += delay
-      setTimeout(() => {
+      return setTimeout(() => {
         if (stillThere() && titlePending()) void fetchThreadsRef.current(workspaceId)
       }, elapsed)
-    }
+    }))
   }
 
   const createChat = (
@@ -295,7 +311,7 @@ export function ChatPanel() {
           // onHeld also hides the shown thread's messages; a left chat reloads on return.
           if (shown()) {
             heldHandlerRef.current(pending)
-          } else {
+          } else if (contextRef.current.workspaceId === chatWorkspaceId) {
             setPendingRequestRef.current(pending.thread_id, pending)
             void refreshJobsRef.current()
           }
@@ -307,15 +323,12 @@ export function ChatPanel() {
         if (retryAfter !== undefined) busyHitRef.current = { retryAfter }
         else if (isRetryableErrorPart(part)) hitRetryableRef.current = true
       },
-      onFinish: ({ messages, isError }) => {
+      onFinish: () => {
         // The shown chat handles both from its status effects.
         if (shown()) return
         const sending = heldSends.get(chatThreadId)
-        if (sending) {
-          // Nothing streamed if no reply was pushed after it.
-          const streamed = sending.streamed || messages.at(-1)?.id !== sending.messageId
-          endHeldSend(sending, isError && !streamed, threadChat)
-        }
+        // Status is already final here: the SDK sets it before calling onFinish.
+        if (sending) endHeldSend(sending, heldSendRefused(sending, threadChat), threadChat)
         release()
         if (chatWorkspaceId) refreshThreadsAfterBackgroundTurn(chatWorkspaceId, chatThreadId)
       },
@@ -367,9 +380,10 @@ export function ChatPanel() {
         returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra)
       }
     } else if (sending && !isChatRunning(chat)) {
-      // Its turn ended in the same commit as the switch, before the status effect
-      // saw it; the outcome is unknown, so show the server's copy, as on unmount.
-      endHeldSend(sending, false, chat)
+      // Defensive: a turn that ended in the same commit as the switch would be missed
+      // by both onFinish (it was still shown) and the status effect (now another thread).
+      endHeldSend(sending, heldSendRefused(sending, chat), chat)
+      if (activeDomainId) refreshThreadsAfterBackgroundTurn(activeDomainId, threadId)
     }
     cancelBusyRetry()
     hitRetryableRef.current = false
@@ -379,12 +393,6 @@ export function ChatPanel() {
     clearError()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, chat, heldSends, cancelBusyRetry, clearError])
-
-  // A chat that failed while another was shown is reloaded from the server, so a
-  // Retry on its stale error would resend whatever turn is now last.
-  useEffect(() => {
-    if (!isChatRunning(chat)) chat.clearError()
-  }, [chat])
 
   const isStreaming = status === "streaming" || status === "submitted"
 
@@ -626,7 +634,7 @@ export function ChatPanel() {
     // chat ends it (the thread-change cleanup).
     if (status === "error" && busyError) return
     if (status !== "ready" && status !== "error") return
-    const refused = status === "error" && !sending.streamed
+    const refused = heldSendRefused(sending, chat)
     endHeldSend(sending, refused, chat)
     if (!refused) return
     // A notice with Retry would resend whatever turn is now last, so those are
