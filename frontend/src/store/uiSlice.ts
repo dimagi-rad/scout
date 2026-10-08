@@ -9,6 +9,7 @@ import {
   RECHECKABLE_REASONS,
   type AccessDenialReason,
 } from "@/lib/accessReasons"
+import { shortThreadTitle } from "@/lib/threadTitle"
 import { forgetLocalThread, newLocalThreadId } from "./localThreads"
 
 export type { AccessDenialReason }
@@ -94,6 +95,7 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
   const requests = createWorkspaceRequestGuard(get)
   // Per workspace. A first turn's response arrives only once its agent is built, which
   // can take seconds; until then a refetch would drop the new chat from the sidebar (#859).
+  // fetchThreads is the one place that merges these back in.
   const sendingThreads = new Map<string, Map<string, Thread>>()
   const withSending = (workspaceId: string, threads: Thread[]): Thread[] => {
     const listed = new Set(threads.map((thread) => thread.id))
@@ -172,8 +174,7 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
         const now = new Date().toISOString()
         const placeholder: Thread = {
           id: threadId,
-          // What the server titles it from too, until a short title is generated.
-          title: text.trim(),
+          title: shortThreadTitle(text),
           title_is_custom: false,
           title_source: "first_message",
           created_at: now,

@@ -301,6 +301,12 @@ describe("uiSlice sending threads (#859)", () => {
     expect(first).toMatchObject({ title: "How many visits?", title_source: "first_message" })
   })
 
+  it("shortens a long message's title the way the server does", () => {
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", `${"a".repeat(199)} b c`)
+
+    expect(useAppStore.getState().threads[0].title).toBe(`${"a".repeat(199)}...`)
+  })
+
   it("keeps it through a refetch that ran before the server had the row", async () => {
     useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?")
     vi.spyOn(api, "get").mockResolvedValue([thread("old", "Older chat")] as never)
