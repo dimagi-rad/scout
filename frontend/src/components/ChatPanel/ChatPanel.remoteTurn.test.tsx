@@ -56,6 +56,8 @@ function mockServer() {
     chatPosts: 0,
     /** Detail polls answer with this status instead, while set. */
     detailStatus: null as number | null,
+    /** Message loads answer with this status instead, while set. */
+    messagesStatus: null as number | null,
     chatReply: "stream" as "stream" | "busy" | "network",
     /** What the running turn has streamed for chats that did not start it. */
     liveRows: [] as { id: number; run: string; text: string; done: boolean }[],
@@ -91,6 +93,7 @@ function mockServer() {
     const messages = url.match(/\/threads\/([^/]+)\/messages\//)
     if (messages) {
       server.messageLoads += 1
+      if (server.messagesStatus) return Response.json({}, { status: server.messagesStatus })
       const mine = messages[1] === THREAD
       return Response.json({
         messages: mine ? (server.running ? [QUESTION] : [QUESTION, ANSWER]) : [],
@@ -262,8 +265,30 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
     expect(server.detailPolls).toHaveLength(REMOTE_TURN_MAX_FAILURES + 1)
     server.detailStatus = null
     server.finish()
-    await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_POLL_MS))
+    await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_MAX_POLL_MS))
     expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
+  })
+
+  it("keeps following a running turn when a reload it asked for fails", async () => {
+    const server = mockServer()
+    server.liveRows = [{ id: 1, run: "call-1", text: "Let me check.", done: false }]
+    renderPanel()
+    await screen.findByTestId("resume-stream")
+    server.messagesStatus = 503
+
+    // The first call ends at its tool; the reload for it fails.
+    server.liveRows.push({ id: 2, run: "call-1", text: "", done: true })
+    await act(() => vi.advanceTimersByTimeAsync(2_000))
+    expect(await screen.findByTestId("chat-history-retry")).toBeInTheDocument()
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "and by month?" } })
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled()
+
+    // Still following: the turn's end reloads it.
+    server.messagesStatus = null
+    server.finish()
+    await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_MAX_POLL_MS))
+    expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled()
   })
 
   it("leaves a background resume's own progress to show, without the placeholder", async () => {

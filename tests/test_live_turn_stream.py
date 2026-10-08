@@ -88,12 +88,14 @@ async def test_each_model_call_is_a_run_ended_when_its_tool_starts():
         await writer.close()
 
     rows = await _rows(thread.id)
-    assert [(row.text, row.done) for row in rows] == [
+    assert [(row.text, row.done) for row in rows[:2]] == [
         ("Let me check.", True),
         ("Here it is.", False),
-        (" Visits rose.", True),
     ]
-    assert rows[0].run != rows[1].run == rows[2].run == writer.run
+    last_call = rows[1:]
+    assert {row.run for row in last_call} == {writer.run} != {rows[0].run}
+    assert "".join(row.text for row in last_call) == "Here it is. Visits rose."
+    assert last_call[-1].done is True
 
 
 async def test_a_flush_spanning_two_calls_writes_a_row_for_each():
@@ -128,6 +130,30 @@ async def test_a_turn_ending_on_a_tool_still_writes_its_end():
     # The second done row is the turn's end, for a chat that reloaded on the first.
     rows = await _rows(thread.id)
     assert [(row.text, row.done) for row in rows] == [("Loading your data.", True), ("", True)]
+
+
+async def test_a_text_part_end_ends_the_call_without_a_tool_part():
+    thread = await _thread("live-no-tool-part")
+    writer = LiveTurnWriter(thread.id)
+
+    with patch.object(resume_stream, "LIVE_FLUSH_INTERVAL_SECONDS", 0.01):
+        # A local tool's part comes only once it ends (none if it fails), so the
+        # stream's text-end is all that marks the call over while it runs.
+        writer.observe(_delta("Let me update the canvas."))
+        writer.observe(_part(type="text-end", id="text-0"))
+        await asyncio.sleep(0.05)
+        latest = await resume_stream.aread_after(thread.id, 0)
+        assert [(chunk["text"], chunk["done"]) for chunk in latest] == [
+            ("Let me update the canvas.", True)
+        ]
+        await writer.close()
+
+    # The turn's own end follows, for a chat that reloaded on the call's.
+    rows = await _rows(thread.id)
+    assert [(row.text, row.done) for row in rows] == [
+        ("Let me update the canvas.", True),
+        ("", True),
+    ]
 
 
 async def test_text_after_a_text_part_ends_is_the_next_call():
@@ -175,14 +201,13 @@ async def test_closing_clears_earlier_turns_text_only():
         await writer.close()
 
     rows = await _rows(thread.id)
-    # The earlier turn keeps its done row (pruned later). This turn keeps all of its
-    # text, for a chat that reads it late, and the newer run is left alone.
-    assert [(row.text, row.done) for row in rows] == [
-        (" More.", True),
-        ("This answer.", False),
-        ("A newer turn.", False),
-        (" Done.", True),
-    ]
+    # The earlier turn keeps only its done row (pruned later). This turn keeps all of
+    # its text, for a chat that reads it late, and the newer run is left alone.
+    earlier_rows = [row for row in rows if row.run == earlier.run]
+    assert [row.done for row in earlier_rows] == [True]
+    this_turn = [row for row in rows if row.run == writer.run]
+    assert "".join(row.text for row in this_turn) == "This answer. Done."
+    assert this_turn[-1].done is True
     assert later.id in {row.id for row in rows}
 
 

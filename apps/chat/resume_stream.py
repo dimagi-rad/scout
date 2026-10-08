@@ -45,11 +45,11 @@ CALL_SEPARATOR = "\n\n"
 LIVE_FLUSH_INTERVAL_SECONDS = 1.0
 # Writing the last row and clearing the run must never hold up the end of a turn.
 LIVE_CLOSE_TIMEOUT_SECONDS = 2.0
-# A tool ends its model call's text. So does the end of a text part followed by more
-# text: a retried or fixed reply, or the next call's text after its thinking (a
-# model call's thinking comes before its text, never after).
-_TOOL_PARTS = frozenset({"tool-input-available", "tool-output-available"})
-_TEXT_END = "text-end"
+# The end of a text part ends its model call's text: the stream ends one only for a
+# tool (some tools send their part only once they finish, or none if they fail),
+# thinking (which comes before a call's text, never after), a retried or fixed reply,
+# or the end of the turn. A tool part covers the rest.
+_CALL_ENDS = frozenset({"text-end", "tool-input-available", "tool-output-available"})
 
 
 def _is_answer(chunk, metadata: dict) -> bool:
@@ -211,7 +211,6 @@ class LiveTurnWriter:
         self._has_text = False
         self._run_has_text = False
         self._run_ended = False
-        self._after_text_end = False
         self._broken = False
         self._stop = asyncio.Event()
         self._flusher: asyncio.Task | None = None
@@ -228,25 +227,19 @@ class LiveTurnWriter:
         if not isinstance(part, dict):
             return
         kind = part.get("type")
-        if kind in _TOOL_PARTS:
+        if kind in _CALL_ENDS:
             # Ended now, not when the next call's text starts: a chat that loads the
             # thread while the tool runs has this call from history already.
             self._end_run()
-            return
-        if kind == _TEXT_END:
-            self._after_text_end = True
             return
         if kind != "text-delta":
             return
         text = part.get("delta")
         if not isinstance(text, str) or not text:
             return
-        if self._after_text_end:
-            self._end_run()
         if self._run_ended:
             self.run = uuid.uuid4()
             self._run_ended = False
-        self._after_text_end = False
         self._run_has_text = True
         self._has_text = True
         self._buffer.append((self.run, text, False))
