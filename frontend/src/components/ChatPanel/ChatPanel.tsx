@@ -94,6 +94,8 @@ export function ChatPanel() {
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const updateThreadTitle = useAppStore((s) => s.uiActions.updateThreadTitle)
   const newThread = useAppStore((s) => s.uiActions.newThread)
+  const addSendingThread = useAppStore((s) => s.uiActions.addSendingThread)
+  const settleSendingThread = useAppStore((s) => s.uiActions.settleSendingThread)
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userId = useAppStore((s) => s.user?.id ?? null)
@@ -321,6 +323,17 @@ export function ChatPanel() {
         credentials: "include",
         headers: () => ({ "X-CSRFToken": getCsrfToken() }),
         body: () => ({ data: context }),
+        // The row exists by the time any response past validation arrives, long before the
+        // turn ends, so the server's list decides from here.
+        fetch: async (input, init) => {
+          try {
+            return await fetch(input, init)
+          } finally {
+            if (chatWorkspaceId) {
+              useAppStore.getState().uiActions.settleSendingThread(chatWorkspaceId, chatThreadId)
+            }
+          }
+        },
         prepareSendMessagesRequest: ({ body, id, messages, trigger, messageId }) => {
           const sending = heldSends.get(chatThreadId)
           const data =
@@ -728,8 +741,21 @@ export function ChatPanel() {
     }
     resetOverloadState()
     setStoppedNotice(false)
-    forgetLocalThread(threadId)
-    void sendMessage({ text })
+    const settle = listSendingThread(text)
+    void sendMessage({ text }).finally(settle)
+  }
+
+  /** A new chat's first message goes out: list it now, not when its turn ends (#859). */
+  function listSendingThread(text: string): () => void {
+    const workspaceId = activeDomainId
+    const sentFrom = threadId
+    if (workspaceId) addSendingThread(workspaceId, sentFrom, text, isLocalThread(sentFrom))
+    forgetLocalThread(sentFrom)
+    // The transport settles it on the response; this covers a send that failed before
+    // its request went out, which would otherwise keep the placeholder for good.
+    return () => {
+      if (workspaceId) settleSendingThread(workspaceId, sentFrom)
+    }
   }
 
   /** Send the held request as this turn, with ``extra`` after it. */
@@ -749,8 +775,9 @@ export function ChatPanel() {
     })
     resetOverloadState()
     setStoppedNotice(false)
-    forgetLocalThread(threadId)
+    const settle = listSendingThread(text)
     void sendMessage({ id: messageId, role: "user", parts: [{ type: "text", text }] })
+      .finally(settle)
   }
 
   /** Puts text the composer had already cleared back, in the chat it was typed in. */

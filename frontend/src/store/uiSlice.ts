@@ -9,6 +9,7 @@ import {
   RECHECKABLE_REASONS,
   type AccessDenialReason,
 } from "@/lib/accessReasons"
+import { shortThreadTitle } from "@/lib/threadTitle"
 import { forgetLocalThread, newLocalThreadId } from "./localThreads"
 
 export type { AccessDenialReason }
@@ -75,6 +76,15 @@ export interface UiSlice {
     newThread: () => void
     selectThread: (id: string) => Promise<void>
     fetchThreads: (workspaceId: string) => Promise<void>
+    /** Lists a new chat whose first message is on its way, until the server lists it. */
+    addSendingThread: (
+      workspaceId: string,
+      threadId: string,
+      text: string,
+      isNewChat: boolean,
+    ) => void
+    /** A send got its response, so the server's list now decides whether the thread is listed. */
+    settleSendingThread: (workspaceId: string, threadId: string) => void
     retryAccessVerification: (workspaceId: string) => Promise<void>
     updateThreadTitle: (
       threadId: string,
@@ -88,6 +98,28 @@ export interface UiSlice {
 
 export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice> = (set, get) => {
   const requests = createWorkspaceRequestGuard(get)
+  // Per workspace. A first turn's response arrives only once its agent is built, which
+  // can take seconds; until then a refetch would drop the new chat from the sidebar (#859).
+  // fetchThreads is the one place that merges these back in.
+  const sendingThreads = new Map<string, Map<string, Thread>>()
+  // Answered first sends whose row the next applied list confirms; by thread id.
+  const settledThreads = new Map<string, string>()
+  // Chats whose first send was refused before the server made the row, so a resend is
+  // still their first and is listed at once too. Only ever adds a placeholder: a wrong
+  // entry costs a brief row, unlike marking the chat local, which skips its history.
+  const refusedFirstSends = new Set<string>()
+  const withSending = (workspaceId: string, threads: Thread[]): Thread[] => {
+    const listed = new Set(threads.map((thread) => thread.id))
+    for (const [threadId, sentIn] of settledThreads) {
+      if (sentIn !== workspaceId) continue
+      settledThreads.delete(threadId)
+      if (!listed.has(threadId)) refusedFirstSends.add(threadId)
+    }
+    const sending = [...(sendingThreads.get(workspaceId)?.values() ?? [])]
+      .filter((thread) => !listed.has(thread.id))
+      .reverse()
+    return sending.length ? [...sending, ...threads] : threads
+  }
   return {
     threadId: newLocalThreadId(),
     activeArtifactId: null,
@@ -125,7 +157,7 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
           const threads = await api.get<Thread[]>(`/api/workspaces/${workspaceId}/threads/`)
           if (!isCurrent()) return
           set({
-            threads,
+            threads: withSending(workspaceId, threads),
             threadsStatus: "loaded",
             threadsAccessDenialReason: null,
             threadsAccessRetryable: false,
@@ -151,6 +183,40 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
             void get().domainActions.revalidateDomains({ fresh: true })
           }
         }
+      },
+      addSendingThread: (
+        workspaceId: string,
+        threadId: string,
+        text: string,
+        isNewChat: boolean,
+      ) => {
+        const firstSend = refusedFirstSends.delete(threadId) || isNewChat
+        if (!firstSend || workspaceId !== get().activeDomainId) return
+        if (get().threads.some((thread) => thread.id === threadId)) return
+        const now = new Date().toISOString()
+        const placeholder: Thread = {
+          id: threadId,
+          title: shortThreadTitle(text),
+          title_is_custom: false,
+          title_source: "first_message",
+          created_at: now,
+          updated_at: now,
+          last_viewed_at: now,
+        }
+        let sending = sendingThreads.get(workspaceId)
+        if (!sending) {
+          sending = new Map()
+          sendingThreads.set(workspaceId, sending)
+        }
+        sending.set(threadId, placeholder)
+        set((state) => ({ threads: [placeholder, ...state.threads] }))
+      },
+      settleSendingThread: (workspaceId: string, threadId: string) => {
+        const wasSending = sendingThreads.get(workspaceId)?.delete(threadId) === true
+        // A retried send (after a busy 503, say) has no placeholder but may still be unlisted.
+        const unlisted = !get().threads.some((thread) => thread.id === threadId)
+        if (wasSending) settledThreads.set(threadId, workspaceId)
+        if (wasSending || unlisted) void get().uiActions.fetchThreads(workspaceId)
       },
       retryAccessVerification: async (workspaceId: string) => {
         const isCurrent = requests.start("threads", workspaceId)

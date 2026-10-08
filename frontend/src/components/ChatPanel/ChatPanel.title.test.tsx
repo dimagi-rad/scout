@@ -1,7 +1,7 @@
 import { createUIMessageStream, createUIMessageStreamResponse } from "ai"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { MemoryRouter, Route, Routes } from "react-router-dom"
+import { MemoryRouter } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import type { Thread } from "@/store/uiSlice"
 import { workspaceApi, type WorkspaceListItem } from "@/api/workspaces"
@@ -25,6 +25,7 @@ vi.mock("@/contexts/WorkspaceJobsContext", () => ({
 const WS = "11111111-1111-1111-1111-111111111111"
 const QUESTION = "What are the module completion rates by district?"
 const GENERATED = "Module completion by district"
+const SERVER_TITLE = "Module completion rates (server)"
 
 const workspace: WorkspaceListItem = {
   id: WS, name: "Workspace", display_name: "Workspace", is_auto_created: false, role: "manage",
@@ -32,49 +33,105 @@ const workspace: WorkspaceListItem = {
   created_at: "2026-01-01",
 }
 
-function thread(title: string, source: Thread["title_source"]): Thread {
+function thread(id: string, title: string, source: Thread["title_source"]): Thread {
   return {
-    id: useAppStore.getState().threadId, title, title_is_custom: false, title_source: source,
+    id, title, title_is_custom: false, title_source: source,
     created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z",
     last_viewed_at: "2026-10-01T00:00:00Z",
   }
 }
 
-function mockApi() {
-  let turnFinished = false
-  let listCallsAfterTurn = 0
-  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+/** The server lists the thread once the POST lands; ``generateTitle`` lets the worker write its title. */
+function mockApi({
+  holdTurn = false,
+  holdResponse = false,
+  refuseSends = 0,
+  serverTitle = QUESTION,
+} = {}) {
+  let refusals = refuseSends
+  let posted: string | null = null
+  let titleGenerated = false
+  let releaseTurn = () => {}
+  const turnHeld = new Promise<void>((resolve) => {
+    releaseTurn = resolve
+  })
+  let release = () => {}
+  let responseHeld!: Promise<void>
+  const holdNextResponse = () => {
+    responseHeld = new Promise<void>((resolve) => {
+      release = resolve
+    })
+  }
+  holdNextResponse()
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
     if (url === "/api/chat/") {
+      const threadId = JSON.parse(options?.body as string).data.threadId
+      // The agent is still being built: no response, and (worst case) not yet listed.
+      if (holdResponse) {
+        await responseHeld
+        holdNextResponse()
+      }
+      // Refused before the server made the row.
+      if (refusals > 0) {
+        refusals -= 1
+        return Response.json({ error: "Empty message" }, { status: 400 })
+      }
+      posted = threadId
       return createUIMessageStreamResponse({
         stream: createUIMessageStream({
-          execute: ({ writer }) => {
+          execute: async ({ writer }) => {
             writer.write({ type: "start", messageId: crypto.randomUUID() })
             writer.write({ type: "text-start", id: "reply" })
             writer.write({ type: "text-delta", id: "reply", delta: "Here are the rates." })
+            if (holdTurn) await turnHeld
             writer.write({ type: "text-end", id: "reply" })
             writer.write({ type: "finish", finishReason: "stop" })
-            turnFinished = true
           },
         }),
       })
     }
     if (url === `/api/workspaces/${WS}/threads/`) {
-      if (!turnFinished) return Response.json([])
-      // The worker has not written the generated title by the first refetch.
-      listCallsAfterTurn += 1
+      if (!posted) return Response.json([])
       return Response.json([
-        listCallsAfterTurn === 1 ? thread(QUESTION, "first_message") : thread(GENERATED, "generated"),
+        titleGenerated
+          ? thread(posted, GENERATED, "generated")
+          : thread(posted, serverTitle, "first_message"),
       ])
     }
     if (url.endsWith("/messages/?include=pending")) return Response.json([])
     if (url.endsWith("/viewed/")) return new Response(null, { status: 204 })
     throw new Error(`Unexpected request: ${url}`)
   }))
+  return {
+    generateTitle: () => {
+      titleGenerated = true
+    },
+    releaseTurn,
+    releaseResponse: () => release(),
+  }
+}
+
+function renderChat() {
+  render(
+    // No routes: the sidebar navigates to the workspace's slugged chat path.
+    <MemoryRouter initialEntries={[`/workspaces/${WS}/chat`]}>
+      <Sidebar />
+      <ChatPanel />
+    </MemoryRouter>,
+  )
+}
+
+async function send(text: string) {
+  await act(async () => {
+    fireEvent.change(await screen.findByRole("textbox"), { target: { value: text } })
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }))
+  })
 }
 
 beforeEach(() => {
   localStorage.clear()
+  useAppStore.getState().uiActions.newThread()
   vi.spyOn(workspaceApi, "list").mockResolvedValue([workspace])
   useAppStore.setState({
     domains: [workspace], domainsStatus: "loaded", activeDomainId: WS,
@@ -89,32 +146,93 @@ afterEach(() => {
 
 describe("chat thread title", () => {
   it("shows the provisional title, then the generated title in header and sidebar", async () => {
-    mockApi()
-    render(
-      <MemoryRouter initialEntries={[`/workspaces/${WS}/chat`]}>
-        <Routes>
-          <Route
-            path="/workspaces/:workspaceId/chat"
-            element={<><Sidebar /><ChatPanel /></>}
-          />
-        </Routes>
-      </MemoryRouter>,
-    )
+    const server = mockApi()
+    renderChat()
 
-    await act(async () => {
-      fireEvent.change(await screen.findByRole("textbox"), { target: { value: QUESTION } })
-      fireEvent.click(screen.getByRole("button", { name: "Send message" }))
-    })
+    await send(QUESTION)
     await screen.findByText("Here are the rates.")
     const threadRow = `sidebar-thread-${useAppStore.getState().threadId}`
 
     await waitFor(() => expect(screen.getByTestId("chat-thread-title")).toHaveTextContent(QUESTION))
     expect(screen.getByTestId(threadRow)).toHaveTextContent(QUESTION)
 
+    server.generateTitle()
     await waitFor(
       () => expect(screen.getByTestId("chat-thread-title")).toHaveTextContent(GENERATED),
       { timeout: 5000 },
     )
     expect(screen.getByTestId(threadRow)).toHaveTextContent(GENERATED)
+  }, 15000)
+
+  it("lists a new chat as soon as its first message is sent, and reopens it mid-turn", async () => {
+    const server = mockApi({ holdTurn: true, serverTitle: SERVER_TITLE })
+    renderChat()
+    const firstThread = useAppStore.getState().threadId
+
+    await send(QUESTION)
+    await screen.findByText("Here are the rates.")
+    // The send's response hands the row to the server's list while the turn still runs.
+    await waitFor(() =>
+      expect(screen.getByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(SERVER_TITLE),
+    )
+
+    // Leave the running turn for a new chat: the first stays listed.
+    await act(async () => fireEvent.click(screen.getByTestId("sidebar-new-chat")))
+    await waitFor(() => expect(useAppStore.getState().threadId).not.toBe(firstThread))
+    expect(screen.queryByText("Here are the rates.")).not.toBeInTheDocument()
+    expect(screen.getByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(SERVER_TITLE)
+
+    await act(async () => fireEvent.click(screen.getByTestId(`sidebar-thread-${firstThread}`)))
+    expect(useAppStore.getState().threadId).toBe(firstThread)
+    expect(await screen.findByText("Here are the rates.")).toBeInTheDocument()
+
+    await act(async () => server.releaseTurn())
+    expect(screen.getByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(SERVER_TITLE)
+  }, 15000)
+
+  it("drops the new chat from the sidebar when its first send is refused", async () => {
+    const server = mockApi({ holdResponse: true, refuseSends: 1 })
+    renderChat()
+    const firstThread = useAppStore.getState().threadId
+
+    await send(QUESTION)
+    expect(await screen.findByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(QUESTION)
+    await act(async () => server.releaseResponse())
+
+    await waitFor(() =>
+      expect(screen.queryByTestId(`sidebar-thread-${firstThread}`)).not.toBeInTheDocument(),
+    )
+    expect(useAppStore.getState().threads).toEqual([])
+    expect(screen.getByTestId("chat-thread-title")).toHaveTextContent("Untitled")
+
+    // A resend is still the chat's first message, so it is listed straight away again.
+    await send(QUESTION)
+    expect(await screen.findByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(QUESTION)
+    await act(async () => server.releaseResponse())
+    expect(await screen.findByText("Here are the rates.")).toBeInTheDocument()
+  }, 15000)
+
+  it("keeps the new chat listed and reopenable before its send is answered", async () => {
+    const server = mockApi({ holdResponse: true })
+    renderChat()
+    const firstThread = useAppStore.getState().threadId
+
+    await send(QUESTION)
+    expect(await screen.findByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(QUESTION)
+
+    await act(async () => fireEvent.click(screen.getByTestId("sidebar-new-chat")))
+    await waitFor(() => expect(useAppStore.getState().threadId).not.toBe(firstThread))
+    // Any refetch now (a job ending, a selection) gets a list without the row yet.
+    await act(async () => useAppStore.getState().uiActions.fetchThreads(WS))
+    expect(screen.getByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(QUESTION)
+
+    await act(async () => fireEvent.click(screen.getByTestId(`sidebar-thread-${firstThread}`)))
+    expect(useAppStore.getState().threadId).toBe(firstThread)
+    // The shown chat is the one still waiting on its send.
+    expect(await screen.findByRole("button", { name: "Stop response" })).toBeInTheDocument()
+
+    await act(async () => server.releaseResponse())
+    expect(await screen.findByText("Here are the rates.")).toBeInTheDocument()
+    expect(screen.getByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(QUESTION)
   }, 15000)
 })

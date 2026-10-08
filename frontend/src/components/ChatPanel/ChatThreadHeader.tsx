@@ -2,11 +2,10 @@ import { useEffect, useRef, useState } from "react"
 import { Check, LayoutDashboard, Loader2, PanelsTopLeft, Pencil } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { shortThreadTitle } from "@/lib/threadTitle"
 import { cn } from "@/lib/utils"
 
 export type ThreadPanelMode = "files" | "canvas"
-
-const THREAD_TITLE_PREVIEW_CHARS = 200
 
 interface ChatThreadHeaderProps {
   title: string
@@ -25,7 +24,7 @@ export function ChatThreadHeader({
   onOpenFiles,
   onOpenCanvas,
 }: ChatThreadHeaderProps) {
-  const displayTitle = shortThreadTitle(title)
+  const displayTitle = shortThreadTitle(title) || "Untitled"
   const isUntitledFallback = !title.trim()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(displayTitle)
@@ -156,13 +155,4 @@ export function ChatThreadHeader({
       </div>
     </header>
   )
-}
-
-function shortThreadTitle(title: string): string {
-  const clean = title.trim()
-  if (!clean) return "Untitled"
-  if (clean.length > THREAD_TITLE_PREVIEW_CHARS) {
-    return `${clean.slice(0, THREAD_TITLE_PREVIEW_CHARS).trimEnd()}...`
-  }
-  return clean
 }
