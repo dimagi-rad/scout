@@ -65,14 +65,6 @@ async def aunserved_tenant_ids(workspace_id) -> set:
     return tenant_ids - served
 
 
-async def aworkspace_serves_nothing(workspace_id) -> bool:
-    """Whether the workspace has sources and none of them serves data yet."""
-    unserved = await aunserved_tenant_ids(workspace_id)
-    return bool(unserved) and (
-        len(unserved) >= await WorkspaceTenant.objects.filter(workspace_id=workspace_id).acount()
-    )
-
-
 def active_runs_for_workspaces(workspace_ids):
     """Unevaluated: the active runs on any tenant of these workspaces, owned or not.
 

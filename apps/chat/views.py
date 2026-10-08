@@ -319,12 +319,13 @@ async def _hold_while_loading(workspace, thread_id: str, message: dict, text: st
 
     Only while the workspace serves no data: a refresh over served data answers
     from what is there. Serving is the workspace's status, not its sources': a new
-    workspace over sources another one already loaded serves nothing until its own
-    views are built. The load is this chat's own, or else another load or rebuild
-    of this workspace (its creation load, a teammate's, or one a read-only member
-    cannot start), whose end flushes it; a sibling workspace's load of a shared
-    source is not one. A chat with no load to wait on gets a normal turn, whose
-    agent explains why nothing can load.
+    workspace over several sources another one already loaded serves nothing until
+    its own views are built. A single loaded source serves through SQL at once,
+    even before the workspace's data model is built (#714). The load is this
+    chat's own, or else another load or rebuild of this workspace (its creation
+    load, a teammate's, or one a read-only member cannot start), whose end flushes
+    it; a sibling workspace's load of a shared source is not one. A chat with no
+    load to wait on gets a normal turn, whose agent explains why nothing can load.
     """
     if await aworkspace_schema_status(workspace.id) == "available":
         return None

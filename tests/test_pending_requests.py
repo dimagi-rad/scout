@@ -32,6 +32,7 @@ from apps.chat.services.continuation import (
     REQUEST_STILL_WAITING_NOTE,
 )
 from apps.chat.turn_lease import atry_acquire_turn_lease
+from apps.semantic.models import CubeSchema, SemanticModel
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces import tasks
 from apps.workspaces.models import (
@@ -921,6 +922,20 @@ async def _new_workspace_over_loaded_sources(slug):
     return ws, user, client
 
 
+async def _ready_data_model(ws):
+    model = await SemanticModel.objects.acreate(
+        workspace=ws, name="Serving", status=SemanticModel.Status.ACTIVE
+    )
+    await CubeSchema.objects.acreate(
+        workspace=ws,
+        semantic_model=model,
+        filename="serving.yml",
+        content="cubes: []",
+        content_hash="x",
+        status=CubeSchema.Status.ACTIVE,
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.usefixtures("queued_jobs", "checkpoint")
@@ -1011,6 +1026,7 @@ class TestHoldForNewWorkspaceOverLoadedSources:
         await WorkspaceViewSchema.objects.acreate(
             workspace=ws, schema_name="v_served", state=SchemaState.ACTIVE
         )
+        await _ready_data_model(ws)
         await adefer_rebuild_workspace_view_schema(workspace_id=str(ws.id))
         thread_id = str(uuid.uuid4())
 
@@ -1304,7 +1320,7 @@ async def test_a_rebuild_flushes_the_requests_waiting_on_it(task, build, fails):
     side_effect = RuntimeError("boom") if fails else None
     with (
         patch.object(tasks.publication, build, AsyncMock(return_value={}, side_effect=side_effect)),
-        patch.object(tasks, "_defer_pending_flush", AsyncMock()) as flush,
+        patch.object(tasks, "_defer_flush_if_held", AsyncMock()) as flush,
     ):
         if fails:
             with pytest.raises(RuntimeError):

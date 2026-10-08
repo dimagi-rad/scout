@@ -835,6 +835,17 @@ async def defer_pending_flush(workspace_id, delay: int = PENDING_FLUSH_DELAY_SEC
         logger.exception("Could not queue the held-request flush for workspace %s", workspace_id)
 
 
+async def defer_flush_if_held(workspace_id) -> None:
+    """``defer_pending_flush`` only when something is held: rebuilds fan out per workspace."""
+    try:
+        held = await pending_requests.aworkspace_holds_flushable(workspace_id)
+    except Exception:
+        logger.exception("Could not check held requests for workspace %s", workspace_id)
+        held = True
+    if held:
+        await defer_pending_flush(workspace_id)
+
+
 async def flush_workspace_requests(workspace_id: str) -> dict:
     """Send the workspace's held requests that no load of their own will send.
 
