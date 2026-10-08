@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+from django.db.models import Subquery
 from django.utils import timezone
 
 from apps.telemetry.models import TelemetryEvent
@@ -22,20 +23,16 @@ PRUNE_MAX_BATCHES = 200
 async def prune_telemetry_events(now=None) -> int:
     """Delete events older than the retention window in small batches; returns the count."""
     cutoff = (now or timezone.now()) - timedelta(days=RETENTION_DAYS)
+    expired = TelemetryEvent.objects.filter(occurred_at__lt=cutoff).order_by("occurred_at")
     deleted = 0
     for _ in range(PRUNE_MAX_BATCHES):
-        ids = [
-            pk
-            async for pk in TelemetryEvent.objects.filter(occurred_at__lt=cutoff)
-            .order_by("occurred_at")
-            .values_list("id", flat=True)[:PRUNE_BATCH_SIZE]
-        ]
-        if not ids:
-            break
-        count, _ = await TelemetryEvent.objects.filter(id__in=ids).adelete()
+        batch = expired.values("id")[:PRUNE_BATCH_SIZE]
+        count, _ = await TelemetryEvent.objects.filter(id__in=Subquery(batch)).adelete()
         deleted += count
-        if len(ids) < PRUNE_BATCH_SIZE:
+        if count < PRUNE_BATCH_SIZE:
             break
+    else:
+        logger.warning("Telemetry prune hit its batch budget; the rest waits for the next run")
     if deleted:
         logger.info("Pruned %d telemetry events older than %s", deleted, cutoff.date())
     return deleted

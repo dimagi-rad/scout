@@ -20,10 +20,13 @@ class EventKind:
 
 
 class Outcome:
-    OK = "ok"
-    ERROR = "error"
+    """Runs (turns, loads, recipes) end completed, stopped or failed; single calls ok or error."""
+
+    COMPLETED = "completed"
     STOPPED = "stopped"
     FAILED = "failed"
+    OK = "ok"
+    ERROR = "error"
 
 
 class TelemetryEvent(models.Model):
@@ -33,7 +36,7 @@ class TelemetryEvent(models.Model):
     occurred_at = models.DateTimeField(default=timezone.now)
     # Plain ids, not foreign keys: history must outlive the rows it describes, and
     # an insert should not take locks on the user or workspace tables.
-    user_id = models.UUIDField(null=True, blank=True)
+    user_id = models.BigIntegerField(null=True, blank=True)
     workspace_id = models.UUIDField(null=True, blank=True)
     name = models.CharField(max_length=128, blank=True, default="")
     outcome = models.CharField(max_length=16, blank=True, default="")

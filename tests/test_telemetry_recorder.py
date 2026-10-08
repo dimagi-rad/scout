@@ -5,7 +5,7 @@ from datetime import timedelta
 from unittest import mock
 
 import pytest
-from django.db import IntegrityError, transaction
+from django.db import transaction
 from django.utils import timezone
 
 from apps.telemetry import recorder, tasks
@@ -16,7 +16,7 @@ from apps.users.models import User
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_arecord_writes_one_event():
-    user_id = uuid.uuid4()
+    user_id = 42
     await recorder.arecord(
         EventKind.TOOL_CALL,
         user_id=user_id,
@@ -38,7 +38,7 @@ async def test_arecord_writes_one_event():
 @pytest.mark.django_db(transaction=True)
 async def test_arecord_swallows_a_failed_insert():
     with mock.patch.object(
-        TelemetryEvent.objects, "abulk_create", side_effect=RuntimeError("db gone")
+        TelemetryEvent.objects, "bulk_create", side_effect=RuntimeError("db gone")
     ):
         await recorder.arecord(EventKind.CHAT_TURN)
 
@@ -47,11 +47,50 @@ async def test_arecord_swallows_a_failed_insert():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_arecord_ignores_an_unparseable_id():
-    await recorder.arecord(EventKind.CHAT_TURN, user_id="not-a-uuid")
+async def test_arecord_ignores_unparseable_ids():
+    await recorder.arecord(EventKind.CHAT_TURN, user_id="not-an-id", workspace_id="nope")
 
     event = await TelemetryEvent.objects.aget()
     assert event.user_id is None
+    assert event.workspace_id is None
+
+
+@pytest.mark.django_db
+def test_event_keeps_a_real_users_id():
+    user = User.objects.create_user(email="ids@example.com", password="pass")
+
+    recorder.record(EventKind.CHAT_TURN, user_id=user.id)
+
+    assert TelemetryEvent.objects.get().user_id == user.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_values_postgres_rejects_never_reach_the_insert():
+    await recorder.arecord_events(
+        [
+            recorder.build_event(
+                EventKind.CHAT_TURN,
+                duration_ms=float("inf"),
+                attrs={"ratio": float("nan"), "big": float("-inf"), "nul": "a\x00b"},
+            ),
+            recorder.build_event(EventKind.TOOL_CALL, duration_ms=10**12),
+        ]
+    )
+
+    events = {e.kind: e async for e in TelemetryEvent.objects.all()}
+    assert events[EventKind.CHAT_TURN].duration_ms is None
+    assert events[EventKind.CHAT_TURN].attrs == {}
+    assert events[EventKind.TOOL_CALL].duration_ms == recorder.MAX_DURATION_MS
+
+
+def test_build_event_never_raises_on_odd_input():
+    event = recorder.build_event(
+        EventKind.CHAT_TURN, name=123, outcome=None, attrs="not a dict", duration_ms="5"
+    )
+
+    assert event is not None
+    assert (event.name, event.outcome, event.attrs, event.duration_ms) == ("", "", {}, None)
 
 
 @pytest.mark.asyncio
@@ -73,13 +112,23 @@ def test_attrs_keep_only_scalars_and_short_labels():
             "ratio": 0.5,
             "cached": True,
             "model": "claude-x",
-            "prompt": "x" * (recorder.MAX_ATTR_STRING + 1),
+            "prompt": "x" * 65,
+            "question": "how many visits?",
+            "email": "someone@example.com",
+            "sql": "select * from t",
             "nested": {"text": "hello"},
             "items": ["a"],
+            "Free Text Key": 1,
+            "k" * 41: 1,
         },
     )
 
     assert event.attrs == {"tokens": 10, "ratio": 0.5, "cached": True, "model": "claude-x"}
+
+
+def test_name_must_be_a_label():
+    assert recorder.build_event(EventKind.TOOL_CALL, name="execute_sql").name == "execute_sql"
+    assert recorder.build_event(EventKind.TOOL_CALL, name="what is this?").name == ""
 
 
 def test_negative_duration_is_clamped():
@@ -88,10 +137,12 @@ def test_negative_duration_is_clamped():
 
 @pytest.mark.django_db
 def test_record_failure_leaves_the_callers_transaction_usable():
+    # duration_ms=-1 fails the column's CHECK constraint inside Postgres, which
+    # aborts the transaction unless the insert ran in its own savepoint.
+    invalid = TelemetryEvent(kind=EventKind.ARTIFACT_VIEW, duration_ms=-1)
     with transaction.atomic():
-        with mock.patch.object(TelemetryEvent, "save", side_effect=IntegrityError("boom")):
+        with mock.patch.object(recorder, "build_event", return_value=invalid):
             recorder.record(EventKind.ARTIFACT_VIEW)
-        # The caller's transaction still accepts writes after the failed insert.
         User.objects.create_user(email="still-ok@example.com", password="pass")
 
     assert User.objects.filter(email="still-ok@example.com").exists()
@@ -140,9 +191,16 @@ async def test_prune_stops_after_its_batch_budget(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_prune_task_is_scheduled_daily():
+async def test_prune_task_runs_the_prune():
     assert await tasks.prune_telemetry.func() == {"deleted": 0}
-    assert any(
-        task.task is tasks.prune_telemetry
-        for task in tasks.app.periodic_registry.periodic_tasks.values()
-    )
+
+
+def test_prune_schedule_and_name_are_pinned():
+    # Procrastinate keys periodic bookkeeping by task name, so a rename re-schedules.
+    scheduled = {
+        name: periodic.cron
+        for (name, _), periodic in tasks.app.periodic_registry.periodic_tasks.items()
+        if name.startswith("apps.telemetry.")
+    }
+
+    assert scheduled == {"apps.telemetry.tasks.prune_telemetry": "23 3 * * *"}
