@@ -57,6 +57,9 @@ function mockServer() {
     /** Detail polls answer with this status instead, while set. */
     detailStatus: null as number | null,
     chatReply: "stream" as "stream" | "busy" | "network",
+    /** What the running turn has streamed for chats that did not start it. */
+    liveRows: [] as { id: number; run: string; text: string; done: boolean }[],
+    tailReads: 0,
     /** Holds this tab's own turn open until called. */
     endReply: () => {},
     finish() {
@@ -94,6 +97,13 @@ function mockServer() {
         pending_request: null,
         turn_running: mine && server.running,
       })
+    }
+    const tail = url.match(/\/threads\/([^/]+)\/resume-stream\/\?after=(\d+)/)
+    if (tail) {
+      server.tailReads += 1
+      const after = Number(tail[2])
+      const rows = tail[1] === THREAD ? server.liveRows.filter((row) => row.id > after) : []
+      return Response.json({ chunks: rows, more: false })
     }
     const detail = url.match(/\/threads\/([^/]+)\/$/)
     if (detail) {
@@ -402,5 +412,72 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
 
     await vi.waitFor(() => expect(server.detailPolls).toEqual([THREAD]))
     expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
+  })
+
+  describe("its text, streamed as the server writes it", () => {
+    it("shows the text as it arrives and reloads on the turn's done row", async () => {
+      const server = mockServer()
+      server.liveRows = [{ id: 1, run: "r1", text: "Visits rose ", done: false }]
+      renderPanel()
+
+      expect(await screen.findByTestId("resume-stream")).toHaveTextContent("Visits rose")
+      expect(screen.queryByTestId("chat-remote-turn")).toBeNull()
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "and by month?" } })
+      expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled()
+
+      server.liveRows.push({ id: 2, run: "r1", text: "in March.", done: false })
+      await act(() => vi.advanceTimersByTimeAsync(1_000))
+      expect(screen.getByTestId("resume-stream")).toHaveTextContent("Visits rose in March.")
+
+      // The server writes the done row once it has let go of the thread.
+      server.finish()
+      server.liveRows.push({ id: 3, run: "r1", text: "", done: true })
+      await act(() => vi.advanceTimersByTimeAsync(1_000))
+
+      expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
+      await vi.waitFor(() => expect(screen.queryByTestId("resume-stream")).toBeNull())
+      // The done row ended the wait before the thread poll had to.
+      expect(server.detailPolls).toEqual([])
+      expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled()
+    })
+
+    it("shows the placeholder until text arrives, and skips a run that already ended", async () => {
+      const server = mockServer()
+      server.liveRows = [{ id: 1, run: "earlier", text: "An earlier answer.", done: true }]
+      renderPanel()
+
+      await screen.findByTestId("chat-remote-turn")
+      await act(() => vi.advanceTimersByTimeAsync(1_000))
+      expect(screen.queryByTestId("resume-stream")).toBeNull()
+
+      server.liveRows.push({ id: 2, run: "r2", text: "Visits rose.", done: false })
+      await act(() => vi.advanceTimersByTimeAsync(3_000))
+      expect(screen.getByTestId("resume-stream")).toHaveTextContent("Visits rose.")
+      expect(screen.queryByTestId("chat-remote-turn")).toBeNull()
+    })
+
+    it("falls back to the thread poll when the turn wrote no done row", async () => {
+      const server = mockServer()
+      server.liveRows = [{ id: 1, run: "r1", text: "Visits rose ", done: false }]
+      renderPanel()
+      await screen.findByTestId("resume-stream")
+
+      server.finish()
+      await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_POLL_MS))
+
+      expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
+      expect(server.detailPolls).toEqual([THREAD])
+    })
+
+    it("does not tail a thread whose turn is not running", async () => {
+      const server = mockServer()
+      server.finish()
+      renderPanel()
+      await screen.findByText("Here are the visits.")
+
+      await act(() => vi.advanceTimersByTimeAsync(5_000))
+
+      expect(server.tailReads).toBe(0)
+    })
   })
 })

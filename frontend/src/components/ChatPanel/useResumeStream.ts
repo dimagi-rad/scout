@@ -17,22 +17,24 @@ interface StreamState {
   scope: string
   run: string | null
   text: string
+  /** The shown run wrote its last row. */
+  done: boolean
 }
 
 /**
  * The answer a background resume of this chat is writing, tailed while
  * ``active`` (the resume is running). The text stays until ``reset``, which the
  * chat calls once its reloaded messages carry the final answer, so the answer
- * never blinks out between the two.
+ * never blinks out between the two. ``done``: the run it shows has ended.
  */
 export function useResumeStream(
   workspaceId: string | null,
   threadId: string,
   active: boolean,
-): { text: string; reset: () => void } {
+): { text: string; done: boolean; reset: () => void } {
   const scope = `${workspaceId}\u0000${threadId}`
-  const [state, setState] = useState<StreamState>({ scope, run: null, text: "" })
-  if (state.scope !== scope) setState({ scope, run: null, text: "" })
+  const [state, setState] = useState<StreamState>({ scope, run: null, text: "", done: false })
+  if (state.scope !== scope) setState({ scope, run: null, text: "", done: false })
   // Where this chat has read up to; per chat, so a switch starts over.
   const cursorRef = useRef<{
     scope: string
@@ -96,15 +98,17 @@ export function useResumeStream(
           : Math.min(delay * 2, RESUME_STREAM_IDLE_POLL_MS)
         if (fresh.length) {
           setState((prev) => {
-            let { run, text } = prev
+            let { run, text, done } = prev
             for (const chunk of fresh) {
               if (chunk.run !== run) {
                 run = chunk.run
                 text = ""
+                done = false
               }
               text += chunk.text
+              if (chunk.done) done = true
             }
-            return { ...prev, run, text }
+            return { ...prev, run, text, done }
           })
         }
       } catch {
@@ -126,8 +130,12 @@ export function useResumeStream(
     // Read the live run from its start again: a reload in the middle of a run
     // does not carry what it streamed so far. A run already finished is skipped.
     cursorRef.current = { scope: cursorRef.current.scope, after: 0, caughtUp: false, backlog: [] }
-    setState((prev) => (prev.text === "" && prev.run === null ? prev : { ...prev, run: null, text: "" }))
+    setState((prev) =>
+      prev.text === "" && prev.run === null && !prev.done
+        ? prev
+        : { ...prev, run: null, text: "", done: false },
+    )
   }, [])
 
-  return { text: state.text, reset }
+  return { text: state.text, done: state.done, reset }
 }

@@ -259,9 +259,8 @@ export function ChatPanel() {
   // sent, or its load's ThreadJob is RUNNING (the resume phase).
   const resumeAnswering =
     held.phase === "answering" || activeMaterializationJob?.state === "running"
-  const resumeStream = useResumeStream(activeDomainId, threadId, resumeAnswering)
-  const resetResumeStreamRef = useRef(resumeStream.reset)
-  resetResumeStreamRef.current = resumeStream.reset
+  // Set below, once the turn this tab can't follow is known: the hooks it needs come first.
+  const resetResumeStreamRef = useRef<() => void>(() => {})
   // Per thread, the user message that sends a held request itself ("Send now"), and
   // the request version it showed; a retry of that message names the version too.
   // Each thread's chat runs on its own, so another thread's send must not replace it.
@@ -528,12 +527,29 @@ export function ChatPanel() {
     && !historyLoading
     && serverTurn?.chat === chat
     && serverTurn.reloadKey === messageReloadKey
-  useRemoteTurnPoll(activeDomainId, threadId, remoteTurnRunning, () => {
+  // Its text streams in as the server writes it; tool and artifact cards come with
+  // the reload once the turn is over.
+  const resumeStream = useResumeStream(
+    activeDomainId,
+    threadId,
+    resumeAnswering || remoteTurnRunning,
+  )
+  resetResumeStreamRef.current = resumeStream.reset
+  function finishRemoteTurn() {
     if (!mountedRef.current) return
     setMessageReloadKey((k) => k + 1)
     setTitleRefreshTrigger((prev) => ({ threadId, turn: (prev?.turn ?? 0) + 1 }))
     if (activeDomainId) void fetchThreads(activeDomainId)
-  })
+  }
+  // The poll is the backstop: a turn that streamed no text, or whose writes failed,
+  // has no done row to read.
+  useRemoteTurnPoll(activeDomainId, threadId, remoteTurnRunning, finishRemoteTurn)
+  const finishRemoteTurnRef = useRef(finishRemoteTurn)
+  finishRemoteTurnRef.current = finishRemoteTurn
+  // The done row is written once the server has let go of the thread.
+  useEffect(() => {
+    if (remoteTurnRunning && resumeStream.done) finishRemoteTurnRef.current()
+  }, [remoteTurnRunning, resumeStream.done])
 
   const loadThreadArtifacts = useCallback(async () => {
     if (!activeDomainId || !threadId) return
