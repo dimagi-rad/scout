@@ -55,6 +55,10 @@ async def snapshot_daily_metrics(timestamp: int = 0) -> dict:
     The day comes from the schedule, so a run delayed past midnight by a busy
     worker still records the right one.
     """
-    scheduled = datetime.fromtimestamp(timestamp, UTC) if timestamp else timezone.now()
+    now = timezone.now()
+    scheduled = datetime.fromtimestamp(timestamp, UTC) if timestamp else now
     day = (scheduled - timedelta(days=1)).date()
-    return {"rows": await take_daily_snapshot(day, gauges=True)}
+    # Totals and sizes are read as of now; a run stuck in the queue past a day
+    # would stamp today's values on an older day.
+    gauges = now - scheduled < timedelta(hours=20)
+    return {"rows": await take_daily_snapshot(day, gauges=gauges)}

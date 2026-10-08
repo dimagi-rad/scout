@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import psycopg
 import pytest
+from asgiref.sync import async_to_sync, sync_to_async
 from django.db import connection
 from django.utils import timezone
 
@@ -12,6 +13,7 @@ from apps.artifacts.models import Artifact, ArtifactType
 from apps.chat.models import Thread
 from apps.telemetry import snapshots, tasks
 from apps.telemetry.models import DailySnapshot, SnapshotMetric
+from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, TenantSchema
 
 SCHEMA = "telemetry_size_probe"
@@ -42,7 +44,8 @@ def managed_is_test_db():
 @pytest.fixture
 def sized_schema(transactional_db, tenant):
     with connection.cursor() as cursor:
-        cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
+        cursor.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
+        cursor.execute(f"CREATE SCHEMA {SCHEMA}")
         cursor.execute(f"CREATE TABLE {SCHEMA}.cases AS SELECT generate_series(1, 5000) AS n")
     TenantSchema.objects.create(tenant=tenant, schema_name=SCHEMA, state=SchemaState.ACTIVE)
     # Never measured: dropped already.
@@ -84,7 +87,7 @@ async def test_snapshot_counts_the_platform(platform, managed_is_test_db):
     assert values[(SnapshotMetric.TENANTS, "")] == 1
     assert values[(SnapshotMetric.USERS, "")] == 1
     assert values[(SnapshotMetric.THREADS_UPDATED, "")] == 1
-    assert values[(SnapshotMetric.ARTIFACTS_UPDATED, "")] == 1
+    assert values[(SnapshotMetric.ARTIFACTS_UPDATED, "")] == 2  # the soft delete counts
     assert values[(SnapshotMetric.WORKSPACES_UPDATED, "")] == 1
 
 
@@ -140,6 +143,8 @@ async def test_schema_sizes_are_recorded_per_tenant_and_in_total(sized_schema, m
     tenant_bytes = values[(SnapshotMetric.SCHEMA_BYTES, str(sized_schema.id))]
     assert tenant_bytes > 100_000
     assert values[(SnapshotMetric.SCHEMA_BYTES, "")] == tenant_bytes
+    assert values[(SnapshotMetric.SCHEMA_BYTES_RETAINED, "")] == 0
+    assert values[(SnapshotMetric.SCHEMAS_SKIPPED, "")] == 0
 
 
 @pytest.mark.asyncio
@@ -172,8 +177,105 @@ async def test_a_failed_size_query_still_records_the_counts(sized_schema):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_the_task_snapshots_the_day_before_its_schedule(managed_is_test_db):
+    scheduled = timezone.now() - timedelta(hours=1)
+
+    await tasks.snapshot_daily_metrics.func(timestamp=int(scheduled.timestamp()))
+
+    day = (scheduled - timedelta(days=1)).date()
+    assert (await _values(day))[(SnapshotMetric.USERS, "")] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_run_stuck_in_the_queue_writes_no_gauges(managed_is_test_db):
     scheduled = datetime(2026, 3, 2, 0, 20, tzinfo=UTC)
 
     await tasks.snapshot_daily_metrics.func(timestamp=int(scheduled.timestamp()))
 
-    assert (await _values(date(2026, 3, 1)))[(SnapshotMetric.USERS, "")] == 0
+    values = await _values(date(2026, 3, 1))
+    assert (SnapshotMetric.USERS, "") not in values
+    assert values[(SnapshotMetric.THREADS_UPDATED, "")] == 0
+
+
+class _LockedSchema:
+    """A managed connection on which sizing one schema hits its lock timeout."""
+
+    def __init__(self, conn, locked):
+        self._conn, self._locked = conn, locked
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._conn.__exit__(*exc)
+
+    def execute(self, sql, params=None):
+        if params == [self._locked]:
+            raise psycopg.errors.LockNotAvailable("canceling statement due to lock timeout")
+        return self._conn.execute(sql, params)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_locked_schema_is_skipped_and_totals_are_withheld(sized_schema):
+    other_tenant = await Tenant.objects.acreate(
+        provider="commcare", external_id="other-size", canonical_name="Other"
+    )
+    await sync_to_async(_make_schema)("telemetry_other_probe")
+    await TenantSchema.objects.acreate(
+        tenant=other_tenant, schema_name="telemetry_other_probe", state=SchemaState.ACTIVE
+    )
+    today = timezone.now().date()
+    # An earlier run that day measured the now-locked tenant; it must not linger.
+    await DailySnapshot.objects.acreate(
+        day=today, metric=SnapshotMetric.SCHEMA_BYTES, dimension=str(sized_schema.id), value=1
+    )
+
+    try:
+        with patch.object(
+            snapshots,
+            "get_managed_db_connection",
+            lambda: _LockedSchema(_test_db_connection(), SCHEMA),
+        ):
+            await snapshots.take_daily_snapshot(today, gauges=True)
+    finally:
+        await sync_to_async(_drop_schema)("telemetry_other_probe")
+
+    values = await _values(today)
+    assert values[(SnapshotMetric.SCHEMAS_SKIPPED, "")] == 1
+    assert (SnapshotMetric.SCHEMA_BYTES, str(sized_schema.id)) not in values
+    assert values[(SnapshotMetric.SCHEMA_BYTES, str(other_tenant.id))] > 0
+    assert (SnapshotMetric.SCHEMA_BYTES, "") not in values
+
+
+def _make_schema(name):
+    with connection.cursor() as cursor:
+        cursor.execute(f"DROP SCHEMA IF EXISTS {name} CASCADE")
+        cursor.execute(f"CREATE SCHEMA {name}")
+        cursor.execute(f"CREATE TABLE {name}.t AS SELECT 1 AS n")
+
+
+def _drop_schema(name):
+    with connection.cursor() as cursor:
+        cursor.execute(f"DROP SCHEMA IF EXISTS {name} CASCADE")
+
+
+def test_size_statements_are_bounded():
+    executed = []
+
+    class Recorder:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            executed.append(sql)
+            return type("Result", (), {"fetchone": lambda _self: (0, 0)})()
+
+    with patch.object(snapshots, "get_managed_db_connection", Recorder):
+        async_to_sync(snapshots._schema_sizes)(["a"])
+
+    assert executed[:2] == ["SET lock_timeout = 2000", "SET statement_timeout = 30000"]

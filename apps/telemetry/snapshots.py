@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime, time, timedelta
 
 import psycopg
 from asgiref.sync import sync_to_async
+from django.db import transaction
 from django.utils import timezone
 
 from apps.artifacts.models import Artifact
@@ -35,8 +36,8 @@ _SCHEMA_SIZE_SQL = """
 
 
 @sync_to_async(thread_sensitive=False)
-def _schema_sizes(schema_names: list[str]) -> dict[str, int]:
-    """Bytes on disk per schema, tables with their indexes and TOAST.
+def _schema_sizes(schema_names: list[str]) -> tuple[dict[str, int], list[str]]:
+    """Bytes on disk per schema (tables with their indexes and TOAST), and the skipped.
 
     One short-lived connection a day, through the same helper every load uses;
     the managed database is a different database, so Django's connection cannot
@@ -44,8 +45,9 @@ def _schema_sizes(schema_names: list[str]) -> dict[str, int]:
     is locked or slow is skipped without losing the rest.
     """
     sizes: dict[str, int] = {}
+    skipped: list[str] = []
     if not schema_names:
-        return sizes
+        return sizes, skipped
     with get_managed_db_connection() as conn:
         conn.execute(f"SET lock_timeout = {_SIZE_LOCK_TIMEOUT_MS}")
         conn.execute(f"SET statement_timeout = {_SIZE_STATEMENT_TIMEOUT_MS}")
@@ -53,11 +55,13 @@ def _schema_sizes(schema_names: list[str]) -> dict[str, int]:
             try:
                 size, relations = conn.execute(_SCHEMA_SIZE_SQL, [name]).fetchone()
             except (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled):
-                logger.warning("Skipped sizing schema %s: it was locked or slow", name)
+                skipped.append(name)
                 continue
             if relations:
                 sizes[name] = int(size)
-    return sizes
+    if skipped:
+        logger.warning("Skipped sizing %d locked or slow schema(s): %s", len(skipped), skipped)
+    return sizes, skipped
 
 
 async def _schema_size_rows(day: date) -> list[DailySnapshot]:
@@ -68,10 +72,12 @@ async def _schema_size_rows(day: date) -> list[DailySnapshot]:
         ).values_list("schema_name", "tenant_id", "state")
     }
     try:
-        sizes = await _schema_sizes(sorted(schemas))
+        sizes, skipped = await _schema_sizes(sorted(schemas))
     except Exception:
         logger.warning("Could not measure tenant schema sizes", exc_info=True)
         return []
+    # A partial number would read as a drop in storage; better no number that night.
+    incomplete = {schemas[name][0] for name in skipped}
     per_tenant: dict[str, int] = {}
     retained = 0
     for schema_name, size in sizes.items():
@@ -82,33 +88,19 @@ async def _schema_size_rows(day: date) -> list[DailySnapshot]:
     rows = [
         DailySnapshot(day=day, metric=SnapshotMetric.SCHEMA_BYTES, dimension=tenant_id, value=size)
         for tenant_id, size in per_tenant.items()
+        if tenant_id not in incomplete
     ]
-    rows.append(
-        DailySnapshot(day=day, metric=SnapshotMetric.SCHEMA_BYTES, value=sum(per_tenant.values()))
-    )
-    rows.append(DailySnapshot(day=day, metric=SnapshotMetric.SCHEMA_BYTES_RETAINED, value=retained))
+    rows.append(DailySnapshot(day=day, metric=SnapshotMetric.SCHEMAS_SKIPPED, value=len(skipped)))
+    if not skipped:
+        rows.append(
+            DailySnapshot(
+                day=day, metric=SnapshotMetric.SCHEMA_BYTES, value=sum(per_tenant.values())
+            )
+        )
+        rows.append(
+            DailySnapshot(day=day, metric=SnapshotMetric.SCHEMA_BYTES_RETAINED, value=retained)
+        )
     return rows
-
-
-async def _count_rows(day: date) -> list[DailySnapshot]:
-    start = datetime.combine(day, time.min, tzinfo=UTC)
-    end = start + timedelta(days=1)
-    updated = {"updated_at__gte": start, "updated_at__lt": end}
-    counts = {
-        SnapshotMetric.THREADS: Thread.objects.all(),
-        SnapshotMetric.ARTIFACTS: Artifact.objects.all(),
-        SnapshotMetric.TENANTS: Tenant.objects.all(),
-        SnapshotMetric.WORKSPACES: Workspace.objects.all(),
-        SnapshotMetric.USERS: User.objects.filter(is_active=True),
-        SnapshotMetric.THREADS_UPDATED: Thread.objects.filter(**updated),
-        SnapshotMetric.ARTIFACTS_UPDATED: Artifact.objects.filter(**updated),
-        SnapshotMetric.TENANTS_UPDATED: Tenant.objects.filter(**updated),
-        SnapshotMetric.WORKSPACES_UPDATED: Workspace.objects.filter(**updated),
-    }
-    return [
-        DailySnapshot(day=day, metric=metric, value=await queryset.acount())
-        for metric, queryset in counts.items()
-    ]
 
 
 GAUGE_METRICS = frozenset(
@@ -122,6 +114,29 @@ GAUGE_METRICS = frozenset(
 )
 
 
+async def _count_rows(day: date, *, gauges: bool) -> list[DailySnapshot]:
+    start = datetime.combine(day, time.min, tzinfo=UTC)
+    end = start + timedelta(days=1)
+    updated = {"updated_at__gte": start, "updated_at__lt": end}
+    counts = {
+        SnapshotMetric.THREADS: Thread.objects.all(),
+        SnapshotMetric.ARTIFACTS: Artifact.objects.all(),
+        SnapshotMetric.TENANTS: Tenant.objects.all(),
+        SnapshotMetric.WORKSPACES: Workspace.objects.all(),
+        SnapshotMetric.USERS: User.objects.filter(is_active=True),
+        SnapshotMetric.THREADS_UPDATED: Thread.objects.filter(**updated),
+        # all_objects: a soft delete that day is a change too.
+        SnapshotMetric.ARTIFACTS_UPDATED: Artifact.all_objects.filter(**updated),
+        SnapshotMetric.TENANTS_UPDATED: Tenant.objects.filter(**updated),
+        SnapshotMetric.WORKSPACES_UPDATED: Workspace.objects.filter(**updated),
+    }
+    return [
+        DailySnapshot(day=day, metric=metric, value=await queryset.acount())
+        for metric, queryset in counts.items()
+        if gauges or metric not in GAUGE_METRICS
+    ]
+
+
 async def take_daily_snapshot(day: date | None = None, *, gauges: bool | None = None) -> int:
     """Record ``day``'s metrics (yesterday by default); rerunning a day replaces them.
 
@@ -133,13 +148,24 @@ async def take_daily_snapshot(day: date | None = None, *, gauges: bool | None = 
     day = day or yesterday
     if gauges is None:
         gauges = day == yesterday
-    rows = [row for row in await _count_rows(day) if gauges or row.metric not in GAUGE_METRICS]
+    rows = await _count_rows(day, gauges=gauges)
     if gauges:
         rows += await _schema_size_rows(day)
-    await DailySnapshot.objects.abulk_create(
-        rows,
-        update_conflicts=True,
-        unique_fields=["day", "metric", "dimension"],
-        update_fields=["value"],
-    )
+    await _replace_day(day, rows, sizes=gauges)
     return len(rows)
+
+
+@sync_to_async
+def _replace_day(day: date, rows: list[DailySnapshot], *, sizes: bool) -> None:
+    with transaction.atomic():
+        if sizes:
+            # Tenants measured on an earlier run of this day may be gone or skipped now.
+            DailySnapshot.objects.filter(day=day, metric=SnapshotMetric.SCHEMA_BYTES).exclude(
+                dimension=""
+            ).delete()
+        DailySnapshot.objects.bulk_create(
+            rows,
+            update_conflicts=True,
+            unique_fields=["day", "metric", "dimension"],
+            update_fields=["value"],
+        )
