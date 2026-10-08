@@ -96,7 +96,7 @@ async def test_snapshot_counts_the_platform(platform, managed_is_test_db):
 async def test_updates_are_counted_only_on_their_own_day(platform, managed_is_test_db):
     yesterday = timezone.now().date() - timedelta(days=1)
 
-    await snapshots.take_daily_snapshot(yesterday)
+    await snapshots.take_daily_snapshot(yesterday, gauges=True)
 
     values = await _values(yesterday)
     assert values[(SnapshotMetric.THREADS, "")] == 1
@@ -166,12 +166,17 @@ async def test_rerunning_a_day_replaces_its_values(platform, managed_is_test_db,
 async def test_a_failed_size_query_still_records_the_counts(sized_schema):
     today = timezone.now().date()
 
+    await DailySnapshot.objects.acreate(day=today, metric=SnapshotMetric.SCHEMA_BYTES, value=7)
+
     with patch.object(snapshots, "get_managed_db_connection", side_effect=OSError("down")):
         await snapshots.take_daily_snapshot(today, gauges=True)
 
     values = await _values(today)
     assert values[(SnapshotMetric.TENANTS, "")] == 1
-    assert not any(metric == SnapshotMetric.SCHEMA_BYTES for metric, _ in values)
+    # An earlier run's sizes for the day survive a sizing that could not run.
+    assert values[(SnapshotMetric.SCHEMA_BYTES, "")] == 7
+    # Both measured schemas went unsized, which the night records.
+    assert values[(SnapshotMetric.SCHEMAS_SKIPPED, "")] == 2
 
 
 @pytest.mark.asyncio
@@ -228,8 +233,17 @@ async def test_a_locked_schema_is_skipped_and_totals_are_withheld(sized_schema):
     )
     today = timezone.now().date()
     # An earlier run that day measured the now-locked tenant; it must not linger.
-    await DailySnapshot.objects.acreate(
-        day=today, metric=SnapshotMetric.SCHEMA_BYTES, dimension=str(sized_schema.id), value=1
+    await DailySnapshot.objects.abulk_create(
+        [
+            DailySnapshot(
+                day=today,
+                metric=SnapshotMetric.SCHEMA_BYTES,
+                dimension=str(sized_schema.id),
+                value=1,
+            ),
+            DailySnapshot(day=today, metric=SnapshotMetric.SCHEMA_BYTES, value=1),
+            DailySnapshot(day=today, metric=SnapshotMetric.SCHEMA_BYTES_RETAINED, value=1),
+        ]
     )
 
     try:
@@ -247,6 +261,7 @@ async def test_a_locked_schema_is_skipped_and_totals_are_withheld(sized_schema):
     assert (SnapshotMetric.SCHEMA_BYTES, str(sized_schema.id)) not in values
     assert values[(SnapshotMetric.SCHEMA_BYTES, str(other_tenant.id))] > 0
     assert (SnapshotMetric.SCHEMA_BYTES, "") not in values
+    assert (SnapshotMetric.SCHEMA_BYTES_RETAINED, "") not in values
 
 
 def _make_schema(name):
