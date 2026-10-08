@@ -10,7 +10,7 @@ import {
   type AccessDenialReason,
 } from "@/lib/accessReasons"
 import { shortThreadTitle } from "@/lib/threadTitle"
-import { forgetLocalThread, newLocalThreadId } from "./localThreads"
+import { forgetLocalThread, markLocalThread, newLocalThreadId } from "./localThreads"
 
 export type { AccessDenialReason }
 
@@ -97,8 +97,17 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
   // can take seconds; until then a refetch would drop the new chat from the sidebar (#859).
   // fetchThreads is the one place that merges these back in.
   const sendingThreads = new Map<string, Map<string, Thread>>()
+  // Answered sends whose row the next applied list confirms; by thread id.
+  const settledThreads = new Map<string, string>()
   const withSending = (workspaceId: string, threads: Thread[]): Thread[] => {
     const listed = new Set(threads.map((thread) => thread.id))
+    for (const [threadId, sentIn] of settledThreads) {
+      if (sentIn !== workspaceId) continue
+      settledThreads.delete(threadId)
+      // Refused before the server made the row: the chat is new again, so a resend
+      // lists it straight away too.
+      if (!listed.has(threadId)) markLocalThread(threadId)
+    }
     const sending = [...(sendingThreads.get(workspaceId)?.values() ?? [])]
       .filter((thread) => !listed.has(thread.id))
       .reverse()
@@ -193,7 +202,7 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
         const wasSending = sendingThreads.get(workspaceId)?.delete(threadId) === true
         // A retried send (after a busy 503, say) has no placeholder but may still be unlisted.
         const unlisted = !get().threads.some((thread) => thread.id === threadId)
-        // A send refused before the server made the row drops the placeholder here.
+        if (wasSending) settledThreads.set(threadId, workspaceId)
         if (wasSending || unlisted) void get().uiActions.fetchThreads(workspaceId)
       },
       retryAccessVerification: async (workspaceId: string) => {

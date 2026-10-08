@@ -25,6 +25,7 @@ vi.mock("@/contexts/WorkspaceJobsContext", () => ({
 const WS = "11111111-1111-1111-1111-111111111111"
 const QUESTION = "What are the module completion rates by district?"
 const GENERATED = "Module completion by district"
+const SERVER_TITLE = "Module completion rates (server)"
 
 const workspace: WorkspaceListItem = {
   id: WS, name: "Workspace", display_name: "Workspace", is_auto_created: false, role: "manage",
@@ -41,25 +42,41 @@ function thread(id: string, title: string, source: Thread["title_source"]): Thre
 }
 
 /** The server lists the thread once the POST lands; ``generateTitle`` lets the worker write its title. */
-function mockApi({ holdTurn = false, holdResponse = false, refuse = false } = {}) {
+function mockApi({
+  holdTurn = false,
+  holdResponse = false,
+  refuseSends = 0,
+  serverTitle = QUESTION,
+} = {}) {
+  let refusals = refuseSends
   let posted: string | null = null
   let titleGenerated = false
   let releaseTurn = () => {}
   const turnHeld = new Promise<void>((resolve) => {
     releaseTurn = resolve
   })
-  let releaseResponse = () => {}
-  const responseHeld = new Promise<void>((resolve) => {
-    releaseResponse = resolve
-  })
+  let release = () => {}
+  let responseHeld!: Promise<void>
+  const holdNextResponse = () => {
+    responseHeld = new Promise<void>((resolve) => {
+      release = resolve
+    })
+  }
+  holdNextResponse()
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
     if (url === "/api/chat/") {
       const threadId = JSON.parse(options?.body as string).data.threadId
       // The agent is still being built: no response, and (worst case) not yet listed.
-      if (holdResponse) await responseHeld
+      if (holdResponse) {
+        await responseHeld
+        holdNextResponse()
+      }
       // Refused before the server made the row.
-      if (refuse) return Response.json({ error: "Empty message" }, { status: 400 })
+      if (refusals > 0) {
+        refusals -= 1
+        return Response.json({ error: "Empty message" }, { status: 400 })
+      }
       posted = threadId
       return createUIMessageStreamResponse({
         stream: createUIMessageStream({
@@ -79,7 +96,7 @@ function mockApi({ holdTurn = false, holdResponse = false, refuse = false } = {}
       return Response.json([
         titleGenerated
           ? thread(posted, GENERATED, "generated")
-          : thread(posted, QUESTION, "first_message"),
+          : thread(posted, serverTitle, "first_message"),
       ])
     }
     if (url.endsWith("/messages/?include=pending")) return Response.json([])
@@ -91,7 +108,7 @@ function mockApi({ holdTurn = false, holdResponse = false, refuse = false } = {}
       titleGenerated = true
     },
     releaseTurn,
-    releaseResponse,
+    releaseResponse: () => release(),
   }
 }
 
@@ -148,31 +165,33 @@ describe("chat thread title", () => {
   }, 15000)
 
   it("lists a new chat as soon as its first message is sent, and reopens it mid-turn", async () => {
-    const server = mockApi({ holdTurn: true })
+    const server = mockApi({ holdTurn: true, serverTitle: SERVER_TITLE })
     renderChat()
     const firstThread = useAppStore.getState().threadId
 
     await send(QUESTION)
     await screen.findByText("Here are the rates.")
-    const row = await screen.findByTestId(`sidebar-thread-${firstThread}`)
-    expect(row).toHaveTextContent(QUESTION)
+    // The send's response hands the row to the server's list while the turn still runs.
+    await waitFor(() =>
+      expect(screen.getByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(SERVER_TITLE),
+    )
 
     // Leave the running turn for a new chat: the first stays listed.
     await act(async () => fireEvent.click(screen.getByTestId("sidebar-new-chat")))
     await waitFor(() => expect(useAppStore.getState().threadId).not.toBe(firstThread))
     expect(screen.queryByText("Here are the rates.")).not.toBeInTheDocument()
-    expect(screen.getByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(QUESTION)
+    expect(screen.getByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(SERVER_TITLE)
 
     await act(async () => fireEvent.click(screen.getByTestId(`sidebar-thread-${firstThread}`)))
     expect(useAppStore.getState().threadId).toBe(firstThread)
     expect(await screen.findByText("Here are the rates.")).toBeInTheDocument()
 
     await act(async () => server.releaseTurn())
-    expect(screen.getByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(QUESTION)
+    expect(screen.getByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(SERVER_TITLE)
   }, 15000)
 
   it("drops the new chat from the sidebar when its first send is refused", async () => {
-    const server = mockApi({ holdResponse: true, refuse: true })
+    const server = mockApi({ holdResponse: true, refuseSends: 1 })
     renderChat()
     const firstThread = useAppStore.getState().threadId
 
@@ -185,6 +204,12 @@ describe("chat thread title", () => {
     )
     expect(useAppStore.getState().threads).toEqual([])
     expect(screen.getByTestId("chat-thread-title")).toHaveTextContent("Untitled")
+
+    // A resend is still the chat's first message, so it is listed straight away again.
+    await send(QUESTION)
+    expect(await screen.findByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(QUESTION)
+    await act(async () => server.releaseResponse())
+    expect(await screen.findByText("Here are the rates.")).toBeInTheDocument()
   }, 15000)
 
   it("keeps the new chat listed and reopenable before its send is answered", async () => {

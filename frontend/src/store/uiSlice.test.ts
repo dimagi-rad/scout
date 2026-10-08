@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { useAppStore } from "@/store/store"
 import { ApiError, api } from "@/api/client"
 import type { Thread } from "@/store/uiSlice"
+import { isLocalThread } from "@/store/localThreads"
 
 function thread(id: string, title: string): Thread {
   return {
@@ -307,6 +308,12 @@ describe("uiSlice sending threads (#859)", () => {
     expect(useAppStore.getState().threads[0].title).toBe(`${"a".repeat(199)}...`)
   })
 
+  it("counts characters, not UTF-16 units, as the server does", () => {
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "😀".repeat(201))
+
+    expect(useAppStore.getState().threads[0].title).toBe(`${"😀".repeat(200)}...`)
+  })
+
   it("keeps it through a refetch that ran before the server had the row", async () => {
     useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?")
     vi.spyOn(api, "get").mockResolvedValue([thread("old", "Older chat")] as never)
@@ -334,6 +341,8 @@ describe("uiSlice sending threads (#859)", () => {
 
     await vi.waitFor(() => expect(ids()).toEqual(["old"]))
     expect(get).toHaveBeenCalledWith("/api/workspaces/ws-1/threads/")
+    // Still the chat's first message to send, so a resend lists it at once again.
+    await vi.waitFor(() => expect(isLocalThread("new")).toBe(true))
   })
 
   it("refetches nothing for a send in a thread already listed", () => {

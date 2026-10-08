@@ -16,3 +16,8 @@ export function isLocalThread(threadId: string): boolean {
 export function forgetLocalThread(threadId: string): void {
   created.delete(threadId)
 }
+
+/** Its first message was refused before the server kept it, so it still has none. */
+export function markLocalThread(threadId: string): void {
+  created.add(threadId)
+}
