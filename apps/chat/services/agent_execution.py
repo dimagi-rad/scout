@@ -10,6 +10,7 @@ from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools
 from apps.agents.tracing import langfuse_trace_context
 from apps.chat.checkpointer import ensure_checkpointer
+from apps.chat.stream import _write_terminal_message
 
 try:
     from langfuse import Langfuse
@@ -39,7 +40,7 @@ async def append_synthetic_message(thread, text: str) -> None:
         conversation_id=str(thread.id),
     )
     config = {"configurable": {"thread_id": str(thread.id)}}
-    await agent.aupdate_state(config, {"messages": [AIMessage(content=text)]})
+    await _write_terminal_message(agent, config, AIMessage(content=text))
 
 
 @contextlib.contextmanager

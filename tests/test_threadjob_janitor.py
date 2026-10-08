@@ -243,6 +243,7 @@ async def test_janitor_persists_synthetic_message_on_stuck_running():
 
     mock_agent = MagicMock()
     mock_agent.aupdate_state = AsyncMock(return_value=None)
+    mock_agent.aget_state = AsyncMock(return_value=None)
 
     with (
         patch(
