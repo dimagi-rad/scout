@@ -4,10 +4,12 @@ import asyncio
 import contextlib
 import json
 import uuid
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.test import AsyncClient
+from django.utils import timezone
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
@@ -22,10 +24,12 @@ from apps.telemetry.models import EventKind, Outcome, TelemetryEvent
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import (
     Workspace,
+    WorkspaceLoadTiming,
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.load_time_estimates import afinish_load_timing
 from tests.agent_doubles import FakeAgent
 from tests.tenant_access import ausable_connection
 
@@ -296,3 +300,28 @@ async def test_a_chat_turn_through_the_view_records_one_turn():
     assert turn.attrs["held_request"] is False
     assert "ttft_ms" in turn.attrs
     assert "how many" not in json.dumps(turn.attrs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_finished_load_records_its_phases():
+    user = await User.objects.acreate_user(email="load@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-load", created_by=user)
+    started = timezone.now() - timedelta(seconds=30)
+    await WorkspaceLoadTiming.objects.acreate(
+        workspace=ws,
+        job_id=991,
+        started_at=started,
+        phase="building_model",
+        phase_started_at=started + timedelta(seconds=20),
+        phase_seconds={"loading": 20.0},
+    )
+
+    await afinish_load_timing(991, True, now=started + timedelta(seconds=30))
+
+    [load] = await _events(EventKind.WORKSPACE_LOAD)
+    assert load.workspace_id == ws.id
+    assert load.outcome == Outcome.COMPLETED
+    assert load.duration_ms == 30_000
+    assert load.attrs["loading_ms"] == 20_000
+    assert load.attrs["building_model_ms"] == 10_000

@@ -8,6 +8,8 @@ from django.db.models import F
 from django.utils import timezone
 from procrastinate.contrib.django.models import ProcrastinateJob
 
+from apps.telemetry import recorder
+from apps.telemetry.models import EventKind, Outcome
 from apps.workspaces.models import MaterializationRun, WorkspaceLoadTiming
 from apps.workspaces.task_dispatch import MATERIALIZE_WORKSPACE
 
@@ -96,14 +98,28 @@ async def afinish_load_timing(job_id, succeeded, *, now=None, require_runs=False
         if timing is None:
             return
         now = now or timezone.now()
+        phase_seconds = _close_phase(timing, now)
         await WorkspaceLoadTiming.objects.filter(pk=timing.pk).aupdate(
             completed_at=now,
             succeeded=succeeded,
-            phase_seconds=_close_phase(timing, now),
+            phase_seconds=phase_seconds,
         )
         await cache.adelete(_cache_key(timing.workspace_id, timing.only_unserved))
     except Exception:
         logger.warning("Could not finish load timing", exc_info=True)
+        return
+    await recorder.arecord(
+        EventKind.WORKSPACE_LOAD,
+        workspace_id=timing.workspace_id,
+        outcome=Outcome.COMPLETED if succeeded else Outcome.FAILED,
+        duration_ms=(now - timing.started_at).total_seconds() * 1000,
+        occurred_at=now,
+        attrs={
+            "only_unserved": timing.only_unserved,
+            "job_id": job_id,
+            **{f"{phase}_ms": round(seconds * 1000) for phase, seconds in phase_seconds.items()},
+        },
+    )
 
 
 async def _history(workspace_id, only_unserved):
