@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import time
 import uuid
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
@@ -11,6 +12,7 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.test import AsyncClient
 from django.utils import timezone
+from langchain_core.callbacks.manager import handle_event
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
@@ -320,6 +322,7 @@ async def test_a_finished_load_records_its_phases():
 
     await afinish_load_timing(991, True, now=started + timedelta(seconds=30))
 
+    await afinish_load_timing(991, True, now=started + timedelta(seconds=31))
     [load] = await _events(EventKind.WORKSPACE_LOAD)
     assert load.workspace_id == ws.id
     assert load.outcome == Outcome.COMPLETED
@@ -344,6 +347,19 @@ async def test_switching_workspace_is_recorded_once():
 
     [switch] = await _events(EventKind.WORKSPACE_SWITCH)
     assert (switch.user_id, switch.workspace_id) == (user.id, ws.id)
+
+    other = await Workspace.objects.acreate(name="W-other", created_by=user)
+    await WorkspaceMembership.objects.acreate(workspace=other, user=user, role=WorkspaceRole.READ)
+    await WorkspaceTenant.objects.acreate(
+        workspace=other, tenant=await Tenant.objects.aget(external_id="t-telemetry-switch")
+    )
+    resp = await client.post(
+        "/api/auth/last-workspace/",
+        data=json.dumps({"workspace_id": str(other.id)}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert [e.workspace_id for e in await _events(EventKind.WORKSPACE_SWITCH)] == [ws.id, other.id]
 
 
 @pytest.mark.django_db
@@ -385,3 +401,79 @@ async def test_a_background_run_records_its_outcome():
         Outcome.FAILED,
         Outcome.STOPPED,
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_cancelled_stream_is_stopped_and_flags_a_lost_lease():
+    async def cancelled():
+        raise asyncio.CancelledError
+
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+
+    with pytest.raises(asyncio.CancelledError):
+        _ = [c async for c in telemetry.wrap_stream(_sse_stream(then=cancelled), lost=lambda: True)]
+
+    [turn] = await _events(EventKind.CHAT_TURN)
+    assert turn.outcome == Outcome.STOPPED
+    assert turn.attrs["lease_lost"] is True
+
+
+def test_a_tool_still_running_at_stop_is_recorded_stopped():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    telemetry.on_tool_start({"name": "query"}, "", run_id=uuid.uuid4())
+    telemetry.outcome = Outcome.STOPPED
+
+    turn, call = telemetry.events()
+
+    assert (call.name, call.outcome) == ("query", Outcome.STOPPED)
+    assert turn.attrs["tool_calls"] == 1
+    assert turn.attrs["tools_unfinished"] == 1
+
+
+def test_subagent_tool_calls_are_marked_nested():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    run_id = uuid.uuid4()
+    telemetry.on_tool_start(
+        {"name": "query"}, "", run_id=run_id, metadata={"subagent": "artifact_manager"}
+    )
+    telemetry.on_tool_end(ToolMessage(content="{}", tool_call_id="a"), run_id=run_id)
+
+    _turn, call = telemetry.events()
+    assert call.attrs["nested"] is True
+
+
+def test_model_starts_never_render_the_history():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    with patch("langchain_core.callbacks.manager.get_buffer_string") as render:
+        handle_event(
+            [telemetry],
+            "on_chat_model_start",
+            "ignore_chat_model",
+            {},
+            [[AIMessage(content="a long history")]],
+            run_id=uuid.uuid4(),
+        )
+
+    render.assert_not_called()
+
+
+def test_setup_time_counts_toward_the_turn():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN, started=time.monotonic() - 2)
+
+    [turn] = telemetry.events()
+
+    assert turn.duration_ms >= 2000
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_failed_load_is_recorded_failed():
+    user = await User.objects.acreate_user(email="load-fail@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-load-fail", created_by=user)
+    await WorkspaceLoadTiming.objects.acreate(workspace=ws, job_id=992)
+
+    await afinish_load_timing(992, False)
+
+    [load] = await _events(EventKind.WORKSPACE_LOAD)
+    assert load.outcome == Outcome.FAILED

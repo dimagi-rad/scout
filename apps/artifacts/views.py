@@ -760,13 +760,6 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
         html_content = SANDBOX_HTML_TEMPLATE.replace("{{CSP_NONCE}}", csp_nonce)
         html_content = html_content.replace("{{ARTIFACT_DATA}}", artifact_json)
 
-        record(
-            EventKind.ARTIFACT_VIEW,
-            user_id=request.user.id,
-            workspace_id=workspace_id,
-            name=artifact.artifact_type,
-            attrs={"artifact_id": artifact.id, "version": artifact.version},
-        )
         response = HttpResponse(html_content, content_type="text/html")
         response["Content-Security-Policy"] = generate_csp_with_nonce(csp_nonce)
         response["X-Content-Type-Options"] = "nosniff"
@@ -788,6 +781,15 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
             return err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
         derive_missing_semantic_query_manifest(artifact)
+        # Every artifact type, stories included, is fetched here once per open; the
+        # sandbox iframe reloads on each data revision and never loads for a story.
+        record(
+            EventKind.ARTIFACT_VIEW,
+            user_id=request.user.id,
+            workspace_id=workspace.id,
+            name=artifact.artifact_type,
+            attrs={"artifact_id": artifact.id, "version": artifact.version},
+        )
         return JsonResponse(self._serialize_artifact(artifact))
 
     def _serialize_artifact(self, artifact: Artifact) -> dict[str, Any]:

@@ -292,7 +292,8 @@ class TestArtifactSandboxView:
         assert "Plotly" not in content
         assert "root" in content
 
-    def test_sandbox_records_an_artifact_view(self, authenticated_client, artifact, workspace):
+    def test_opening_an_artifact_records_one_view(self, authenticated_client, artifact, workspace):
+        authenticated_client.get(f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/data/")
         authenticated_client.get(f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/")
 
         view = TelemetryEvent.objects.get(kind=EventKind.ARTIFACT_VIEW)

@@ -13,7 +13,7 @@ import contextlib
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -107,6 +107,7 @@ class AgentRunTelemetry(BaseCallbackHandler):
         workspace_id: Any = None,
         thread_id: str = "",
         name: str = "",
+        started: float | None = None,
     ) -> None:
         super().__init__()
         self.kind = kind
@@ -116,9 +117,10 @@ class AgentRunTelemetry(BaseCallbackHandler):
         self.name = name
         self.outcome = ""
         self.attrs: dict[str, Any] = {}
-        self._started = time.monotonic()
+        # A live turn starts when the request arrives, before the agent is built.
+        self._started = started if started is not None else time.monotonic()
         self._first_token_ms: float | None = None
-        self._tool_starts: dict[Any, tuple[str, float]] = {}
+        self._tool_starts: dict[Any, tuple[str, float, bool]] = {}
         self._tool_events: list[TelemetryEvent | None] = []
         self._tool_errors = 0
         self._llm_calls = 0
@@ -129,9 +131,15 @@ class AgentRunTelemetry(BaseCallbackHandler):
     def _elapsed_ms(self) -> float:
         return (time.monotonic() - self._started) * 1000
 
+    def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs) -> None:
+        # Without this, LangChain falls back to on_llm_start and first renders the
+        # whole message history to strings, on the event loop, for every model call.
+        return None
+
     def on_tool_start(self, serialized, input_str, *, run_id, **kwargs) -> None:
         name = kwargs.get("name") or (serialized or {}).get("name") or "unknown"
-        self._tool_starts[run_id] = (str(name), time.monotonic())
+        nested = bool((kwargs.get("metadata") or {}).get("subagent"))
+        self._tool_starts[run_id] = (str(name), time.monotonic(), nested)
 
     def on_tool_end(self, output, *, run_id, **kwargs) -> None:
         outcome, attrs = _tool_result(output)
@@ -144,19 +152,26 @@ class AgentRunTelemetry(BaseCallbackHandler):
         started = self._tool_starts.pop(run_id, None)
         if started is None:
             return
-        name, started_at = started
         if outcome == Outcome.ERROR:
             self._tool_errors += 1
-        self._tool_events.append(
-            recorder.build_event(
-                EventKind.TOOL_CALL,
-                user_id=self.user_id,
-                workspace_id=self.workspace_id,
-                name=name,
-                outcome=outcome,
-                duration_ms=(time.monotonic() - started_at) * 1000,
-                attrs={"run_kind": self.kind, "thread_id": self.thread_id, **attrs},
-            )
+        self._tool_events.append(self._tool_event(started, outcome, attrs))
+
+    def _tool_event(self, started, outcome: str, attrs: dict[str, Any]) -> TelemetryEvent | None:
+        name, started_at, nested = started
+        return recorder.build_event(
+            EventKind.TOOL_CALL,
+            user_id=self.user_id,
+            workspace_id=self.workspace_id,
+            name=name,
+            outcome=outcome,
+            duration_ms=(time.monotonic() - started_at) * 1000,
+            attrs={
+                "run_kind": self.kind,
+                "thread_id": self.thread_id,
+                # A subagent's calls also sit inside its parent tool call's time.
+                "nested": nested,
+                **attrs,
+            },
         )
 
     def on_llm_end(self, response, *, run_id, **kwargs) -> None:
@@ -179,10 +194,17 @@ class AgentRunTelemetry(BaseCallbackHandler):
         elif chunk.startswith(_FINISH_CHUNK) and not self.outcome:
             self.outcome = Outcome.COMPLETED
 
-    def events(self) -> list[TelemetryEvent]:
+    def events(self) -> list[TelemetryEvent | None]:
+        # A tool still running when the run was stopped never reports an end
+        # (CancelledError skips on_tool_error); these are the slow calls that matter.
+        unfinished = [
+            self._tool_event(started, Outcome.STOPPED, {}) for started in self._tool_starts.values()
+        ]
+        tool_events = [*self._tool_events, *unfinished]
         attrs: dict[str, Any] = {
             "thread_id": self.thread_id,
-            "tool_calls": len(self._tool_events),
+            "tool_calls": len(tool_events),
+            "tools_unfinished": len(unfinished),
             "tool_errors": self._tool_errors,
             "llm_calls": self._llm_calls,
             **self._tokens,
@@ -201,7 +223,7 @@ class AgentRunTelemetry(BaseCallbackHandler):
             duration_ms=self._elapsed_ms(),
             attrs=attrs,
         )
-        return [run_event, *self._tool_events]
+        return [run_event, *tool_events]
 
     async def aflush(self) -> None:
         """Write the run's events once; never raises."""
@@ -215,12 +237,17 @@ class AgentRunTelemetry(BaseCallbackHandler):
             return
         await recorder.arecord_events(events)
 
-    async def wrap_stream(self, stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    async def wrap_stream(
+        self, stream: AsyncIterator[str], *, lost: Callable[[], bool] | None = None
+    ) -> AsyncIterator[str]:
         """Pass a chat turn's SSE stream through, recording the turn when it ends.
 
-        The write happens after the last chunk is sent, so it never delays the reply.
+        The write happens after the last chunk is sent and after the turn lease is
+        released, so it never delays the reply's content or the next turn; it does
+        hold the response open for one insert. ``lost`` tells a stop by the user
+        from a turn that lost its thread to another run.
         """
-        self._started = time.monotonic()
+        self.attrs["setup_ms"] = round(self._elapsed_ms())
         try:
             async with contextlib.aclosing(stream) as chunks:
                 async for chunk in chunks:
@@ -229,6 +256,8 @@ class AgentRunTelemetry(BaseCallbackHandler):
         except (asyncio.CancelledError, GeneratorExit):
             if not self.outcome:
                 self.outcome = Outcome.STOPPED
+            if lost is not None and lost():
+                self.attrs["lease_lost"] = True
             raise
         except Exception:
             self.outcome = Outcome.FAILED

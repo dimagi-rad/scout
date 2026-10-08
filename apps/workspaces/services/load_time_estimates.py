@@ -84,6 +84,8 @@ def transition_load_phase(job_id, phase):
 
 
 async def afinish_load_timing(job_id, succeeded, *, now=None, require_runs=False):
+    timing = None
+    finished = 0
     try:
         if succeeded and require_runs:
             runs = MaterializationRun.objects.filter(procrastinate_job_id=job_id)
@@ -99,7 +101,9 @@ async def afinish_load_timing(job_id, succeeded, *, now=None, require_runs=False
             return
         now = now or timezone.now()
         phase_seconds = _close_phase(timing, now)
-        await WorkspaceLoadTiming.objects.filter(pk=timing.pk).aupdate(
+        finished = await WorkspaceLoadTiming.objects.filter(
+            pk=timing.pk, completed_at=None
+        ).aupdate(
             completed_at=now,
             succeeded=succeeded,
             phase_seconds=phase_seconds,
@@ -107,6 +111,9 @@ async def afinish_load_timing(job_id, succeeded, *, now=None, require_runs=False
         await cache.adelete(_cache_key(timing.workspace_id, timing.only_unserved))
     except Exception:
         logger.warning("Could not finish load timing", exc_info=True)
+    # Only the finisher that closed the row records it, and a failed cache clear
+    # after that does not lose the event.
+    if timing is None or not finished:
         return
     await recorder.arecord(
         EventKind.WORKSPACE_LOAD,

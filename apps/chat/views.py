@@ -397,6 +397,7 @@ async def _start_turn(
 ):
     """Build the agent and return the turn's stream, which owns ``lease`` from here."""
     thread_id = str(thread.id)
+    turn_started = time.monotonic()
     # Reset inactivity TTL on user-initiated chat.
     await touch_workspace_schemas(workspace)
 
@@ -471,6 +472,7 @@ async def _start_turn(
         workspace_id=workspace.id,
         thread_id=thread_id,
         name="live",
+        started=turn_started,
     )
     config["callbacks"] = [*config.get("callbacks", []), telemetry]
 
@@ -524,7 +526,7 @@ async def _start_turn(
                     await pending_requests.asettle(claimed)
 
     telemetry.attrs["held_request"] = claimed is not None
-    response.streaming_content = telemetry.wrap_stream(_traced_stream())
+    response.streaming_content = telemetry.wrap_stream(_traced_stream(), lost=lambda: lease.lost)
     return response
 
 
