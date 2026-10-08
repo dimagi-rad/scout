@@ -11,6 +11,7 @@ from typing import Any
 
 from asgiref.sync import async_to_sync, sync_to_async
 from django.db import close_old_connections
+from django.db.models import Prefetch
 
 from apps.common.capacity import CapacityExhausted, CapacityResource, report_capacity_exhausted
 from apps.common.errors import validation_error_code
@@ -207,6 +208,15 @@ def _compile_semantic_query(
     query_spec = resolve_query_dates(query_spec)
     model = get_active_semantic_model(workspace)
 
+    # Pre-load all visible datasets and their visible fields in 2 queries total,
+    # avoiding an N+1 pattern when resolving members below.
+    datasets_by_name: dict[str, SemanticDataset] = {
+        ds.name: ds
+        for ds in model.datasets.filter(is_visible=True).prefetch_related(
+            Prefetch("fields", queryset=SemanticField.objects.filter(is_visible=True))
+        )
+    }
+
     measures = _as_list(query_spec.get("measures"))
     dimensions = _as_list(query_spec.get("dimensions"))
     time_dimension = query_spec.get("time_dimension") or query_spec.get("timeDimension") or ""
@@ -227,11 +237,12 @@ def _compile_semantic_query(
         raise SemanticQueryError("A granularity requires a time_dimension.")
 
     resolved_measures = [
-        _resolve_member(model, m, expected=SemanticField.FieldType.MEASURE) for m in measures
+        _resolve_member(datasets_by_name, m, expected=SemanticField.FieldType.MEASURE)
+        for m in measures
     ]
     resolved_dimensions = [
         _resolve_member(
-            model,
+            datasets_by_name,
             d,
             expected_any={
                 SemanticField.FieldType.DIMENSION,
@@ -241,13 +252,17 @@ def _compile_semantic_query(
         for d in dimensions
     ]
     resolved_time = (
-        _resolve_member(model, time_dimension, expected=SemanticField.FieldType.TIME_DIMENSION)
+        _resolve_member(
+            datasets_by_name, time_dimension, expected=SemanticField.FieldType.TIME_DIMENSION
+        )
         if time_dimension
         else None
     )
     resolved_filters = [
         _resolve_filter(
-            model, f, timezone_name=(query_spec.get("query_context") or {}).get("timezone")
+            datasets_by_name,
+            f,
+            timezone_name=(query_spec.get("query_context") or {}).get("timezone"),
         )
         for f in filters
     ]
@@ -396,7 +411,7 @@ def _coerce_limit(value: Any, max_limit: int = MAX_SEMANTIC_LIMIT) -> int:
 
 
 def _resolve_member(
-    model,
+    datasets_by_name: dict[str, SemanticDataset],
     member: str,
     *,
     expected: str | None = None,
@@ -405,10 +420,11 @@ def _resolve_member(
     if not isinstance(member, str) or "." not in member:
         raise SemanticQueryError(f"Invalid semantic member '{member}'. Use dataset.field.")
     dataset_name, field_name = member.split(".", 1)
-    dataset = model.datasets.filter(name=dataset_name, is_visible=True).first()
+    dataset = datasets_by_name.get(dataset_name)
     if dataset is None:
         raise SemanticMemberError(f"Unknown dataset '{dataset_name}'.")
-    field = dataset.fields.filter(name=field_name, is_visible=True).first()
+    # dataset.fields.all() is served from the prefetch cache — no extra query.
+    field = next((f for f in dataset.fields.all() if f.name == field_name), None)
     if field is None:
         raise SemanticMemberError(f"Unknown semantic field '{member}'.")
     allowed = expected_any or ({expected} if expected else None)
@@ -419,14 +435,17 @@ def _resolve_member(
 
 
 def _resolve_filter(
-    model, filter_spec: dict[str, Any], *, timezone_name=None
+    datasets_by_name: dict[str, SemanticDataset],
+    filter_spec: dict[str, Any],
+    *,
+    timezone_name=None,
 ) -> tuple[ResolvedMember, dict[str, Any]]:
     if not isinstance(filter_spec, dict):
         raise SemanticQueryError("Each filter must be an object.")
     validate_date_filter(filter_spec, timezone_name)
     field = filter_spec.get("field") or filter_spec.get("member")
     member = _resolve_member(
-        model,
+        datasets_by_name,
         field,
         expected_any={
             SemanticField.FieldType.DIMENSION,
