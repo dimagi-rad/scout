@@ -10,6 +10,8 @@ export interface User {
   name: string
   is_staff: boolean
   onboarding_complete: boolean
+  // Absent on older servers; only ever a workspace the user is still a member of.
+  last_workspace_id?: string | null
   agent_model?: { id: string; label: string }
 }
 

@@ -2,6 +2,7 @@ import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
 import { workspaceApi, workspaceHasAccess, type WorkspaceListItem } from "@/api/workspaces"
 import { recordWorkspaceUse } from "@/lib/recentWorkspaces"
+import type { AuthSlice } from "./authSlice"
 import type { AccountSessionScope } from "./accountSession"
 
 export type DomainsStatus = "idle" | "loading" | "loaded" | "error"
@@ -38,7 +39,14 @@ export interface DomainSlice {
 // one whose upstream access was removed — landing there would just show the
 // lost-access modal. A deep link to an orphan still works (the URL→store sync
 // adopts it); this only governs the no-URL default.
-function defaultDomainId(domains: WorkspaceListItem[]): string | null {
+function defaultDomainId(
+  domains: WorkspaceListItem[],
+  rememberedId: string | null | undefined,
+): string | null {
+  // The server only reports a remembered workspace the user is still a member of;
+  // the list check also covers one that has since dropped out of it.
+  const remembered = domains.find((d) => d.id === rememberedId)
+  if (remembered && workspaceHasAccess(remembered)) return remembered.id
   return (domains.find(workspaceHasAccess) ?? domains[0])?.id ?? null
 }
 
@@ -49,10 +57,11 @@ function nextActiveDomainId(
   prev: WorkspaceListItem[],
   next: WorkspaceListItem[],
   activeId: string | null,
+  rememberedId: string | null | undefined,
 ): string | null {
-  if (activeId === null) return defaultDomainId(next)
+  if (activeId === null) return defaultDomainId(next, rememberedId)
   const removed = prev.some((d) => d.id === activeId) && !next.some((d) => d.id === activeId)
-  return removed ? defaultDomainId(next) : activeId
+  return removed ? defaultDomainId(next, rememberedId) : activeId
 }
 
 // Same array when absent, so subscribers selecting the list don't re-render.
@@ -60,7 +69,7 @@ function withoutId(ids: string[], id: string): string[] {
   return ids.includes(id) ? ids.filter((other) => other !== id) : ids
 }
 
-export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, [], [], DomainSlice> = (set, get) => {
+export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope & Pick<AuthSlice, "user">, [], [], DomainSlice> = (set, get) => {
   // Bumped by every list request, so a background result never overwrites a newer foreground one.
   let listRequestSeq = 0
   let revalidation: Promise<RevalidateResult> | null = null
@@ -83,7 +92,12 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
             domains,
             domainsStatus: "loaded",
             domainsError: null,
-            activeDomainId: nextActiveDomainId(current.domains, domains, current.activeDomainId),
+            activeDomainId: nextActiveDomainId(
+              current.domains,
+              domains,
+              current.activeDomainId,
+              current.user?.last_workspace_id,
+            ),
           })
         } catch (error) {
           set({
@@ -115,6 +129,7 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
               current.domains,
               domains,
               current.activeDomainId,
+              current.user?.last_workspace_id,
             )
             const known = new Set(current.domains.map((d) => d.id))
             // The active one is already open, e.g. a deep link waiting on this very refresh,
@@ -151,6 +166,12 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
       setActiveDomain: (id: string) => {
         if (!get().accountSession.isCurrent()) return
         recordWorkspaceUse(id)
+        const { user } = get()
+        if (user && user.last_workspace_id !== id) {
+          // Best effort: a 404 for a deep link to a workspace we aren't a member of is expected.
+          api.post("/api/auth/last-workspace/", { workspace_id: id }).catch(() => undefined)
+          set({ user: { ...user, last_workspace_id: id } })
+        }
         set({ activeDomainId: id, addedDomainIds: withoutId(get().addedDomainIds, id) })
       },
 
