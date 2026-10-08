@@ -383,6 +383,47 @@ async def test_first_turn_titles_a_row_created_before_any_message(workspace, use
     assert shell.title_source == Thread.TitleSource.FIRST_MESSAGE
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_a_new_thread_is_listed_while_its_first_turn_streams(workspace, user, queued_jobs):
+    # The sidebar lists a chat as soon as its turn is accepted, not when it ends (#859).
+    client = AsyncClient()
+    await sync_to_async(client.force_login)(user)
+    thread_id = str(uuid.uuid4())
+
+    with (
+        patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock, return_value=[]),
+        patch("apps.chat.views.ensure_checkpointer", new_callable=AsyncMock),
+        patch("apps.chat.views.build_agent_graph", new_callable=AsyncMock),
+        patch("apps.chat.views.astart_chat_load", new_callable=AsyncMock, return_value=object()),
+        patch("apps.chat.views.touch_workspace_schemas", new_callable=AsyncMock),
+        patch(
+            "apps.chat.views.repair_dangling_tool_calls", new_callable=AsyncMock, return_value=[]
+        ),
+        patch("apps.chat.views.langgraph_to_ui_stream", side_effect=_succeeding_stream),
+    ):
+        response = await client.post(
+            "/api/chat/",
+            data=json.dumps(
+                {
+                    "messages": [{"role": "user", "content": "Visits by worker last month"}],
+                    "workspaceId": str(workspace.id),
+                    "threadId": thread_id,
+                }
+            ),
+            content_type="application/json",
+        )
+        assert response.status_code == 200, response.content
+
+        listed = await client.get(f"/api/workspaces/{workspace.id}/threads/")
+        assert listed.status_code == 200
+        (summary,) = [t for t in listed.json() if t["id"] == thread_id]
+        assert summary["title"] == "Visits by worker last month"
+        assert summary["title_source"] == Thread.TitleSource.FIRST_MESSAGE
+
+        _ = [chunk async for chunk in response.streaming_content]
+
+
 async def _all_have_state(thread_ids):
     return {str(thread_id) for thread_id in thread_ids}
 
