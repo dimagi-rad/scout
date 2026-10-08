@@ -31,7 +31,8 @@ export function useResumeStream(
   workspaceId: string | null,
   threadId: string,
   active: boolean,
-): { text: string; done: boolean; reset: () => void } {
+  pollMs: number = RESUME_STREAM_POLL_MS,
+): { text: string; run: string | null; done: boolean; reset: () => void } {
   const scope = `${workspaceId}\u0000${threadId}`
   const [state, setState] = useState<StreamState>({ scope, run: null, text: "", done: false })
   if (state.scope !== scope) setState({ scope, run: null, text: "", done: false })
@@ -56,7 +57,7 @@ export function useResumeStream(
     cursorRef.current.backlog = []
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
-    let delay = RESUME_STREAM_POLL_MS
+    let delay = pollMs
 
     async function poll() {
       const cursor = cursorRef.current
@@ -94,8 +95,8 @@ export function useResumeStream(
         cursor.caughtUp = true
         const fresh = read.filter((chunk) => !finished.has(chunk.run))
         delay = fresh.length
-          ? RESUME_STREAM_POLL_MS
-          : Math.min(delay * 2, RESUME_STREAM_IDLE_POLL_MS)
+          ? pollMs
+          : Math.min(delay * 2, Math.max(pollMs, RESUME_STREAM_IDLE_POLL_MS))
         if (fresh.length) {
           setState((prev) => {
             let { run, text, done } = prev
@@ -124,7 +125,7 @@ export function useResumeStream(
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [active, workspaceId, threadId, scope])
+  }, [active, workspaceId, threadId, scope, pollMs])
 
   const reset = useCallback(() => {
     // Read the live run from its start again: a reload in the middle of a run
@@ -137,5 +138,5 @@ export function useResumeStream(
     )
   }, [])
 
-  return { text: state.text, done: state.done, reset }
+  return { text: state.text, run: state.run, done: state.done, reset }
 }

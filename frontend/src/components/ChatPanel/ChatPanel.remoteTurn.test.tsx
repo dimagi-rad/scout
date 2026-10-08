@@ -456,6 +456,37 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
       expect(screen.queryByTestId("chat-remote-turn")).toBeNull()
     })
 
+    it("reloads when the next model call starts, so the last one comes from history", async () => {
+      const server = mockServer()
+      server.liveRows = [{ id: 1, run: "call-1", text: "Let me check.", done: false }]
+      renderPanel()
+      expect(await screen.findByTestId("resume-stream")).toHaveTextContent("Let me check.")
+      const loads = server.messageLoads
+
+      // The server reads after=0 from the latest run, which is now the second call.
+      server.liveRows = [{ id: 2, run: "call-2", text: "Visits rose.", done: false }]
+      await act(() => vi.advanceTimersByTimeAsync(2_000))
+
+      await vi.waitFor(() => expect(server.messageLoads).toBe(loads + 1))
+      await vi.waitFor(() =>
+        expect(screen.getByTestId("resume-stream")).toHaveTextContent("Visits rose."),
+      )
+      expect(screen.getByTestId("resume-stream")).not.toHaveTextContent("Let me check.")
+      expect(screen.getByTestId("chat-input")).toBeInTheDocument()
+    })
+
+    it("tails a remote turn no faster than the server writes it", async () => {
+      const server = mockServer()
+      server.liveRows = [{ id: 1, run: "r1", text: "Visits rose ", done: false }]
+      renderPanel()
+      await screen.findByTestId("resume-stream")
+      const reads = server.tailReads
+
+      await act(() => vi.advanceTimersByTimeAsync(3_000))
+
+      expect(server.tailReads - reads).toBeLessThanOrEqual(3)
+    })
+
     it("falls back to the thread poll when the turn wrote no done row", async () => {
       const server = mockServer()
       server.liveRows = [{ id: 1, run: "r1", text: "Visits rose ", done: false }]

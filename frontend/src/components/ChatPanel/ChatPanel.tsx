@@ -44,8 +44,8 @@ import { readDraft, writeDraft } from "./draftStorage"
 import { classifyChatError } from "./chatErrors"
 import { PendingRequestCard } from "./PendingRequestCard"
 import { useHeldRequest, type EditOutcome } from "./useHeldRequest"
-import { useResumeStream } from "./useResumeStream"
-import { useRemoteTurnPoll } from "./useRemoteTurn"
+import { RESUME_STREAM_POLL_MS, useResumeStream } from "./useResumeStream"
+import { REMOTE_TURN_STREAM_POLL_MS, useRemoteTurnPoll } from "./useRemoteTurn"
 import { HISTORY_LOAD_TIMEOUT_MS } from "./historyLoad"
 import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -533,6 +533,8 @@ export function ChatPanel() {
     activeDomainId,
     threadId,
     resumeAnswering || remoteTurnRunning,
+    // A chat turn writes at most once a second; reading faster finds nothing new.
+    resumeAnswering ? RESUME_STREAM_POLL_MS : REMOTE_TURN_STREAM_POLL_MS,
   )
   resetResumeStreamRef.current = resumeStream.reset
   function finishRemoteTurn() {
@@ -550,6 +552,18 @@ export function ChatPanel() {
   useEffect(() => {
     if (remoteTurnRunning && resumeStream.done) finishRemoteTurnRef.current()
   }, [remoteTurnRunning, resumeStream.done])
+  // Each model call streams as a run of its own. A new one means the last call and
+  // its tool cards are in the history now, so reload to show them; the reload's
+  // read then starts at the call being written, rather than showing the last twice.
+  const shownRunRef = useRef<string | null>(null)
+  useEffect(() => {
+    const previous = shownRunRef.current
+    shownRunRef.current = resumeStream.run
+    if (remoteTurnRunning && previous !== null && resumeStream.run !== null
+      && previous !== resumeStream.run) {
+      setMessageReloadKey((k) => k + 1)
+    }
+  }, [remoteTurnRunning, resumeStream.run])
 
   const loadThreadArtifacts = useCallback(async () => {
     if (!activeDomainId || !threadId) return
