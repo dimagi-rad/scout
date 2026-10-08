@@ -5,6 +5,7 @@ from datetime import timedelta
 from unittest import mock
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.db import transaction
 from django.utils import timezone
 
@@ -124,6 +125,21 @@ def test_attrs_keep_only_scalars_and_short_labels():
     )
 
     assert event.attrs == {"tokens": 10, "ratio": 0.5, "cached": True, "model": "claude-x"}
+
+
+def test_a_trailing_newline_is_not_a_label():
+    assert not recorder.is_label("a" * 64 + "\n")
+    assert recorder.build_event(EventKind.TOOL_CALL, name="sql\n").name == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_unknown_keyword_never_raises():
+    await recorder.arecord(EventKind.TOOL_CALL, tool="execute_sql")
+    recorder_sync = sync_to_async(recorder.record)
+    await recorder_sync(EventKind.TOOL_CALL, tool="execute_sql")
+
+    assert await TelemetryEvent.objects.acount() == 0
 
 
 def test_name_must_be_a_label():

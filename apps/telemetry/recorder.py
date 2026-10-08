@@ -17,6 +17,7 @@ import math
 import re
 import uuid
 from datetime import datetime
+from itertools import islice
 from typing import Any
 
 from asgiref.sync import sync_to_async
@@ -29,8 +30,8 @@ logger = logging.getLogger(__name__)
 
 # Labels (tool names, phases, error codes, model ids) fit this; sentences, emails
 # and SQL do not, so free text cannot ride along in an event.
-_LABEL = re.compile(r"^[A-Za-z0-9_.:/-]{1,64}$")
-_KEY = re.compile(r"^[a-z0-9_]{1,40}$")
+_LABEL = re.compile(r"[A-Za-z0-9_.:/-]{1,64}")
+_KEY = re.compile(r"[a-z0-9_]{1,40}")
 MAX_ATTRS = 32
 # duration_ms is an int4 column.
 MAX_DURATION_MS = 2_147_483_647
@@ -41,7 +42,7 @@ def _enabled() -> bool:
 
 
 def is_label(value: Any) -> bool:
-    return isinstance(value, str) and bool(_LABEL.match(value))
+    return isinstance(value, str) and bool(_LABEL.fullmatch(value))
 
 
 def _clean_value(value: Any) -> tuple[bool, Any]:
@@ -59,10 +60,8 @@ def _clean_attrs(attrs: dict[str, Any] | None) -> dict[str, Any]:
     clean: dict[str, Any] = {}
     if not isinstance(attrs, dict):
         return clean
-    for key, value in attrs.items():
-        if len(clean) >= MAX_ATTRS:
-            break
-        if not (isinstance(key, str) and _KEY.match(key)):
+    for key, value in islice(attrs.items(), MAX_ATTRS):
+        if not (isinstance(key, str) and _KEY.fullmatch(key)):
             continue
         keep, value = _clean_value(value)
         if keep:
@@ -149,11 +148,20 @@ async def arecord_events(events: list[TelemetryEvent | None]) -> None:
         logger.warning("Could not record %d telemetry event(s)", len(rows), exc_info=True)
 
 
+def _safe_build(kind: str, fields: dict[str, Any]) -> TelemetryEvent | None:
+    # A stale or misspelt keyword fails at call binding, before build_event's own guard.
+    try:
+        return build_event(kind, **fields)
+    except TypeError:
+        logger.warning("Bad telemetry fields for %s", kind, exc_info=True)
+        return None
+
+
 async def arecord(kind: str, **fields: Any) -> None:
     """Record one event from async code; never raises."""
     if not _enabled():
         return
-    await arecord_events([build_event(kind, **fields)])
+    await arecord_events([_safe_build(kind, fields)])
 
 
 def record(kind: str, **fields: Any) -> None:
@@ -163,7 +171,7 @@ def record(kind: str, **fields: Any) -> None:
     """
     if not _enabled():
         return
-    event = build_event(kind, **fields)
+    event = _safe_build(kind, fields)
     if event is None:
         return
     try:

@@ -32,7 +32,8 @@ async def prune_telemetry_events(now=None) -> int:
         if count < PRUNE_BATCH_SIZE:
             break
     else:
-        logger.warning("Telemetry prune hit its batch budget; the rest waits for the next run")
+        if await expired.aexists():
+            logger.warning("Telemetry prune hit its batch budget; the rest waits for the next run")
     if deleted:
         logger.info("Pruned %d telemetry events older than %s", deleted, cutoff.date())
     return deleted
