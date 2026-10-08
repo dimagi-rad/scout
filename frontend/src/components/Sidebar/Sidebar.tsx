@@ -43,6 +43,7 @@ const DOMAIN_REVALIDATE_POLL_MS = 60_000
 // turn's own end refetches too, but can land just before the server lets go of it.
 export const RUNNING_THREADS_POLL_MS = 5_000
 export const RUNNING_THREADS_MAX_POLL_MS = 30_000
+const RUNNING_THREADS_STALL_MS = 30_000
 
 export function Sidebar() {
   const navigate = useNavigate()
@@ -224,10 +225,12 @@ export function Sidebar() {
         const hidden = document.hidden
         // A stalled request must not end the chain; fetchThreads takes no signal.
         if (!hidden) {
+          let stall: ReturnType<typeof setTimeout> | undefined
           await Promise.race([
             fetchThreads(activeDomainId),
-            new Promise((resolve) => setTimeout(resolve, RUNNING_THREADS_MAX_POLL_MS)),
+            new Promise((resolve) => (stall = setTimeout(resolve, RUNNING_THREADS_STALL_MS))),
           ])
+          clearTimeout(stall)
         }
         if (cancelled) return
         delay = hidden

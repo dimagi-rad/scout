@@ -649,7 +649,8 @@ export function ChatPanel() {
         // shown, and offer a retry.
         setLoaded({ chat, reloadKey })
         setHistoryFailed({ chat, reloadKey })
-        // An earlier load's observation must not block sending now.
+        // serverTurn only ever describes the latest load: an earlier one's must not
+        // block sending now.
         setServerTurn(null)
         resetResumeStreamRef.current()
       } finally {
