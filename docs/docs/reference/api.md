@@ -56,9 +56,9 @@ none was saved or the user is no longer a member of it. Clients treat it as a
 hint and check it against their own workspace list.
 
 `POST /api/auth/last-workspace/` takes `{"workspace_id": "..."}` and returns
-`{"ok": true}`. It returns 400 for invalid JSON or a missing `workspace_id`, and
-404 `{"error": "Workspace not found"}` when the workspace doesn't exist or the
-user can't access it.
+`{"ok": true}`. It returns 400 for invalid JSON or a `workspace_id` that isn't
+a string, and 404 `{"error": "Workspace not found"}` when `workspace_id` is
+missing, the workspace doesn't exist, or the user can't access it.
 
 Login returns 400 for invalid JSON or missing fields, 401 for bad credentials,
 and 429 once an email has 5 failed logins within 5 minutes.
