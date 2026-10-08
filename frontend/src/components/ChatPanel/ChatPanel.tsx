@@ -592,6 +592,7 @@ export function ChatPanel() {
       void Promise.resolve().then(() => {
         if (cancelled) return
         setLoaded({ chat, reloadKey })
+        setServerTurn(null)
         // Nothing was fetched, so a failed load stays failed and keeps its Retry.
         setHistoryFailed((failed) => (failed?.chat === chat ? { chat, reloadKey } : failed))
       })
@@ -648,6 +649,8 @@ export function ChatPanel() {
         // shown, and offer a retry.
         setLoaded({ chat, reloadKey })
         setHistoryFailed({ chat, reloadKey })
+        // An earlier load's observation must not block sending now.
+        setServerTurn(null)
         resetResumeStreamRef.current()
       } finally {
         clearTimeout(timeout)

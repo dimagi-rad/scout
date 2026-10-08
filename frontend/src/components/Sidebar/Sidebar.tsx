@@ -222,7 +222,13 @@ export function Sidebar() {
       timer = setTimeout(async () => {
         // Hidden ticks fetch nothing, so they earn no backoff.
         const hidden = document.hidden
-        if (!hidden) await fetchThreads(activeDomainId)
+        // A stalled request must not end the chain; fetchThreads takes no signal.
+        if (!hidden) {
+          await Promise.race([
+            fetchThreads(activeDomainId),
+            new Promise((resolve) => setTimeout(resolve, RUNNING_THREADS_MAX_POLL_MS)),
+          ])
+        }
         if (cancelled) return
         delay = hidden
           ? RUNNING_THREADS_POLL_MS

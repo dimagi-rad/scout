@@ -56,6 +56,8 @@ function mockServer() {
     chatPosts: 0,
     /** Detail polls answer with this status instead, while set. */
     detailStatus: null as number | null,
+    /** Message loads answer with this status instead, while set. */
+    messagesStatus: null as number | null,
     chatReply: "stream" as "stream" | "busy" | "network",
     /** Holds this tab's own turn open until called. */
     endReply: () => {},
@@ -88,6 +90,7 @@ function mockServer() {
     const messages = url.match(/\/threads\/([^/]+)\/messages\//)
     if (messages) {
       server.messageLoads += 1
+      if (server.messagesStatus) return Response.json({}, { status: server.messagesStatus })
       const mine = messages[1] === THREAD
       return Response.json({
         messages: mine ? (server.running ? [QUESTION] : [QUESTION, ANSWER]) : [],
@@ -196,6 +199,22 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
     await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_MAX_POLL_MS))
     expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
     expect(screen.queryByTestId("chat-remote-turn")).toBeNull()
+  })
+
+  it("does not block sending on an earlier load's observation when a reload fails", async () => {
+    const server = mockServer()
+    renderPanel()
+    await screen.findByTestId("chat-remote-turn")
+    await act(async () => useAppStore.setState({ threadId: OTHER }))
+    await vi.waitFor(() => expect(screen.queryByTestId("chat-remote-turn")).toBeNull())
+    server.messagesStatus = 503
+
+    await act(async () => useAppStore.setState({ threadId: THREAD }))
+
+    expect(await screen.findByTestId("chat-history-retry")).toBeInTheDocument()
+    expect(screen.queryByTestId("chat-remote-turn")).toBeNull()
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "and by month?" } })
+    expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled()
   })
 
   it("stops polling when another thread is shown", async () => {
