@@ -302,6 +302,8 @@ async def test_a_chat_turn_through_the_view_records_one_turn():
     assert turn.attrs["thread_id"] == str(thread.id)
     assert turn.attrs["held_request"] is False
     assert "ttft_ms" in turn.attrs
+    # The clock starts as the view is entered, so setup includes the lease wait.
+    assert turn.attrs["setup_ms"] <= turn.attrs["ttft_ms"] <= turn.duration_ms
     assert "how many" not in json.dumps(turn.attrs)
 
 
@@ -387,7 +389,7 @@ async def test_a_background_run_records_its_outcome():
     for outcome, body in (
         (Outcome.COMPLETED, None),
         (Outcome.FAILED, RuntimeError("boom")),
-        (Outcome.STOPPED, asyncio.CancelledError()),
+        (Outcome.FAILED, asyncio.CancelledError()),
     ):
         telemetry = AgentRunTelemetry(EventKind.CHAT_TURN, name="flush")
         with contextlib.suppress(RuntimeError, asyncio.CancelledError):
@@ -396,11 +398,9 @@ async def test_a_background_run_records_its_outcome():
                     raise body
         assert telemetry.outcome == outcome
 
-    assert [e.outcome for e in await _events(EventKind.CHAT_TURN)] == [
-        Outcome.COMPLETED,
-        Outcome.FAILED,
-        Outcome.STOPPED,
-    ]
+    turns = await _events(EventKind.CHAT_TURN)
+    assert [e.outcome for e in turns] == [Outcome.COMPLETED, Outcome.FAILED, Outcome.FAILED]
+    assert [e.attrs.get("cancelled") for e in turns] == [None, None, True]
 
 
 @pytest.mark.asyncio

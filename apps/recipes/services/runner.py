@@ -178,19 +178,26 @@ class RecipeRunner:
 
         self._thread_id = f"recipe-run-{self._run.id}"
 
-        graph = await self._build_graph()
         telemetry = AgentRunTelemetry(
             EventKind.RECIPE_RUN,
             user_id=self.user.id,
             workspace_id=self.recipe.workspace_id,
             thread_id=self._thread_id,
+            name="recipe",
         )
         telemetry.attrs["recipe_id"] = str(self.recipe.id)
-        config = {
-            "configurable": {"thread_id": self._thread_id},
-            "recursion_limit": 50,
-            "callbacks": [telemetry],
-        }
+        # Recorded however the run ends, including a worker shutdown mid-run.
+        async with telemetry.recording():
+            return await self._execute_graph(telemetry)
+
+    async def _execute_graph(self, telemetry: AgentRunTelemetry) -> RecipeRun:
+        graph = await self._build_graph()
+        config = telemetry.with_callbacks(
+            {
+                "configurable": {"thread_id": self._thread_id},
+                "recursion_limit": 50,
+            }
+        )
 
         prompt = self.recipe.render_prompt(self.variable_values)
 
@@ -253,9 +260,8 @@ class RecipeRunner:
             RecipeRunStatus.COMPLETED if result["success"] else RecipeRunStatus.FAILED
         )
         self._run.completed_at = timezone.now()
-        await self._run.asave(update_fields=["step_results", "status", "completed_at"])
         telemetry.outcome = Outcome.COMPLETED if result["success"] else Outcome.FAILED
-        await telemetry.aflush()
+        await self._run.asave(update_fields=["step_results", "status", "completed_at"])
 
         return self._run
 

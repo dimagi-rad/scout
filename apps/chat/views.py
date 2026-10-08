@@ -165,6 +165,8 @@ async def chat_view(request):
     """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    # The turn's clock: time to first token counts what the user waits through.
+    request_started = time.monotonic()
 
     user = request._authenticated_user
 
@@ -283,6 +285,7 @@ async def chat_view(request):
                 user_content=user_content,
                 pending_version=pending_version,
                 pending_request_id=pending_request_id,
+                request_started=request_started,
             )
     except asyncio.CancelledError:
         await lease.release()
@@ -394,10 +397,10 @@ async def _start_turn(
     user_content: str,
     pending_version: int | None = None,
     pending_request_id: str | None = None,
+    request_started: float | None = None,
 ):
     """Build the agent and return the turn's stream, which owns ``lease`` from here."""
     thread_id = str(thread.id)
-    turn_started = time.monotonic()
     # Reset inactivity TTL on user-initiated chat.
     await touch_workspace_schemas(workspace)
 
@@ -472,9 +475,9 @@ async def _start_turn(
         workspace_id=workspace.id,
         thread_id=thread_id,
         name="live",
-        started=turn_started,
+        started=request_started,
     )
-    config["callbacks"] = [*config.get("callbacks", []), telemetry]
+    telemetry.with_callbacks(config)
 
     trace_ctx = langfuse_trace_context(
         session_id=str(thread_id),

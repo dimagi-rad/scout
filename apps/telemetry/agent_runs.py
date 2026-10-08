@@ -13,7 +13,7 @@ import contextlib
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -124,6 +124,7 @@ class AgentRunTelemetry(BaseCallbackHandler):
         self._tool_events: list[TelemetryEvent | None] = []
         self._tool_errors = 0
         self._llm_calls = 0
+        self._llm_errors = 0
         self._tokens: dict[str, int] = {}
         self._model = ""
         self._flushed = False
@@ -181,6 +182,10 @@ class AgentRunTelemetry(BaseCallbackHandler):
             self._tokens[key] = self._tokens.get(key, 0) + value
         self._model = self._model or model
 
+    def on_llm_error(self, error, *, run_id, **kwargs) -> None:
+        self._llm_calls += 1
+        self._llm_errors += 1
+
     def observe_chunk(self, chunk: Any) -> None:
         """Note the chat stream's first token, error and finish as the client sees them."""
         if not isinstance(chunk, str):
@@ -207,6 +212,7 @@ class AgentRunTelemetry(BaseCallbackHandler):
             "tools_unfinished": len(unfinished),
             "tool_errors": self._tool_errors,
             "llm_calls": self._llm_calls,
+            "llm_errors": self._llm_errors,
             **self._tokens,
             **self.attrs,
         }
@@ -238,7 +244,7 @@ class AgentRunTelemetry(BaseCallbackHandler):
         await recorder.arecord_events(events)
 
     async def wrap_stream(
-        self, stream: AsyncIterator[str], *, lost: Callable[[], bool] | None = None
+        self, stream: AsyncGenerator[str, None], *, lost: Callable[[], bool] | None = None
     ) -> AsyncIterator[str]:
         """Pass a chat turn's SSE stream through, recording the turn when it ends.
 
@@ -269,14 +275,16 @@ class AgentRunTelemetry(BaseCallbackHandler):
     async def recording(self):
         """Time a background run (a resumed or flushed turn) and record it on exit.
 
-        A clean exit is completed, a cancellation stopped, an error failed; the
-        error still propagates to the caller.
+        A clean exit is completed and an error failed; the error still propagates.
+        Nobody can press stop on a background run, so a cancellation (a deadline,
+        a lost lease, a worker shutdown) is failed too, flagged ``cancelled``.
         """
         self._started = time.monotonic()
         try:
             yield self
         except asyncio.CancelledError:
-            self.outcome = Outcome.STOPPED
+            self.outcome = Outcome.FAILED
+            self.attrs["cancelled"] = True
             raise
         except Exception:
             self.outcome = Outcome.FAILED
@@ -286,7 +294,7 @@ class AgentRunTelemetry(BaseCallbackHandler):
         finally:
             await self.aflush()
 
-    def with_callbacks(self, config: dict) -> dict:
+    def with_callbacks(self, config: dict) -> Any:
         """``config`` with this handler added to its callbacks."""
         config["callbacks"] = [*config.get("callbacks", []), self]
         return config
