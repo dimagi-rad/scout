@@ -55,6 +55,7 @@ from apps.users.services.token_refresh import (
     token_health,
     token_needs_refresh,
 )
+from apps.workspaces.access import aworkspace_read_allowed
 from apps.workspaces.models import WorkspaceMembership
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ def _last_workspace_id(user) -> str | None:
     """The remembered workspace id, only while the user is still a member of it."""
     if user.last_workspace_id is None:
         return None
+    # authz-exempt: a hint the client re-checks against its own workspace list.
     is_member = WorkspaceMembership.objects.filter(
         user=user, workspace_id=user.last_workspace_id
     ).exists()
@@ -73,6 +75,7 @@ def _last_workspace_id(user) -> str | None:
 async def _alast_workspace_id(user) -> str | None:
     if user.last_workspace_id is None:
         return None
+    # authz-exempt: a hint the client re-checks against its own workspace list.
     is_member = await WorkspaceMembership.objects.filter(
         user=user, workspace_id=user.last_workspace_id
     ).aexists()
@@ -253,12 +256,10 @@ async def last_workspace_view(request):
         return err
     user = request._authenticated_user
     try:
-        is_member = await WorkspaceMembership.objects.filter(
-            user=user, workspace_id=workspace_id
-        ).aexists()
+        allowed = await aworkspace_read_allowed(user, workspace_id)
     except (ValidationError, ValueError):
-        is_member = False
-    if not is_member:
+        allowed = False
+    if not allowed:
         return JsonResponse({"error": "Workspace not found"}, status=404)
     await User.objects.filter(pk=user.pk).aupdate(last_workspace_id=workspace_id)
     return JsonResponse({"ok": True})

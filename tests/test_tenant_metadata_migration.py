@@ -17,7 +17,7 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.utils import timezone
 
-from apps.users.models import Tenant, TenantMembership, User
+from apps.users.models import Tenant, TenantMembership
 
 BEFORE = ("workspaces", "0007_tenantmetadata_add_tenant")
 AFTER = ("workspaces", "0008_backfill_tenantmetadata_tenant")
@@ -31,10 +31,11 @@ def _migrate(target):
     return executor
 
 
-def _leaf():
+def _leaves():
+    # Every app's leaf: rewinding workspaces also reverses users migrations that depend on it.
     executor = MigrationExecutor(connection)
     executor.loader.build_graph()
-    return next(n for n in executor.loader.graph.leaf_nodes("workspaces"))
+    return executor.loader.graph.leaf_nodes()
 
 
 def _historical_metadata_model(target):
@@ -43,14 +44,22 @@ def _historical_metadata_model(target):
     return executor.loader.project_state([target]).apps.get_model("workspaces", "TenantMetadata")
 
 
+def _historical_user_model(target):
+    executor = MigrationExecutor(connection)
+    executor.loader.build_graph()
+    return executor.loader.project_state([target]).apps.get_model("users", "User")
+
+
 def _membership(tenant, suffix, *, archived=False):
-    user = User.objects.create_user(email=f"m{suffix}@example.com", password="x")
+    # Rewinding workspaces also reverses users.User.last_workspace, so the current
+    # User model would insert a column this schema no longer has.
+    user = _historical_user_model(BEFORE).objects.create(email=f"m{suffix}@example.com")
     # bulk_create skips the post_save signal that auto-creates a workspace: its
     # WorkspaceTenant is the current model, which this rewound schema predates.
     (membership,) = TenantMembership.all_objects.bulk_create(
         [
             TenantMembership(
-                user=user,
+                user_id=user.pk,
                 tenant=tenant,
                 archived_at=timezone.now() if archived else None,
             )
@@ -62,7 +71,7 @@ def _membership(tenant, suffix, *, archived=False):
 @pytest.fixture
 def production_shaped_metadata(transactional_db):
     """Seed at the pre-backfill schema and yield the historical model + expectations."""
-    leaf = _leaf()
+    leaves = _leaves()
     _migrate(BEFORE)
     Metadata = _historical_metadata_model(BEFORE)
 
@@ -117,7 +126,7 @@ def production_shaped_metadata(transactional_db):
             "fresh_live": fresh_live,
         }
     finally:
-        _migrate(leaf)
+        MigrationExecutor(connection).migrate(leaves)
 
 
 def test_dedupe_keeps_the_row_the_read_rule_serves(production_shaped_metadata, caplog):
