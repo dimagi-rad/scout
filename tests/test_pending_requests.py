@@ -641,7 +641,7 @@ class TestResume:
         agent = _resume_agent()
 
         with patch.object(
-            pending_requests, "workspace_build_pending", MagicMock(return_value=True)
+            pending_requests, "workspace_own_build_pending", MagicMock(return_value=True)
         ):
             await self._resume(tj, agent)
 
@@ -956,10 +956,19 @@ class TestHoldForNewWorkspaceOverLoadedSources:
         assert held["workspace_load_pending"] is True
         assert await pending_requests.aflushable_thread_ids(ws.id) == [uuid.UUID(thread_id)]
 
-    async def test_a_siblings_rebuild_is_not_one_to_wait_for(self, agent_layer):
+    async def test_a_siblings_build_on_a_shared_source_is_not_one_to_wait_for(self, agent_layer):
         ws, user, client = await _new_workspace_over_loaded_sources("sibling-build")
         sibling = await Workspace.objects.acreate(name="W-sibling-build-2", created_by=user)
+        schema = await TenantSchema.objects.filter(tenant__workspace_tenants__workspace=ws).afirst()
+        await WorkspaceTenant.objects.acreate(workspace=sibling, tenant_id=schema.tenant_id)
+        await MaterializationRun.objects.acreate(
+            tenant_schema=schema,
+            pipeline="commcare_sync",
+            state=MaterializationRun.RunState.LOADING,
+            procrastinate_job_id=8787,
+        )
         await adefer_rebuild_workspace_view_schema(workspace_id=str(sibling.id))
+        assert await load_activity.aworkspace_load_pending(ws.id)
         thread_id = str(uuid.uuid4())
 
         response = await _post(client, ws, thread_id, "visits?")
@@ -1022,7 +1031,9 @@ class TestHoldForWorkspaceLoad:
 
         with (
             patch("apps.chat.views.aworkspace_own_build_pending", AsyncMock(return_value=True)),
-            patch.object(pending_requests, "workspace_build_pending", MagicMock(return_value=True)),
+            patch.object(
+                pending_requests, "workspace_own_build_pending", MagicMock(return_value=True)
+            ),
         ):
             held = await _held_events(await _post(client, ws, thread_id, "visits?"))
 
@@ -1258,7 +1269,7 @@ class TestFlush:
         lease = await atry_acquire_turn_lease(thread.id)
 
         with patch.object(
-            pending_requests, "workspace_build_pending", MagicMock(return_value=True)
+            pending_requests, "workspace_own_build_pending", MagicMock(return_value=True)
         ):
             # Still waiting on another load of the workspace: not this resume's.
             assert (
