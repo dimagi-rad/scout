@@ -49,6 +49,7 @@ from apps.common.capacity import (
     BUSY_ERROR,
     BUSY_MESSAGE,
     RETRY_AFTER_SECONDS,
+    CapacityResource,
     classify_capacity_error,
     report_capacity_exhausted,
 )
@@ -229,6 +230,7 @@ def _subagent_parent_tool_call_id(event: dict[str, Any]) -> str | None:
 audit_logger = logging.getLogger("scout.agent.audit")
 
 STOPPED_RESPONSE_MARKER = "Response stopped by user."
+TURN_FAILED_NOTICE = "This response didn't finish. (Ref: {ref})"
 INTERRUPTED_TOOL_RESULT = "Not completed: the turn ended before this tool call returned."
 
 
@@ -298,6 +300,12 @@ async def _persist_stopped_response(agent: Any, config: dict, partial_text: str)
     )
 
 
+async def _persist_failed_response(agent: Any, config: dict, partial_text: str, ref: str) -> None:
+    await _persist_terminal_response(
+        agent, config, partial_text, TURN_FAILED_NOTICE.format(ref=ref), {"scout_turn_failed": True}
+    )
+
+
 async def langgraph_to_ui_stream(
     agent: Any,
     input_state: dict,
@@ -309,8 +317,8 @@ async def langgraph_to_ui_stream(
     """
     Stream LangGraph agent events as UI Message Stream Protocol (SSE) chunks.
 
-    ``owns_thread`` gates the stopped-reply write on cancellation: a run
-    cancelled because it lost the thread's turn lease must not write to it.
+    ``owns_thread`` gates the stopped and failed reply writes: a run that lost
+    the thread's turn lease must not write to it.
     ``on_success`` runs once the agent run ends without an error, before the
     finish chunk, so its work is already queued when the client sees the turn end.
     """
@@ -601,8 +609,17 @@ async def langgraph_to_ui_stream(
             await _persist_stopped_response(agent, config, "".join(streamed_text))
         raise
     except Exception as exc:
+        ref = _error_ref(exc)
         capacity = classify_capacity_error(exc)
+        # A full checkpointer pool would hold the write, and the busy notice, until
+        # the pool timeout, only to fail it.
+        can_write = capacity is None or capacity.resource != CapacityResource.CHECKPOINTER_POOL
+        if can_write and (owns_thread is None or owns_thread()):
+            # Written before any yield: a left chat's turn has nobody watching it,
+            # and this is the only record that it failed.
+            await _persist_failed_response(agent, config, "".join(streamed_text), ref)
         if capacity is not None:
+            logger.warning("Capacity exhausted during agent streaming [ref=%s]", ref)
             await sync_to_async(report_capacity_exhausted)(capacity.resource, str(capacity))
             yield _sse(
                 {
@@ -623,7 +640,8 @@ async def langgraph_to_ui_stream(
             # the frontend can use to auto-retry the turn. Any open text/
             # reasoning part is closed by the shared block below.
             logger.warning(
-                "Anthropic capacity error during stream (retryable): %s",
+                "Anthropic capacity error during stream (retryable) [ref=%s]: %s",
+                ref,
                 exc.__class__.__name__,
             )
             yield _sse(
@@ -634,7 +652,6 @@ async def langgraph_to_ui_stream(
                 }
             )
         else:
-            ref = _error_ref(exc)
             if isinstance(exc, LLM_TIMEOUT_ERRORS):
                 # Expected once requests are bounded: keep it out of ERROR-level
                 # Sentry. Not auto-retried: the turn may already have run tools, and
