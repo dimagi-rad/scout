@@ -29,6 +29,7 @@ import {
   ChatBusyNotice,
   ChatErrorNotice,
   ChatOverloadNotice,
+  ChatRemoteTurnNotice,
   ChatStoppedNotice,
   ChatThinkingIndicator,
 } from "./ChatStatus"
@@ -44,6 +45,7 @@ import { classifyChatError } from "./chatErrors"
 import { PendingRequestCard } from "./PendingRequestCard"
 import { useHeldRequest, type EditOutcome } from "./useHeldRequest"
 import { useResumeStream } from "./useResumeStream"
+import { useRemoteTurnPoll } from "./useRemoteTurn"
 import { HISTORY_LOAD_TIMEOUT_MS } from "./historyLoad"
 import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -225,6 +227,9 @@ export function ChatPanel() {
   })
   // The load that failed or timed out, offered for retry.
   const [historyFailed, setHistoryFailed] =
+    useState<{ chat: Chat<UIMessage>; reloadKey: number } | null>(null)
+  // The loaded history's turn was running on the server, as of that load (#856).
+  const [serverTurn, setServerTurn] =
     useState<{ chat: Chat<UIMessage>; reloadKey: number } | null>(null)
   // A left chat can finish after the panel is gone; it must not start polls then.
   const mountedRef = useRef(true)
@@ -449,6 +454,18 @@ export function ChatPanel() {
   historyLoadingRef.current = historyLoading
   const historyLoadFailed =
     historyFailed?.chat === chat && historyFailed.reloadKey === messageReloadKey
+  // Its turn runs where this tab can't follow it (another tab or device, or one left
+  // before a reload or a route change): wait for it rather than send into its lease.
+  const remoteTurnRunning =
+    !isStreaming
+    && !historyLoading
+    && serverTurn?.chat === chat
+    && serverTurn.reloadKey === messageReloadKey
+  useRemoteTurnPoll(activeDomainId, threadId, remoteTurnRunning, () => {
+    setMessageReloadKey((k) => k + 1)
+    setTitleRefreshTrigger((prev) => ({ threadId, turn: (prev?.turn ?? 0) + 1 }))
+    if (activeDomainId) void fetchThreads(activeDomainId)
+  })
 
   const loadThreadArtifacts = useCallback(async () => {
     if (!activeDomainId || !threadId) return
@@ -519,7 +536,12 @@ export function ChatPanel() {
     async function loadMessages() {
       try {
         const response = await api.get<
-          UIMessage[] | { messages: UIMessage[]; pending_request: PendingRequest | null }
+          | UIMessage[]
+          | {
+              messages: UIMessage[]
+              pending_request: PendingRequest | null
+              turn_running?: boolean
+            }
         >(
           `/api/workspaces/${activeDomainId}/threads/${threadId}/messages/?include=pending`,
           abort.signal,
@@ -530,6 +552,9 @@ export function ChatPanel() {
           ? { messages: response, pending_request: null }
           : response
         setLoaded({ chat, reloadKey })
+        setServerTurn(
+          !Array.isArray(response) && response.turn_running === true ? { chat, reloadKey } : null,
+        )
         // A shown thread can't send until its history loads, so only a new chat (no
         // history) or a retry timer can have started a turn; the live turn wins.
         if (!isChatRunning(chat)) setMessages(history.messages)
@@ -794,7 +819,7 @@ export function ChatPanel() {
 
   async function handleSend(text: string) {
     // Defensive: the composer blocks this; keep the typed text rather than drop it.
-    if (historyLoading && !held.adding) {
+    if ((historyLoading || remoteTurnRunning) && !held.adding) {
       setInput(text)
       return
     }
@@ -837,7 +862,7 @@ export function ChatPanel() {
   }
 
   function handleSendHeldNow() {
-    if (historyLoading) return
+    if (historyLoading || remoteTurnRunning) return
     const pending = held.takeForSend()
     if (pending) sendHeld(pending)
   }
@@ -881,7 +906,13 @@ export function ChatPanel() {
   }
 
   // While loading, or after a failed load, it is not shown as a new, empty chat.
-  if (visibleMessages.length === 0 && !held.pending && !historyLoading && !historyLoadFailed) {
+  if (
+    visibleMessages.length === 0
+    && !held.pending
+    && !historyLoading
+    && !historyLoadFailed
+    && !remoteTurnRunning
+  ) {
     return (
       <div className="flex h-full min-w-0 flex-col">
         {loadBanners}
@@ -956,7 +987,7 @@ export function ChatPanel() {
               onEdit={handleEditHeld}
               onRemovePart={held.removePart}
               onAbandonEdit={(text) => returnToComposer(activeDomainId, threadId, text)}
-              actionsDisabled={isStreaming || historyLoading}
+              actionsDisabled={isStreaming || historyLoading || remoteTurnRunning}
               onDiscard={() => void held.discard()}
             />
           )}
@@ -980,6 +1011,9 @@ export function ChatPanel() {
             </p>
           )}
           {isStreaming && <ChatThinkingIndicator />}
+          {remoteTurnRunning && !resumeStream.text && held.phase !== "answering" && (
+            <ChatRemoteTurnNotice />
+          )}
           {stoppedNotice && <ChatStoppedNotice />}
           {error && !busyError && (
             <ChatErrorNotice
@@ -1015,7 +1049,10 @@ export function ChatPanel() {
             setInput={setInput}
             onSend={handleSend}
             isStreaming={isStreaming}
-            sendBlocked={historyLoading}
+            sendBlocked={historyLoading || remoteTurnRunning}
+            sendBlockedReason={
+              remoteTurnRunning ? "Still working on the last message..." : undefined
+            }
             onStop={handleStop}
             mode={held.adding ? "add" : "send"}
           />
