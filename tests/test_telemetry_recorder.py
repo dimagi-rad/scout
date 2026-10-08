@@ -10,6 +10,7 @@ from django.db import connection, transaction
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
+from apps.telemetry import admin as admin_module
 from apps.telemetry import recorder, tasks
 from apps.telemetry.admin import EstimatedCountPaginator
 from apps.telemetry.models import EventKind, TelemetryEvent
@@ -196,14 +197,17 @@ def test_out_of_range_user_ids_and_naive_times_are_dropped():
 
 
 @pytest.mark.django_db
-def test_admin_pages_by_estimate_not_a_full_count():
-    TelemetryEvent.objects.create(kind=EventKind.CHAT_TURN)
-    paginator = EstimatedCountPaginator(TelemetryEvent.objects.order_by("-occurred_at"), 100)
+def test_admin_count_is_bounded_when_the_estimate_is_unknown(monkeypatch):
+    # A fresh table has no planner estimate yet; the count must still be real so
+    # the changelist keeps paginating instead of loading every row.
+    monkeypatch.setattr(admin_module, "EXACT_COUNT_BOUND", 3)
+    TelemetryEvent.objects.bulk_create([TelemetryEvent(kind=EventKind.CHAT_TURN) for _ in range(5)])
+    paginator = EstimatedCountPaginator(TelemetryEvent.objects.order_by("-occurred_at"), 2)
 
     with CaptureQueriesContext(connection) as queries:
-        assert paginator.count >= 0
+        assert paginator.count == 3
 
-    assert not any("COUNT(" in q["sql"].upper() for q in queries.captured_queries)
+    assert any("LIMIT 3" in q["sql"] for q in queries.captured_queries)
 
 
 @pytest.mark.django_db

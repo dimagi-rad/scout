@@ -7,6 +7,8 @@ from apps.common.admin import ReadOnlyModelAdmin
 
 from .models import TelemetryEvent
 
+EXACT_COUNT_BOUND = 10_000
+
 
 class EstimatedCountPaginator(Paginator):
     """Pages by the planner's row estimate: an exact COUNT(*) scans a year of events."""
@@ -19,7 +21,13 @@ class EstimatedCountPaginator(Paginator):
                 [self.object_list.model._meta.db_table],
             )
             row = cursor.fetchone()
-        return max(0, row[0]) if row else 0
+        estimate = row[0] if row else 0
+        if estimate >= EXACT_COUNT_BOUND:
+            return estimate
+        # Before the first ANALYZE the estimate is 0 or -1, and a count that fits on
+        # one page makes the changelist skip the paginator and load every row, so
+        # small or unknown tables get a count that stops at the bound.
+        return self.object_list[:EXACT_COUNT_BOUND].count()
 
 
 @admin.register(TelemetryEvent)
