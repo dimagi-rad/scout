@@ -13,6 +13,7 @@ import { RecipesPage } from "@/pages/RecipesPage"
 import { ConnectionsPage } from "@/pages/ConnectionsPage"
 import { WorkspacesPage } from "@/pages/WorkspacesPage"
 import { WorkspaceDetailPage } from "@/pages/WorkspaceDetailPage"
+import { UsagePage } from "@/pages/UsagePage"
 
 export const router = createBrowserRouter([
   {
@@ -46,6 +47,7 @@ export const router = createBrowserRouter([
       { path: "datasets/:datasetName", element: <DatasetBrowserPage /> },
       { path: "data-dictionary", element: <Navigate to="/datasets" replace /> },
       { path: "settings/connections", element: <ConnectionsPage /> },
+      { path: "usage", element: <UsagePage /> },
       { path: "workspaces", element: <WorkspacesPage /> },
       { path: "workspaces/:workspaceId", element: <WorkspaceDetailPage /> },
       // Pretty URL: cosmetic slug + UUID. Resolution is always by :workspaceId;

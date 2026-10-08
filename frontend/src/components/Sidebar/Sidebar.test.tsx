@@ -15,7 +15,7 @@ const mocks = vi.hoisted(() => {
 
   return {
     state: {
-      user: { id: "user-1" },
+      user: { id: "user-1" } as { id: string; can_view_usage_dashboard?: boolean },
       activeDomainId: "workspace-1",
       domains: [{ id: "workspace-1", name: "Test Workspace" }],
       threadId: null,
@@ -448,5 +448,22 @@ describe("Sidebar running threads (#856)", () => {
     await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 4)
 
     expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches)
+  })
+})
+
+describe("Sidebar usage link", () => {
+  afterEach(() => {
+    mocks.state.user = { id: "user-1" }
+  })
+
+  it("is hidden from people without the usage dashboard permission", () => {
+    renderSidebar()
+    expect(screen.queryByTestId("sidebar-usage")).not.toBeInTheDocument()
+  })
+
+  it("links to the usage dashboard for people who have it", () => {
+    mocks.state.user = { id: "user-1", can_view_usage_dashboard: true }
+    renderSidebar()
+    expect(screen.getByTestId("sidebar-usage")).toHaveAttribute("href", "/usage")
   })
 })
