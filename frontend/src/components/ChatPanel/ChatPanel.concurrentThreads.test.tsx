@@ -96,7 +96,7 @@ function mockServer({
     heldHistories.set(threadId, new Promise<void>((resolve) => (release = resolve)))
     return () => release()
   }
-  const threadLists = { count: 0, rows: [] as Thread[] }
+  const threadLists = { count: 0 }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = String(input)
     if (url === "/api/chat/") {
@@ -161,7 +161,7 @@ function mockServer({
     if (/\/threads\/[^/]+\/viewed\/$/.test(url)) return new Response(null, { status: 204 })
     if (/^\/api\/workspaces\/[^/]+\/threads\/$/.test(url)) {
       threadLists.count += 1
-      return Response.json(threadLists.rows)
+      return Response.json([])
     }
     throw new Error(`Unexpected request: ${url}`)
   }))
@@ -400,7 +400,6 @@ describe("concurrent chat threads (#847)", () => {
   it("starts no title polls for a left chat that finishes after the panel is gone", async () => {
     const server = mockServer()
     useAppStore.setState({ threads: [listed(THREAD_A, "first_message"), listed(THREAD_B)] })
-    server.threadLists.rows = useAppStore.getState().threads
     const view = render(<MemoryRouter><ChatPanel /></MemoryRouter>)
     await screen.findByText("Chat A history.")
     await send("run recipe X")

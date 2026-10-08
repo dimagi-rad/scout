@@ -3,8 +3,9 @@
 import logging
 from datetime import UTC, datetime
 
+from django.db.models import BooleanField, ExpressionWrapper, Q
+from django.db.models.functions import Now
 from django.http import JsonResponse
-from django.utils import timezone
 
 from apps.chat import pending_requests, resume_stream
 from apps.chat.artifact_links import (
@@ -26,12 +27,22 @@ from apps.workspaces.workspace_resolver import aresolve_workspace
 logger = logging.getLogger(__name__)
 
 
+# An agent run holds the thread's turn lease (a chat turn in any tab, or a background
+# resume); a holder that died clears once its lease lapses. Judged by the database
+# clock, as the lease itself is (apps/chat/turn_lease.py).
+_TURN_RUNNING = ExpressionWrapper(Q(turn_lease_expires_at__gt=Now()), output_field=BooleanField())
+
+
+def _threads():
+    return Thread.objects.annotate(lease_live=_TURN_RUNNING)
+
+
 async def _get_thread(thread_id, user, *, workspace_id=None):
     """Load a thread ensuring ownership, optionally scoped to a workspace."""
     try:
         if workspace_id is not None:
-            return await Thread.objects.aget(id=thread_id, user=user, workspace_id=workspace_id)
-        return await Thread.objects.aget(id=thread_id, user=user)
+            return await _threads().aget(id=thread_id, user=user, workspace_id=workspace_id)
+        return await _threads().aget(id=thread_id, user=user)
     except Thread.DoesNotExist:
         return None
 
@@ -45,10 +56,8 @@ async def _thread_id_taken(thread_id) -> bool:
 
 
 def _turn_running(thread) -> bool:
-    """An agent run holds the thread's turn lease (a chat turn in any tab, or a
-    background resume). A holder that died clears once its lease lapses."""
-    expires = thread.turn_lease_expires_at
-    return expires is not None and expires > timezone.now()
+    # NULL (no lease) compares as NULL; a row made here, not loaded, has no lease.
+    return getattr(thread, "lease_live", None) is True
 
 
 def _thread_summary(thread):
@@ -80,7 +89,7 @@ async def _list_threads(user, *, workspace_id):
     if err is not None:
         return None, err
 
-    queryset = Thread.objects.filter(user=user, workspace=workspace).order_by("-updated_at")[:50]
+    queryset = _threads().filter(user=user, workspace=workspace).order_by("-updated_at")[:50]
     threads = [thread async for thread in queryset]
     await afill_blank_titles(threads)
     return [_thread_summary(thread) for thread in threads], None
