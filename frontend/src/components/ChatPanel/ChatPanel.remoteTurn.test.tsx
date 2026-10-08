@@ -269,6 +269,24 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
     expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
   })
 
+  it("offers Retry, and stops loading, when the reload at the turn's end fails", async () => {
+    const server = mockServer()
+    renderPanel()
+    await screen.findByTestId("chat-remote-turn")
+    server.messagesStatus = 503
+    server.finish()
+
+    await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_POLL_MS))
+    expect(await screen.findByTestId("chat-history-retry")).toBeInTheDocument()
+    const loads = server.messageLoads
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "and by month?" } })
+    expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled()
+
+    await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_MAX_POLL_MS * 3))
+    expect(server.messageLoads).toBe(loads)
+    expect(screen.queryByTestId("chat-remote-turn")).toBeNull()
+  })
+
   it("keeps following a running turn when a reload it asked for fails", async () => {
     const server = mockServer()
     server.liveRows = [{ id: 1, run: "call-1", text: "Let me check.", done: false }]

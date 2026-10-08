@@ -276,7 +276,7 @@ export function ChatPanel() {
   // The loaded history's turn was running on the server, as of that load (#856).
   // The chat whose reload a remote turn asked for: a failed one keeps following the
   // turn instead of unblocking a send into its lease.
-  const remoteReloadRef = useRef<Chat<UIMessage> | null>(null)
+  const remoteReloadRef = useRef<{ chat: Chat<UIMessage>; follow: boolean } | null>(null)
   const [serverTurn, setServerTurn] =
     useState<{ chat: Chat<UIMessage>; reloadKey: number } | null>(null)
   // A left chat can finish after the panel is gone; it must not start polls then.
@@ -541,21 +541,24 @@ export function ChatPanel() {
   )
   resetResumeStreamRef.current = resumeStream.reset
   /** Reload a remote turn's thread: a call of it ended, or the turn did. The load
-   *  says which (turn_running), and refreshes the title and list only for the latter. */
-  function reloadRemoteTurn() {
+   *  says which (turn_running), and refreshes the title and list only for the latter.
+   *  ``follow``: the tail asked, mid-turn, so a failed load keeps following the turn;
+   *  the poll asks once the turn is over (or it gave up), and a failure then offers
+   *  the load's Retry instead of polling again. */
+  function reloadRemoteTurn(follow: boolean) {
     if (!mountedRef.current) return
-    remoteReloadRef.current = chat
+    remoteReloadRef.current = { chat, follow }
     setMessageReloadKey((k) => k + 1)
   }
   // The poll is the backstop: a turn that streamed no text, or whose writes failed,
   // has no done row to read.
-  useRemoteTurnPoll(activeDomainId, threadId, remoteTurnRunning, reloadRemoteTurn)
+  useRemoteTurnPoll(activeDomainId, threadId, remoteTurnRunning, () => reloadRemoteTurn(false))
   const reloadRemoteTurnRef = useRef(reloadRemoteTurn)
   reloadRemoteTurnRef.current = reloadRemoteTurn
   // A done row ends a model call, or (written once the server has let go of the
   // thread) the turn.
   useEffect(() => {
-    if (remoteTurnRunning && resumeStream.done) reloadRemoteTurnRef.current()
+    if (remoteTurnRunning && resumeStream.done) reloadRemoteTurnRef.current(true)
   }, [remoteTurnRunning, resumeStream.done])
   // Each model call streams as a run of its own. A new one means the last call and
   // its tool cards are in the history now, so reload to show them; the reload's
@@ -566,7 +569,7 @@ export function ChatPanel() {
     shownRunRef.current = resumeStream.run
     if (remoteTurnRunning && previous !== null && resumeStream.run !== null
       && previous !== resumeStream.run) {
-      reloadRemoteTurnRef.current()
+      reloadRemoteTurnRef.current(true)
     }
   }, [remoteTurnRunning, resumeStream.run])
 
@@ -660,7 +663,7 @@ export function ChatPanel() {
         const remoteRunning =
           !Array.isArray(response) && response.turn_running === true && !isChatRunning(chat)
         setServerTurn(remoteRunning ? { chat, reloadKey } : null)
-        const followedRemoteTurn = remoteReloadRef.current === chat
+        const followedRemoteTurn = remoteReloadRef.current?.chat === chat
         remoteReloadRef.current = null
         if (followedRemoteTurn && !remoteRunning) {
           // The turn is over: its first answer is when the thread gets a title.
@@ -693,7 +696,8 @@ export function ChatPanel() {
         // block sending now. A reload a running remote turn asked for keeps
         // following it (its tail and poll reload again), rather than unblocking a
         // send into its lease.
-        const followingRemoteTurn = remoteReloadRef.current === chat
+        const followingRemoteTurn =
+          remoteReloadRef.current?.chat === chat && remoteReloadRef.current.follow
         remoteReloadRef.current = null
         setServerTurn(followingRemoteTurn ? { chat, reloadKey } : null)
         resetResumeStreamRef.current()
