@@ -39,7 +39,7 @@ from asgiref.sync import sync_to_async
 from langchain_core.messages import AIMessage, ToolMessage
 
 from apps.agents.graph.base import FIXED_MESSAGE_NODES, INJECTED_TOOL_PARAMS
-from apps.agents.graph.state import TRUNCATED_TOOL_CALLS_NODE
+from apps.agents.graph.state import TRUNCATED_TOOL_CALLS_NODE, all_tool_calls
 from apps.agents.llm_request import LLM_TIMEOUT_ERRORS
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
@@ -229,33 +229,73 @@ def _subagent_parent_tool_call_id(event: dict[str, Any]) -> str | None:
 audit_logger = logging.getLogger("scout.agent.audit")
 
 STOPPED_RESPONSE_MARKER = "Response stopped by user."
+INTERRUPTED_TOOL_RESULT = "Not completed: the turn ended before this tool call returned."
+
+
+def _trailing_unanswered_tool_calls(messages: list[Any]) -> list[dict]:
+    """Tool calls of the latest AIMessage that no ToolMessage after it answers."""
+    answered: set[str] = set()
+    for msg in reversed(messages):
+        if isinstance(msg, ToolMessage):
+            answered.add(msg.tool_call_id)
+        elif isinstance(msg, AIMessage):
+            return [tc for tc in all_tool_calls(msg) if tc.get("id") and tc["id"] not in answered]
+        else:
+            return []
+    return []
+
+
+async def _history(agent: Any, config: dict) -> list[Any]:
+    try:
+        state = await agent.aget_state(config)
+    except Exception:
+        logger.warning("Could not load the thread before ending its turn", exc_info=True)
+        return []
+    values = getattr(state, "values", None)
+    history = values.get("messages") if isinstance(values, dict) else None
+    return history if isinstance(history, list) else []
+
+
+async def _write_terminal_message(agent: Any, config: dict, message: AIMessage) -> None:
+    # Answer the turn's unanswered tool calls before the marker, not after it: the
+    # next turn's repair only looks at the latest AIMessage, which is the marker,
+    # and a reload would show those calls as still running.
+    interrupted = [
+        ToolMessage(
+            content=INTERRUPTED_TOOL_RESULT,
+            tool_call_id=tc["id"],
+            name=tc.get("name") or "unknown",
+        )
+        for tc in _trailing_unanswered_tool_calls(await _history(agent, config))
+    ]
+    await agent.aupdate_state(config, {"messages": [*interrupted, message]}, as_node="agent")
+
+
+async def _persist_terminal_response(
+    agent: Any, config: dict, partial_text: str, notice: str, metadata: dict
+) -> None:
+    """Append the assistant message that ends a turn which didn't complete."""
+    clean_partial = partial_text.strip()
+    content = f"{clean_partial}\n\n_{notice}_" if clean_partial else f"_{notice}_"
+    message = AIMessage(content=content, response_metadata=metadata)
+    write = asyncio.ensure_future(_write_terminal_message(agent, config, message))
+    try:
+        try:
+            await asyncio.shield(write)
+        except asyncio.CancelledError:
+            # The caller releases the turn lease once this returns; a write still
+            # in flight then could land after another turn has taken the thread.
+            with contextlib.suppress(Exception):
+                await write
+            raise
+    except Exception:
+        logger.warning("Could not persist the end of an unfinished chat turn", exc_info=True)
 
 
 async def _persist_stopped_response(agent: Any, config: dict, partial_text: str) -> None:
-    """Append a terminal assistant message when the client cancels a stream."""
-    clean_partial = partial_text.strip()
-    content = (
-        f"{clean_partial}\n\n_{STOPPED_RESPONSE_MARKER}_"
-        if clean_partial
-        else f"_{STOPPED_RESPONSE_MARKER}_"
+    await _persist_terminal_response(
+        agent, config, partial_text, STOPPED_RESPONSE_MARKER, {"scout_response_stopped": True}
     )
-    try:
-        await asyncio.shield(
-            agent.aupdate_state(
-                config,
-                {
-                    "messages": [
-                        AIMessage(
-                            content=content,
-                            response_metadata={"scout_response_stopped": True},
-                        )
-                    ]
-                },
-                as_node="agent",
-            )
-        )
-    except Exception:
-        logger.warning("Could not persist stopped chat response", exc_info=True)
 
 
 async def langgraph_to_ui_stream(
