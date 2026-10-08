@@ -41,7 +41,7 @@ function thread(id: string, title: string, source: Thread["title_source"]): Thre
 }
 
 /** The server lists the thread once the POST lands; ``generateTitle`` lets the worker write its title. */
-function mockApi({ holdTurn = false, holdResponse = false } = {}) {
+function mockApi({ holdTurn = false, holdResponse = false, refuse = false } = {}) {
   let posted: string | null = null
   let titleGenerated = false
   let releaseTurn = () => {}
@@ -58,6 +58,8 @@ function mockApi({ holdTurn = false, holdResponse = false } = {}) {
       const threadId = JSON.parse(options?.body as string).data.threadId
       // The agent is still being built: no response, and (worst case) not yet listed.
       if (holdResponse) await responseHeld
+      // Refused before the server made the row.
+      if (refuse) return Response.json({ error: "Empty message" }, { status: 400 })
       posted = threadId
       return createUIMessageStreamResponse({
         stream: createUIMessageStream({
@@ -167,6 +169,22 @@ describe("chat thread title", () => {
 
     await act(async () => server.releaseTurn())
     expect(screen.getByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(QUESTION)
+  }, 15000)
+
+  it("drops the new chat from the sidebar when its first send is refused", async () => {
+    const server = mockApi({ holdResponse: true, refuse: true })
+    renderChat()
+    const firstThread = useAppStore.getState().threadId
+
+    await send(QUESTION)
+    expect(await screen.findByTestId(`sidebar-thread-${firstThread}`)).toHaveTextContent(QUESTION)
+    await act(async () => server.releaseResponse())
+
+    await waitFor(() =>
+      expect(screen.queryByTestId(`sidebar-thread-${firstThread}`)).not.toBeInTheDocument(),
+    )
+    expect(useAppStore.getState().threads).toEqual([])
+    expect(screen.getByTestId("chat-thread-title")).toHaveTextContent("Untitled")
   }, 15000)
 
   it("keeps the new chat listed and reopenable before its send is answered", async () => {

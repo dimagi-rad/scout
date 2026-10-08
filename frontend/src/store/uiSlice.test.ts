@@ -275,6 +275,7 @@ describe("uiSlice.fetchThreads refreshes the workspace list on access loss", () 
 
 describe("uiSlice sending threads (#859)", () => {
   beforeEach(() => {
+    vi.spyOn(api, "get").mockResolvedValue([] as never)
     useAppStore.setState({
       activeDomainId: "ws-1",
       threads: [thread("old", "Older chat")],
@@ -293,7 +294,6 @@ describe("uiSlice sending threads (#859)", () => {
   const ids = () => useAppStore.getState().threads.map((t) => t.id)
 
   it("lists the new chat first, titled by its message, before the server does", () => {
-    vi.spyOn(api, "get").mockResolvedValue([] as never)
     useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "  How many visits?  ")
 
     const [first] = useAppStore.getState().threads
@@ -337,7 +337,7 @@ describe("uiSlice sending threads (#859)", () => {
   })
 
   it("refetches nothing for a send in a thread already listed", () => {
-    const get = vi.spyOn(api, "get").mockResolvedValue([] as never)
+    const get = vi.mocked(api.get)
 
     useAppStore.getState().uiActions.addSendingThread("ws-1", "old", "Another question")
     useAppStore.getState().uiActions.settleSendingThread("ws-1", "old")
@@ -345,6 +345,31 @@ describe("uiSlice sending threads (#859)", () => {
     expect(ids()).toEqual(["old"])
     expect(useAppStore.getState().threads[0].title).toBe("Older chat")
     expect(get).not.toHaveBeenCalled()
+  })
+
+  it("shows it again on returning to its workspace before the send is answered", async () => {
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?")
+    vi.spyOn(api, "get").mockResolvedValue([thread("old", "Older chat")] as never)
+
+    useAppStore.setState({ activeDomainId: "ws-2" })
+    expect(ids()).toEqual([])
+    useAppStore.setState({ activeDomainId: "ws-1" })
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(ids()).toEqual(["new", "old"])
+  })
+
+  it("leaves the server's list alone once the send was answered in another workspace", async () => {
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?")
+    const get = vi.spyOn(api, "get").mockResolvedValue([thread("old", "Older chat")] as never)
+
+    useAppStore.setState({ activeDomainId: "ws-2" })
+    useAppStore.getState().uiActions.settleSendingThread("ws-1", "new")
+    expect(get).not.toHaveBeenCalledWith("/api/workspaces/ws-1/threads/")
+    useAppStore.setState({ activeDomainId: "ws-1" })
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(ids()).toEqual(["old"])
   })
 
   it("ignores a send from a workspace that is no longer shown", () => {

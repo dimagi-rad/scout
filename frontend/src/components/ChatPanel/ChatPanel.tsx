@@ -323,7 +323,8 @@ export function ChatPanel() {
         credentials: "include",
         headers: () => ({ "X-CSRFToken": getCsrfToken() }),
         body: () => ({ data: context }),
-        // The server lists a thread once its turn is accepted, long before it finishes.
+        // The row exists by the time any response past validation arrives, long before the
+        // turn ends, so the server's list decides from here.
         fetch: async (input, init) => {
           try {
             return await fetch(input, init)
