@@ -519,7 +519,7 @@ class TestSyntheticFailureMessage:
         tj = await ThreadJob.objects.select_related("thread__workspace", "thread__user").aget(
             id=(await _resumable_job("synthetic-idle", 880008)).id
         )
-        agent = MagicMock(aupdate_state=AsyncMock())
+        agent = MagicMock(aget_state=AsyncMock(), aupdate_state=AsyncMock())
 
         with patch(
             "apps.chat.services.agent_execution.build_agent_for_resume",

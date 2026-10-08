@@ -273,7 +273,7 @@ async def _write_terminal_message(agent: Any, config: dict, message: AIMessage) 
         )
         for tc in _trailing_unanswered_tool_calls(await _history(agent, config))
     ]
-    await agent.aupdate_state(config, {"messages": [*interrupted, message]}, as_node="agent")
+    await agent.aupdate_state(config, {"messages": [*interrupted, message]}, as_node=AGENT_NODE)
 
 
 async def _persist_terminal_response(

@@ -976,7 +976,8 @@ async def persist_synthetic_failure_message(
 ) -> None:
     """Append a plain-text AIMessage to the LangGraph checkpointer for
     ``thread_job.thread`` so the chat UI shows a user-visible explanation when
-    the agent never produced one.
+    the agent never produced one. Tool calls the turn left open are answered
+    as interrupted first.
 
     The frontend (apps/chat/thread_views.py:_load_thread_messages) reads
     assistant responses from the checkpointer, so a failure message that
