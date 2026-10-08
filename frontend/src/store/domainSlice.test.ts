@@ -152,6 +152,8 @@ describe("domainSlice — remembered workspace (#860)", () => {
   })
 
   beforeEach(() => {
+    // A new identity rebuilds the slices, dropping the in-flight request tracker.
+    useAppStore.setState({ user: null })
     localStorage.clear()
     useAppStore.setState({ activeDomainId: null, domains: [], domainsStatus: "idle" })
   })
@@ -188,7 +190,8 @@ describe("domainSlice — remembered workspace (#860)", () => {
   })
 
   it("lets a deep link win over the remembered workspace", async () => {
-    useAppStore.setState({ user: signedIn("b"), activeDomainId: "a" })
+    useAppStore.setState({ user: signedIn("b") })
+    useAppStore.setState({ activeDomainId: "a" })
     vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a"), ws("b")] as never)
 
     await useAppStore.getState().domainActions.fetchDomains()
@@ -214,6 +217,25 @@ describe("domainSlice — remembered workspace (#860)", () => {
     useAppStore.getState().domainActions.setActiveDomain("a")
 
     expect(post).not.toHaveBeenCalled()
+  })
+
+  it("sends the switch back when the first switch is still in flight", async () => {
+    useAppStore.setState({ user: signedIn("a") })
+    let resolveB: () => void = () => undefined
+    const post = vi
+      .spyOn(api, "post")
+      .mockImplementationOnce(() => new Promise((r) => { resolveB = () => r({ ok: true } as never) }))
+      .mockResolvedValue({ ok: true } as never)
+
+    useAppStore.getState().domainActions.setActiveDomain("b")
+    useAppStore.getState().domainActions.setActiveDomain("a")
+    resolveB()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(post).toHaveBeenCalledTimes(2)
+    expect(post).toHaveBeenLastCalledWith("/api/auth/last-workspace/", { workspace_id: "a" })
+    expect(useAppStore.getState().user?.last_workspace_id).toBe("a")
   })
 
   it("survives the server rejecting the workspace", async () => {

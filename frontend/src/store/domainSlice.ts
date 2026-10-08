@@ -73,6 +73,8 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope &
   // Bumped by every list request, so a background result never overwrites a newer foreground one.
   let listRequestSeq = 0
   let revalidation: Promise<RevalidateResult> | null = null
+  // Last id sent to the server, so a quick A -> B -> A isn't deduped against a copy B has yet to update.
+  let requestedWorkspaceId: string | null = null
 
   return {
     domains: [],
@@ -167,18 +169,23 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope &
         if (!get().accountSession.isCurrent()) return
         recordWorkspaceUse(id)
         const { user } = get()
-        if (user && user.last_workspace_id !== id) {
+        if (user && (requestedWorkspaceId ?? user.last_workspace_id) !== id) {
+          requestedWorkspaceId = id
           // Best effort: a 404 for a deep link to a workspace we aren't a member of is expected,
           // so the local copy only follows once the server accepted it.
           api
             .post("/api/auth/last-workspace/", { workspace_id: id })
             .then(() => {
               const current = get().user
+              // A newer switch owns the remembered value now.
+              if (requestedWorkspaceId !== id) return
               if (current && current.id === user.id) {
                 set({ user: { ...current, last_workspace_id: id } })
               }
             })
-            .catch(() => undefined)
+            .catch(() => {
+              if (requestedWorkspaceId === id) requestedWorkspaceId = null
+            })
         }
         set({ activeDomainId: id, addedDomainIds: withoutId(get().addedDomainIds, id) })
       },
