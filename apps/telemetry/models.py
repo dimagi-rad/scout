@@ -63,7 +63,9 @@ class SnapshotMetric:
     # Of the total, bytes in schemas not serving queries: refreshes being built,
     # failed candidates kept for a resume, teardowns still referenced.
     SCHEMA_BYTES_RETAINED = "schema_bytes_retained"
-    # Schemas a lock kept from being sized; totals are not written on such a night.
+    # Schemas left unsized that night: a lock skipped some (totals withheld), or the
+    # sizing could not run (every schema counted; earlier sizes for the day kept).
+    # Read it alongside the size series.
     SCHEMAS_SKIPPED = "schemas_skipped"
     THREADS = "threads"
     ARTIFACTS = "artifacts"
