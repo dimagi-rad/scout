@@ -22,7 +22,7 @@ from apps.common.commcare_servers import (
     server_for_provider,
 )
 from apps.common.http import parse_json_object, string_field
-from apps.telemetry.models import EventKind
+from apps.telemetry.models import USAGE_DASHBOARD_PERMISSION, EventKind
 from apps.telemetry.recorder import arecord
 from apps.users.decorators import async_login_required, login_required_json
 from apps.users.models import (
@@ -84,13 +84,17 @@ async def _alast_workspace_id(user) -> str | None:
     return str(user.last_workspace_id) if is_member else None
 
 
-def _user_response(user, *, onboarding_complete=False, last_workspace_id=None):
+def _user_response(
+    user, *, onboarding_complete=False, last_workspace_id=None, can_view_usage_dashboard=False
+):
     """Build standard user JSON response dict."""
     return {
         "id": str(user.id),
         "email": user.email,
         "name": user.get_full_name(),
         "is_staff": user.is_staff,
+        # Only hides the nav link; the dashboard API checks the permission itself.
+        "can_view_usage_dashboard": can_view_usage_dashboard,
         "onboarding_complete": onboarding_complete,
         "last_workspace_id": last_workspace_id,
         "agent_model": {
@@ -167,11 +171,17 @@ async def me_view(request):
     user = request._authenticated_user
 
     last_workspace_id = await _alast_workspace_id(user)
+    can_view_usage_dashboard = await user.ahas_perm(USAGE_DASHBOARD_PERMISSION)
     cache_key = me_onboarding_cache_key(user)
     cached = await cache.aget(cache_key)
     if cached is not None:
         return JsonResponse(
-            _user_response(user, onboarding_complete=cached, last_workspace_id=last_workspace_id)
+            _user_response(
+                user,
+                onboarding_complete=cached,
+                last_workspace_id=last_workspace_id,
+                can_view_usage_dashboard=can_view_usage_dashboard,
+            )
         )
 
     onboarding_complete = await _aonboarding_complete(user)
@@ -198,6 +208,7 @@ async def me_view(request):
             user,
             onboarding_complete=onboarding_complete,
             last_workspace_id=last_workspace_id,
+            can_view_usage_dashboard=can_view_usage_dashboard,
         )
     )
 
@@ -242,6 +253,7 @@ def login_view(request):
             user,
             onboarding_complete=onboarding_complete,
             last_workspace_id=_last_workspace_id(user),
+            can_view_usage_dashboard=user.has_perm(USAGE_DASHBOARD_PERMISSION),
         )
     )
 

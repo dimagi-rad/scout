@@ -7,6 +7,8 @@ text, query text or anything a user typed.
 from django.db import models
 from django.utils import timezone
 
+USAGE_DASHBOARD_PERMISSION = "telemetry.view_usage_dashboard"
+
 
 class EventKind:
     """The event kinds the platform records; ``kind`` is free text so a new one needs no migration."""
@@ -45,6 +47,7 @@ class TelemetryEvent(models.Model):
     attrs = models.JSONField(default=dict, blank=True)
 
     class Meta:
+        permissions = [("view_usage_dashboard", "Can view the usage dashboard")]
         indexes = [
             models.Index(fields=["kind", "occurred_at"], name="telemetry_kind_time"),
             # The retention prune scans by time across every kind.
