@@ -693,7 +693,7 @@ async def test_a_cancelled_stream_saves_its_partial_reply_only_while_it_owns_the
         await asyncio.Event().wait()
         yield {}
 
-    agent = MagicMock(astream_events=events, aupdate_state=AsyncMock())
+    agent = MagicMock(astream_events=events, aget_state=AsyncMock(), aupdate_state=AsyncMock())
 
     async def consume():
         async for _chunk in langgraph_to_ui_stream(

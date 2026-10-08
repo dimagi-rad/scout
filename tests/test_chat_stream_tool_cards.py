@@ -454,6 +454,7 @@ class _StallingAgent:
     def __init__(self, stream_obj):
         self._stream = stream_obj
         self.aupdate_state = AsyncMock()
+        self.aget_state = AsyncMock()
 
     def astream_events(self, input_state, *, config, version):
         return self._stream

@@ -115,8 +115,11 @@ async def test_a_retryable_failure_also_saves_the_marker(exc):
 
 
 @pytest.mark.asyncio
-async def test_a_full_checkpointer_pool_skips_the_write_it_could_not_make():
-    agent = _ScriptedAgent([], CapacityExhausted(CapacityResource.CHECKPOINTER_POOL))
+@pytest.mark.parametrize(
+    "resource", [CapacityResource.CHECKPOINTER_POOL, CapacityResource.DATABASE]
+)
+async def test_no_spare_connection_skips_the_write_it_could_not_make(resource):
+    agent = _ScriptedAgent([], CapacityExhausted(resource))
 
     events = await _run(agent)
 
@@ -144,6 +147,88 @@ async def test_a_failed_write_still_ends_the_stream():
     assert events[-1] == {"type": "finish", "finishReason": "stop"}
 
 
+class _SlowWrite:
+    """An ``aupdate_state`` that holds until released, recording whether it landed."""
+
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.landed = False
+
+    async def __call__(self, *_args, **_kwargs):
+        self.started.set()
+        await self.release.wait()
+        self.landed = True
+
+
+async def _cancel_during_the_write(agent, write: _SlowWrite, owns_thread) -> asyncio.Task:
+    async def consume():
+        async for _chunk in stream.langgraph_to_ui_stream(
+            agent, {}, CONFIG, owns_thread=owns_thread
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    async with asyncio.timeout(10):
+        await write.started.wait()
+    task.cancel()
+    await asyncio.sleep(0.05)
+    return task
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_stream_ends_only_once_its_write_has_landed():
+    """The turn lease is released when the stream ends, so the write must land first."""
+    agent = _ScriptedAgent([], ValueError("boom"))
+    write = _SlowWrite()
+    agent.aupdate_state = write
+
+    task = await _cancel_during_the_write(agent, write, owns_thread=lambda: True)
+
+    assert not task.done()
+    write.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert write.landed
+
+
+@pytest.mark.asyncio
+async def test_a_stream_cancelled_for_losing_its_lease_drops_its_write():
+    agent = _ScriptedAgent([], ValueError("boom"))
+    write = _SlowWrite()
+    agent.aupdate_state = write
+    owns = True
+
+    async def consume_then_lose_lease():
+        nonlocal owns
+        await write.started.wait()
+        owns = False
+
+    losing = asyncio.create_task(consume_then_lose_lease())
+    task = await _cancel_during_the_write(agent, write, owns_thread=lambda: owns)
+    await losing
+
+    # Well inside the write timeout: the write is dropped, not waited out.
+    await asyncio.wait({task}, timeout=1)
+    assert task.cancelled()
+    write.release.set()
+    await asyncio.sleep(0)
+    assert not write.landed
+
+
+@pytest.mark.asyncio
+async def test_a_write_that_hangs_gives_up_and_the_stream_ends(monkeypatch):
+    monkeypatch.setattr(stream, "TERMINAL_WRITE_TIMEOUT_SECONDS", 0.05)
+    agent = _ScriptedAgent([], ValueError("boom"))
+    agent.aupdate_state = _SlowWrite()
+
+    async with asyncio.timeout(10):
+        events = await _run(agent)
+
+    assert events[-1] == {"type": "finish", "finishReason": "stop"}
+    assert not agent.aupdate_state.landed
+
+
 @pytest.mark.asyncio
 async def test_unanswered_tool_calls_are_answered_before_the_marker():
     history = [
@@ -164,6 +249,7 @@ async def test_unanswered_tool_calls_are_answered_before_the_marker():
     interrupted, marker = _written(agent)
     assert isinstance(interrupted, ToolMessage)
     assert (interrupted.tool_call_id, interrupted.name) == ("call_2", "describe")
+    assert interrupted.status == "error"
     assert marker.response_metadata == {"scout_turn_failed": True}
 
 
@@ -275,3 +361,28 @@ async def test_a_turn_stopped_mid_tool_leaves_a_history_the_next_turn_can_send()
     assert saved[-2].tool_call_id == "toolu_1"
     assert saved[-1].response_metadata == {"scout_response_stopped": True}
     _assert_valid_for_the_model(await _next_turn_history(graph))
+
+
+@pytest.mark.asyncio
+async def test_the_marker_leaves_out_text_from_steps_already_saved():
+    step_end = {"event": "on_chain_end", "name": "agent", "metadata": {"langgraph_node": "agent"}}
+    agent = _ScriptedAgent(
+        [_text_event("Checking the table."), step_end, _text_event("Found 3")],
+        ValueError("x"),
+    )
+
+    await _run(agent)
+
+    [marker] = _written(agent)
+    assert marker.content.startswith("Found 3\n\n_This response didn't finish.")
+
+
+@pytest.mark.asyncio
+async def test_a_thread_that_cannot_be_loaded_gets_no_half_written_marker():
+    agent = _ScriptedAgent([], ValueError("boom"))
+    agent.aget_state.side_effect = RuntimeError("pool checkout timed out")
+
+    events = await _run(agent)
+
+    assert any(e["type"] == "error" for e in events)
+    agent.aupdate_state.assert_not_awaited()
