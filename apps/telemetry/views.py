@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
 from django.core.cache import cache
+from django.db import OperationalError
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -10,8 +13,12 @@ from rest_framework.views import APIView
 from apps.telemetry.dashboard import DEFAULT_DAYS, MAX_DAYS, build_dashboard
 from apps.telemetry.models import USAGE_DASHBOARD_PERMISSION
 
+logger = logging.getLogger(__name__)
+
 # The numbers move slowly; a short cache keeps reloads off the shared database.
 CACHE_SECONDS = 60
+# The ranges the page offers; other windows are computed fresh rather than fill the cache.
+CACHED_WINDOWS = frozenset({7, 30, 90})
 
 
 class CanViewUsageDashboard(BasePermission):
@@ -30,8 +37,18 @@ class UsageDashboardView(APIView):
         except (TypeError, ValueError):
             days = DEFAULT_DAYS
         days = min(MAX_DAYS, max(1, days))
-        # Checked permission first; the cached aggregates are the same for every viewer.
-        data = cache.get_or_set(
-            f"usage_dashboard:v1:{days}", lambda: build_dashboard(days=days), CACHE_SECONDS
-        )
+        try:
+            if days not in CACHED_WINDOWS:
+                return Response(build_dashboard(days=days))
+            # Checked permission first; the cached aggregates are the same for every viewer.
+            data = cache.get_or_set(
+                f"usage_dashboard:v1:{days}", lambda: build_dashboard(days=days), CACHE_SECONDS
+            )
+        except OperationalError:
+            # The statement timeout cancelled a query: busy database, try again shortly.
+            logger.warning("Usage dashboard query cancelled for a %d-day window", days)
+            return Response(
+                {"error": "The usage numbers took too long. Try a shorter range or retry."},
+                status=503,
+            )
         return Response(data)

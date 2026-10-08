@@ -34,11 +34,12 @@ class Command(BaseCommand):
         if revoke:
             if not has_it:
                 self.stdout.write(f"{user.email} had no direct grant to revoke; no change.")
-                self._warn_if_still_granted(user_model, user, revoke)
+                self._warn_if_still_granted(user_model, user)
                 return
             user.user_permissions.remove(permission)
             forget_usage_dashboard_flag(user.pk)
             self.stdout.write(f"Revoked usage dashboard access from {user.email}.")
+            self._warn_if_still_granted(user_model, user)
         else:
             if has_it:
                 self.stdout.write(f"{user.email} already has usage dashboard access; no change.")
@@ -46,11 +47,10 @@ class Command(BaseCommand):
             user.user_permissions.add(permission)
             forget_usage_dashboard_flag(user.pk)
             self.stdout.write(f"Granted usage dashboard access to {user.email}.")
-        self._warn_if_still_granted(user_model, user, revoke)
+        if user.is_superuser:
+            self.stdout.write("Note: superusers can see the dashboard regardless.")
 
-    def _warn_if_still_granted(self, user_model, user, revoke):
-        if not revoke:
-            return
+    def _warn_if_still_granted(self, user_model, user):
         # A fresh instance: has_perm caches on the object it was first asked of.
         if user_model.objects.get(pk=user.pk).has_perm(USAGE_DASHBOARD_PERMISSION):
             self.stdout.write(

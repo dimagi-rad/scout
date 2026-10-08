@@ -3,11 +3,13 @@
 import uuid
 from datetime import timedelta
 from io import StringIO
+from unittest.mock import patch
 
 import pytest
 from django.contrib.auth.models import Group, Permission
 from django.core.cache import cache
 from django.core.management import CommandError, call_command
+from django.db import OperationalError
 from django.test import Client
 from django.utils import timezone
 
@@ -22,7 +24,12 @@ from apps.telemetry.models import (
     TelemetryEvent,
 )
 from apps.users.models import User
-from apps.workspaces.models import MaterializationRun, TenantSchema, WorkspaceLoadTiming
+from apps.workspaces.models import (
+    MaterializationRun,
+    TenantSchema,
+    Workspace,
+    WorkspaceLoadTiming,
+)
 
 URL = "/api/telemetry/dashboard/"
 
@@ -97,6 +104,14 @@ def test_the_dashboard_is_cached_per_window(admin_user):
 
     assert client.get(URL, {"days": "7"}).json() == first
     assert client.get(URL, {"days": "8"}).json()["active_users"]["dau"] == 1
+
+
+@pytest.mark.django_db
+def test_a_cancelled_query_is_a_retryable_503(admin_user):
+    with patch("apps.telemetry.views.build_dashboard", side_effect=OperationalError("canceled")):
+        response = _client_for(admin_user).get(URL, {"days": "45"})
+
+    assert response.status_code == 503
 
 
 @pytest.mark.django_db
@@ -208,7 +223,7 @@ def test_dashboard_adds_up_events_and_existing_tables(user, workspace, tenant):
     # Only the completed turn's first token counts.
     assert turns["ttft_ms"]["p50"] == 200
     assert turns["tool_calls_per_turn"] == 1
-    # Spend counts the worker's turn too, so it reconciles with the per-workspace table.
+    # Spend counts the worker's turn too, as the per-workspace table does.
     assert turns["tokens"]["input"] == 67
     [tool] = data["tools"]
     assert (tool["name"], tool["calls"], tool["errors"], tool["error_rate"]) == ("query", 2, 1, 0.5)
@@ -237,7 +252,11 @@ def test_dashboard_adds_up_events_and_existing_tables(user, workspace, tenant):
         "failed": 1,
         "duration_ms": {"p50": None, "p95": None},
     }
-    assert data["created"]["workspaces"][-1] == 1
+    # Other suites can leave committed rows behind, so compare with the table itself.
+    assert (
+        data["created"]["workspaces"][-1]
+        == Workspace.objects.filter(created_at__date=now.date()).count()
+    )
     assert data["schema_sizes"]["total_daily"][-1] == 900
     assert data["schema_sizes"]["top_tenants"][0]["bytes"] == 900
     assert data["schema_sizes"]["retained_bytes"] == 100

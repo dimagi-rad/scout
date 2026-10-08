@@ -243,7 +243,7 @@ function Dashboard({ data }: { data: UsageDashboard }) {
         />
         <Tile
           id="tokens"
-          label="Chat model tokens, in / out"
+          label="Chat model tokens, in / out, worker turns included"
           value={formatCompact(turns.tokens.input)}
           hint={`${formatCompact(turns.tokens.output)} out · ${formatCompact(turns.tokens.cache_read)} from cache`}
         />
