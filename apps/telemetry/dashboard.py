@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Count
 from django.db.models.functions import TruncDate
 from django.utils import timezone
@@ -164,11 +164,11 @@ def _turns(start: datetime, days: list[date]) -> dict[str, Any]:
             percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms),
             -- A failed turn's first token is its apology text, so only completed
             -- turns say how long a real answer takes to start.
-            percentile_cont(0.5) WITHIN GROUP (ORDER BY (attrs->>'ttft_ms')::bigint)
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY (CASE WHEN jsonb_typeof(attrs->'ttft_ms') = 'number' THEN (attrs->>'ttft_ms')::numeric END))
                 FILTER (WHERE outcome = %s),
-            percentile_cont(0.95) WITHIN GROUP (ORDER BY (attrs->>'ttft_ms')::bigint)
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY (CASE WHEN jsonb_typeof(attrs->'ttft_ms') = 'number' THEN (attrs->>'ttft_ms')::numeric END))
                 FILTER (WHERE outcome = %s),
-            AVG((attrs->>'tool_calls')::bigint)
+            AVG((CASE WHEN jsonb_typeof(attrs->'tool_calls') = 'number' THEN (attrs->>'tool_calls')::numeric END))
         FROM telemetry_telemetryevent
         WHERE kind = %s AND occurred_at >= %s AND name <> ALL(%s)
         """,
@@ -190,7 +190,7 @@ def _turns(start: datetime, days: list[date]) -> dict[str, Any]:
             SELECT (occurred_at AT TIME ZONE 'UTC')::date,
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms),
                 percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms),
-                percentile_cont(0.5) WITHIN GROUP (ORDER BY (attrs->>'ttft_ms')::bigint)
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY (CASE WHEN jsonb_typeof(attrs->'ttft_ms') = 'number' THEN (attrs->>'ttft_ms')::numeric END))
                     FILTER (WHERE outcome = %s)
             FROM telemetry_telemetryevent
             WHERE kind = %s AND occurred_at >= %s AND name <> ALL(%s)
@@ -203,9 +203,9 @@ def _turns(start: datetime, days: list[date]) -> dict[str, Any]:
     # Spend includes turns the worker ran: a flushed turn answers a real question.
     [tokens] = _rows(
         """
-        SELECT COALESCE(SUM((attrs->>'input_tokens')::bigint), 0),
-            COALESCE(SUM((attrs->>'output_tokens')::bigint), 0),
-            COALESCE(SUM((attrs->>'cache_read_tokens')::bigint), 0)
+        SELECT COALESCE(SUM((CASE WHEN jsonb_typeof(attrs->'input_tokens') = 'number' THEN (attrs->>'input_tokens')::numeric END)), 0),
+            COALESCE(SUM((CASE WHEN jsonb_typeof(attrs->'output_tokens') = 'number' THEN (attrs->>'output_tokens')::numeric END)), 0),
+            COALESCE(SUM((CASE WHEN jsonb_typeof(attrs->'cache_read_tokens') = 'number' THEN (attrs->>'cache_read_tokens')::numeric END)), 0)
         FROM telemetry_telemetryevent
         WHERE kind = %s AND occurred_at >= %s
         """,
@@ -226,7 +226,11 @@ def _turns(start: datetime, days: list[date]) -> dict[str, Any]:
         "duration_ms": {"p50": _ms(summary[4]), "p95": _ms(summary[5])},
         "ttft_ms": {"p50": _ms(summary[6]), "p95": _ms(summary[7])},
         "tool_calls_per_turn": round(float(summary[8]), 2) if summary[8] is not None else None,
-        "tokens": {"input": tokens[0], "output": tokens[1], "cache_read": tokens[2]},
+        "tokens": {
+            "input": int(tokens[0]),
+            "output": int(tokens[1]),
+            "cache_read": int(tokens[2]),
+        },
         "daily": [
             {
                 "duration_p50_ms": daily.get(day, (None,) * 3)[0],
@@ -267,14 +271,14 @@ def _tokens_by_workspace(start: datetime) -> list[dict[str, Any]]:
     rows = _rows(
         """
         SELECT workspace_id,
-            COALESCE(SUM((attrs->>'input_tokens')::bigint), 0),
-            COALESCE(SUM((attrs->>'output_tokens')::bigint), 0),
+            COALESCE(SUM((CASE WHEN jsonb_typeof(attrs->'input_tokens') = 'number' THEN (attrs->>'input_tokens')::numeric END)), 0),
+            COALESCE(SUM((CASE WHEN jsonb_typeof(attrs->'output_tokens') = 'number' THEN (attrs->>'output_tokens')::numeric END)), 0),
             COUNT(*)
         FROM telemetry_telemetryevent
         WHERE kind = ANY(%s) AND occurred_at >= %s AND workspace_id IS NOT NULL
         GROUP BY workspace_id
-        ORDER BY COALESCE(SUM((attrs->>'input_tokens')::bigint), 0)
-            + COALESCE(SUM((attrs->>'output_tokens')::bigint), 0) DESC
+        ORDER BY COALESCE(SUM((CASE WHEN jsonb_typeof(attrs->'input_tokens') = 'number' THEN (attrs->>'input_tokens')::numeric END)), 0)
+            + COALESCE(SUM((CASE WHEN jsonb_typeof(attrs->'output_tokens') = 'number' THEN (attrs->>'output_tokens')::numeric END)), 0) DESC
         LIMIT %s
         """,
         [[EventKind.CHAT_TURN, EventKind.RECIPE_RUN], start, TOP_N],
@@ -286,8 +290,8 @@ def _tokens_by_workspace(start: datetime) -> list[dict[str, Any]]:
         {
             "workspace_id": str(workspace_id),
             "name": names.get(workspace_id, "(deleted)"),
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
+            "input_tokens": int(input_tokens),
+            "output_tokens": int(output_tokens),
             "runs": runs,
         }
         for workspace_id, input_tokens, output_tokens, runs in rows
@@ -452,8 +456,18 @@ def _schema_sizes(start: datetime, days: list[date]) -> dict[str, Any]:
     }
 
 
+# A runaway aggregate is cancelled rather than left running on the shared database.
+DASHBOARD_STATEMENT_TIMEOUT = "15s"
+
+
 def build_dashboard(days: int = DEFAULT_DAYS, now: datetime | None = None) -> dict[str, Any]:
-    now = now or timezone.now()
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SET LOCAL statement_timeout = %s", [DASHBOARD_STATEMENT_TIMEOUT])
+        return _build(days, now or timezone.now())
+
+
+def _build(days: int, now: datetime) -> dict[str, Any]:
     start, now, day_list = _window(days, now)
     return {
         "window": {"start": start.isoformat(), "end": now.isoformat(), "days": days},

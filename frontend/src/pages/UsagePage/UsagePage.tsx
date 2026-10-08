@@ -121,7 +121,16 @@ function DailyLine({
           allowDecimals={false}
           width={76}
         />
-        <Tooltip {...TOOLTIP} formatter={(value) => (format ? format(Number(value)) : String(value))} />
+        <Tooltip
+          {...TOOLTIP}
+          formatter={(value) =>
+            value === null || value === undefined
+              ? "–"
+              : format
+                ? format(Number(value))
+                : String(value)
+          }
+        />
         <Line
           type="linear"
           dataKey={label}
@@ -152,7 +161,10 @@ function LatencyChart({ data }: { data: UsageDashboard }) {
           tickFormatter={(v) => formatMs(Number(v))}
           width={76}
         />
-        <Tooltip {...TOOLTIP} formatter={(value) => formatMs(Number(value))} />
+        <Tooltip
+          {...TOOLTIP}
+          formatter={(value) => formatMs(value === null || value === undefined ? null : Number(value))}
+        />
         <Legend wrapperStyle={{ fontSize: 12 }} />
         {/* One hue; the dash tells the two percentiles apart without relying on colour. */}
         <Line
@@ -192,7 +204,9 @@ function SmallMultiples({
           <div className="mb-1 flex items-baseline justify-between text-xs">
             <span className="text-muted-foreground">{label}</span>
             <span className="tabular-nums">
-              {formatCount(values.reduce<number>((total, value) => total + (value ?? 0), 0))}
+              {values.every((value) => value === null)
+                ? "–"
+                : formatCount(values.reduce<number>((total, value) => total + (value ?? 0), 0))}
             </span>
           </div>
           <DailyBars days={days} values={values} label={label} />
@@ -398,7 +412,7 @@ function Dashboard({ data }: { data: UsageDashboard }) {
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Panel id="tokens-by-workspace" title="Model tokens by workspace, chat and recipes">
+        <Panel id="tokens-by-workspace" title="Model tokens, top 20 workspaces, chat and recipes">
           {data.tokens_by_workspace.length === 0 ? (
             <p className="text-sm text-muted-foreground">No model usage in this window.</p>
           ) : (
@@ -467,6 +481,14 @@ function Dashboard({ data }: { data: UsageDashboard }) {
   )
 }
 
+function NoAccess() {
+  return (
+    <p className="text-sm text-muted-foreground" data-testid="usage-forbidden">
+      You don&apos;t have access to the usage dashboard.
+    </p>
+  )
+}
+
 export function UsagePage() {
   const allowed = useAppStore((state) => state.user?.can_view_usage_dashboard === true)
   if (!allowed) {
@@ -474,9 +496,7 @@ export function UsagePage() {
     return (
       <div className="p-4 sm:p-6" data-testid="usage-page">
         <h1 className="mb-2 text-2xl font-bold">Usage</h1>
-        <p className="text-sm text-muted-foreground" data-testid="usage-forbidden">
-          You don&apos;t have access to the usage dashboard.
-        </p>
+        <NoAccess />
       </div>
     )
   }
@@ -510,7 +530,7 @@ function UsageDashboardPage() {
       <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Usage</h1>
-          <p className="text-muted-foreground">How Scout is used and where it is slow. Times are UTC.</p>
+          <p className="text-muted-foreground">How Scout is used and where it is slow. Days are UTC; the last one is today so far.</p>
         </div>
         <div className="flex gap-1" role="group" aria-label="Time range">
           {WINDOWS.map((option) => (
@@ -532,9 +552,7 @@ function UsageDashboardPage() {
         </div>
       </div>
       {status === "forbidden" && (
-        <p className="text-sm text-muted-foreground" data-testid="usage-forbidden">
-          You don&apos;t have access to the usage dashboard.
-        </p>
+        <NoAccess />
       )}
       {status === "error" && (
         <div className="flex items-center gap-3 text-sm" data-testid="usage-error">

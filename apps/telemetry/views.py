@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from django.core.cache import cache
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.telemetry.dashboard import DEFAULT_DAYS, MAX_DAYS, build_dashboard
 from apps.telemetry.models import USAGE_DASHBOARD_PERMISSION
+
+# The numbers move slowly; a short cache keeps reloads off the shared database.
+CACHE_SECONDS = 60
 
 
 class CanViewUsageDashboard(BasePermission):
@@ -25,4 +29,9 @@ class UsageDashboardView(APIView):
             days = int(request.query_params.get("days", DEFAULT_DAYS))
         except (TypeError, ValueError):
             days = DEFAULT_DAYS
-        return Response(build_dashboard(days=min(MAX_DAYS, max(1, days))))
+        days = min(MAX_DAYS, max(1, days))
+        # Checked permission first; the cached aggregates are the same for every viewer.
+        data = cache.get_or_set(
+            f"usage_dashboard:v1:{days}", lambda: build_dashboard(days=days), CACHE_SECONDS
+        )
+        return Response(data)

@@ -5,7 +5,8 @@ from datetime import timedelta
 from io import StringIO
 
 import pytest
-from django.contrib.auth.models import Permission
+from django.contrib.auth.models import Group, Permission
+from django.core.cache import cache
 from django.core.management import CommandError, call_command
 from django.test import Client
 from django.utils import timezone
@@ -27,9 +28,7 @@ URL = "/api/telemetry/dashboard/"
 
 
 def _grant(user):
-    user.user_permissions.add(
-        Permission.objects.get(content_type__app_label="telemetry", codename="view_usage_dashboard")
-    )
+    call_command("grant_usage_dashboard", user.email, stdout=StringIO())
     return User.objects.get(pk=user.pk)
 
 
@@ -41,6 +40,10 @@ def _client_for(user):
 
 @pytest.mark.django_db
 class TestPermissionGate:
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self):
+        cache.clear()
+
     def test_anonymous_is_refused(self):
         assert Client().get(URL).status_code in (401, 403)
 
@@ -72,6 +75,10 @@ class TestPermissionGate:
 
 @pytest.mark.django_db
 class TestMeFlag:
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self):
+        cache.clear()
+
     def test_me_reports_the_permission(self, user):
         assert _client_for(user).get("/api/auth/me/").json()["can_view_usage_dashboard"] is False
         granted = _grant(user)
@@ -79,6 +86,26 @@ class TestMeFlag:
         me = _client_for(granted).get("/api/auth/me/").json()
 
         assert me["can_view_usage_dashboard"] is True
+
+
+@pytest.mark.django_db
+def test_the_dashboard_is_cached_per_window(admin_user):
+    cache.clear()
+    client = _client_for(admin_user)
+    first = client.get(URL, {"days": "7"}).json()
+    TelemetryEvent.objects.create(kind=EventKind.LOGIN, user_id=admin_user.id)
+
+    assert client.get(URL, {"days": "7"}).json() == first
+    assert client.get(URL, {"days": "8"}).json()["active_users"]["dau"] == 1
+
+
+@pytest.mark.django_db
+def test_a_non_numeric_attr_never_breaks_the_dashboard():
+    TelemetryEvent.objects.create(
+        kind=EventKind.CHAT_TURN, name="live", outcome=Outcome.COMPLETED, attrs={"ttft_ms": True}
+    )
+
+    assert build_dashboard(days=1)["turns"]["ttft_ms"]["p50"] is None
 
 
 @pytest.mark.django_db
@@ -243,8 +270,19 @@ class TestGrantCommand:
         self._run(user.email)
 
         assert "Revoked" in self._run(user.email, "--revoke")
-        assert "did not have" in self._run(user.email, "--revoke")
+        assert "no direct grant" in self._run(user.email, "--revoke")
         assert not User.objects.get(pk=user.pk).has_perm(USAGE_DASHBOARD_PERMISSION)
+
+    def test_revoke_says_when_a_group_still_grants_access(self, user):
+        group = Group.objects.create(name="usage viewers")
+        group.permissions.add(
+            Permission.objects.get(
+                codename="view_usage_dashboard", content_type__app_label="telemetry"
+            )
+        )
+        user.groups.add(group)
+
+        assert "still has access" in self._run(user.email, "--revoke")
 
     def test_an_unknown_email_fails(self):
         with pytest.raises(CommandError):

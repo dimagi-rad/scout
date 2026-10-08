@@ -22,6 +22,7 @@ from apps.common.commcare_servers import (
     server_for_provider,
 )
 from apps.common.http import parse_json_object, string_field
+from apps.telemetry.access import acan_view_usage_dashboard
 from apps.telemetry.models import USAGE_DASHBOARD_PERMISSION, EventKind
 from apps.telemetry.recorder import arecord
 from apps.users.decorators import async_login_required, login_required_json
@@ -171,7 +172,7 @@ async def me_view(request):
     user = request._authenticated_user
 
     last_workspace_id = await _alast_workspace_id(user)
-    can_view_usage_dashboard = await user.ahas_perm(USAGE_DASHBOARD_PERMISSION)
+    can_view_usage_dashboard = await acan_view_usage_dashboard(user)
     cache_key = me_onboarding_cache_key(user)
     cached = await cache.aget(cache_key)
     if cached is not None:

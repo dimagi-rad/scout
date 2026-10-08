@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.core.management.base import BaseCommand, CommandError
 
+from apps.telemetry.access import forget_usage_dashboard_flag
 from apps.telemetry.models import USAGE_DASHBOARD_PERMISSION
 
 
@@ -23,19 +24,35 @@ class Command(BaseCommand):
         except user_model.MultipleObjectsReturned as exc:
             raise CommandError(f"More than one user matches {email}") from exc
         app_label, codename = USAGE_DASHBOARD_PERMISSION.split(".")
-        permission = Permission.objects.get(content_type__app_label=app_label, codename=codename)
+        try:
+            permission = Permission.objects.get(
+                content_type__app_label=app_label, codename=codename
+            )
+        except Permission.DoesNotExist as exc:
+            raise CommandError("The permission is missing; run migrate first.") from exc
         has_it = user.user_permissions.filter(pk=permission.pk).exists()
         if revoke:
             if not has_it:
-                self.stdout.write(f"{user.email} did not have usage dashboard access; no change.")
+                self.stdout.write(f"{user.email} had no direct grant to revoke; no change.")
+                self._warn_if_still_granted(user_model, user, revoke)
                 return
             user.user_permissions.remove(permission)
+            forget_usage_dashboard_flag(user.pk)
             self.stdout.write(f"Revoked usage dashboard access from {user.email}.")
         else:
             if has_it:
                 self.stdout.write(f"{user.email} already has usage dashboard access; no change.")
                 return
             user.user_permissions.add(permission)
+            forget_usage_dashboard_flag(user.pk)
             self.stdout.write(f"Granted usage dashboard access to {user.email}.")
-        if user.is_superuser:
-            self.stdout.write("Note: superusers can see the dashboard regardless.")
+        self._warn_if_still_granted(user_model, user, revoke)
+
+    def _warn_if_still_granted(self, user_model, user, revoke):
+        if not revoke:
+            return
+        # A fresh instance: has_perm caches on the object it was first asked of.
+        if user_model.objects.get(pk=user.pk).has_perm(USAGE_DASHBOARD_PERMISSION):
+            self.stdout.write(
+                f"Note: {user.email} still has access, as a superuser or through a group."
+            )
