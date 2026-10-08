@@ -6,7 +6,6 @@ from django.utils import timezone
 
 from apps.chat import resume_stream
 from apps.chat.services import continuation
-from apps.chat.services.continuation import defer_flush_if_held as _defer_flush_if_held
 from apps.chat.services.continuation import defer_pending_flush as _defer_pending_flush
 from apps.common.capacity import classify_capacity_error
 from apps.users.models import User
@@ -187,7 +186,7 @@ async def rebuild_workspace_view_schema(workspace_id: str, revive_retired: bool 
             workspace_id, revive_retired=revive_retired
         )
     finally:
-        await _defer_flush_if_held(workspace_id)
+        await _defer_pending_flush(workspace_id)
 
 
 @app.task
@@ -198,7 +197,7 @@ async def rebuild_workspace_semantic_model(workspace_id: str) -> dict:
     try:
         return await publication.rebuild_workspace_semantic_model_core(workspace_id)
     finally:
-        await _defer_flush_if_held(workspace_id)
+        await _defer_pending_flush(workspace_id)
 
 
 @app.task(pass_context=True)

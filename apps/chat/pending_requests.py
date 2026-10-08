@@ -520,10 +520,6 @@ async def aflushable_thread_ids(workspace_id) -> list:
     ]
 
 
-async def aworkspace_holds_flushable(workspace_id) -> bool:
-    return await _flushable().filter(thread__workspace_id=workspace_id).aexists()
-
-
 async def aflushable_workspace_ids() -> set:
     return {
         workspace_id

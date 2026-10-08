@@ -1320,7 +1320,7 @@ async def test_a_rebuild_flushes_the_requests_waiting_on_it(task, build, fails):
     side_effect = RuntimeError("boom") if fails else None
     with (
         patch.object(tasks.publication, build, AsyncMock(return_value={}, side_effect=side_effect)),
-        patch.object(tasks, "_defer_flush_if_held", AsyncMock()) as flush,
+        patch.object(tasks, "_defer_pending_flush", AsyncMock()) as flush,
     ):
         if fails:
             with pytest.raises(RuntimeError):
