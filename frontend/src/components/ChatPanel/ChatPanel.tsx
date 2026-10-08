@@ -749,7 +749,7 @@ export function ChatPanel() {
   function listSendingThread(text: string): () => void {
     const workspaceId = activeDomainId
     const sentFrom = threadId
-    if (isLocalThread(sentFrom) && workspaceId) addSendingThread(workspaceId, sentFrom, text)
+    if (workspaceId) addSendingThread(workspaceId, sentFrom, text, isLocalThread(sentFrom))
     forgetLocalThread(sentFrom)
     // The transport settles it on the response; this covers a send that failed before
     // its request went out, which would otherwise keep the placeholder for good.

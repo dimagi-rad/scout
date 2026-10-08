@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { useAppStore } from "@/store/store"
 import { ApiError, api } from "@/api/client"
 import type { Thread } from "@/store/uiSlice"
-import { isLocalThread } from "@/store/localThreads"
 
 function thread(id: string, title: string): Thread {
   return {
@@ -295,7 +294,7 @@ describe("uiSlice sending threads (#859)", () => {
   const ids = () => useAppStore.getState().threads.map((t) => t.id)
 
   it("lists the new chat first, titled by its message, before the server does", () => {
-    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "  How many visits?  ")
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "  How many visits?  ", true)
 
     const [first] = useAppStore.getState().threads
     expect(ids()).toEqual(["new", "old"])
@@ -303,19 +302,19 @@ describe("uiSlice sending threads (#859)", () => {
   })
 
   it("shortens a long message's title the way the server does", () => {
-    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", `${"a".repeat(199)} b c`)
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", `${"a".repeat(199)} b c`, true)
 
     expect(useAppStore.getState().threads[0].title).toBe(`${"a".repeat(199)}...`)
   })
 
   it("counts characters, not UTF-16 units, as the server does", () => {
-    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "😀".repeat(201))
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "😀".repeat(201), true)
 
     expect(useAppStore.getState().threads[0].title).toBe(`${"😀".repeat(200)}...`)
   })
 
   it("keeps it through a refetch that ran before the server had the row", async () => {
-    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?")
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?", true)
     vi.spyOn(api, "get").mockResolvedValue([thread("old", "Older chat")] as never)
 
     await useAppStore.getState().uiActions.fetchThreads("ws-1")
@@ -324,7 +323,7 @@ describe("uiSlice sending threads (#859)", () => {
   })
 
   it("takes the server's row once listed, without a duplicate", async () => {
-    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?")
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?", true)
     const serverRow = { ...thread("new", "Untitled"), title: "How many visits?" }
     vi.spyOn(api, "get").mockResolvedValue([serverRow, thread("old", "Older chat")] as never)
 
@@ -334,21 +333,22 @@ describe("uiSlice sending threads (#859)", () => {
   })
 
   it("drops it when the send is answered and the server never made the row", async () => {
-    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?")
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?", true)
     const get = vi.spyOn(api, "get").mockResolvedValue([thread("old", "Older chat")] as never)
 
     useAppStore.getState().uiActions.settleSendingThread("ws-1", "new")
 
     await vi.waitFor(() => expect(ids()).toEqual(["old"]))
     expect(get).toHaveBeenCalledWith("/api/workspaces/ws-1/threads/")
-    // Still the chat's first message to send, so a resend lists it at once again.
-    await vi.waitFor(() => expect(isLocalThread("new")).toBe(true))
+    // A resend is still the chat's first, though the chat is no longer one this tab made up.
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?", false)
+    expect(ids()).toEqual(["new", "old"])
   })
 
   it("refetches nothing for a send in a thread already listed", () => {
     const get = vi.mocked(api.get)
 
-    useAppStore.getState().uiActions.addSendingThread("ws-1", "old", "Another question")
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "old", "Another question", true)
     useAppStore.getState().uiActions.settleSendingThread("ws-1", "old")
 
     expect(ids()).toEqual(["old"])
@@ -357,7 +357,7 @@ describe("uiSlice sending threads (#859)", () => {
   })
 
   it("shows it again on returning to its workspace before the send is answered", async () => {
-    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?")
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?", true)
     vi.spyOn(api, "get").mockResolvedValue([thread("old", "Older chat")] as never)
 
     useAppStore.setState({ activeDomainId: "ws-2" })
@@ -369,7 +369,7 @@ describe("uiSlice sending threads (#859)", () => {
   })
 
   it("leaves the server's list alone once the send was answered in another workspace", async () => {
-    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?")
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?", true)
     const get = vi.spyOn(api, "get").mockResolvedValue([thread("old", "Older chat")] as never)
 
     useAppStore.setState({ activeDomainId: "ws-2" })
@@ -381,8 +381,14 @@ describe("uiSlice sending threads (#859)", () => {
     expect(ids()).toEqual(["old"])
   })
 
+  it("lists no placeholder for a send in an existing chat the list lacks", () => {
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "older", "Follow-up", false)
+
+    expect(ids()).toEqual(["old"])
+  })
+
   it("ignores a send from a workspace that is no longer shown", () => {
-    useAppStore.getState().uiActions.addSendingThread("ws-2", "new", "How many visits?")
+    useAppStore.getState().uiActions.addSendingThread("ws-2", "new", "How many visits?", true)
 
     expect(ids()).toEqual(["old"])
   })

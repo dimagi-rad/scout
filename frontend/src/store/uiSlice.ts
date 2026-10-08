@@ -10,7 +10,7 @@ import {
   type AccessDenialReason,
 } from "@/lib/accessReasons"
 import { shortThreadTitle } from "@/lib/threadTitle"
-import { forgetLocalThread, markLocalThread, newLocalThreadId } from "./localThreads"
+import { forgetLocalThread, newLocalThreadId } from "./localThreads"
 
 export type { AccessDenialReason }
 
@@ -77,7 +77,12 @@ export interface UiSlice {
     selectThread: (id: string) => Promise<void>
     fetchThreads: (workspaceId: string) => Promise<void>
     /** Lists a new chat whose first message is on its way, until the server lists it. */
-    addSendingThread: (workspaceId: string, threadId: string, text: string) => void
+    addSendingThread: (
+      workspaceId: string,
+      threadId: string,
+      text: string,
+      isNewChat: boolean,
+    ) => void
     /** A send got its response, so the server's list now decides whether the thread is listed. */
     settleSendingThread: (workspaceId: string, threadId: string) => void
     retryAccessVerification: (workspaceId: string) => Promise<void>
@@ -97,16 +102,18 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
   // can take seconds; until then a refetch would drop the new chat from the sidebar (#859).
   // fetchThreads is the one place that merges these back in.
   const sendingThreads = new Map<string, Map<string, Thread>>()
-  // Answered sends whose row the next applied list confirms; by thread id.
+  // Answered first sends whose row the next applied list confirms; by thread id.
   const settledThreads = new Map<string, string>()
+  // Chats whose first send was refused before the server made the row, so a resend is
+  // still their first and is listed at once too. Only ever adds a placeholder: a wrong
+  // entry costs a brief row, unlike marking the chat local, which skips its history.
+  const refusedFirstSends = new Set<string>()
   const withSending = (workspaceId: string, threads: Thread[]): Thread[] => {
     const listed = new Set(threads.map((thread) => thread.id))
     for (const [threadId, sentIn] of settledThreads) {
       if (sentIn !== workspaceId) continue
       settledThreads.delete(threadId)
-      // Refused before the server made the row: the chat is new again, so a resend
-      // lists it straight away too.
-      if (!listed.has(threadId)) markLocalThread(threadId)
+      if (!listed.has(threadId)) refusedFirstSends.add(threadId)
     }
     const sending = [...(sendingThreads.get(workspaceId)?.values() ?? [])]
       .filter((thread) => !listed.has(thread.id))
@@ -177,8 +184,14 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
           }
         }
       },
-      addSendingThread: (workspaceId: string, threadId: string, text: string) => {
-        if (workspaceId !== get().activeDomainId) return
+      addSendingThread: (
+        workspaceId: string,
+        threadId: string,
+        text: string,
+        isNewChat: boolean,
+      ) => {
+        const firstSend = refusedFirstSends.delete(threadId) || isNewChat
+        if (!firstSend || workspaceId !== get().activeDomainId) return
         if (get().threads.some((thread) => thread.id === threadId)) return
         const now = new Date().toISOString()
         const placeholder: Thread = {
