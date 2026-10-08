@@ -211,6 +211,18 @@ def test_admin_count_is_bounded_when_the_estimate_is_unknown(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_a_filtered_admin_list_gets_a_real_count():
+    TelemetryEvent.objects.bulk_create(
+        [TelemetryEvent(kind=EventKind.CHAT_TURN), TelemetryEvent(kind=EventKind.TOOL_CALL)]
+    )
+    with connection.cursor() as cursor:
+        cursor.execute("ANALYZE telemetry_telemetryevent")
+    filtered = TelemetryEvent.objects.filter(kind=EventKind.TOOL_CALL).order_by("-occurred_at")
+
+    assert EstimatedCountPaginator(filtered, 100).count == 1
+
+
+@pytest.mark.django_db
 def test_record_writes_from_sync_code():
     recorder.record(EventKind.ARTIFACT_VIEW, name="dashboard")
 

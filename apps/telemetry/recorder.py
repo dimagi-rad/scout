@@ -1,4 +1,4 @@
-"""Write telemetry events without ever failing or slowing the caller.
+"""Write telemetry events without ever failing the caller.
 
 Every entry point swallows and logs its own errors: a broken telemetry write must
 never surface in a chat turn or a request. Writes go through the caller's
@@ -84,10 +84,13 @@ def _clean_attrs(attrs: dict[str, Any] | None) -> dict[str, Any]:
     # The cap bounds the keys inspected, not the keys kept, so the work is bounded too.
     for key, value in islice(attrs.items(), MAX_ATTRS):
         if not (isinstance(key, str) and _KEY.fullmatch(key)):
+            logger.debug("Dropped a telemetry attribute with an invalid key")
             continue
         keep, value = _clean_value(key, value)
         if keep:
             clean[key] = value
+        else:
+            logger.debug("Dropped telemetry attribute %s", key)
     return clean
 
 

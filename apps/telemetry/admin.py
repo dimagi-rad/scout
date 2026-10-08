@@ -15,6 +15,9 @@ class EstimatedCountPaginator(Paginator):
 
     @cached_property
     def count(self) -> int:
+        # The estimate is for the whole table; a filtered changelist needs a real count.
+        if self.object_list.query.has_filters():
+            return self.object_list[:EXACT_COUNT_BOUND].count()
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT reltuples::bigint FROM pg_class WHERE oid = %s::regclass",
