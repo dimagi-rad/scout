@@ -8,6 +8,8 @@ from django.db.models import F
 from django.utils import timezone
 from procrastinate.contrib.django.models import ProcrastinateJob
 
+from apps.telemetry import recorder
+from apps.telemetry.models import EventKind, Outcome
 from apps.workspaces.models import MaterializationRun, WorkspaceLoadTiming
 from apps.workspaces.task_dispatch import MATERIALIZE_WORKSPACE
 
@@ -82,6 +84,8 @@ def transition_load_phase(job_id, phase):
 
 
 async def afinish_load_timing(job_id, succeeded, *, now=None, require_runs=False):
+    timing = None
+    finished = 0
     try:
         if succeeded and require_runs:
             runs = MaterializationRun.objects.filter(procrastinate_job_id=job_id)
@@ -96,14 +100,40 @@ async def afinish_load_timing(job_id, succeeded, *, now=None, require_runs=False
         if timing is None:
             return
         now = now or timezone.now()
-        await WorkspaceLoadTiming.objects.filter(pk=timing.pk).aupdate(
+        phase_seconds = _close_phase(timing, now)
+        finished = await WorkspaceLoadTiming.objects.filter(
+            pk=timing.pk, completed_at=None
+        ).aupdate(
             completed_at=now,
             succeeded=succeeded,
-            phase_seconds=_close_phase(timing, now),
+            phase_seconds=phase_seconds,
         )
         await cache.adelete(_cache_key(timing.workspace_id, timing.only_unserved))
     except Exception:
         logger.warning("Could not finish load timing", exc_info=True)
+    # Only the finisher that closed the row records it, and a failed cache clear
+    # after that does not lose the event.
+    if timing is None or not finished:
+        return
+    try:
+        phase_ms = {
+            f"{phase}_ms": round(seconds * 1000) for phase, seconds in phase_seconds.items()
+        }
+    except (TypeError, ValueError):
+        logger.warning("Load timing for job %s has a non-numeric phase", job_id)
+        phase_ms = {}
+    await recorder.arecord(
+        EventKind.WORKSPACE_LOAD,
+        workspace_id=timing.workspace_id,
+        outcome=Outcome.COMPLETED if succeeded else Outcome.FAILED,
+        duration_ms=(now - timing.started_at).total_seconds() * 1000,
+        occurred_at=now,
+        attrs={
+            "only_unserved": timing.only_unserved,
+            "job_id": job_id,
+            **phase_ms,
+        },
+    )
 
 
 async def _history(workspace_id, only_unserved):

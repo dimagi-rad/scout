@@ -84,7 +84,7 @@ def _clean_attrs(attrs: dict[str, Any] | None) -> dict[str, Any]:
     # The cap bounds the keys inspected, not the keys kept, so the work is bounded too.
     for key, value in islice(attrs.items(), MAX_ATTRS):
         if not (isinstance(key, str) and _KEY.fullmatch(key)):
-            logger.debug("Dropped a telemetry attribute with an invalid key")
+            logger.debug("Dropped telemetry attribute with invalid key %.40r", key)
             continue
         keep, value = _clean_value(key, value)
         if keep:

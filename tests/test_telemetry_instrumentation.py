@@ -1,0 +1,490 @@
+"""Chat turns, tool calls, loads, recipes and feature use each leave a telemetry event."""
+
+import asyncio
+import contextlib
+import json
+import time
+import uuid
+from datetime import timedelta
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from asgiref.sync import sync_to_async
+from django.test import AsyncClient
+from django.utils import timezone
+from langchain_core.callbacks.manager import handle_event
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, LLMResult
+from langchain_core.tools import tool
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
+
+from apps.chat.models import Thread
+from apps.chat.stream import langgraph_to_ui_stream
+from apps.telemetry.agent_runs import AgentRunTelemetry, _tool_result, _usage
+from apps.telemetry.models import EventKind, Outcome, TelemetryEvent
+from apps.users.models import Tenant, TenantMembership, User
+from apps.workspaces.models import (
+    Workspace,
+    WorkspaceLoadTiming,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+)
+from apps.workspaces.services.load_time_estimates import afinish_load_timing
+from tests.agent_doubles import FakeAgent
+from tests.tenant_access import ausable_connection
+
+
+async def _events(kind):
+    return [e async for e in TelemetryEvent.objects.filter(kind=kind).order_by("id")]
+
+
+@tool
+def lookup_rows(question: str) -> str:
+    """Look up rows."""
+    return json.dumps(
+        {"success": False, "error": {"code": "QUERY_TIMEOUT", "message": "slow"}, "timing_ms": 7}
+    )
+
+
+def _tool_then_answer_graph():
+    call = AIMessage(
+        content="",
+        tool_calls=[{"name": "lookup_rows", "args": {"question": "q"}, "id": "toolu_1"}],
+    )
+    model = FakeMessagesListChatModel(responses=[call, AIMessage(content="Done.")])
+
+    async def agent(state: MessagesState) -> dict:
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    def route(state: MessagesState) -> str:
+        return "tools" if state["messages"][-1].tool_calls else END
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("agent", agent)
+    graph.add_node("tools", ToolNode([lookup_rows]))
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", route)
+    graph.add_edge("tools", "agent")
+    return graph.compile()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_streamed_turn_records_itself_and_its_tool_calls():
+    telemetry = AgentRunTelemetry(
+        EventKind.CHAT_TURN, user_id=7, workspace_id=uuid.uuid4(), thread_id=str(uuid.uuid4())
+    )
+    config = {"configurable": {"thread_id": "t"}, "callbacks": [telemetry]}
+
+    stream = langgraph_to_ui_stream(
+        _tool_then_answer_graph(), {"messages": [("user", "hi")]}, config
+    )
+    chunks = [chunk async for chunk in telemetry.wrap_stream(stream)]
+
+    assert chunks[-1].startswith('data: {"type": "finish"')
+    [turn] = await _events(EventKind.CHAT_TURN)
+    assert turn.outcome == Outcome.COMPLETED
+    assert turn.user_id == 7
+    assert turn.attrs["tool_calls"] == 1
+    assert turn.attrs["tool_errors"] == 1
+    assert turn.attrs["llm_calls"] == 2
+    [call] = await _events(EventKind.TOOL_CALL)
+    assert (call.name, call.outcome) == ("lookup_rows", Outcome.ERROR)
+    assert call.attrs["error_code"] == "QUERY_TIMEOUT"
+    assert call.attrs["server_ms"] == 7
+    assert call.attrs["run_kind"] == EventKind.CHAT_TURN
+
+
+async def _sse_stream(*chunks, then=None):
+    for chunk in chunks:
+        yield chunk
+    if then is not None:
+        await then()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_error_chunk_marks_the_turn_failed():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    stream = _sse_stream(
+        'data: {"type": "error", "errorText": "x"}\n\n', 'data: {"type": "finish"}\n\n'
+    )
+
+    _ = [chunk async for chunk in telemetry.wrap_stream(stream)]
+
+    [turn] = await _events(EventKind.CHAT_TURN)
+    assert turn.outcome == Outcome.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_retryable_status_marks_the_turn_failed():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    status = {"type": "data-chat-status", "data": {"kind": "retryable-error"}}
+    stream = _sse_stream(f"data: {json.dumps(status)}\n\n", 'data: {"type": "finish"}\n\n')
+
+    _ = [chunk async for chunk in telemetry.wrap_stream(stream)]
+
+    [turn] = await _events(EventKind.CHAT_TURN)
+    assert turn.outcome == Outcome.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_client_disconnect_marks_the_turn_stopped():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    wrapped = telemetry.wrap_stream(
+        _sse_stream(
+            'data: {"type": "text-delta", "id": "t", "delta": "a"}\n\n', then=asyncio.Event().wait
+        )
+    )
+
+    await anext(wrapped)
+    await wrapped.aclose()
+
+    [turn] = await _events(EventKind.CHAT_TURN)
+    assert turn.outcome == Outcome.STOPPED
+    assert "ttft_ms" in turn.attrs
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_stream_that_raises_is_recorded_failed_and_still_raises():
+    async def boom():
+        raise RuntimeError("boom")
+
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+
+    with pytest.raises(RuntimeError):
+        _ = [chunk async for chunk in telemetry.wrap_stream(_sse_stream(then=boom))]
+
+    [turn] = await _events(EventKind.CHAT_TURN)
+    assert turn.outcome == Outcome.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_failed_telemetry_write_never_reaches_the_turn():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    with patch.object(TelemetryEvent.objects, "bulk_create", side_effect=RuntimeError("down")):
+        chunks = [
+            chunk
+            async for chunk in telemetry.wrap_stream(_sse_stream('data: {"type": "finish"}\n\n'))
+        ]
+
+    assert chunks == ['data: {"type": "finish"}\n\n']
+
+
+def test_token_usage_is_summed_across_generations():
+    message = AIMessage(
+        content="x",
+        usage_metadata={
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "input_token_details": {"cache_read": 80, "cache_creation": 5},
+        },
+        response_metadata={"model_name": "claude-test-1"},
+    )
+    result = LLMResult(generations=[[ChatGeneration(message=message)]])
+
+    counts, model = _usage(result)
+
+    assert counts == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_read_tokens": 80,
+        "cache_creation_tokens": 5,
+    }
+    assert model == "claude-test-1"
+
+
+def test_on_llm_end_accumulates_usage_into_the_run_event():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    message = AIMessage(
+        content="x", usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+    )
+    for _ in range(2):
+        telemetry.on_llm_end(
+            LLMResult(generations=[[ChatGeneration(message=message)]]), run_id=uuid.uuid4()
+        )
+
+    [turn] = telemetry.events()
+    assert turn.attrs["input_tokens"] == 6
+    assert turn.attrs["output_tokens"] == 4
+    assert turn.attrs["llm_calls"] == 2
+
+
+def test_tool_status_reads_the_envelope_and_the_message_status():
+    ok = json.dumps({"success": True, "data": {"rows": [1]}, "timing_ms": 12})
+    assert _tool_result(ToolMessage(content=ok, tool_call_id="a")) == (
+        Outcome.OK,
+        {"server_ms": 12},
+    )
+    errored = ToolMessage(content="Error: bad args", tool_call_id="a", status="error")
+    assert _tool_result(errored) == (Outcome.ERROR, {})
+
+
+def test_a_raised_tool_error_is_counted():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    run_id = uuid.uuid4()
+    telemetry.on_tool_start({"name": "execute_sql"}, "", run_id=run_id)
+    telemetry.on_tool_error(TimeoutError(), run_id=run_id)
+
+    turn, call = telemetry.events()
+    assert turn.attrs["tool_errors"] == 1
+    assert (call.name, call.outcome, call.attrs["error_type"]) == (
+        "execute_sql",
+        Outcome.ERROR,
+        "TimeoutError",
+    )
+
+
+async def _chat_member(slug: str):
+    user = await User.objects.acreate_user(email=f"{slug}@b.c", password="x")
+    ws = await Workspace.objects.acreate(name=f"W-{slug}", created_by=user)
+    tenant = await Tenant.objects.acreate(
+        external_id=f"t-{slug}", provider="commcare", canonical_name="Tenant"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.READ)
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+    )
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    client = AsyncClient()
+    await client.alogin(email=f"{slug}@b.c", password="x")
+    return user, ws, thread, client
+
+
+@contextlib.contextmanager
+def _agent(agent):
+    with (
+        patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock, return_value=[]),
+        patch("apps.chat.views.ensure_checkpointer", new_callable=AsyncMock),
+        patch("apps.chat.views.build_agent_graph", AsyncMock(return_value=agent)),
+        patch(
+            "apps.chat.views.repair_dangling_tool_calls", new_callable=AsyncMock, return_value=[]
+        ),
+        patch("apps.chat.views.aschedule_thread_title", new_callable=AsyncMock),
+    ):
+        yield
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_chat_turn_through_the_view_records_one_turn():
+    user, ws, thread, client = await _chat_member("telemetry-turn")
+    await TelemetryEvent.objects.all().adelete()
+
+    with _agent(FakeAgent()):
+        resp = await client.post(
+            "/api/chat/",
+            data=json.dumps(
+                {
+                    "messages": [{"role": "user", "content": "how many visits?"}],
+                    "workspaceId": str(ws.id),
+                    "threadId": str(thread.id),
+                }
+            ),
+            content_type="application/json",
+        )
+        assert resp.status_code == 200
+        _ = [chunk async for chunk in resp.streaming_content]
+
+    [turn] = await _events(EventKind.CHAT_TURN)
+    assert turn.outcome == Outcome.COMPLETED
+    assert turn.user_id == user.id
+    assert turn.workspace_id == ws.id
+    assert turn.attrs["thread_id"] == str(thread.id)
+    assert turn.attrs["held_request"] is False
+    assert "ttft_ms" in turn.attrs
+    # The clock starts as the view is entered, so setup includes the lease wait.
+    assert turn.attrs["setup_ms"] <= turn.attrs["ttft_ms"] <= turn.duration_ms
+    assert "how many" not in json.dumps(turn.attrs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_finished_load_records_its_phases():
+    user = await User.objects.acreate_user(email="load@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-load", created_by=user)
+    started = timezone.now() - timedelta(seconds=30)
+    await WorkspaceLoadTiming.objects.acreate(
+        workspace=ws,
+        job_id=991,
+        started_at=started,
+        phase="building_model",
+        phase_started_at=started + timedelta(seconds=20),
+        phase_seconds={"loading": 20.0},
+    )
+
+    await afinish_load_timing(991, True, now=started + timedelta(seconds=30))
+
+    await afinish_load_timing(991, True, now=started + timedelta(seconds=31))
+    [load] = await _events(EventKind.WORKSPACE_LOAD)
+    assert load.workspace_id == ws.id
+    assert load.outcome == Outcome.COMPLETED
+    assert load.duration_ms == 30_000
+    assert load.attrs["loading_ms"] == 20_000
+    assert load.attrs["building_model_ms"] == 10_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_switching_workspace_is_recorded_once():
+    user, ws, _thread, client = await _chat_member("telemetry-switch")
+    await TelemetryEvent.objects.all().adelete()
+
+    for _ in range(2):
+        resp = await client.post(
+            "/api/auth/last-workspace/",
+            data=json.dumps({"workspace_id": str(ws.id)}),
+            content_type="application/json",
+        )
+        assert resp.status_code == 200
+
+    [switch] = await _events(EventKind.WORKSPACE_SWITCH)
+    assert (switch.user_id, switch.workspace_id) == (user.id, ws.id)
+
+    other = await Workspace.objects.acreate(name="W-other", created_by=user)
+    await WorkspaceMembership.objects.acreate(workspace=other, user=user, role=WorkspaceRole.READ)
+    await WorkspaceTenant.objects.acreate(
+        workspace=other, tenant=await Tenant.objects.aget(external_id="t-telemetry-switch")
+    )
+    resp = await client.post(
+        "/api/auth/last-workspace/",
+        data=json.dumps({"workspace_id": str(other.id)}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert [e.workspace_id for e in await _events(EventKind.WORKSPACE_SWITCH)] == [ws.id, other.id]
+
+
+@pytest.mark.django_db
+def test_a_login_is_recorded(client):
+    user = User.objects.create_user(email="login@b.c", password="x")
+
+    assert client.login(email="login@b.c", password="x")
+
+    assert TelemetryEvent.objects.filter(kind=EventKind.LOGIN, user_id=user.id).count() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_login_event_failure_does_not_block_login():
+    await User.objects.acreate_user(email="login-fail@b.c", password="x")
+    client = AsyncClient()
+
+    with patch.object(TelemetryEvent, "save", side_effect=RuntimeError("down")):
+        assert await sync_to_async(client.login)(email="login-fail@b.c", password="x")
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_background_run_records_its_outcome():
+    for outcome, body in (
+        (Outcome.COMPLETED, None),
+        (Outcome.FAILED, RuntimeError("boom")),
+        (Outcome.FAILED, asyncio.CancelledError()),
+    ):
+        telemetry = AgentRunTelemetry(EventKind.CHAT_TURN, name="flush")
+        with contextlib.suppress(RuntimeError, asyncio.CancelledError):
+            async with telemetry.recording():
+                if body is not None:
+                    raise body
+        assert telemetry.outcome == outcome
+
+    turns = await _events(EventKind.CHAT_TURN)
+    assert [e.outcome for e in turns] == [Outcome.COMPLETED, Outcome.FAILED, Outcome.FAILED]
+    assert [e.attrs.get("cancelled") for e in turns] == [None, None, True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_cancelled_stream_is_stopped_and_flags_a_lost_lease():
+    async def cancelled():
+        raise asyncio.CancelledError
+
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+
+    with pytest.raises(asyncio.CancelledError):
+        _ = [c async for c in telemetry.wrap_stream(_sse_stream(then=cancelled), lost=lambda: True)]
+
+    [turn] = await _events(EventKind.CHAT_TURN)
+    assert turn.outcome == Outcome.STOPPED
+    assert turn.attrs["lease_lost"] is True
+
+
+def test_a_tool_still_running_at_stop_is_recorded_stopped():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    telemetry.on_tool_start({"name": "query"}, "", run_id=uuid.uuid4())
+    telemetry.outcome = Outcome.STOPPED
+
+    turn, call = telemetry.events()
+
+    assert (call.name, call.outcome) == ("query", Outcome.STOPPED)
+    assert turn.attrs["tool_calls"] == 1
+    assert turn.attrs["tools_unfinished"] == 1
+
+
+def test_subagent_tool_calls_are_marked_nested():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    run_id = uuid.uuid4()
+    telemetry.on_tool_start(
+        {"name": "query"}, "", run_id=run_id, metadata={"subagent": "artifact_manager"}
+    )
+    telemetry.on_tool_end(ToolMessage(content="{}", tool_call_id="a"), run_id=run_id)
+
+    _turn, call = telemetry.events()
+    assert call.attrs["nested"] is True
+
+
+def test_model_starts_never_render_the_history():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    with patch("langchain_core.callbacks.manager.get_buffer_string") as render:
+        handle_event(
+            [telemetry],
+            "on_chat_model_start",
+            "ignore_chat_model",
+            {},
+            [[AIMessage(content="a long history")]],
+            run_id=uuid.uuid4(),
+        )
+
+    render.assert_not_called()
+
+
+def test_setup_time_counts_toward_the_turn():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN, started=time.monotonic() - 2)
+
+    [turn] = telemetry.events()
+
+    assert turn.duration_ms >= 2000
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_failed_load_is_recorded_failed():
+    user = await User.objects.acreate_user(email="load-fail@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-load-fail", created_by=user)
+    await WorkspaceLoadTiming.objects.acreate(workspace=ws, job_id=992)
+
+    await afinish_load_timing(992, False)
+
+    [load] = await _events(EventKind.WORKSPACE_LOAD)
+    assert load.outcome == Outcome.FAILED
+
+
+def test_caller_attrs_never_overwrite_measured_counts():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    telemetry.attrs["tool_calls"] = 99
+    telemetry.on_llm_error(RuntimeError("overloaded"), run_id=uuid.uuid4())
+
+    [turn] = telemetry.events()
+
+    assert turn.attrs["tool_calls"] == 0
+    assert (turn.attrs["llm_calls"], turn.attrs["llm_errors"]) == (1, 1)

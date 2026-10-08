@@ -22,6 +22,8 @@ from apps.common.commcare_servers import (
     server_for_provider,
 )
 from apps.common.http import parse_json_object, string_field
+from apps.telemetry.models import EventKind
+from apps.telemetry.recorder import arecord
 from apps.users.decorators import async_login_required, login_required_json
 from apps.users.models import (
     SCOPED_OAUTH_PROVIDERS,
@@ -263,7 +265,13 @@ async def last_workspace_view(request):
         allowed = False
     if not allowed:
         return JsonResponse({"error": "Workspace not found"}, status=404)
-    await User.objects.filter(pk=user.pk).aupdate(last_workspace_id=workspace_id)
+    switched = (
+        await User.objects.filter(pk=user.pk)
+        .exclude(last_workspace_id=workspace_id)
+        .aupdate(last_workspace_id=workspace_id)
+    )
+    if switched:
+        await arecord(EventKind.WORKSPACE_SWITCH, user_id=user.pk, workspace_id=workspace_id)
     return JsonResponse({"ok": True})
 
 

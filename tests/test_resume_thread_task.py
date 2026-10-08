@@ -20,6 +20,7 @@ from apps.chat.services.continuation import (
 )
 from apps.common.error_codes import ErrorCode
 from apps.semantic.models import CubeSchema, SemanticModel
+from apps.telemetry.models import EventKind, Outcome, TelemetryEvent
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.api.jobs_views import _termination_to_dict
 from apps.workspaces.models import (
@@ -135,6 +136,9 @@ async def test_resume_appends_system_message_and_invokes_agent():
     # (arch #253, finding 01#0).
     config = mock_agent.last_run.config
     assert config["configurable"]["thread_id"] == str(thread.id)
+    turn = await TelemetryEvent.objects.aget(kind=EventKind.CHAT_TURN)
+    assert (turn.name, turn.outcome, turn.workspace_id) == ("resume", Outcome.COMPLETED, ws.id)
+    assert turn.attrs["thread_id"] == str(thread.id)
 
 
 @pytest.mark.asyncio
@@ -978,6 +982,37 @@ async def test_agent_timeout_marks_failed_and_persists_message():
     msg = (await mock_agent.thread_messages(tj.thread_id))[-1]
     assert isinstance(msg, AIMessage)
     assert msg.content == RESUME_TIMEOUT_MESSAGE
+    turn = await TelemetryEvent.objects.aget(kind=EventKind.CHAT_TURN)
+    assert (turn.name, turn.outcome) == ("resume", Outcome.FAILED)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_resume_whose_agent_build_fails_is_recorded_failed():
+    _, _, _, tj = await _make_thread_job_ready_to_resume(
+        email="build-fail@b.c",
+        ws_name="W-build-fail",
+        ext_id="t-build-fail",
+        schema_name="s_build_fail",
+        pj_id=10002,
+        tool_call="tc-build-fail",
+    )
+    agent = FakeAgent()
+    with (
+        patch(
+            "apps.chat.services.continuation.build_agent_for_resume",
+            AsyncMock(side_effect=RuntimeError("mcp down")),
+        ),
+        patch(
+            "apps.chat.services.agent_execution.build_agent_for_resume",
+            AsyncMock(return_value=agent),
+        ),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["status"] == "agent_failed"
+    turn = await TelemetryEvent.objects.aget(kind=EventKind.CHAT_TURN)
+    assert (turn.name, turn.outcome) == ("resume", Outcome.FAILED)
 
 
 @pytest.mark.asyncio
@@ -1166,7 +1201,7 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
-    assert mock_agent.last_run.config["callbacks"] == [handler]
+    assert mock_agent.last_run.config["callbacks"][0] is handler
 
     span_helper.assert_called_once()
     kwargs = span_helper.call_args.kwargs

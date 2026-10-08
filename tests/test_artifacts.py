@@ -19,6 +19,7 @@ from django.test import AsyncClient, Client
 from apps.artifacts.models import Artifact, ArtifactType
 from apps.artifacts.services.export import ArtifactExporter
 from apps.artifacts.views import SANDBOX_FLAGS, SANDBOX_HTML_TEMPLATE
+from apps.telemetry.models import EventKind, TelemetryEvent
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     Workspace,
@@ -290,6 +291,15 @@ class TestArtifactSandboxView:
         assert "Recharts" in content
         assert "Plotly" not in content
         assert "root" in content
+
+    def test_opening_an_artifact_records_one_view(self, authenticated_client, artifact, workspace):
+        authenticated_client.get(f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/data/")
+        authenticated_client.get(f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/")
+
+        view = TelemetryEvent.objects.get(kind=EventKind.ARTIFACT_VIEW)
+        assert view.workspace_id == workspace.id
+        assert view.name == artifact.artifact_type
+        assert view.attrs["artifact_id"] == str(artifact.id)
 
     def test_sandbox_has_no_story_renderer(self):
         # Stories render through the React ArtifactGraph and never load this

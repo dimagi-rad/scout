@@ -28,6 +28,7 @@ from apps.chat.services.agent_execution import (
 )
 from apps.chat.tasks import aschedule_thread_title
 from apps.chat.turn_lease import TurnLease, atry_acquire_turn_lease
+from apps.telemetry.agent_runs import background_turn
 from apps.workspaces.models import (
     VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER,
     SchemaState,
@@ -554,6 +555,7 @@ async def _resume_claimed_job(
         timeout_s,
     )
     start = time.monotonic()
+    telemetry = background_turn("resume", user=user, workspace=workspace, thread_id=tj.thread.id)
     try:
         agent = await build_agent_for_resume(workspace, user, conversation_id=str(tj.thread.id))
         input_state = {
@@ -569,6 +571,7 @@ async def _resume_claimed_job(
         langfuse_handler = get_langfuse_callback(session_id=str(tj.thread.id), user_id=str(user.id))
         if langfuse_handler is not None:
             config["callbacks"] = [langfuse_handler]
+        telemetry.with_callbacks(config)
         with resume_langfuse_span(
             thread_job_id=thread_job_id,
             thread_id=str(tj.thread.id),
@@ -578,10 +581,11 @@ async def _resume_claimed_job(
         ) as langfuse_span:
             # Streamed, so a chat open on the thread shows the answer as it is written.
             try:
-                result = await asyncio.wait_for(
-                    resume_stream.arun_streamed(agent, input_state, config, tj.thread_id),
-                    timeout=timeout_s,
-                )
+                async with telemetry.recording():
+                    result = await asyncio.wait_for(
+                        resume_stream.arun_streamed(agent, input_state, config, tj.thread_id),
+                        timeout=timeout_s,
+                    )
             except LLM_TIMEOUT_ERRORS as exc:
                 # Converted only here: the agent build above does its own I/O (the
                 # MCP tool list), and a stall there is not a slow answer.
@@ -643,6 +647,8 @@ async def _resume_claimed_job(
         )
         return {"status": "agent_failed"}
     finally:
+        # A no-op once the run recorded itself; this catches a failed agent build.
+        await telemetry.aflush()
         elapsed = time.monotonic() - start
         logger.info(
             "resume: ainvoke complete tj=%s elapsed=%.2fs",
@@ -924,6 +930,7 @@ async def _flush_thread(thread_id) -> int:
 
 async def _answer_flushed_request(thread: Thread, held) -> bool:
     workspace, user = thread.workspace, thread.user
+    telemetry = background_turn("flush", user=user, workspace=workspace, thread_id=thread.id)
     try:
         agent = await build_agent_for_resume(workspace, user, conversation_id=str(thread.id))
         config = {
@@ -933,24 +940,26 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
         langfuse_handler = get_langfuse_callback(session_id=str(thread.id), user_id=str(user.id))
         if langfuse_handler is not None:
             config["callbacks"] = [langfuse_handler]
+        telemetry.with_callbacks(config)
         try:
-            await asyncio.wait_for(
-                resume_stream.arun_streamed(
-                    agent,
-                    {
-                        "messages": [
-                            HumanMessage(content=FLUSH_NOTE, id=held.marker_id),
-                            HumanMessage(content=held.text, id=held.message_id),
-                        ],
-                        "workspace_id": str(workspace.id),
-                        "user_id": str(user.id),
-                        "thread_id": str(thread.id),
-                    },
-                    config,
-                    thread.id,
-                ),
-                timeout=settings.AGENT_RESUME_TIMEOUT_S,
-            )
+            async with telemetry.recording():
+                await asyncio.wait_for(
+                    resume_stream.arun_streamed(
+                        agent,
+                        {
+                            "messages": [
+                                HumanMessage(content=FLUSH_NOTE, id=held.marker_id),
+                                HumanMessage(content=held.text, id=held.message_id),
+                            ],
+                            "workspace_id": str(workspace.id),
+                            "user_id": str(user.id),
+                            "thread_id": str(thread.id),
+                        },
+                        config,
+                        thread.id,
+                    ),
+                    timeout=settings.AGENT_RESUME_TIMEOUT_S,
+                )
         except LLM_TIMEOUT_ERRORS as exc:
             raise _ModelRequestTimeout("model request timed out") from exc
     except _ModelRequestTimeout as exc:
@@ -964,6 +973,9 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
         # Settled after: unsent, it waits again (its one flush spent) for the user to send.
         logger.exception("flush: agent failed for the held request of thread %s", thread.id)
         return False
+    finally:
+        # A no-op once the run recorded itself; this catches a failed agent build.
+        await telemetry.aflush()
     return True
 
 

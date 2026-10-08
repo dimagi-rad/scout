@@ -15,7 +15,9 @@ class EstimatedCountPaginator(Paginator):
 
     @cached_property
     def count(self) -> int:
-        # The estimate is for the whole table; a filtered changelist needs a real count.
+        # The estimate is for the whole table, so a filtered changelist gets a count
+        # bounded at EXACT_COUNT_BOUND. Filters reach here only from a hand-written
+        # URL (there is no filter UI); one on an unindexed column can still scan.
         if self.object_list.query.has_filters():
             return self.object_list[:EXACT_COUNT_BOUND].count()
         with connection.cursor() as cursor:
