@@ -299,6 +299,8 @@ describe("uiSlice sending threads (#859)", () => {
     const [first] = useAppStore.getState().threads
     expect(ids()).toEqual(["new", "old"])
     expect(first).toMatchObject({ title: "How many visits?", title_source: "first_message" })
+    // Its turn is starting, so the sidebar shows it running (#856).
+    expect(first.turn_running).toBe(true)
   })
 
   it("shortens a long message's title the way the server does", () => {

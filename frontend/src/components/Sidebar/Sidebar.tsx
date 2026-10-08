@@ -39,6 +39,10 @@ const ACCESS_DENIAL_SUMMARY: Record<AccessDenialReason, string> = {
 const DOMAIN_REVALIDATE_MIN_INTERVAL_MS = 15_000
 // Catches a grant while you stay on the tab. Slow on purpose: prod and staging share one RDS.
 const DOMAIN_REVALIDATE_POLL_MS = 60_000
+// While a listed thread's turn runs, refetch so its spinner clears when it ends; a
+// turn's own end refetches too, but can land just before the server lets go of it.
+export const RUNNING_THREADS_POLL_MS = 5_000
+export const RUNNING_THREADS_MAX_POLL_MS = 30_000
 
 export function Sidebar() {
   const navigate = useNavigate()
@@ -200,6 +204,30 @@ export function Sidebar() {
       fetchThreads(activeDomainId)
     }
   }, [activeDomainId, fetchThreads])
+
+  const runningThreadIds = threads
+    .filter((thread) => thread.turn_running)
+    .map((thread) => thread.id)
+    .join(",")
+  useEffect(() => {
+    if (!activeDomainId || !runningThreadIds) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let delay = RUNNING_THREADS_POLL_MS
+    const schedule = () => {
+      timer = setTimeout(async () => {
+        await fetchThreads(activeDomainId)
+        if (cancelled) return
+        delay = Math.min(delay * 1.5, RUNNING_THREADS_MAX_POLL_MS)
+        schedule()
+      }, delay)
+    }
+    schedule()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [activeDomainId, runningThreadIds, fetchThreads])
 
   // Refetch threads when jobs complete so the sidebar green-dot indicator
   // picks up the bumped Thread.updated_at from the resume task.
@@ -440,6 +468,14 @@ export function Sidebar() {
                           {job.progress.source}
                         </span>
                       ) : null}
+                    </span>
+                  ) : thread.turn_running ? (
+                    <span
+                      className="flex items-center"
+                      title="Working on a reply"
+                      data-testid={`sidebar-thread-running-${thread.id}`}
+                    >
+                      <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />
                     </span>
                   ) : hasUnread ? (
                     <span

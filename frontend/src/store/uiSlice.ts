@@ -26,6 +26,8 @@ export interface Thread {
   created_at: string
   updated_at: string
   last_viewed_at: string | null
+  /** An agent run holds the thread's turn (in any tab, or a background resume). */
+  turn_running?: boolean
 }
 
 export type ThreadsStatus = "idle" | "loading" | "loaded" | "error"
@@ -202,6 +204,7 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
           created_at: now,
           updated_at: now,
           last_viewed_at: now,
+          turn_running: true,
         }
         let sending = sendingThreads.get(workspaceId)
         if (!sending) {

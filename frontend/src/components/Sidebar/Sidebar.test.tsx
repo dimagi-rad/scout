@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Thread } from "@/store/uiSlice"
-import { Sidebar } from "./Sidebar"
+import { RUNNING_THREADS_POLL_MS, Sidebar } from "./Sidebar"
 
 const mocks = vi.hoisted(() => {
   const fetchDomains = vi.fn()
@@ -328,5 +328,79 @@ describe("Sidebar agent model label", () => {
     renderSidebar()
 
     expect(screen.queryByTestId("app-model-label")).toBeNull()
+  })
+})
+
+describe("Sidebar running threads (#856)", () => {
+  const running = (turn_running: boolean): Thread => ({
+    id: "thread-running",
+    title: "Visits by district",
+    title_is_custom: false,
+    title_source: "generated",
+    created_at: "2026-07-01T12:00:00Z",
+    updated_at: "2026-07-01T12:00:00Z",
+    last_viewed_at: "2026-07-01T12:00:00Z",
+    turn_running,
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    mocks.state.threadId = null
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    mocks.state.threads = []
+    mocks.fetchThreads.mockReset()
+  })
+
+  it("shows a spinner while a thread's turn runs, refetching until it clears", async () => {
+    mocks.state.threads = [running(true)]
+    const { rerender } = renderSidebar()
+    expect(screen.getByTestId("sidebar-thread-running-thread-running")).toBeInTheDocument()
+    const mountFetches = mocks.fetchThreads.mock.calls.length
+
+    // Still running at the first refetch: the next one waits longer.
+    await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS)
+    expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches + 1)
+    await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS)
+    expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches + 1)
+    mocks.fetchThreads.mockImplementation(() => {
+      mocks.state.threads = [running(false)]
+    })
+    await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 0.5)
+    expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches + 2)
+
+    rerender(
+      <MemoryRouter initialEntries={["/artifacts"]}>
+        <Sidebar />
+      </MemoryRouter>,
+    )
+    expect(screen.queryByTestId("sidebar-thread-running-thread-running")).toBeNull()
+    await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 10)
+    expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches + 2)
+  })
+
+  it("does not poll when no listed turn is running", async () => {
+    mocks.state.threads = [running(false)]
+    renderSidebar()
+    const mountFetches = mocks.fetchThreads.mock.calls.length
+
+    await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 4)
+
+    expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches)
+    expect(screen.queryByTestId("sidebar-thread-running-thread-running")).toBeNull()
+  })
+
+  it("stops polling on unmount", async () => {
+    mocks.state.threads = [running(true)]
+    const { unmount } = renderSidebar()
+    const mountFetches = mocks.fetchThreads.mock.calls.length
+    unmount()
+
+    await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 4)
+
+    expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches)
   })
 })

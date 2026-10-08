@@ -335,7 +335,14 @@ export function ChatPanel() {
             return await fetch(input, init)
           } finally {
             if (chatWorkspaceId) {
-              useAppStore.getState().uiActions.settleSendingThread(chatWorkspaceId, chatThreadId)
+              const { threads, uiActions } = useAppStore.getState()
+              // A listed thread refetches to show its turn running; settling refetches
+              // an unlisted one, and a new chat's placeholder already shows it.
+              const listedIdle = threads.some(
+                (thread) => thread.id === chatThreadId && !thread.turn_running,
+              )
+              uiActions.settleSendingThread(chatWorkspaceId, chatThreadId)
+              if (listedIdle) void uiActions.fetchThreads(chatWorkspaceId)
             }
           }
         },

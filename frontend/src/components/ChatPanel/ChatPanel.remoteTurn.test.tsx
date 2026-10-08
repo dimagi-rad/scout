@@ -194,4 +194,24 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
     expect(server.detailPolls).toEqual([])
   })
 
+  it("refetches the list when a send in a listed thread is answered, to show it running", async () => {
+    const server = mockServer()
+    server.finish()
+    useAppStore.setState({
+      threads: [{
+        id: THREAD, title: "Visits", title_is_custom: false, title_source: "generated",
+        created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z",
+        last_viewed_at: null, turn_running: false,
+      }],
+    })
+    renderPanel()
+    await screen.findByText("Here are the visits.")
+    const listFetches = server.listFetches
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "and by month?" } })
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send message" })))
+
+    await vi.waitFor(() => expect(server.chatPosts).toBe(1))
+    await vi.waitFor(() => expect(server.listFetches).toBe(listFetches + 1))
+  })
 })
