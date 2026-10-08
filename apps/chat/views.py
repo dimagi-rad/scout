@@ -329,7 +329,7 @@ async def _hold_while_loading(workspace, thread_id: str, message: dict, text: st
     if await aworkspace_schema_status(workspace.id) == "available":
         return None
     own_load = await athread_awaits_load(thread_id)
-    if not own_load and not await aworkspace_own_build_pending(workspace):
+    if not own_load and not await aworkspace_own_build_pending(workspace.id):
         return None
     part_id = message.get("id")
     if (

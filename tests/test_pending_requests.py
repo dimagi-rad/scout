@@ -954,6 +954,48 @@ class TestHoldForNewWorkspaceOverLoadedSources:
 
         assert agent_layer.inputs == []
         assert held["workspace_load_pending"] is True
+        assert await pending_requests.aflushable_thread_ids(ws.id) == [uuid.UUID(thread_id)]
+
+    async def test_a_siblings_rebuild_is_not_one_to_wait_for(self, agent_layer):
+        ws, user, client = await _new_workspace_over_loaded_sources("sibling-build")
+        sibling = await Workspace.objects.acreate(name="W-sibling-build-2", created_by=user)
+        await adefer_rebuild_workspace_view_schema(workspace_id=str(sibling.id))
+        thread_id = str(uuid.uuid4())
+
+        response = await _post(client, ws, thread_id, "visits?")
+        [chunk async for chunk in response.streaming_content]
+
+        assert len(agent_layer.inputs) == 1
+        assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+
+    async def test_the_held_message_is_sent_once_the_build_ends(self, agent_layer, checkpoint):
+        ws, _user, client = await _new_workspace_over_loaded_sources("build-ends")
+        job_id = await adefer_rebuild_workspace_view_schema(workspace_id=str(ws.id))
+        thread_id = str(uuid.uuid4())
+        await _held_events(await _post(client, ws, thread_id, "visits?"))
+        # A sibling refreshing a shared source does not keep it waiting.
+        schema = await TenantSchema.objects.filter(tenant__workspace_tenants__workspace=ws).afirst()
+        await MaterializationRun.objects.acreate(
+            tenant_schema=schema,
+            pipeline="commcare_sync",
+            state=MaterializationRun.RunState.LOADING,
+            procrastinate_job_id=8686,
+        )
+        await sync_to_async(_delete_jobs)([job_id])
+        agent = _flush_agent(checkpoint)
+
+        with (
+            patch(
+                "apps.chat.services.continuation.build_agent_for_resume",
+                AsyncMock(return_value=agent),
+            ),
+            patch("apps.chat.services.continuation.aschedule_thread_title", AsyncMock()),
+        ):
+            result = await tasks.flush_pending_requests(str(ws.id))
+
+        assert result == {"status": "flushed", "sent": 1}
+        assert agent.last_run.messages[-1].content == "visits?"
+        assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
 
     async def test_once_its_views_serve_it_is_answered(self, agent_layer):
         ws, _user, client = await _new_workspace_over_loaded_sources("served")
@@ -1020,7 +1062,7 @@ class TestFlush:
     async def _flush(self, ws, agent):
         with (
             patch(
-                "apps.chat.services.continuation.aworkspace_build_pending",
+                "apps.chat.services.continuation.aworkspace_own_build_pending",
                 AsyncMock(return_value=False),
             ),
             patch(
@@ -1052,7 +1094,8 @@ class TestFlush:
         agent = _flush_agent(checkpoint)
 
         with patch(
-            "apps.chat.services.continuation.aworkspace_build_pending", AsyncMock(return_value=True)
+            "apps.chat.services.continuation.aworkspace_own_build_pending",
+            AsyncMock(return_value=True),
         ):
             result = await tasks.flush_pending_requests(str(ws.id))
 
@@ -1238,6 +1281,30 @@ async def test_queueing_a_flush_twice_is_quiet():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task", "build"),
+    [
+        (tasks.rebuild_workspace_view_schema, "rebuild_workspace_view_schema"),
+        (tasks.rebuild_workspace_semantic_model, "rebuild_workspace_semantic_model_core"),
+    ],
+)
+@pytest.mark.parametrize("fails", [False, True])
+async def test_a_rebuild_flushes_the_requests_waiting_on_it(task, build, fails):
+    side_effect = RuntimeError("boom") if fails else None
+    with (
+        patch.object(tasks.publication, build, AsyncMock(return_value={}, side_effect=side_effect)),
+        patch.object(tasks, "_defer_pending_flush", AsyncMock()) as flush,
+    ):
+        if fails:
+            with pytest.raises(RuntimeError):
+                await task("ws-1")
+        else:
+            await task("ws-1")
+
+    flush.assert_awaited_once_with("ws-1")
+
+
+@pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_a_sibling_workspaces_run_is_not_a_load_of_this_one():
     ws, tenant = await _workspace("sibling-run")
@@ -1250,17 +1317,17 @@ async def test_a_sibling_workspaces_run_is_not_a_load_of_this_one():
     )
 
     assert await load_activity.aworkspace_load_pending(ws.id)
-    assert not await load_activity.aworkspace_own_build_pending(ws)
+    assert not await load_activity.aworkspace_own_build_pending(ws.id)
 
     await TenantSchema.objects.filter(id=schema.id).aupdate(
         refresh_workspace_id=ws.id, state=SchemaState.PROVISIONING
     )
-    assert await load_activity.aworkspace_own_build_pending(ws)
+    assert await load_activity.aworkspace_own_build_pending(ws.id)
 
     await TenantSchema.objects.filter(id=schema.id).aupdate(
         refresh_workspace_id=None, load_workspace_id=ws.id
     )
-    assert await load_activity.aworkspace_own_build_pending(ws)
+    assert await load_activity.aworkspace_own_build_pending(ws.id)
 
 
 @pytest.mark.asyncio

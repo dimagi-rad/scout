@@ -35,7 +35,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.failure_guidance import credential_guidance, summary_failures
-from apps.workspaces.services.load_activity import aworkspace_build_pending
+from apps.workspaces.services.load_activity import aworkspace_own_build_pending
 from apps.workspaces.services.load_outcome import (
     TENANT_NOT_RUN,
     aggregate_materialization_state,
@@ -845,7 +845,9 @@ async def flush_workspace_requests(workspace_id: str) -> dict:
     thread_ids = await pending_requests.aflushable_thread_ids(workspace_id)
     for thread_id in thread_ids[:FLUSH_BATCH]:
         # Per request: answering one takes minutes, and a load may start meanwhile.
-        if await aworkspace_build_pending(workspace_id):
+        # Its own builds only, as the hold: a sibling's refresh of a shared source
+        # would keep the oldest request waiting behind newer, answered ones.
+        if await aworkspace_own_build_pending(workspace_id):
             await defer_pending_flush(workspace_id, PENDING_FLUSH_RECHECK_SECONDS)
             return {"status": "load_pending", "sent": sent}
         try:

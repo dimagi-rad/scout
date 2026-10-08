@@ -1885,7 +1885,7 @@ async def _load_in_progress(workspace: Workspace) -> dict | None:
     workspace_jobs = ThreadJob.objects.filter(
         thread__workspace_id=workspace.id, job_type=ThreadJob.JobType.MATERIALIZATION
     )
-    own_filter = owned_run_q(workspace)
+    own_filter = owned_run_q(workspace.id)
     own = [
         run
         async for run in active_runs.filter(own_filter)

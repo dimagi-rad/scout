@@ -89,17 +89,17 @@ def active_runs_for_workspaces(workspace_ids):
     )
 
 
-def owned_run_q(workspace) -> Q:
+def owned_run_q(workspace_id) -> Q:
     """Runs this workspace started, as opposed to a sibling's load of a shared tenant."""
     workspace_job_ids = ThreadJob.objects.filter(
-        thread__workspace_id=workspace.id, job_type=ThreadJob.JobType.MATERIALIZATION
+        thread__workspace_id=workspace_id, job_type=ThreadJob.JobType.MATERIALIZATION
     ).values("procrastinate_job_id")
     # A load candidate carries load_workspace_id only until promotion, which is
     # after its run finishes; finished runs are found through the job id instead.
     return (
-        Q(tenant_schema__load_workspace_id=workspace.id)
+        Q(tenant_schema__load_workspace_id=workspace_id)
         | Q(
-            tenant_schema__refresh_workspace_id=workspace.id,
+            tenant_schema__refresh_workspace_id=workspace_id,
             tenant_schema__state=SchemaState.PROVISIONING,
         )
         | Q(procrastinate_job_id__in=workspace_job_ids)
@@ -136,7 +136,7 @@ async def aworkspace_load_pending(workspace_id) -> bool:
     return await _aany_pending(_pending_loads([workspace_id]))
 
 
-async def aworkspace_own_build_pending(workspace) -> bool:
+async def aworkspace_own_build_pending(workspace_id) -> bool:
     """Whether a load of this workspace itself, or a rebuild after one, is queued or running.
 
     Unlike ``aworkspace_build_pending``, a sibling workspace's run on a shared
@@ -145,8 +145,8 @@ async def aworkspace_own_build_pending(workspace) -> bool:
     recipe's inline load) do, as do the view and semantic rebuilds a new
     workspace over already-loaded sources waits on.
     """
-    runs, recoveries, jobs = _pending_loads([workspace.id], _BUILD_TASK_NAMES)
-    return await _aany_pending([runs.filter(owned_run_q(workspace)), recoveries, jobs])
+    runs, recoveries, jobs = _pending_loads([workspace_id], _BUILD_TASK_NAMES)
+    return await _aany_pending([runs.filter(owned_run_q(workspace_id)), recoveries, jobs])
 
 
 async def aworkspace_build_pending(workspace_id) -> bool:
@@ -232,6 +232,9 @@ async def aworkspace_schema_status(workspace_id) -> str:
         .values_list("state", flat=True)
         .afirst()
     )
+    # Serving ignores what is building, so skip those queries on the hot path.
+    if workspace_schema_status(tenant_ids, active, False, view_state) == "available":
+        return "available"
     building = await _aany_pending(_pending_loads([workspace_id], _STATUS_TASK_NAMES))
     return workspace_schema_status(tenant_ids, active, building, view_state)
 
