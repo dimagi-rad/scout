@@ -89,6 +89,46 @@ function withoutHeldMessages(messages: UIMessage[], heldIds: ReadonlySet<string>
   })
 }
 
+/** ``response`` with ``onEnd`` called once its body is done, failed or cancelled. */
+function untilBodyEnds(response: Response, onEnd: () => void): Response {
+  if (!response.body) {
+    onEnd()
+    return response
+  }
+  const reader = response.body.getReader()
+  let ended = false
+  const end = () => {
+    if (ended) return
+    ended = true
+    onEnd()
+  }
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read()
+        if (done) {
+          end()
+          controller.close()
+        } else {
+          controller.enqueue(value)
+        }
+      } catch (readError) {
+        end()
+        controller.error(readError)
+      }
+    },
+    cancel(reason) {
+      end()
+      return reader.cancel(reason)
+    },
+  })
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  })
+}
+
 export function ChatPanel() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const threadId = useAppStore((s) => s.threadId)
@@ -237,6 +277,12 @@ export function ChatPanel() {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      // Its chats go with it; the server's turn_running shows their turns from here.
+      const { activeDomainId: workspaceId, localTurnThreadIds, uiActions } =
+        useAppStore.getState()
+      if (localTurnThreadIds.size === 0) return
+      uiActions.forgetLocalTurns()
+      if (workspaceId) void uiActions.fetchThreads(workspaceId)
     }
   }, [])
   // Title polls for threads whose turn finished out of view.
@@ -331,20 +377,18 @@ export function ChatPanel() {
         // The row exists by the time any response past validation arrives, long before the
         // turn ends, so the server's list decides from here.
         fetch: async (input, init) => {
+          const { uiActions } = useAppStore.getState()
+          uiActions.startLocalTurn(chatThreadId)
+          let response: Response
           try {
-            return await fetch(input, init)
+            response = await fetch(input, init)
+          } catch (fetchError) {
+            uiActions.endLocalTurn(chatThreadId)
+            throw fetchError
           } finally {
-            if (chatWorkspaceId) {
-              const { threads, uiActions } = useAppStore.getState()
-              // A listed thread refetches to show its turn running; settling refetches
-              // an unlisted one, and a new chat's placeholder already shows it.
-              const listedIdle = threads.some(
-                (thread) => thread.id === chatThreadId && !thread.turn_running,
-              )
-              uiActions.settleSendingThread(chatWorkspaceId, chatThreadId)
-              if (listedIdle) void uiActions.fetchThreads(chatWorkspaceId)
-            }
+            if (chatWorkspaceId) uiActions.settleSendingThread(chatWorkspaceId, chatThreadId)
           }
+          return untilBodyEnds(response, () => uiActions.endLocalTurn(chatThreadId))
         },
         prepareSendMessagesRequest: ({ body, id, messages, trigger, messageId }) => {
           const sending = heldSends.get(chatThreadId)
@@ -469,6 +513,7 @@ export function ChatPanel() {
     && serverTurn?.chat === chat
     && serverTurn.reloadKey === messageReloadKey
   useRemoteTurnPoll(activeDomainId, threadId, remoteTurnRunning, () => {
+    if (!mountedRef.current) return
     setMessageReloadKey((k) => k + 1)
     setTitleRefreshTrigger((prev) => ({ threadId, turn: (prev?.turn ?? 0) + 1 }))
     if (activeDomainId) void fetchThreads(activeDomainId)
@@ -559,8 +604,11 @@ export function ChatPanel() {
           ? { messages: response, pending_request: null }
           : response
         setLoaded({ chat, reloadKey })
+        // A turn this tab started while the load was out is the lease it reports.
         setServerTurn(
-          !Array.isArray(response) && response.turn_running === true ? { chat, reloadKey } : null,
+          !Array.isArray(response) && response.turn_running === true && !isChatRunning(chat)
+            ? { chat, reloadKey }
+            : null,
         )
         // A shown thread can't send until its history loads, so only a new chat (no
         // history) or a retry timer can have started a turn; the live turn wins.
@@ -1018,7 +1066,7 @@ export function ChatPanel() {
             </p>
           )}
           {isStreaming && <ChatThinkingIndicator />}
-          {remoteTurnRunning && !resumeStream.text && held.phase !== "answering" && (
+          {remoteTurnRunning && !resumeAnswering && !resumeStream.text && (
             <ChatRemoteTurnNotice />
           )}
           {stoppedNotice && <ChatStoppedNotice />}

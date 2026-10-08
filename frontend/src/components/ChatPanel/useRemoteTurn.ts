@@ -6,6 +6,9 @@ export const REMOTE_TURN_POLL_MS = 3000
 // A long turn (or a dead holder's lease, which lapses after 90s) is checked less often.
 export const REMOTE_TURN_MAX_POLL_MS = 15_000
 const BACKOFF = 1.5
+// Past this many failed polls in a row (access revoked, an outage), stop waiting and
+// let the reload decide: it shows the turn running again, or offers its retry.
+export const REMOTE_TURN_MAX_FAILURES = 5
 
 /**
  * While ``active`` (the server reports this thread's turn running and this tab is not
@@ -29,28 +32,44 @@ export function useRemoteTurnPoll(
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
     let delay = REMOTE_TURN_POLL_MS
+    let failures = 0
+    let attempt: AbortController | null = null
 
     async function poll() {
       if (typeof document !== "undefined" && document.hidden) {
+        // Back on the tab, the next check comes soon: the backoff was never earned.
+        delay = REMOTE_TURN_POLL_MS
         timer = setTimeout(poll, REMOTE_TURN_MAX_POLL_MS)
         return
       }
+      // A hung request would stop the chain, as the next poll is scheduled after it.
+      const controller = new AbortController()
+      attempt = controller
+      const timeout = setTimeout(() => controller.abort(), REMOTE_TURN_MAX_POLL_MS)
       try {
         const response = await api.get<{ turn_running?: boolean }>(
           `/api/workspaces/${workspaceId}/threads/${threadId}/`,
+          controller.signal,
         )
         if (cancelled) return
         if (!response.turn_running) {
           onDoneRef.current()
           return
         }
+        failures = 0
       } catch (error) {
         if (cancelled) return
-        // Gone: the reload says what became of it.
-        if (error instanceof ApiError && error.status === 404) {
+        failures += 1
+        // Gone, or failing for good: the reload says what became of it.
+        if (
+          (error instanceof ApiError && error.status === 404)
+          || failures >= REMOTE_TURN_MAX_FAILURES
+        ) {
           onDoneRef.current()
           return
         }
+      } finally {
+        clearTimeout(timeout)
       }
       delay = Math.min(delay * BACKOFF, REMOTE_TURN_MAX_POLL_MS)
       timer = setTimeout(poll, delay)
@@ -60,6 +79,7 @@ export function useRemoteTurnPoll(
     return () => {
       cancelled = true
       if (timer) clearTimeout(timer)
+      attempt?.abort()
     }
   }, [active, workspaceId, threadId])
 }

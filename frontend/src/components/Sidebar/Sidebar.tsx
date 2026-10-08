@@ -205,9 +205,12 @@ export function Sidebar() {
     }
   }, [activeDomainId, fetchThreads])
 
+  const localTurnThreadIds = useAppStore((s) => s.localTurnThreadIds)
+  // This tab's own turns end with a refetch of their own, so only others are polled for.
   const runningThreadIds = threads
-    .filter((thread) => thread.turn_running)
+    .filter((thread) => thread.turn_running && !localTurnThreadIds.has(thread.id))
     .map((thread) => thread.id)
+    .sort()
     .join(",")
   useEffect(() => {
     if (!activeDomainId || !runningThreadIds) return
@@ -216,7 +219,7 @@ export function Sidebar() {
     let delay = RUNNING_THREADS_POLL_MS
     const schedule = () => {
       timer = setTimeout(async () => {
-        await fetchThreads(activeDomainId)
+        if (!document.hidden) await fetchThreads(activeDomainId)
         if (cancelled) return
         delay = Math.min(delay * 1.5, RUNNING_THREADS_MAX_POLL_MS)
         schedule()
@@ -425,6 +428,7 @@ export function Sidebar() {
                 ? new Date(thread.last_viewed_at)
                 : new Date(thread.created_at)
               const hasUnread = lastUpdated > baseline
+              const turnRunning = thread.turn_running || localTurnThreadIds.has(thread.id)
               return (
                 <button
                   key={thread.id}
@@ -469,7 +473,7 @@ export function Sidebar() {
                         </span>
                       ) : null}
                     </span>
-                  ) : thread.turn_running ? (
+                  ) : turnRunning ? (
                     <span
                       className="flex items-center"
                       title="Working on a reply"

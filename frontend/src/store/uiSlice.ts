@@ -74,6 +74,9 @@ export interface UiSlice {
   // The server's message when "Retry verification" was itself denied. Kept apart from
   // the threads denial so the lost-access gate shows only what the retry found.
   accessRetryOutcome: string | null
+  // Threads whose turn this tab is streaming; it knows when they end, so the sidebar
+  // shows them running without polling the list for them (#856).
+  localTurnThreadIds: ReadonlySet<string>
   uiActions: {
     newThread: () => void
     selectThread: (id: string) => Promise<void>
@@ -95,6 +98,11 @@ export interface UiSlice {
     ) => Promise<Thread>
     openArtifact: (id: string) => void
     closeArtifact: () => void
+    startLocalTurn: (threadId: string) => void
+    /** The turn this tab streamed is over: its row stops showing running until a refetch says otherwise. */
+    endLocalTurn: (threadId: string) => void
+    /** The chat that streamed them is gone; the server's flag decides from here. */
+    forgetLocalTurns: () => void
   }
 }
 
@@ -130,7 +138,28 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
     threadsAccessDenialReason: null,
     threadsAccessRetryable: false,
     accessRetryOutcome: null,
+    localTurnThreadIds: new Set(),
     uiActions: {
+      startLocalTurn: (threadId: string) => {
+        set((state) => ({ localTurnThreadIds: new Set([...state.localTurnThreadIds, threadId]) }))
+      },
+      endLocalTurn: (threadId: string) => {
+        set((state) => {
+          const local = new Set(state.localTurnThreadIds)
+          local.delete(threadId)
+          return {
+            localTurnThreadIds: local,
+            threads: state.threads.map((thread) =>
+              thread.id === threadId && thread.turn_running
+                ? { ...thread, turn_running: false }
+                : thread,
+            ),
+          }
+        })
+      },
+      forgetLocalTurns: () => {
+        set({ localTurnThreadIds: new Set() })
+      },
       newThread: () => {
         set({ threadId: newLocalThreadId(), activeArtifactId: null })
       },
@@ -204,7 +233,6 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
           created_at: now,
           updated_at: now,
           last_viewed_at: now,
-          turn_running: true,
         }
         let sending = sendingThreads.get(workspaceId)
         if (!sending) {

@@ -187,7 +187,7 @@ export function ChatThinkingIndicator() {
 /** The thread's turn is running somewhere this tab can't follow (another tab, or before a reload). */
 export function ChatRemoteTurnNotice() {
   return (
-    <div className="flex items-start gap-3 py-2" data-testid="chat-remote-turn">
+    <div className="flex items-start gap-3 py-2" role="status" data-testid="chat-remote-turn">
       <div className="flex items-center gap-2 rounded-lg bg-muted px-4 py-3 text-sm text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
         Still working on this…

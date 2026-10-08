@@ -1,15 +1,22 @@
-import type { UIMessage } from "ai"
+import { createUIMessageStream, createUIMessageStreamResponse, type UIMessage } from "ai"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, fireEvent, render, screen } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import type { WorkspaceListItem } from "@/api/workspaces"
 import { ChatPanel } from "./ChatPanel"
-import { REMOTE_TURN_MAX_POLL_MS, REMOTE_TURN_POLL_MS } from "./useRemoteTurn"
+import type { ActiveJob } from "@/api/jobs"
+import {
+  REMOTE_TURN_MAX_FAILURES,
+  REMOTE_TURN_MAX_POLL_MS,
+  REMOTE_TURN_POLL_MS,
+} from "./useRemoteTurn"
+
+const jobs = vi.hoisted(() => ({ byThreadId: {} as Record<string, unknown> }))
 
 vi.mock("@/contexts/WorkspaceJobsContext", () => ({
   useWorkspaceJobs: () => ({
-    jobsByThreadId: {},
+    jobsByThreadId: jobs.byThreadId,
     recentlyCompletedThreadIds: [],
     recentTerminationsByToolCallId: {},
     pendingByThreadId: {},
@@ -44,8 +51,13 @@ function mockServer() {
   const server = {
     running: true,
     detailPolls: [] as string[],
+    messageLoads: 0,
     listFetches: 0,
     chatPosts: 0,
+    /** Detail polls answer with this status instead, while set. */
+    detailStatus: null as number | null,
+    /** Holds this tab's own turn open until called. */
+    endReply: () => {},
     finish() {
       server.running = false
     },
@@ -54,10 +66,23 @@ function mockServer() {
     const url = String(input)
     if (url === "/api/chat/") {
       server.chatPosts += 1
-      return Response.json({}, { status: 500 })
+      const ended = new Promise<void>((resolve) => (server.endReply = resolve))
+      return createUIMessageStreamResponse({
+        stream: createUIMessageStream({
+          execute: async ({ writer }) => {
+            writer.write({ type: "start" })
+            writer.write({ type: "text-start", id: "t" })
+            writer.write({ type: "text-delta", id: "t", delta: "By month: rising." })
+            await ended
+            writer.write({ type: "text-end", id: "t" })
+            writer.write({ type: "finish", finishReason: "stop" })
+          },
+        }),
+      })
     }
     const messages = url.match(/\/threads\/([^/]+)\/messages\//)
     if (messages) {
+      server.messageLoads += 1
       const mine = messages[1] === THREAD
       return Response.json({
         messages: mine ? (server.running ? [QUESTION] : [QUESTION, ANSWER]) : [],
@@ -68,6 +93,7 @@ function mockServer() {
     const detail = url.match(/\/threads\/([^/]+)\/$/)
     if (detail) {
       server.detailPolls.push(detail[1])
+      if (server.detailStatus) return Response.json({}, { status: server.detailStatus })
       return Response.json({ id: detail[1], turn_running: server.running })
     }
     if (/\/threads\/[^/]+\/viewed\/$/.test(url)) return new Response(null, { status: 204 })
@@ -88,7 +114,10 @@ beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout"] })
   localStorage.clear()
   useAppStore.setState({ domains: [workspace()], domainsStatus: "loaded", activeDomainId: WS })
-  useAppStore.setState({ threadId: THREAD, threads: [], threadsStatus: "loaded" })
+  useAppStore.setState({
+    threadId: THREAD, threads: [], threadsStatus: "loaded", localTurnThreadIds: new Set(),
+  })
+  jobs.byThreadId = {}
 })
 
 afterEach(() => {
@@ -194,7 +223,47 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
     expect(server.detailPolls).toEqual([])
   })
 
-  it("refetches the list when a send in a listed thread is answered, to show it running", async () => {
+  it("stops waiting after repeated failed polls and lets the reload decide", async () => {
+    const server = mockServer()
+    renderPanel()
+    await screen.findByTestId("chat-remote-turn")
+    server.detailStatus = 403
+    const loads = server.messageLoads
+
+    // 3 + 4.5 + 6.75 + 10.1 + 15s: the fifth failure ends the wait.
+    await act(() => vi.advanceTimersByTimeAsync(39_000))
+    expect(server.detailPolls).toHaveLength(REMOTE_TURN_MAX_FAILURES - 1)
+    await act(() => vi.advanceTimersByTimeAsync(1_000))
+    expect(server.detailPolls).toHaveLength(REMOTE_TURN_MAX_FAILURES)
+    await vi.waitFor(() => expect(server.messageLoads).toBe(loads + 1))
+
+    // The reload still reports the turn running, so the wait starts over.
+    expect(await screen.findByTestId("chat-remote-turn")).toBeInTheDocument()
+    await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_POLL_MS))
+    expect(server.detailPolls).toHaveLength(REMOTE_TURN_MAX_FAILURES + 1)
+    server.detailStatus = null
+    server.finish()
+    await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_POLL_MS))
+    expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
+  })
+
+  it("leaves a background resume's own progress to show, without the placeholder", async () => {
+    mockServer()
+    const job: ActiveJob = {
+      thread_job_id: "job-1", thread_id: THREAD, tool_call_id: "toolu_1",
+      job_type: "materialization", state: "running", progress: null, source_index: null,
+      source_total: null, tenant_name: null, created_at: "2026-07-01T12:00:00Z",
+    }
+    jobs.byThreadId = { [THREAD]: job }
+    renderPanel()
+
+    await screen.findByText("Visits by district?")
+    expect(screen.queryByTestId("chat-remote-turn")).toBeNull()
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "and by month?" } })
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled()
+  })
+
+  it("shows this tab's own turn running until its stream ends", async () => {
     const server = mockServer()
     server.finish()
     useAppStore.setState({
@@ -206,12 +275,21 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
     })
     renderPanel()
     await screen.findByText("Here are the visits.")
-    const listFetches = server.listFetches
 
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "and by month?" } })
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send message" })))
+    await screen.findByText("By month: rising.")
+    expect(useAppStore.getState().localTurnThreadIds.has(THREAD)).toBe(true)
+    // A list refetched mid-turn reports it running.
+    useAppStore.setState((state) => ({
+      threads: state.threads.map((thread) => ({ ...thread, turn_running: true })),
+    }))
 
-    await vi.waitFor(() => expect(server.chatPosts).toBe(1))
-    await vi.waitFor(() => expect(server.listFetches).toBe(listFetches + 1))
+    await act(async () => server.endReply())
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().localTurnThreadIds.has(THREAD)).toBe(false),
+    )
+    expect(useAppStore.getState().threads[0].turn_running).toBe(false)
+    expect(server.detailPolls).toEqual([])
   })
 })

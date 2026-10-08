@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
       threadsStatus: "loaded",
       threadsAccessDenialReason: null as string | null,
       threadsAccessRetryable: false,
+      localTurnThreadIds: new Set<string>(),
       domainActions: { fetchDomains, revalidateDomains },
       authActions: { logout },
       uiActions: { fetchThreads, newThread, selectThread, retryAccessVerification },
@@ -380,6 +381,36 @@ describe("Sidebar running threads (#856)", () => {
     expect(screen.queryByTestId("sidebar-thread-running-thread-running")).toBeNull()
     await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 10)
     expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches + 2)
+  })
+
+  it("shows this tab's own turn running without polling for it", async () => {
+    mocks.state.threads = [running(false)]
+    mocks.state.localTurnThreadIds = new Set(["thread-running"])
+    try {
+      renderSidebar()
+      const mountFetches = mocks.fetchThreads.mock.calls.length
+      expect(screen.getByTestId("sidebar-thread-running-thread-running")).toBeInTheDocument()
+
+      // The list may say running too (refetched mid-turn): still this tab's to end.
+      mocks.state.threads = [running(true)]
+      await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 4)
+      expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches)
+    } finally {
+      mocks.state.localTurnThreadIds = new Set()
+    }
+  })
+
+  it("does not refetch while the tab is hidden", async () => {
+    mocks.state.threads = [running(true)]
+    renderSidebar()
+    const mountFetches = mocks.fetchThreads.mock.calls.length
+    Object.defineProperty(document, "hidden", { configurable: true, value: true })
+    try {
+      await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 4)
+      expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches)
+    } finally {
+      Object.defineProperty(document, "hidden", { configurable: true, value: false })
+    }
   })
 
   it("does not poll when no listed turn is running", async () => {
