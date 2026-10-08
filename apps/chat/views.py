@@ -466,7 +466,11 @@ async def _start_turn(
     if langfuse_handler is not None:
         config["callbacks"] = [langfuse_handler]
     telemetry = AgentRunTelemetry(
-        EventKind.CHAT_TURN, user_id=user.id, workspace_id=workspace.id, thread_id=thread_id
+        EventKind.CHAT_TURN,
+        user_id=user.id,
+        workspace_id=workspace.id,
+        thread_id=thread_id,
+        name="live",
     )
     config["callbacks"] = [*config.get("callbacks", []), telemetry]
 

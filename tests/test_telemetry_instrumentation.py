@@ -363,3 +363,25 @@ async def test_a_login_event_failure_does_not_block_login():
 
     with patch.object(TelemetryEvent, "save", side_effect=RuntimeError("down")):
         assert await sync_to_async(client.login)(email="login-fail@b.c", password="x")
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_background_run_records_its_outcome():
+    for outcome, body in (
+        (Outcome.COMPLETED, None),
+        (Outcome.FAILED, RuntimeError("boom")),
+        (Outcome.STOPPED, asyncio.CancelledError()),
+    ):
+        telemetry = AgentRunTelemetry(EventKind.CHAT_TURN, name="flush")
+        with contextlib.suppress(RuntimeError, asyncio.CancelledError):
+            async with telemetry.recording():
+                if body is not None:
+                    raise body
+        assert telemetry.outcome == outcome
+
+    assert [e.outcome for e in await _events(EventKind.CHAT_TURN)] == [
+        Outcome.COMPLETED,
+        Outcome.FAILED,
+        Outcome.STOPPED,
+    ]

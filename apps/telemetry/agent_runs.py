@@ -235,3 +235,39 @@ class AgentRunTelemetry(BaseCallbackHandler):
             raise
         finally:
             await self.aflush()
+
+    @contextlib.asynccontextmanager
+    async def recording(self):
+        """Time a background run (a resumed or flushed turn) and record it on exit.
+
+        A clean exit is completed, a cancellation stopped, an error failed; the
+        error still propagates to the caller.
+        """
+        self._started = time.monotonic()
+        try:
+            yield self
+        except asyncio.CancelledError:
+            self.outcome = Outcome.STOPPED
+            raise
+        except Exception:
+            self.outcome = Outcome.FAILED
+            raise
+        else:
+            self.outcome = self.outcome or Outcome.COMPLETED
+        finally:
+            await self.aflush()
+
+    def with_callbacks(self, config: dict) -> dict:
+        """``config`` with this handler added to its callbacks."""
+        config["callbacks"] = [*config.get("callbacks", []), self]
+        return config
+
+
+def background_turn(name: str, *, user, workspace, thread_id) -> AgentRunTelemetry:
+    return AgentRunTelemetry(
+        EventKind.CHAT_TURN,
+        user_id=user.id,
+        workspace_id=workspace.id,
+        thread_id=str(thread_id),
+        name=name,
+    )
