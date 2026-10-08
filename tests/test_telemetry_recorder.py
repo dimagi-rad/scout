@@ -1,15 +1,17 @@
 """The telemetry recorder never fails its caller, and the retention prune keeps recent events."""
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest import mock
 
 import pytest
-from asgiref.sync import sync_to_async
-from django.db import transaction
+from asgiref.sync import async_to_sync, sync_to_async
+from django.db import connection, transaction
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from apps.telemetry import recorder, tasks
+from apps.telemetry.admin import EstimatedCountPaginator
 from apps.telemetry.models import EventKind, TelemetryEvent
 from apps.users.models import User
 
@@ -113,6 +115,9 @@ def test_attrs_keep_only_scalars_and_short_labels():
             "ratio": 0.5,
             "cached": True,
             "model": "claude-x",
+            "reply": "yes",
+            "username": "jdoe",
+            "huge": 2**64,
             "prompt": "x" * 65,
             "question": "how many visits?",
             "email": "someone@example.com",
@@ -165,6 +170,42 @@ def test_record_failure_leaves_the_callers_transaction_usable():
     assert TelemetryEvent.objects.count() == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_async_failure_leaves_an_open_transaction_usable():
+    invalid = TelemetryEvent(kind=EventKind.ARTIFACT_VIEW, duration_ms=-1)
+
+    def write_inside_a_transaction():
+        with transaction.atomic():
+            async_to_sync(recorder.arecord_events)([invalid])
+            User.objects.create_user(email="async-ok@example.com", password="pass")
+
+    await sync_to_async(write_inside_a_transaction)()
+
+    assert await User.objects.filter(email="async-ok@example.com").aexists()
+    assert await TelemetryEvent.objects.acount() == 0
+
+
+def test_out_of_range_user_ids_and_naive_times_are_dropped():
+    event = recorder.build_event(
+        EventKind.CHAT_TURN, user_id=2**63, occurred_at=datetime(2026, 1, 1)
+    )
+
+    assert event.user_id is None
+    assert event.occurred_at.tzinfo is not None
+
+
+@pytest.mark.django_db
+def test_admin_pages_by_estimate_not_a_full_count():
+    TelemetryEvent.objects.create(kind=EventKind.CHAT_TURN)
+    paginator = EstimatedCountPaginator(TelemetryEvent.objects.order_by("-occurred_at"), 100)
+
+    with CaptureQueriesContext(connection) as queries:
+        assert paginator.count >= 0
+
+    assert not any("COUNT(" in q["sql"].upper() for q in queries.captured_queries)
+
+
 @pytest.mark.django_db
 def test_record_writes_from_sync_code():
     recorder.record(EventKind.ARTIFACT_VIEW, name="dashboard")
@@ -203,6 +244,20 @@ async def test_prune_stops_after_its_batch_budget(monkeypatch):
 
     assert await tasks.prune_telemetry_events() == 2
     assert await TelemetryEvent.objects.acount() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_exactly_drained_backlog_does_not_warn(monkeypatch, caplog):
+    monkeypatch.setattr(tasks, "PRUNE_BATCH_SIZE", 1)
+    monkeypatch.setattr(tasks, "PRUNE_MAX_BATCHES", 2)
+    old = timezone.now() - timedelta(days=tasks.RETENTION_DAYS + 1)
+    await TelemetryEvent.objects.abulk_create(
+        [TelemetryEvent(kind=EventKind.CHAT_TURN, occurred_at=old) for _ in range(2)]
+    )
+
+    assert await tasks.prune_telemetry_events() == 2
+    assert "batch budget" not in caplog.text
 
 
 @pytest.mark.asyncio

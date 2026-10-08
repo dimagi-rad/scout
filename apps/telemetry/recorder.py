@@ -23,6 +23,7 @@ from typing import Any
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 
 from apps.telemetry.models import TelemetryEvent
 
@@ -30,9 +31,25 @@ logger = logging.getLogger(__name__)
 
 # Labels (tool names, phases, error codes, model ids) fit this; sentences, emails
 # and SQL do not, so free text cannot ride along in an event.
-_LABEL = re.compile(r"[A-Za-z0-9_.:/-]{1,64}")
-_KEY = re.compile(r"[a-z0-9_]{1,40}")
+_LABEL = re.compile(r"\A[A-Za-z0-9_.:/-]{1,64}\Z")
+_KEY = re.compile(r"\A[a-z0-9_]{1,40}\Z")
 MAX_ATTRS = 32
+# Only these attributes may hold a string; a label-shaped value under any other key
+# could still be a one-word reply, a username or a domain.
+STRING_ATTR_KEYS = frozenset(
+    {
+        "artifact_id",
+        "error_code",
+        "error_type",
+        "model",
+        "phase",
+        "recipe_id",
+        "run_kind",
+        "thread_id",
+        "tool",
+    }
+)
+MAX_BIGINT = 2**63 - 1
 # duration_ms is an int4 column.
 MAX_DURATION_MS = 2_147_483_647
 
@@ -45,11 +62,15 @@ def is_label(value: Any) -> bool:
     return isinstance(value, str) and bool(_LABEL.fullmatch(value))
 
 
-def _clean_value(value: Any) -> tuple[bool, Any]:
-    if value is None or isinstance(value, bool | int):
+def _clean_value(key: str, value: Any) -> tuple[bool, Any]:
+    if value is None or isinstance(value, bool):
         return True, value
+    if isinstance(value, int):
+        return abs(value) <= MAX_BIGINT, value
     if isinstance(value, float):
         return math.isfinite(value), value
+    if key not in STRING_ATTR_KEYS:
+        return False, value
     if isinstance(value, uuid.UUID):
         return True, str(value)
     return is_label(value), value
@@ -60,10 +81,11 @@ def _clean_attrs(attrs: dict[str, Any] | None) -> dict[str, Any]:
     clean: dict[str, Any] = {}
     if not isinstance(attrs, dict):
         return clean
+    # The cap bounds the keys inspected, not the keys kept, so the work is bounded too.
     for key, value in islice(attrs.items(), MAX_ATTRS):
         if not (isinstance(key, str) and _KEY.fullmatch(key)):
             continue
-        keep, value = _clean_value(value)
+        keep, value = _clean_value(key, value)
         if keep:
             clean[key] = value
     return clean
@@ -84,9 +106,10 @@ def _as_user_id(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
         return None
     try:
-        return int(value)
-    except (ValueError, TypeError):
+        user_id = int(value)
+    except (ValueError, TypeError, OverflowError):
         return None
+    return user_id if 0 < user_id <= MAX_BIGINT else None
 
 
 def _as_duration(value: Any) -> int | None:
@@ -119,7 +142,7 @@ def build_event(
             "duration_ms": _as_duration(duration_ms),
             "attrs": _clean_attrs(attrs),
         }
-        if isinstance(occurred_at, datetime):
+        if isinstance(occurred_at, datetime) and timezone.is_aware(occurred_at):
             fields["occurred_at"] = occurred_at
         return TelemetryEvent(**fields)
     except Exception:
