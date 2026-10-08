@@ -337,6 +337,32 @@ describe("domainSlice.addedDomainIds — workspaces someone added you to (#355)"
     expect(useAppStore.getState().addedDomainIds).toEqual([])
   })
 
+  it("doesn't record workspaces tenant discovery created just for you", async () => {
+    const discovered = (id: string) => ({ ...ws(id), is_auto_created: true, member_count: 1 })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([
+      ws("a"),
+      discovered("opp-2049"),
+      discovered("opp-2050"),
+      discovered("opp-2051"),
+    ])
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(useAppStore.getState().domains).toHaveLength(4)
+    expect(useAppStore.getState().addedDomainIds).toEqual([])
+  })
+
+  it("records an auto-created workspace someone else shared with you", async () => {
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([
+      ws("a"),
+      { ...ws("shared"), is_auto_created: true, member_count: 2 },
+    ])
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(useAppStore.getState().addedDomainIds).toEqual(["shared"])
+  })
+
   it("forgets an added workspace that a later refresh no longer lists", async () => {
     vi.spyOn(workspaceApi, "list")
       .mockResolvedValueOnce([ws("x"), ws("a")])
