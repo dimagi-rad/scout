@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from django.db.models import Subquery
 from django.utils import timezone
 
 from apps.telemetry.models import TelemetryEvent
+from apps.telemetry.snapshots import take_daily_snapshot
 from config.procrastinate import app
 
 logger = logging.getLogger(__name__)
@@ -44,3 +45,20 @@ async def prune_telemetry_events(now=None) -> int:
 async def prune_telemetry(timestamp: int = 0) -> dict:
     """Apply the telemetry retention policy once a day."""
     return {"deleted": await prune_telemetry_events()}
+
+
+@app.periodic(cron="20 0 * * *")
+@app.task
+async def snapshot_daily_metrics(timestamp: int = 0) -> dict:
+    """Record the day before the scheduled run: schema sizes, totals, update counts.
+
+    The day comes from the schedule, so a run delayed past midnight by a busy
+    worker still records the right one.
+    """
+    now = timezone.now()
+    scheduled = datetime.fromtimestamp(timestamp, UTC) if timestamp else now
+    day = (scheduled - timedelta(days=1)).date()
+    # Totals and sizes are read as of now; a run stuck in the queue past a day
+    # would stamp today's values on an older day.
+    gauges = now - scheduled < timedelta(hours=20)
+    return {"rows": await take_daily_snapshot(day, gauges=gauges)}
