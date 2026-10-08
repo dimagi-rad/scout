@@ -219,7 +219,7 @@ function Dashboard({ data }: { data: UsageDashboard }) {
           id="turns"
           label="Chat turns"
           value={formatCount(turns.total)}
-          hint={`${percent(failed, turns.total)} failed · ${percent(turns.outcomes.stopped, turns.total)} stopped · ${formatCount(turns.background)} after loads`}
+          hint={`${percent(failed, turns.total)} failed · ${percent(turns.outcomes.stopped, turns.total)} stopped · ${formatCount(turns.background)} run by the worker`}
         />
         <Tile
           id="ttft"
@@ -257,6 +257,7 @@ function Dashboard({ data }: { data: UsageDashboard }) {
               label: "Workspace switches",
               values: data.features.workspace_switches,
             },
+            { key: "logins", label: "Logins", values: data.features.logins },
           ]}
         />
       </Panel>
@@ -287,7 +288,7 @@ function Dashboard({ data }: { data: UsageDashboard }) {
         />
       </Panel>
 
-      <Panel id="tools" title="Tool calls">
+      <Panel id="tools" title="Tool calls, all runs (chat, worker and recipes)">
         {data.tools.length === 0 ? (
           <p className="text-sm text-muted-foreground">No tool calls in this window.</p>
         ) : (
@@ -430,6 +431,12 @@ function Dashboard({ data }: { data: UsageDashboard }) {
             label="All tenant schemas"
             format={formatBytes}
           />
+          {data.schema_sizes.latest_skipped && (
+            <p className="mt-2 text-xs text-muted-foreground" data-testid="usage-schema-skipped">
+              {data.schema_sizes.latest_skipped.schemas} schema(s) could not be measured on{" "}
+              {data.schema_sizes.latest_skipped.day}; figures here are from the last complete night.
+            </p>
+          )}
           {data.schema_sizes.retained_bytes ? (
             <p className="mt-2 text-xs text-muted-foreground" data-testid="usage-schema-retained">
               {formatBytes(data.schema_sizes.retained_bytes)} of it is in schemas not serving

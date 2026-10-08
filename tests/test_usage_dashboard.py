@@ -119,9 +119,10 @@ def test_dashboard_adds_up_events_and_existing_tables(user, workspace, tenant):
                 EventKind.CHAT_TURN,
                 user_id=other.id,
                 workspace_id=ws,
-                name="resume",
+                name="flush",
                 outcome=Outcome.COMPLETED,
                 duration_ms=90_000,
+                attrs={"input_tokens": 7, "output_tokens": 1},
             ),
             # Outside the window: never counted.
             TelemetryEvent(
@@ -180,14 +181,15 @@ def test_dashboard_adds_up_events_and_existing_tables(user, workspace, tenant):
     # Only the completed turn's first token counts.
     assert turns["ttft_ms"]["p50"] == 200
     assert turns["tool_calls_per_turn"] == 1
-    assert turns["tokens"]["input"] == 60
+    # Spend counts the worker's turn too, so it reconciles with the per-workspace table.
+    assert turns["tokens"]["input"] == 67
     [tool] = data["tools"]
     assert (tool["name"], tool["calls"], tool["errors"], tool["error_rate"]) == ("query", 2, 1, 0.5)
     [usage] = data["tokens_by_workspace"]
     assert (usage["workspace_id"], usage["name"], usage["input_tokens"]) == (
         str(ws),
         workspace.name,
-        60,
+        67,
     )
     assert data["turns"]["background"] == 1
     loads = data["loads"]
@@ -247,3 +249,41 @@ class TestGrantCommand:
     def test_an_unknown_email_fails(self):
         with pytest.raises(CommandError):
             self._run(f"{uuid.uuid4().hex}@example.com")
+
+
+@pytest.mark.django_db
+def test_sizes_come_from_the_last_complete_night(tenant):
+    today = timezone.now().date()
+    yesterday = today - timedelta(days=1)
+    DailySnapshot.objects.bulk_create(
+        [
+            DailySnapshot(day=yesterday, metric=SnapshotMetric.SCHEMA_BYTES, value=500),
+            DailySnapshot(
+                day=yesterday,
+                metric=SnapshotMetric.SCHEMA_BYTES,
+                dimension=str(tenant.id),
+                value=500,
+            ),
+            # Tonight a lock skipped this tenant: no total, no tenant row.
+            DailySnapshot(day=today, metric=SnapshotMetric.SCHEMAS_SKIPPED, value=1),
+        ]
+    )
+
+    sizes = build_dashboard(days=7)["schema_sizes"]
+
+    assert sizes["as_of"] == yesterday.isoformat()
+    assert [row["bytes"] for row in sizes["top_tenants"]] == [500]
+    assert sizes["latest_skipped"] == {"day": today.isoformat(), "schemas": 1}
+
+
+@pytest.mark.django_db
+def test_login_reports_the_permission(user):
+    _grant(user)
+
+    response = Client().post(
+        "/api/auth/login/",
+        data={"email": user.email, "password": "testpass123"},
+        content_type="application/json",
+    )
+
+    assert response.json()["can_view_usage_dashboard"] is True

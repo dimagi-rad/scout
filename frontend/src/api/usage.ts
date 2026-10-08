@@ -50,6 +50,7 @@ export interface UsageDashboard {
     as_of: string | null
     // Of the latest total, bytes in schemas not serving queries (failed loads, teardowns).
     retained_bytes: number | null
+    latest_skipped: { day: string; schemas: number } | null
     total_daily: (number | null)[]
     top_tenants: { tenant_id: string; name: string; bytes: number }[]
   }

@@ -54,12 +54,14 @@ const dashboard: UsageDashboard = {
   schema_sizes: {
     as_of: "2026-10-07",
     retained_bytes: 1024,
+    latest_skipped: { day: "2026-10-08", schemas: 1 },
     total_daily: [2048, 4096],
     top_tenants: [{ tenant_id: "t1", name: "Demo domain", bytes: 4096 }],
   },
 }
 
-const viewer = { id: "1", email: "a@b.c", name: "A", is_staff: true, onboarding_complete: true }
+// Not staff: the permission alone must be enough.
+const viewer = { id: "1", email: "a@b.c", name: "A", is_staff: false, onboarding_complete: true }
 
 describe("Usage page", () => {
   beforeEach(() => {
@@ -85,6 +87,7 @@ describe("Usage page", () => {
     expect(screen.getByTestId("usage-workspace-tokens-w1")).toHaveTextContent("Kisumu")
     expect(screen.getByTestId("usage-tenant-size-t1")).toHaveTextContent("4.0 KB")
     expect(screen.getByTestId("usage-schema-retained")).toHaveTextContent("1.0 KB")
+    expect(screen.getByTestId("usage-schema-skipped")).toHaveTextContent("2026-10-08")
     expect(mocked.dashboard).toHaveBeenCalledWith(30, expect.any(AbortSignal))
   })
 
@@ -103,6 +106,21 @@ describe("Usage page", () => {
     await waitFor(() => expect(screen.queryByTestId("usage-refreshing")).not.toBeInTheDocument())
     expect(mocked.dashboard).toHaveBeenLastCalledWith(7, expect.any(AbortSignal))
     expect(screen.getByTestId("usage-days-7")).toHaveAttribute("aria-pressed", "true")
+  })
+
+  it("keeps the newest range when an older request answers last", async () => {
+    let finishOld: (value: UsageDashboard) => void = () => {}
+    mocked.dashboard
+      .mockReturnValueOnce(new Promise((resolve) => (finishOld = resolve)))
+      .mockResolvedValueOnce({ ...dashboard, active_users: { ...dashboard.active_users, dau: 42 } })
+    render(<UsagePage />)
+
+    await userEvent.click(screen.getByTestId("usage-days-7"))
+    expect(await screen.findByTestId("usage-tile-dau")).toHaveTextContent("42")
+    finishOld(dashboard)
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(screen.getByTestId("usage-tile-dau")).toHaveTextContent("42")
   })
 
   it("says so when the server refuses access", async () => {

@@ -168,10 +168,7 @@ def _turns(start: datetime, days: list[date]) -> dict[str, Any]:
                 FILTER (WHERE outcome = %s),
             percentile_cont(0.95) WITHIN GROUP (ORDER BY (attrs->>'ttft_ms')::bigint)
                 FILTER (WHERE outcome = %s),
-            AVG((attrs->>'tool_calls')::bigint),
-            COALESCE(SUM((attrs->>'input_tokens')::bigint), 0),
-            COALESCE(SUM((attrs->>'output_tokens')::bigint), 0),
-            COALESCE(SUM((attrs->>'cache_read_tokens')::bigint), 0)
+            AVG((attrs->>'tool_calls')::bigint)
         FROM telemetry_telemetryevent
         WHERE kind = %s AND occurred_at >= %s AND name <> ALL(%s)
         """,
@@ -203,6 +200,17 @@ def _turns(start: datetime, days: list[date]) -> dict[str, Any]:
         )
     }
     total, completed, stopped, failed = summary[:4]
+    # Spend includes turns the worker ran: a flushed turn answers a real question.
+    [tokens] = _rows(
+        """
+        SELECT COALESCE(SUM((attrs->>'input_tokens')::bigint), 0),
+            COALESCE(SUM((attrs->>'output_tokens')::bigint), 0),
+            COALESCE(SUM((attrs->>'cache_read_tokens')::bigint), 0)
+        FROM telemetry_telemetryevent
+        WHERE kind = %s AND occurred_at >= %s
+        """,
+        [EventKind.CHAT_TURN, start],
+    )
     [(background,)] = _rows(
         """
         SELECT COUNT(*) FROM telemetry_telemetryevent
@@ -218,11 +226,7 @@ def _turns(start: datetime, days: list[date]) -> dict[str, Any]:
         "duration_ms": {"p50": _ms(summary[4]), "p95": _ms(summary[5])},
         "ttft_ms": {"p50": _ms(summary[6]), "p95": _ms(summary[7])},
         "tool_calls_per_turn": round(float(summary[8]), 2) if summary[8] is not None else None,
-        "tokens": {
-            "input": summary[9],
-            "output": summary[10],
-            "cache_read": summary[11],
-        },
+        "tokens": {"input": tokens[0], "output": tokens[1], "cache_read": tokens[2]},
         "daily": [
             {
                 "duration_p50_ms": daily.get(day, (None,) * 3)[0],
@@ -390,8 +394,10 @@ def _schema_sizes(start: datetime, days: list[date]) -> dict[str, Any]:
             metric=SnapshotMetric.SCHEMA_BYTES, dimension="", day__gte=start.date()
         )
     }
+    # The newest complete night: one with skipped schemas withholds its total, and
+    # its per-tenant list would silently miss the tenants that were locked.
     latest_day = (
-        DailySnapshot.objects.filter(metric=SnapshotMetric.SCHEMA_BYTES)
+        DailySnapshot.objects.filter(metric=SnapshotMetric.SCHEMA_BYTES, dimension="")
         .order_by("-day")
         .values_list("day", flat=True)
         .first()
@@ -426,8 +432,20 @@ def _schema_sizes(start: datetime, days: list[date]) -> dict[str, Any]:
         if latest_day is not None
         else None
     )
+    last_skip = (
+        DailySnapshot.objects.filter(metric=SnapshotMetric.SCHEMAS_SKIPPED)
+        .order_by("-day")
+        .values_list("day", "value")
+        .first()
+    )
     return {
         "as_of": latest_day.isoformat() if latest_day else None,
+        # The latest night's count of schemas it could not measure.
+        "latest_skipped": (
+            {"day": last_skip[0].isoformat(), "schemas": last_skip[1]}
+            if last_skip and last_skip[1]
+            else None
+        ),
         "retained_bytes": retained,
         "total_daily": [total.get(day) for day in days],
         "top_tenants": top,
