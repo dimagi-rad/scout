@@ -42,8 +42,13 @@ from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
+    WorkspaceViewSchema,
 )
 from apps.workspaces.services import load_activity
+from apps.workspaces.task_dispatch import (
+    adefer_materialize_workspace,
+    adefer_rebuild_workspace_view_schema,
+)
 from apps.workspaces.tasks import resume_thread_after_materialization
 from tests.agent_doubles import FakeAgent
 from tests.tenant_access import ausable_connection
@@ -898,6 +903,73 @@ async def _hold_without_load(thread, text="visits?"):
     )
 
 
+async def _new_workspace_over_loaded_sources(slug):
+    """A two-source workspace whose sources another workspace already loaded."""
+    ws, tenant = await _workspace(slug)
+    other = await Tenant.objects.acreate(
+        external_id=f"t2-{slug}", provider="commcare", canonical_name=f"Other {slug}"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=other)
+    user, client = await _member(ws, tenant, f"chatter-{slug}@b.c")
+    await TenantMembership.objects.acreate(
+        user=user, tenant=other, connection=await ausable_connection(user, other.provider)
+    )
+    for source in (tenant, other):
+        await TenantSchema.objects.acreate(
+            tenant=source, schema_name=f"s_{source.external_id}", state=SchemaState.ACTIVE
+        )
+    return ws, user, client
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("queued_jobs", "checkpoint")
+class TestHoldForNewWorkspaceOverLoadedSources:
+    """Its sources serve, but it answers nothing until its own views are built."""
+
+    async def test_the_first_message_is_held_for_the_creation_load(self, agent_layer):
+        ws, user, client = await _new_workspace_over_loaded_sources("creation")
+        await adefer_materialize_workspace(
+            workspace_id=str(ws.id),
+            user_id=str(user.id),
+            load_intent=None,
+            only_unserved=True,
+            notify_thread=False,
+        )
+        thread_id = str(uuid.uuid4())
+
+        held = await _held_events(await _post(client, ws, thread_id, "visits?"))
+
+        assert agent_layer.inputs == []
+        assert held["thread_job_id"] is None
+        assert held["workspace_load_pending"] is True
+        assert await pending_requests.aflushable_thread_ids(ws.id) == [uuid.UUID(thread_id)]
+
+    async def test_a_message_after_the_load_is_held_for_the_view_build(self, agent_layer):
+        ws, _user, client = await _new_workspace_over_loaded_sources("view-build")
+        await adefer_rebuild_workspace_view_schema(workspace_id=str(ws.id))
+        thread_id = str(uuid.uuid4())
+
+        held = await _held_events(await _post(client, ws, thread_id, "visits?"))
+
+        assert agent_layer.inputs == []
+        assert held["workspace_load_pending"] is True
+
+    async def test_once_its_views_serve_it_is_answered(self, agent_layer):
+        ws, _user, client = await _new_workspace_over_loaded_sources("served")
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=ws, schema_name="v_served", state=SchemaState.ACTIVE
+        )
+        await adefer_rebuild_workspace_view_schema(workspace_id=str(ws.id))
+        thread_id = str(uuid.uuid4())
+
+        response = await _post(client, ws, thread_id, "visits?")
+        [chunk async for chunk in response.streaming_content]
+
+        assert len(agent_layer.inputs) == 1
+        assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+
+
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.usefixtures("queued_jobs", "checkpoint")
@@ -907,7 +979,7 @@ class TestHoldForWorkspaceLoad:
         thread_id = str(uuid.uuid4())
 
         with (
-            patch("apps.chat.views.aworkspace_own_load_pending", AsyncMock(return_value=True)),
+            patch("apps.chat.views.aworkspace_own_build_pending", AsyncMock(return_value=True)),
             patch.object(pending_requests, "workspace_build_pending", MagicMock(return_value=True)),
         ):
             held = await _held_events(await _post(client, ws, thread_id, "visits?"))
@@ -921,7 +993,7 @@ class TestHoldForWorkspaceLoad:
         ws, _tenant, _user, client = await _loading_chat("ro-idle", role=WorkspaceRole.READ)
         thread_id = str(uuid.uuid4())
 
-        with patch("apps.chat.views.aworkspace_own_load_pending", AsyncMock(return_value=False)):
+        with patch("apps.chat.views.aworkspace_own_build_pending", AsyncMock(return_value=False)):
             response = await _post(client, ws, thread_id, "visits?")
             [chunk async for chunk in response.streaming_content]
 
@@ -1178,17 +1250,17 @@ async def test_a_sibling_workspaces_run_is_not_a_load_of_this_one():
     )
 
     assert await load_activity.aworkspace_load_pending(ws.id)
-    assert not await load_activity.aworkspace_own_load_pending(ws)
+    assert not await load_activity.aworkspace_own_build_pending(ws)
 
     await TenantSchema.objects.filter(id=schema.id).aupdate(
         refresh_workspace_id=ws.id, state=SchemaState.PROVISIONING
     )
-    assert await load_activity.aworkspace_own_load_pending(ws)
+    assert await load_activity.aworkspace_own_build_pending(ws)
 
     await TenantSchema.objects.filter(id=schema.id).aupdate(
         refresh_workspace_id=None, load_workspace_id=ws.id
     )
-    assert await load_activity.aworkspace_own_load_pending(ws)
+    assert await load_activity.aworkspace_own_build_pending(ws)
 
 
 @pytest.mark.asyncio

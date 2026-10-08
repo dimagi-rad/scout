@@ -136,15 +136,16 @@ async def aworkspace_load_pending(workspace_id) -> bool:
     return await _aany_pending(_pending_loads([workspace_id]))
 
 
-async def aworkspace_own_load_pending(workspace) -> bool:
-    """Whether a load of this workspace itself is queued or running.
+async def aworkspace_own_build_pending(workspace) -> bool:
+    """Whether a load of this workspace itself, or a rebuild after one, is queued or running.
 
-    Unlike ``aworkspace_load_pending``, a sibling workspace's run on a shared
+    Unlike ``aworkspace_build_pending``, a sibling workspace's run on a shared
     tenant does not count: it builds that workspace's catalog, not this one's,
     and its end flushes nothing here. The workspace's own runs (a refresh, a
-    recipe's inline load) do.
+    recipe's inline load) do, as do the view and semantic rebuilds a new
+    workspace over already-loaded sources waits on.
     """
-    runs, recoveries, jobs = _pending_loads([workspace.id])
+    runs, recoveries, jobs = _pending_loads([workspace.id], _BUILD_TASK_NAMES)
     return await _aany_pending([runs.filter(owned_run_q(workspace)), recoveries, jobs])
 
 
