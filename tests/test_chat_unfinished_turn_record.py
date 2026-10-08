@@ -12,6 +12,7 @@ from typing import Annotated
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -386,3 +387,47 @@ async def test_a_thread_that_cannot_be_loaded_gets_no_half_written_marker():
 
     assert any(e["type"] == "error" for e in events)
     agent.aupdate_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_real_two_step_failure_saves_each_steps_text_once():
+    steps = iter(
+        [
+            AIMessage(
+                content="Let me check.",
+                tool_calls=[{"id": "toolu_1", "name": "run_query", "args": {}}],
+            ),
+            AIMessage(content="Found three rows"),
+        ]
+    )
+
+    async def agent(state: _State) -> dict:
+        step = next(steps)
+        # The fake model streams the text; the step keeps its own tool calls.
+        await GenericFakeChatModel(messages=iter([step.content])).ainvoke(state["messages"])
+        if state["messages"][-1].type == "tool":
+            raise ConnectionError("model connection dropped")
+        return {"messages": [step]}
+
+    def route(state: _State) -> str:
+        return "tools" if state["messages"][-1].tool_calls else END
+
+    def tools(state: _State) -> dict:
+        return {"messages": [ToolMessage(content="3", tool_call_id="toolu_1", name="run_query")]}
+
+    builder = StateGraph(_State)
+    builder.add_node("agent", agent)
+    builder.add_node("tools", tools)
+    builder.add_edge(START, "agent")
+    builder.add_conditional_edges("agent", route, ["tools", END])
+    builder.add_edge("tools", "agent")
+    graph = builder.compile(checkpointer=InMemorySaver())
+
+    async for _chunk in stream.langgraph_to_ui_stream(
+        graph, {"messages": [HumanMessage(content="q")]}, CONFIG
+    ):
+        pass
+
+    saved = (await graph.aget_state(CONFIG)).values["messages"]
+    assert saved[1].content == "Let me check."
+    assert saved[-1].content.startswith("Found three rows\n\n_This response didn't finish.")
