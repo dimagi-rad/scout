@@ -94,6 +94,7 @@ export function ChatPanel() {
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const updateThreadTitle = useAppStore((s) => s.uiActions.updateThreadTitle)
   const newThread = useAppStore((s) => s.uiActions.newThread)
+  const addSendingThread = useAppStore((s) => s.uiActions.addSendingThread)
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userId = useAppStore((s) => s.user?.id ?? null)
@@ -321,6 +322,16 @@ export function ChatPanel() {
         credentials: "include",
         headers: () => ({ "X-CSRFToken": getCsrfToken() }),
         body: () => ({ data: context }),
+        // The server lists a thread once its turn is accepted, long before it finishes.
+        fetch: async (input, init) => {
+          try {
+            return await fetch(input, init)
+          } finally {
+            if (chatWorkspaceId) {
+              useAppStore.getState().uiActions.settleSendingThread(chatWorkspaceId, chatThreadId)
+            }
+          }
+        },
         prepareSendMessagesRequest: ({ body, id, messages, trigger, messageId }) => {
           const sending = heldSends.get(chatThreadId)
           const data =
@@ -728,8 +739,14 @@ export function ChatPanel() {
     }
     resetOverloadState()
     setStoppedNotice(false)
-    forgetLocalThread(threadId)
+    listSendingThread(text)
     void sendMessage({ text })
+  }
+
+  /** A new chat's first message goes out: list it now, not when its turn ends (#859). */
+  function listSendingThread(text: string) {
+    if (isLocalThread(threadId) && activeDomainId) addSendingThread(activeDomainId, threadId, text)
+    forgetLocalThread(threadId)
   }
 
   /** Send the held request as this turn, with ``extra`` after it. */
@@ -749,7 +766,7 @@ export function ChatPanel() {
     })
     resetOverloadState()
     setStoppedNotice(false)
-    forgetLocalThread(threadId)
+    listSendingThread(text)
     void sendMessage({ id: messageId, role: "user", parts: [{ type: "text", text }] })
   }
 

@@ -272,3 +272,78 @@ describe("uiSlice.fetchThreads refreshes the workspace list on access loss", () 
     expect(revalidate).not.toHaveBeenCalled()
   })
 })
+
+describe("uiSlice sending threads (#859)", () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      activeDomainId: "ws-1",
+      threads: [thread("old", "Older chat")],
+      threadsStatus: "loaded",
+      threadsAccessDenialReason: null,
+      accessRetryOutcome: null,
+    })
+  })
+
+  afterEach(() => {
+    // Clears the slice's sending set between tests.
+    useAppStore.getState().uiActions.settleSendingThread("ws-1", "new")
+    vi.restoreAllMocks()
+  })
+
+  const ids = () => useAppStore.getState().threads.map((t) => t.id)
+
+  it("lists the new chat first, titled by its message, before the server does", () => {
+    vi.spyOn(api, "get").mockResolvedValue([] as never)
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "  How many visits?  ")
+
+    const [first] = useAppStore.getState().threads
+    expect(ids()).toEqual(["new", "old"])
+    expect(first).toMatchObject({ title: "How many visits?", title_source: "first_message" })
+  })
+
+  it("keeps it through a refetch that ran before the server had the row", async () => {
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?")
+    vi.spyOn(api, "get").mockResolvedValue([thread("old", "Older chat")] as never)
+
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(ids()).toEqual(["new", "old"])
+  })
+
+  it("takes the server's row once listed, without a duplicate", async () => {
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?")
+    const serverRow = { ...thread("new", "Untitled"), title: "How many visits?" }
+    vi.spyOn(api, "get").mockResolvedValue([serverRow, thread("old", "Older chat")] as never)
+
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(useAppStore.getState().threads).toEqual([serverRow, thread("old", "Older chat")])
+  })
+
+  it("drops it when the send is answered and the server never made the row", async () => {
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "new", "How many visits?")
+    const get = vi.spyOn(api, "get").mockResolvedValue([thread("old", "Older chat")] as never)
+
+    useAppStore.getState().uiActions.settleSendingThread("ws-1", "new")
+
+    await vi.waitFor(() => expect(ids()).toEqual(["old"]))
+    expect(get).toHaveBeenCalledWith("/api/workspaces/ws-1/threads/")
+  })
+
+  it("refetches nothing for a send in a thread already listed", () => {
+    const get = vi.spyOn(api, "get").mockResolvedValue([] as never)
+
+    useAppStore.getState().uiActions.addSendingThread("ws-1", "old", "Another question")
+    useAppStore.getState().uiActions.settleSendingThread("ws-1", "old")
+
+    expect(ids()).toEqual(["old"])
+    expect(useAppStore.getState().threads[0].title).toBe("Older chat")
+    expect(get).not.toHaveBeenCalled()
+  })
+
+  it("ignores a send from a workspace that is no longer shown", () => {
+    useAppStore.getState().uiActions.addSendingThread("ws-2", "new", "How many visits?")
+
+    expect(ids()).toEqual(["old"])
+  })
+})

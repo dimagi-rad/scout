@@ -75,6 +75,10 @@ export interface UiSlice {
     newThread: () => void
     selectThread: (id: string) => Promise<void>
     fetchThreads: (workspaceId: string) => Promise<void>
+    /** Lists a new chat whose first message is on its way, until the server lists it. */
+    addSendingThread: (workspaceId: string, threadId: string, text: string) => void
+    /** A send got its response, so the server's list now decides whether the thread is listed. */
+    settleSendingThread: (workspaceId: string, threadId: string) => void
     retryAccessVerification: (workspaceId: string) => Promise<void>
     updateThreadTitle: (
       threadId: string,
@@ -88,6 +92,16 @@ export interface UiSlice {
 
 export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice> = (set, get) => {
   const requests = createWorkspaceRequestGuard(get)
+  // Per workspace. A first turn's response arrives only once its agent is built, which
+  // can take seconds; until then a refetch would drop the new chat from the sidebar (#859).
+  const sendingThreads = new Map<string, Map<string, Thread>>()
+  const withSending = (workspaceId: string, threads: Thread[]): Thread[] => {
+    const listed = new Set(threads.map((thread) => thread.id))
+    const sending = [...(sendingThreads.get(workspaceId)?.values() ?? [])]
+      .filter((thread) => !listed.has(thread.id))
+      .reverse()
+    return sending.length ? [...sending, ...threads] : threads
+  }
   return {
     threadId: newLocalThreadId(),
     activeArtifactId: null,
@@ -125,7 +139,7 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
           const threads = await api.get<Thread[]>(`/api/workspaces/${workspaceId}/threads/`)
           if (!isCurrent()) return
           set({
-            threads,
+            threads: withSending(workspaceId, threads),
             threadsStatus: "loaded",
             threadsAccessDenialReason: null,
             threadsAccessRetryable: false,
@@ -151,6 +165,35 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
             void get().domainActions.revalidateDomains({ fresh: true })
           }
         }
+      },
+      addSendingThread: (workspaceId: string, threadId: string, text: string) => {
+        if (workspaceId !== get().activeDomainId) return
+        if (get().threads.some((thread) => thread.id === threadId)) return
+        const now = new Date().toISOString()
+        const placeholder: Thread = {
+          id: threadId,
+          // What the server titles it from too, until a short title is generated.
+          title: text.trim(),
+          title_is_custom: false,
+          title_source: "first_message",
+          created_at: now,
+          updated_at: now,
+          last_viewed_at: now,
+        }
+        let sending = sendingThreads.get(workspaceId)
+        if (!sending) {
+          sending = new Map()
+          sendingThreads.set(workspaceId, sending)
+        }
+        sending.set(threadId, placeholder)
+        set((state) => ({ threads: [placeholder, ...state.threads] }))
+      },
+      settleSendingThread: (workspaceId: string, threadId: string) => {
+        const wasSending = sendingThreads.get(workspaceId)?.delete(threadId) === true
+        // A retried send (after a busy 503, say) has no placeholder but may still be unlisted.
+        const unlisted = !get().threads.some((thread) => thread.id === threadId)
+        // A send refused before the server made the row drops the placeholder here.
+        if (wasSending || unlisted) void get().uiActions.fetchThreads(workspaceId)
       },
       retryAccessVerification: async (workspaceId: string) => {
         const isCurrent = requests.start("threads", workspaceId)
