@@ -555,6 +555,7 @@ async def _resume_claimed_job(
         timeout_s,
     )
     start = time.monotonic()
+    telemetry = background_turn("resume", user=user, workspace=workspace, thread_id=tj.thread.id)
     try:
         agent = await build_agent_for_resume(workspace, user, conversation_id=str(tj.thread.id))
         input_state = {
@@ -570,9 +571,6 @@ async def _resume_claimed_job(
         langfuse_handler = get_langfuse_callback(session_id=str(tj.thread.id), user_id=str(user.id))
         if langfuse_handler is not None:
             config["callbacks"] = [langfuse_handler]
-        telemetry = background_turn(
-            "resume", user=user, workspace=workspace, thread_id=tj.thread.id
-        )
         telemetry.with_callbacks(config)
         with resume_langfuse_span(
             thread_job_id=thread_job_id,
@@ -649,6 +647,8 @@ async def _resume_claimed_job(
         )
         return {"status": "agent_failed"}
     finally:
+        # A no-op once the run recorded itself; this catches a failed agent build.
+        await telemetry.aflush()
         elapsed = time.monotonic() - start
         logger.info(
             "resume: ainvoke complete tj=%s elapsed=%.2fs",

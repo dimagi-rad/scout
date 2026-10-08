@@ -115,6 +115,13 @@ async def afinish_load_timing(job_id, succeeded, *, now=None, require_runs=False
     # after that does not lose the event.
     if timing is None or not finished:
         return
+    try:
+        phase_ms = {
+            f"{phase}_ms": round(seconds * 1000) for phase, seconds in phase_seconds.items()
+        }
+    except (TypeError, ValueError):
+        logger.warning("Load timing for job %s has a non-numeric phase", job_id)
+        phase_ms = {}
     await recorder.arecord(
         EventKind.WORKSPACE_LOAD,
         workspace_id=timing.workspace_id,
@@ -124,7 +131,7 @@ async def afinish_load_timing(job_id, succeeded, *, now=None, require_runs=False
         attrs={
             "only_unserved": timing.only_unserved,
             "job_id": job_id,
-            **{f"{phase}_ms": round(seconds * 1000) for phase, seconds in phase_seconds.items()},
+            **phase_ms,
         },
     )
 

@@ -477,3 +477,14 @@ async def test_a_failed_load_is_recorded_failed():
 
     [load] = await _events(EventKind.WORKSPACE_LOAD)
     assert load.outcome == Outcome.FAILED
+
+
+def test_caller_attrs_never_overwrite_measured_counts():
+    telemetry = AgentRunTelemetry(EventKind.CHAT_TURN)
+    telemetry.attrs["tool_calls"] = 99
+    telemetry.on_llm_error(RuntimeError("overloaded"), run_id=uuid.uuid4())
+
+    [turn] = telemetry.events()
+
+    assert turn.attrs["tool_calls"] == 0
+    assert (turn.attrs["llm_calls"], turn.attrs["llm_errors"]) == (1, 1)

@@ -207,6 +207,7 @@ class AgentRunTelemetry(BaseCallbackHandler):
         ]
         tool_events = [*self._tool_events, *unfinished]
         attrs: dict[str, Any] = {
+            **self.attrs,
             "thread_id": self.thread_id,
             "tool_calls": len(tool_events),
             "tools_unfinished": len(unfinished),
@@ -214,7 +215,6 @@ class AgentRunTelemetry(BaseCallbackHandler):
             "llm_calls": self._llm_calls,
             "llm_errors": self._llm_errors,
             **self._tokens,
-            **self.attrs,
         }
         if self._first_token_ms is not None:
             attrs["ttft_ms"] = round(self._first_token_ms)
@@ -277,9 +277,9 @@ class AgentRunTelemetry(BaseCallbackHandler):
 
         A clean exit is completed and an error failed; the error still propagates.
         Nobody can press stop on a background run, so a cancellation (a deadline,
-        a lost lease, a worker shutdown) is failed too, flagged ``cancelled``.
+        a lost lease, a worker shutdown) is failed too, flagged ``cancelled``. The
+        clock runs from construction, so agent setup counts as for a live turn.
         """
-        self._started = time.monotonic()
         try:
             yield self
         except asyncio.CancelledError:

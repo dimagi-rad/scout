@@ -988,6 +988,35 @@ async def test_agent_timeout_marks_failed_and_persists_message():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_a_resume_whose_agent_build_fails_is_recorded_failed():
+    _, _, _, tj = await _make_thread_job_ready_to_resume(
+        email="build-fail@b.c",
+        ws_name="W-build-fail",
+        ext_id="t-build-fail",
+        schema_name="s_build_fail",
+        pj_id=10002,
+        tool_call="tc-build-fail",
+    )
+    agent = FakeAgent()
+    with (
+        patch(
+            "apps.chat.services.continuation.build_agent_for_resume",
+            AsyncMock(side_effect=RuntimeError("mcp down")),
+        ),
+        patch(
+            "apps.chat.services.agent_execution.build_agent_for_resume",
+            AsyncMock(return_value=agent),
+        ),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["status"] == "agent_failed"
+    turn = await TelemetryEvent.objects.aget(kind=EventKind.CHAT_TURN)
+    assert (turn.name, turn.outcome) == ("resume", Outcome.FAILED)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     "timeout_error",
     [
