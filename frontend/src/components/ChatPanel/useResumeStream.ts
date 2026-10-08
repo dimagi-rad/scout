@@ -115,7 +115,7 @@ export function useResumeStream(
       } catch {
         // A missed poll is caught up by the next; the answer also lands on reload.
         // One that keeps failing is retried less often.
-        delay = Math.min(delay * 2, RESUME_STREAM_IDLE_POLL_MS)
+        delay = Math.min(delay * 2, Math.max(pollMs, RESUME_STREAM_IDLE_POLL_MS))
       }
       if (!cancelled) timer = setTimeout(poll, delay)
     }

@@ -47,8 +47,11 @@ LIVE_FLUSH_INTERVAL_SECONDS = 1.0
 LIVE_CLOSE_TIMEOUT_SECONDS = 2.0
 # The end of a text part ends its model call's text: the stream ends one only for a
 # tool (some tools send their part only once they finish, or none if they fail),
-# thinking (which comes before a call's text, never after), a retried or fixed reply,
-# or the end of the turn. A tool part covers the rest.
+# thinking, a retried or fixed reply, or the end of the turn. A tool part covers the
+# rest. Thinking is taken to start the next call: a response's thinking comes before
+# its text. If one ever thought after its text, the split would only cost the
+# tailing chat a reload that finds nothing new, and the first half of that message
+# until the turn ends.
 _CALL_ENDS = frozenset({"text-end", "tool-input-available", "tool-output-available"})
 
 
@@ -266,8 +269,6 @@ class LiveTurnWriter:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await closing
             raise
-        except Exception:
-            logger.warning("Could not close the live stream", exc_info=True)
 
     async def _flush_periodically(self) -> None:
         while not self._broken and not self._stop.is_set():
@@ -310,7 +311,8 @@ class LiveTurnWriter:
                 rows[-1][2] = ends
             else:
                 rows.append([run, [text], ends])
-        # The turn's end: written even for a run a tool already ended, as a chat that
+        # The turn's end, merged into this run's last row if it is still buffered;
+        # else a row of its own, even for a run already ended, as a chat that
         # reloaded on that end is tailing for this one.
         if done:
             if rows and rows[-1][0] == self.run:
