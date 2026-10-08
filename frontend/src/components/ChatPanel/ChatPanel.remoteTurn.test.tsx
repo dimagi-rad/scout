@@ -475,6 +475,27 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
       expect(screen.getByTestId("chat-input")).toBeInTheDocument()
     })
 
+    it("reloads when a call ends at its tool, then tails the next call", async () => {
+      const server = mockServer()
+      server.liveRows = [{ id: 1, run: "call-1", text: "Let me check.", done: false }]
+      renderPanel()
+      expect(await screen.findByTestId("resume-stream")).toHaveTextContent("Let me check.")
+      const loads = server.messageLoads
+
+      // The tool starts: the first call's run ends, and its message is in the history.
+      server.liveRows.push({ id: 2, run: "call-1", text: "", done: true })
+      await act(() => vi.advanceTimersByTimeAsync(2_000))
+      await vi.waitFor(() => expect(server.messageLoads).toBe(loads + 1))
+      await vi.waitFor(() => expect(screen.queryByTestId("resume-stream")).toBeNull())
+      // Still running: the wait goes on, without showing the ended call twice.
+      expect(await screen.findByTestId("chat-remote-turn")).toBeInTheDocument()
+
+      server.liveRows.push({ id: 3, run: "call-2", text: "Visits rose.", done: false })
+      await act(() => vi.advanceTimersByTimeAsync(2_000))
+      expect(await screen.findByTestId("resume-stream")).toHaveTextContent("Visits rose.")
+      expect(screen.getByTestId("resume-stream")).not.toHaveTextContent("Let me check.")
+    })
+
     it("tails a remote turn no faster than the server writes it", async () => {
       const server = mockServer()
       server.liveRows = [{ id: 1, run: "r1", text: "Visits rose ", done: false }]

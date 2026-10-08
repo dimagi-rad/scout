@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 import time
+import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -60,7 +61,7 @@ async def test_text_is_written_at_most_once_per_interval():
     assert writer.rows_written == len(rows)
 
 
-async def test_each_model_call_is_a_run_and_a_new_reader_starts_at_the_current_one():
+async def test_each_model_call_is_a_run_ended_when_its_tool_starts():
     thread = await _thread("live-calls")
     writer = LiveTurnWriter(thread.id)
 
@@ -68,15 +69,17 @@ async def test_each_model_call_is_a_run_and_a_new_reader_starts_at_the_current_o
         writer.observe(_delta("Let me check."))
         writer.observe(_part(type="text-end", id="text-0"))
         writer.observe(_part(type="tool-input-available", toolCallId="t1", toolName="q", input={}))
+        await asyncio.sleep(0.05)
+
+        # The first call is in the checkpoint by now: a chat loading the thread while
+        # the tool runs finds its run ended, and so skips it.
+        latest = await resume_stream.aread_after(thread.id, 0)
+        assert [(chunk["text"], chunk["done"]) for chunk in latest] == [("Let me check.", True)]
+
         writer.observe(_part(type="tool-output-available", toolCallId="t1", output="rows"))
         writer.observe(_delta("Here it is."))
         await asyncio.sleep(0.05)
-
-        rows = await _rows(thread.id)
-        assert [row.text for row in rows] == ["Let me check.", "Here it is."]
-        assert rows[0].run != rows[1].run
-        # The first call is in the checkpoint by now; a chat loading the thread
-        # mid-turn tails only the call still being written.
+        # Mid-call, a new reader tails only the call still being written.
         assert [chunk["text"] for chunk in await resume_stream.aread_after(thread.id, 0)] == [
             "Here it is."
         ]
@@ -86,11 +89,11 @@ async def test_each_model_call_is_a_run_and_a_new_reader_starts_at_the_current_o
 
     rows = await _rows(thread.id)
     assert [(row.text, row.done) for row in rows] == [
-        ("Let me check.", False),
+        ("Let me check.", True),
         ("Here it is.", False),
         (" Visits rose.", True),
     ]
-    assert rows[-1].run == rows[-2].run == writer.run
+    assert rows[0].run != rows[1].run == rows[2].run == writer.run
 
 
 async def test_a_flush_spanning_two_calls_writes_a_row_for_each():
@@ -109,10 +112,25 @@ async def test_a_flush_spanning_two_calls_writes_a_row_for_each():
         writer.observe(_delta("Here it is."))
         await writer.close()
 
-    assert written == [("Let me check.", False), ("Here it is.", True)]
+    assert written == [("Let me check.", True), ("Here it is.", True)]
 
 
-async def test_a_retried_reply_is_a_call_of_its_own_but_reasoning_is_not():
+async def test_a_turn_ending_on_a_tool_still_writes_its_end():
+    thread = await _thread("live-ends-on-tool")
+    writer = LiveTurnWriter(thread.id)
+
+    with patch.object(resume_stream, "LIVE_FLUSH_INTERVAL_SECONDS", 0.01):
+        writer.observe(_delta("Loading your data."))
+        writer.observe(_part(type="tool-input-available", toolCallId="t1", toolName="q", input={}))
+        await asyncio.sleep(0.05)
+        await writer.close()
+
+    # The second done row is the turn's end, for a chat that reloaded on the first.
+    rows = await _rows(thread.id)
+    assert [(row.text, row.done) for row in rows] == [("Loading your data.", True), ("", True)]
+
+
+async def test_text_after_a_text_part_ends_is_the_next_call():
     thread = await _thread("live-retry")
     writer = LiveTurnWriter(thread.id)
 
@@ -122,39 +140,50 @@ async def test_a_retried_reply_is_a_call_of_its_own_but_reasoning_is_not():
     writer.observe(_part(type="text-start", id="text-1"))
     writer.observe(_delta("Retried."))
     writer.observe(_part(type="text-end", id="text-1"))
+    # The next call's thinking comes before its text.
     writer.observe(_part(type="reasoning-start", id="r"))
     writer.observe(_part(type="reasoning-delta", id="r", delta="thinking"))
-    writer.observe(_delta(" Still the same call."))
+    writer.observe(_delta("Next call."))
     await writer.close()
 
     rows = await _rows(thread.id)
-    assert [row.text for row in rows] == ["Cut off", "Retried. Still the same call."]
-    assert rows[0].run != rows[1].run
+    assert [(row.text, row.done) for row in rows] == [
+        ("Cut off", True),
+        ("Retried.", True),
+        ("Next call.", True),
+    ]
+    assert len({row.run for row in rows}) == 3
 
 
-async def test_closing_clears_earlier_turns_text_and_keeps_this_ones():
+async def test_closing_clears_earlier_turns_text_only():
     thread = await _thread("live-cleanup")
-    earlier = LiveTurnWriter(thread.id)
-    earlier.observe(_delta("An earlier answer."))
-    earlier.observe(_part(type="tool-output-available", toolCallId="t1", output="rows"))
-    earlier.observe(_delta(" More."))
-    await earlier.close()
-
-    writer = LiveTurnWriter(thread.id)
     with patch.object(resume_stream, "LIVE_FLUSH_INTERVAL_SECONDS", 0.01):
+        earlier = LiveTurnWriter(thread.id)
+        earlier.observe(_delta("An earlier answer."))
+        await asyncio.sleep(0.05)
+        earlier.observe(_delta(" More."))
+        await earlier.close()
+
+        writer = LiveTurnWriter(thread.id)
         writer.observe(_delta("This answer."))
         await asyncio.sleep(0.05)
+        # A run that took the thread once this one let go of it, before its close.
+        later = await ResumeStreamChunk.objects.acreate(
+            thread_id=thread.id, run=uuid.uuid4(), text="A newer turn.", done=False
+        )
         writer.observe(_delta(" Done."))
         await writer.close()
 
     rows = await _rows(thread.id)
-    # The earlier turn keeps its done row (pruned later); a chat reading this turn
-    # late still gets all of its text.
+    # The earlier turn keeps its done row (pruned later). This turn keeps all of its
+    # text, for a chat that reads it late, and the newer run is left alone.
     assert [(row.text, row.done) for row in rows] == [
         (" More.", True),
         ("This answer.", False),
+        ("A newer turn.", False),
         (" Done.", True),
     ]
+    assert later.id in {row.id for row in rows}
 
 
 async def test_only_answer_text_is_written():
