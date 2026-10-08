@@ -55,6 +55,13 @@ function nextActiveDomainId(
   return removed ? defaultDomainId(next) : activeId
 }
 
+// Tenant discovery (re-run on access checks, not just at login) auto-creates one workspace per
+// upstream opportunity or domain you can reach. Nobody added you to those, and a Connect admin
+// can gain dozens in one pass, which flooded the notice. Someone sharing one adds a second member.
+function isOwnDiscoveredWorkspace(workspace: WorkspaceListItem): boolean {
+  return workspace.is_auto_created && workspace.member_count <= 1
+}
+
 // Same array when absent, so subscribers selecting the list don't re-render.
 function withoutId(ids: string[], id: string): string[] {
   return ids.includes(id) ? ids.filter((other) => other !== id) : ids
@@ -120,7 +127,13 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
             // The active one is already open, e.g. a deep link waiting on this very refresh,
             // and one without upstream access would only open the lost-access gate.
             const added = domains
-              .filter((d) => !known.has(d.id) && d.id !== activeDomainId && workspaceHasAccess(d))
+              .filter(
+                (d) =>
+                  !known.has(d.id) &&
+                  d.id !== activeDomainId &&
+                  workspaceHasAccess(d) &&
+                  !isOwnDiscoveredWorkspace(d),
+              )
               .map((d) => d.id)
             const accessible = new Set(domains.filter(workspaceHasAccess).map((d) => d.id))
             const kept = current.addedDomainIds.filter(
