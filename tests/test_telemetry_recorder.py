@@ -211,7 +211,9 @@ def test_admin_count_is_bounded_when_the_estimate_is_unknown(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_a_filtered_admin_list_gets_a_real_count():
+def test_a_filtered_admin_list_gets_a_real_count(monkeypatch):
+    # With the bound at 1 the unfiltered estimate (2) would be used; a filter must not.
+    monkeypatch.setattr(admin_module, "EXACT_COUNT_BOUND", 1)
     TelemetryEvent.objects.bulk_create(
         [TelemetryEvent(kind=EventKind.CHAT_TURN), TelemetryEvent(kind=EventKind.TOOL_CALL)]
     )
