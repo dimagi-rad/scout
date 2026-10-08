@@ -5,7 +5,7 @@ from django.utils.functional import cached_property
 
 from apps.common.admin import ReadOnlyModelAdmin
 
-from .models import TelemetryEvent
+from .models import DailySnapshot, TelemetryEvent
 
 EXACT_COUNT_BOUND = 10_000
 
@@ -43,3 +43,10 @@ class TelemetryEventAdmin(ReadOnlyModelAdmin):
     show_full_result_count = False
     paginator = EstimatedCountPaginator
     ordering = ["-occurred_at"]
+
+
+@admin.register(DailySnapshot)
+class DailySnapshotAdmin(ReadOnlyModelAdmin):
+    list_display = ["day", "metric", "dimension", "value"]
+    show_full_result_count = False
+    ordering = ["-day", "metric"]

@@ -292,4 +292,7 @@ def test_prune_schedule_and_name_are_pinned():
         if name.startswith("apps.telemetry.")
     }
 
-    assert scheduled == {"apps.telemetry.tasks.prune_telemetry": "23 3 * * *"}
+    assert scheduled == {
+        "apps.telemetry.tasks.prune_telemetry": "23 3 * * *",
+        "apps.telemetry.tasks.snapshot_daily_metrics": "20 0 * * *",
+    }

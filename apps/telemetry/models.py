@@ -53,3 +53,43 @@ class TelemetryEvent(models.Model):
 
     def __str__(self) -> str:
         return f"{self.kind} {self.name} @ {self.occurred_at:%Y-%m-%d %H:%M:%S}"
+
+
+class SnapshotMetric:
+    SCHEMA_BYTES = "schema_bytes"
+    # Of the total, bytes in schemas not serving queries (failed candidates, teardowns).
+    SCHEMA_BYTES_RETAINED = "schema_bytes_retained"
+    THREADS = "threads"
+    ARTIFACTS = "artifacts"
+    TENANTS = "tenants"
+    WORKSPACES = "workspaces"
+    USERS = "users"
+    THREADS_UPDATED = "threads_updated"
+    ARTIFACTS_UPDATED = "artifacts_updated"
+    WORKSPACES_UPDATED = "workspaces_updated"
+    TENANTS_UPDATED = "tenants_updated"
+
+
+class DailySnapshot(models.Model):
+    """One gauge per day, such as a tenant's schema size or the number of threads.
+
+    ``updated_at`` columns keep only the last change, so the day's update counts
+    are captured here before the next change overwrites them.
+    """
+
+    day = models.DateField()
+    metric = models.CharField(max_length=64)
+    # A tenant id for per-tenant gauges; empty for platform totals.
+    dimension = models.CharField(max_length=64, blank=True, default="")
+    value = models.BigIntegerField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["day", "metric", "dimension"], name="telemetry_snapshot_unique_day"
+            )
+        ]
+        indexes = [models.Index(fields=["metric", "day"], name="telemetry_snapshot_metric_day")]
+
+    def __str__(self) -> str:
+        return f"{self.day} {self.metric} {self.dimension} = {self.value}"
