@@ -8,6 +8,7 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.test import AsyncClient
 from django.utils import timezone
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -325,3 +326,40 @@ async def test_a_finished_load_records_its_phases():
     assert load.duration_ms == 30_000
     assert load.attrs["loading_ms"] == 20_000
     assert load.attrs["building_model_ms"] == 10_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_switching_workspace_is_recorded_once():
+    user, ws, _thread, client = await _chat_member("telemetry-switch")
+    await TelemetryEvent.objects.all().adelete()
+
+    for _ in range(2):
+        resp = await client.post(
+            "/api/auth/last-workspace/",
+            data=json.dumps({"workspace_id": str(ws.id)}),
+            content_type="application/json",
+        )
+        assert resp.status_code == 200
+
+    [switch] = await _events(EventKind.WORKSPACE_SWITCH)
+    assert (switch.user_id, switch.workspace_id) == (user.id, ws.id)
+
+
+@pytest.mark.django_db
+def test_a_login_is_recorded(client):
+    user = User.objects.create_user(email="login@b.c", password="x")
+
+    assert client.login(email="login@b.c", password="x")
+
+    assert TelemetryEvent.objects.filter(kind=EventKind.LOGIN, user_id=user.id).count() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_login_event_failure_does_not_block_login():
+    await User.objects.acreate_user(email="login-fail@b.c", password="x")
+    client = AsyncClient()
+
+    with patch.object(TelemetryEvent, "save", side_effect=RuntimeError("down")):
+        assert await sync_to_async(client.login)(email="login-fail@b.c", password="x")

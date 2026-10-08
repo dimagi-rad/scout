@@ -36,6 +36,8 @@ from apps.common.http import parse_json_object
 from apps.common.utils import creator_display_name
 from apps.semantic.services.date_context import DateContextError, date_context
 from apps.semantic.services.query import raise_if_capacity_exhausted
+from apps.telemetry.models import EventKind
+from apps.telemetry.recorder import record
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
@@ -758,6 +760,13 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
         html_content = SANDBOX_HTML_TEMPLATE.replace("{{CSP_NONCE}}", csp_nonce)
         html_content = html_content.replace("{{ARTIFACT_DATA}}", artifact_json)
 
+        record(
+            EventKind.ARTIFACT_VIEW,
+            user_id=request.user.id,
+            workspace_id=workspace_id,
+            name=artifact.artifact_type,
+            attrs={"artifact_id": artifact.id, "version": artifact.version},
+        )
         response = HttpResponse(html_content, content_type="text/html")
         response["Content-Security-Policy"] = generate_csp_with_nonce(csp_nonce)
         response["X-Content-Type-Options"] = "nosniff"

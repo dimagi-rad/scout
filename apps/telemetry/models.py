@@ -17,6 +17,7 @@ class EventKind:
     RECIPE_RUN = "recipe.run"
     ARTIFACT_VIEW = "feature.artifact_view"
     WORKSPACE_SWITCH = "feature.workspace_switch"
+    LOGIN = "auth.login"
 
 
 class Outcome:
