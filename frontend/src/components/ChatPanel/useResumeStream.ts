@@ -32,7 +32,14 @@ export function useResumeStream(
   threadId: string,
   active: boolean,
   pollMs: number = RESUME_STREAM_POLL_MS,
-): { text: string; run: string | null; done: boolean; reset: () => void } {
+): {
+  text: string
+  run: string | null
+  done: boolean
+  reset: () => void
+  /** The run's end was acted on (a reload that failed): keep its text, clear ``done``. */
+  acknowledgeDone: () => void
+} {
   const scope = `${workspaceId}\u0000${threadId}`
   const [state, setState] = useState<StreamState>({ scope, run: null, text: "", done: false })
   if (state.scope !== scope) setState({ scope, run: null, text: "", done: false })
@@ -138,5 +145,9 @@ export function useResumeStream(
     )
   }, [])
 
-  return { text: state.text, run: state.run, done: state.done, reset }
+  const acknowledgeDone = useCallback(() => {
+    setState((prev) => (prev.done ? { ...prev, done: false } : prev))
+  }, [])
+
+  return { text: state.text, run: state.run, done: state.done, reset, acknowledgeDone }
 }

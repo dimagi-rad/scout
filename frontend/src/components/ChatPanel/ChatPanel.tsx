@@ -261,6 +261,7 @@ export function ChatPanel() {
     held.phase === "answering" || activeMaterializationJob?.state === "running"
   // Set below, once the turn this tab can't follow is known: the hooks it needs come first.
   const resetResumeStreamRef = useRef<() => void>(() => {})
+  const acknowledgeResumeDoneRef = useRef<() => void>(() => {})
   // Per thread, the user message that sends a held request itself ("Send now"), and
   // the request version it showed; a retry of that message names the version too.
   // Each thread's chat runs on its own, so another thread's send must not replace it.
@@ -540,6 +541,7 @@ export function ChatPanel() {
     resumeAnswering ? RESUME_STREAM_POLL_MS : REMOTE_TURN_STREAM_POLL_MS,
   )
   resetResumeStreamRef.current = resumeStream.reset
+  acknowledgeResumeDoneRef.current = resumeStream.acknowledgeDone
   /** Reload a remote turn's thread: a call of it ended, or the turn did. The load
    *  says which (turn_running), and refreshes the title and list only for the latter.
    *  ``follow``: the tail asked, mid-turn, so a failed load keeps following the turn;
@@ -700,7 +702,10 @@ export function ChatPanel() {
           remoteReloadRef.current?.chat === chat && remoteReloadRef.current.follow
         remoteReloadRef.current = null
         setServerTurn(followingRemoteTurn ? { chat, reloadKey } : null)
-        resetResumeStreamRef.current()
+        // Nothing was reloaded, so what the tail shows is still all the turn shows;
+        // only the end it reloaded for is spent, or it would reload again at once.
+        if (followingRemoteTurn) acknowledgeResumeDoneRef.current()
+        else resetResumeStreamRef.current()
       } finally {
         clearTimeout(timeout)
       }
@@ -1094,7 +1099,9 @@ export function ChatPanel() {
                 variant="outline"
                 size="sm"
                 disabled={isStreaming}
-                onClick={() => setMessageReloadKey((k) => k + 1)}
+                // Through the remote-turn path, so a retry that finds the turn over
+                // still refreshes its title, and one during it keeps following it.
+                onClick={() => reloadRemoteTurn(remoteTurnRunning)}
                 data-testid="chat-history-retry"
               >
                 Retry

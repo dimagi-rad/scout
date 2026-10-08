@@ -219,9 +219,15 @@ class LiveTurnWriter:
         self._flusher: asyncio.Task | None = None
 
     def observe(self, sse_chunk: str) -> None:
-        # Only these parts matter; skip parsing the rest (a tool's output can be large).
-        head = sse_chunk[:40]
-        if self._broken or not ('"text-' in head or '"tool-' in head):
+        if self._broken:
+            return
+        # The part's type leads every frame (stream.py's _sse), so only a text delta,
+        # whose text is needed, is parsed; a tool's output can be large.
+        head = sse_chunk[:48]
+        if any(f'"type": "{kind}"' in head for kind in _CALL_ENDS):
+            self._end_run()
+            return
+        if '"type": "text-delta"' not in head:
             return
         try:
             part = json.loads(sse_chunk.removeprefix("data: "))
@@ -229,13 +235,7 @@ class LiveTurnWriter:
             return
         if not isinstance(part, dict):
             return
-        kind = part.get("type")
-        if kind in _CALL_ENDS:
-            # Ended now, not when the next call's text starts: a chat that loads the
-            # thread while the tool runs has this call from history already.
-            self._end_run()
-            return
-        if kind != "text-delta":
+        if part.get("type") != "text-delta":
             return
         text = part.get("delta")
         if not isinstance(text, str) or not text:
@@ -250,6 +250,8 @@ class LiveTurnWriter:
             self._flusher = asyncio.ensure_future(self._flush_periodically())
 
     def _end_run(self) -> None:
+        # Now, not when the next call's text starts: a chat that loads the thread while
+        # the tool runs has this call from history already.
         if self._run_has_text and not self._run_ended:
             self._buffer.append((self.run, "", True))
             self._run_ended = True
@@ -284,7 +286,10 @@ class LiveTurnWriter:
                 # dropping its text between two rows.
                 self._stop.set()
                 if self._flusher is not None:
-                    await self._flusher
+                    # Its own share of the budget, so a slow write still leaves time for
+                    # the done row; a write left running is ahead of it on the
+                    # request's thread either way.
+                    await asyncio.wait({self._flusher}, timeout=LIVE_CLOSE_TIMEOUT_SECONDS / 2)
                 await self._write(done=True)
                 if self._first_row_id is not None:
                     await ResumeStreamChunk.objects.filter(

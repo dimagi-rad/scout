@@ -300,6 +300,12 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
     expect(await screen.findByTestId("chat-history-retry")).toBeInTheDocument()
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "and by month?" } })
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled()
+    // Nothing was reloaded, so the streamed call stays on screen.
+    expect(screen.getByTestId("resume-stream")).toHaveTextContent("Let me check.")
+    // The end it reloaded for is spent: no reload storm while the turn runs on.
+    const loadsAfterFailure = server.messageLoads
+    await act(() => vi.advanceTimersByTimeAsync(2_000))
+    expect(server.messageLoads).toBe(loadsAfterFailure)
 
     // Still following: the turn's end reloads it.
     server.messagesStatus = null
