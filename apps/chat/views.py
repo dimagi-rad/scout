@@ -38,6 +38,8 @@ from apps.chat.titles import afill_turn_title, short_thread_title
 from apps.chat.turn_lease import TurnLease, aacquire_turn_lease
 from apps.common.capacity import BUSY_ERROR, RETRY_AFTER_SECONDS, classify_capacity_error
 from apps.common.http import parse_json_object
+from apps.telemetry.agent_runs import AgentRunTelemetry
+from apps.telemetry.models import EventKind
 from apps.workspaces.access import access_denied_response, role_satisfies
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.services.load_activity import (
@@ -463,6 +465,10 @@ async def _start_turn(
     )
     if langfuse_handler is not None:
         config["callbacks"] = [langfuse_handler]
+    telemetry = AgentRunTelemetry(
+        EventKind.CHAT_TURN, user_id=user.id, workspace_id=workspace.id, thread_id=thread_id
+    )
+    config["callbacks"] = [*config.get("callbacks", []), telemetry]
 
     trace_ctx = langfuse_trace_context(
         session_id=str(thread_id),
@@ -513,7 +519,8 @@ async def _start_turn(
                 if claimed is not None:
                     await pending_requests.asettle(claimed)
 
-    response.streaming_content = _traced_stream()
+    telemetry.attrs["held_request"] = claimed is not None
+    response.streaming_content = telemetry.wrap_stream(_traced_stream())
     return response
 
 
