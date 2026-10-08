@@ -4,6 +4,7 @@ import logging
 from datetime import UTC, datetime
 
 from django.http import JsonResponse
+from django.utils import timezone
 
 from apps.chat import pending_requests, resume_stream
 from apps.chat.artifact_links import (
@@ -43,6 +44,13 @@ async def _thread_id_taken(thread_id) -> bool:
     )
 
 
+def _turn_running(thread) -> bool:
+    """An agent run holds the thread's turn lease (a chat turn in any tab, or a
+    background resume). A holder that died clears once its lease lapses."""
+    expires = thread.turn_lease_expires_at
+    return expires is not None and expires > timezone.now()
+
+
 def _thread_summary(thread):
     # Blank stays blank: the client owns the "Untitled" placeholder, so it can tell a
     # placeholder from a real title.
@@ -57,6 +65,7 @@ def _thread_summary(thread):
         "created_at": thread.created_at.isoformat(),
         "updated_at": thread.updated_at.isoformat(),
         "last_viewed_at": thread.last_viewed_at.isoformat() if thread.last_viewed_at else None,
+        "turn_running": _turn_running(thread),
     }
 
 
@@ -193,7 +202,7 @@ async def thread_messages_view(request, workspace_id, thread_id):
         if await _thread_id_taken(thread_id):
             return JsonResponse({"error": "Thread not found"}, status=404)
         if with_pending:
-            return JsonResponse({"messages": [], "pending_request": None})
+            return JsonResponse({"messages": [], "pending_request": None, "turn_running": False})
         return JsonResponse([], safe=False)
 
     try:
@@ -209,6 +218,10 @@ async def thread_messages_view(request, workspace_id, thread_id):
             {
                 "messages": ui_messages,
                 "pending_request": await pending_requests.athread_pending_request(thread.id),
+                # From the row read before the checkpoint, so a turn that ends in
+                # between reads as still running (the client polls again), never as
+                # finished with its answer missing.
+                "turn_running": _turn_running(thread),
             }
         )
     return JsonResponse(ui_messages, safe=False)
