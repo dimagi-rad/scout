@@ -5,6 +5,7 @@ from django.urls import path
 from apps.users.auth_views import (
     csrf_view,
     disconnect_provider_view,
+    last_workspace_view,
     login_view,
     logout_view,
     me_view,
@@ -30,6 +31,7 @@ app_name = "auth"
 urlpatterns = [
     path("csrf/", csrf_view, name="csrf"),
     path("me/", me_view, name="me"),
+    path("last-workspace/", last_workspace_view, name="last-workspace"),
     path("login/", login_view, name="login"),
     path("logout/", logout_view, name="logout"),
     path("providers/", providers_view, name="providers"),
