@@ -99,8 +99,9 @@ export interface UiSlice {
     openArtifact: (id: string) => void
     closeArtifact: () => void
     startLocalTurn: (threadId: string) => void
-    /** The turn this tab streamed is over: its row stops showing running until a refetch says otherwise. */
-    endLocalTurn: (threadId: string) => void
+    /** The turn this tab sent is over; the list's flag shows the thread from here.
+     *  False when it was no longer tracked (the chat page was left meanwhile). */
+    endLocalTurn: (threadId: string) => boolean
     /** The chat that streamed them is gone; the server's flag decides from here. */
     forgetLocalTurns: () => void
   }
@@ -144,18 +145,13 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
         set((state) => ({ localTurnThreadIds: new Set([...state.localTurnThreadIds, threadId]) }))
       },
       endLocalTurn: (threadId: string) => {
+        if (!get().localTurnThreadIds.has(threadId)) return false
         set((state) => {
           const local = new Set(state.localTurnThreadIds)
           local.delete(threadId)
-          return {
-            localTurnThreadIds: local,
-            threads: state.threads.map((thread) =>
-              thread.id === threadId && thread.turn_running
-                ? { ...thread, turn_running: false }
-                : thread,
-            ),
-          }
+          return { localTurnThreadIds: local }
         })
+        return true
       },
       forgetLocalTurns: () => {
         set({ localTurnThreadIds: new Set() })
@@ -209,7 +205,8 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
             threadsAccessRetryable: denial?.retryable === true,
             accessRetryOutcome: null,
           })
-          // Can't loop: threads refetch on a workspace switch, not when the list changes.
+          // Can't loop: threads refetch on a workspace switch, not when the list changes,
+          // and the sidebar's running-turn poll pauses on an access denial.
           if (denial && ACCESS_LOSS_REASONS.has(denial.reason)) {
             void get().domainActions.revalidateDomains({ fresh: true })
           }

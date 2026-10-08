@@ -413,6 +413,21 @@ describe("Sidebar running threads (#856)", () => {
     }
   })
 
+  it("does not poll while the list is denied", async () => {
+    mocks.state.threads = [running(true)]
+    mocks.state.threadsStatus = "error"
+    mocks.state.threadsAccessDenialReason = "tenant_access_lost"
+    try {
+      renderSidebar()
+      const mountFetches = mocks.fetchThreads.mock.calls.length
+      await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 4)
+      expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches)
+    } finally {
+      mocks.state.threadsStatus = "loaded"
+      mocks.state.threadsAccessDenialReason = null
+    }
+  })
+
   it("does not poll when no listed turn is running", async () => {
     mocks.state.threads = [running(false)]
     renderSidebar()

@@ -89,25 +89,31 @@ function withoutHeldMessages(messages: UIMessage[], heldIds: ReadonlySet<string>
   })
 }
 
-/** ``response`` with ``onEnd`` called once its body is done, failed or cancelled. */
-function untilBodyEnds(response: Response, onEnd: () => void): Response {
+/** ``response`` with ``onEnd`` called once its body is done (``clean``), or failed,
+ *  cancelled or its request aborted (Stop). */
+function untilBodyEnds(
+  response: Response,
+  signal: AbortSignal | null | undefined,
+  onEnd: (clean: boolean) => void,
+): Response {
   if (!response.body) {
-    onEnd()
+    onEnd(true)
     return response
   }
   const reader = response.body.getReader()
   let ended = false
-  const end = () => {
+  const end = (clean = false) => {
     if (ended) return
     ended = true
-    onEnd()
+    onEnd(clean)
   }
+  signal?.addEventListener("abort", () => end(), { once: true })
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const { done, value } = await reader.read()
         if (done) {
-          end()
+          end(true)
           controller.close()
         } else {
           controller.enqueue(value)
@@ -379,16 +385,26 @@ export function ChatPanel() {
         fetch: async (input, init) => {
           const { uiActions } = useAppStore.getState()
           uiActions.startLocalTurn(chatThreadId)
+          // An answered turn's end refetches the list (the status effects); any other
+          // end does it here, as the server may still be running the turn or another
+          // tab's, and the list's flag is what shows the thread from now on.
+          const endTurn = (refetch: boolean) => {
+            if (uiActions.endLocalTurn(chatThreadId) && refetch && chatWorkspaceId) {
+              void uiActions.fetchThreads(chatWorkspaceId)
+            }
+          }
           let response: Response
           try {
             response = await fetch(input, init)
           } catch (fetchError) {
-            uiActions.endLocalTurn(chatThreadId)
+            endTurn(true)
             throw fetchError
           } finally {
             if (chatWorkspaceId) uiActions.settleSendingThread(chatWorkspaceId, chatThreadId)
           }
-          return untilBodyEnds(response, () => uiActions.endLocalTurn(chatThreadId))
+          return untilBodyEnds(response, init?.signal, (clean) =>
+            endTurn(!clean || !response.ok),
+          )
         },
         prepareSendMessagesRequest: ({ body, id, messages, trigger, messageId }) => {
           const sending = heldSends.get(chatThreadId)

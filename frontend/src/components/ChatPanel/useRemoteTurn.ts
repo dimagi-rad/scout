@@ -7,7 +7,8 @@ export const REMOTE_TURN_POLL_MS = 3000
 export const REMOTE_TURN_MAX_POLL_MS = 15_000
 const BACKOFF = 1.5
 // Past this many failed polls in a row (access revoked, an outage), stop waiting and
-// let the reload decide: it shows the turn running again, or offers its retry.
+// let the reload decide: it shows the turn running again (and the wait restarts), or
+// fails and offers its retry. A 403 or outage fails the reload too.
 export const REMOTE_TURN_MAX_FAILURES = 5
 
 /**
@@ -34,6 +35,12 @@ export function useRemoteTurnPoll(
     let delay = REMOTE_TURN_POLL_MS
     let failures = 0
     let attempt: AbortController | null = null
+    let inFlight = false
+
+    const finish = () => {
+      cancelled = true
+      onDoneRef.current()
+    }
 
     async function poll() {
       if (typeof document !== "undefined" && document.hidden) {
@@ -45,6 +52,7 @@ export function useRemoteTurnPoll(
       // A hung request would stop the chain, as the next poll is scheduled after it.
       const controller = new AbortController()
       attempt = controller
+      inFlight = true
       const timeout = setTimeout(() => controller.abort(), REMOTE_TURN_MAX_POLL_MS)
       try {
         const response = await api.get<{ turn_running?: boolean }>(
@@ -53,7 +61,7 @@ export function useRemoteTurnPoll(
         )
         if (cancelled) return
         if (!response.turn_running) {
-          onDoneRef.current()
+          finish()
           return
         }
         failures = 0
@@ -65,21 +73,30 @@ export function useRemoteTurnPoll(
           (error instanceof ApiError && error.status === 404)
           || failures >= REMOTE_TURN_MAX_FAILURES
         ) {
-          onDoneRef.current()
+          finish()
           return
         }
       } finally {
+        inFlight = false
         clearTimeout(timeout)
       }
       delay = Math.min(delay * BACKOFF, REMOTE_TURN_MAX_POLL_MS)
       timer = setTimeout(poll, delay)
     }
 
+    // Back on the tab, check now rather than at the hidden-tab interval.
+    const pollOnReturn = () => {
+      if (document.hidden || inFlight || cancelled) return
+      if (timer) clearTimeout(timer)
+      void poll()
+    }
     timer = setTimeout(poll, delay)
+    document.addEventListener("visibilitychange", pollOnReturn)
     return () => {
       cancelled = true
       if (timer) clearTimeout(timer)
       attempt?.abort()
+      document.removeEventListener("visibilitychange", pollOnReturn)
     }
   }, [active, workspaceId, threadId])
 }

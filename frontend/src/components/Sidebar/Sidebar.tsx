@@ -213,15 +213,20 @@ export function Sidebar() {
     .sort()
     .join(",")
   useEffect(() => {
-    if (!activeDomainId || !runningThreadIds) return
+    // A denial keeps the old list (still running); refetching it would only repeat the denial.
+    if (!activeDomainId || !runningThreadIds || threadsAccessDenialReason) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
     let delay = RUNNING_THREADS_POLL_MS
     const schedule = () => {
       timer = setTimeout(async () => {
-        if (!document.hidden) await fetchThreads(activeDomainId)
+        // Hidden ticks fetch nothing, so they earn no backoff.
+        const hidden = document.hidden
+        if (!hidden) await fetchThreads(activeDomainId)
         if (cancelled) return
-        delay = Math.min(delay * 1.5, RUNNING_THREADS_MAX_POLL_MS)
+        delay = hidden
+          ? RUNNING_THREADS_POLL_MS
+          : Math.min(delay * 1.5, RUNNING_THREADS_MAX_POLL_MS)
         schedule()
       }, delay)
     }
@@ -230,7 +235,7 @@ export function Sidebar() {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [activeDomainId, runningThreadIds, fetchThreads])
+  }, [activeDomainId, runningThreadIds, threadsAccessDenialReason, fetchThreads])
 
   // Refetch threads when jobs complete so the sidebar green-dot indicator
   // picks up the bumped Thread.updated_at from the resume task.

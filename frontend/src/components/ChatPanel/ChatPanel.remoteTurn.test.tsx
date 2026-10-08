@@ -56,6 +56,7 @@ function mockServer() {
     chatPosts: 0,
     /** Detail polls answer with this status instead, while set. */
     detailStatus: null as number | null,
+    chatReply: "stream" as "stream" | "busy" | "network",
     /** Holds this tab's own turn open until called. */
     endReply: () => {},
     finish() {
@@ -66,6 +67,10 @@ function mockServer() {
     const url = String(input)
     if (url === "/api/chat/") {
       server.chatPosts += 1
+      if (server.chatReply === "network") throw new TypeError("Failed to fetch")
+      if (server.chatReply === "busy") {
+        return Response.json({ error: "A response is still being generated." }, { status: 409 })
+      }
       const ended = new Promise<void>((resolve) => (server.endReply = resolve))
       return createUIMessageStreamResponse({
         stream: createUIMessageStream({
@@ -99,7 +104,11 @@ function mockServer() {
     if (/\/threads\/[^/]+\/viewed\/$/.test(url)) return new Response(null, { status: 204 })
     if (/\/workspaces\/[^/]+\/threads\/$/.test(url)) {
       server.listFetches += 1
-      return Response.json(useAppStore.getState().threads)
+      return Response.json(
+        useAppStore.getState().threads.map((thread) => ({
+          ...thread, turn_running: thread.id === THREAD ? server.running : false,
+        })),
+      )
     }
     return Response.json({}, { status: 404 })
   }))
@@ -289,7 +298,109 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
     await vi.waitFor(() =>
       expect(useAppStore.getState().localTurnThreadIds.has(THREAD)).toBe(false),
     )
-    expect(useAppStore.getState().threads[0].turn_running).toBe(false)
+    // The turn's end refetches the list, whose flag shows the thread from here.
+    await vi.waitFor(() => expect(useAppStore.getState().threads[0].turn_running).toBe(false))
     expect(server.detailPolls).toEqual([])
+  })
+
+  describe("this tab's own turn", () => {
+    function listRunning(turnRunning: boolean) {
+      useAppStore.setState({
+        threads: [{
+          id: THREAD, title: "Visits", title_is_custom: false, title_source: "generated",
+          created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z",
+          last_viewed_at: null, turn_running: turnRunning,
+        }],
+      })
+    }
+    async function sendFollowUp() {
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "and by month?" } })
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send message" })))
+    }
+    const local = () => useAppStore.getState().localTurnThreadIds.has(THREAD)
+
+    it("ends when Stop aborts its stream", async () => {
+      const server = mockServer()
+      server.finish()
+      renderPanel()
+      await screen.findByText("Here are the visits.")
+      await sendFollowUp()
+      await screen.findByText("By month: rising.")
+      expect(local()).toBe(true)
+
+      await act(async () => fireEvent.click(screen.getByTestId("chat-stop")))
+
+      await vi.waitFor(() => expect(local()).toBe(false))
+    })
+
+    it("ends on a refused send, leaving another tab's running turn listed", async () => {
+      const server = mockServer()
+      server.finish()
+      server.chatReply = "busy"
+      listRunning(true)
+      renderPanel()
+      await screen.findByText("Here are the visits.")
+      // Another tab took the thread after this one loaded it.
+      server.running = true
+      await sendFollowUp()
+
+      await vi.waitFor(() => expect(server.chatPosts).toBeGreaterThan(0))
+      await vi.waitFor(() => expect(local()).toBe(false))
+      expect(useAppStore.getState().threads[0].turn_running).toBe(true)
+    })
+
+    it("ends when the request never reaches the server, refetching the list", async () => {
+      const server = mockServer()
+      server.finish()
+      server.chatReply = "network"
+      listRunning(false)
+      renderPanel()
+      await screen.findByText("Here are the visits.")
+      const listFetches = server.listFetches
+      // Another tab takes the thread meanwhile.
+      server.running = true
+      await sendFollowUp()
+
+      await vi.waitFor(() => expect(server.chatPosts).toBe(1))
+      await vi.waitFor(() => expect(local()).toBe(false))
+      await vi.waitFor(() => expect(server.listFetches).toBeGreaterThan(listFetches))
+      await vi.waitFor(() => expect(useAppStore.getState().threads[0].turn_running).toBe(true))
+    })
+
+    it("goes to the server's flag, with one refetch, when the chat page unmounts mid-turn", async () => {
+      const server = mockServer()
+      server.finish()
+      listRunning(false)
+      const { unmount } = renderPanel()
+      await screen.findByText("Here are the visits.")
+      await sendFollowUp()
+      await screen.findByText("By month: rising.")
+      const listFetches = server.listFetches
+
+      unmount()
+
+      expect(local()).toBe(false)
+      await vi.waitFor(() => expect(server.listFetches).toBe(listFetches + 1))
+      await act(async () => server.endReply())
+    })
+  })
+
+  it("checks at once when the tab becomes visible again", async () => {
+    const server = mockServer()
+    renderPanel()
+    await screen.findByTestId("chat-remote-turn")
+    Object.defineProperty(document, "hidden", { configurable: true, value: true })
+    try {
+      await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_POLL_MS))
+      expect(server.detailPolls).toEqual([])
+    } finally {
+      Object.defineProperty(document, "hidden", { configurable: true, value: false })
+    }
+    server.finish()
+
+    await act(async () => fireEvent(document, new Event("visibilitychange")))
+
+    await vi.waitFor(() => expect(server.detailPolls).toEqual([THREAD]))
+    expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
   })
 })
