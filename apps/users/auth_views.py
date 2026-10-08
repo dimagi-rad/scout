@@ -55,7 +55,7 @@ from apps.users.services.token_refresh import (
     token_health,
     token_needs_refresh,
 )
-from apps.workspaces.access import aworkspace_read_allowed
+from apps.workspaces.access import aresolve_workspace_access_ex
 from apps.workspaces.models import WorkspaceMembership
 
 logger = logging.getLogger(__name__)
@@ -256,7 +256,9 @@ async def last_workspace_view(request):
         return err
     user = request._authenticated_user
     try:
-        allowed = await aworkspace_read_allowed(user, workspace_id)
+        allowed = (
+            await aresolve_workspace_access_ex(user, workspace_id, verification=None)
+        ).granted
     except (ValidationError, ValueError):
         allowed = False
     if not allowed:

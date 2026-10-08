@@ -25,7 +25,8 @@ function deferred<T>() {
 
 function signedIn(account = USER_A) {
   const store = createAppStore()
-  store.setState({ user: account, authStatus: "authenticated" })
+  // Already remembered, so seeding the workspace sends no save that the tests would count.
+  store.setState({ user: { ...account, last_workspace_id: "workspace-a" }, authStatus: "authenticated" })
   store.getState().domainActions.setActiveDomain("workspace-a")
   return store
 }

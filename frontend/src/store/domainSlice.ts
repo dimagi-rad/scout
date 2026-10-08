@@ -75,6 +75,7 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope &
   let revalidation: Promise<RevalidateResult> | null = null
   // Last id sent to the server, so a quick A -> B -> A isn't deduped against a copy B has yet to update.
   let requestedWorkspaceId: string | null = null
+  let saveSeq = 0
 
   return {
     domains: [],
@@ -171,6 +172,7 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope &
         const { user } = get()
         if (user && (requestedWorkspaceId ?? user.last_workspace_id) !== id) {
           requestedWorkspaceId = id
+          const seq = ++saveSeq
           // Best effort: a 404 for a deep link to a workspace we aren't a member of is expected,
           // so the local copy only follows once the server accepted it.
           api
@@ -178,13 +180,13 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope &
             .then(() => {
               const current = get().user
               // A newer switch owns the remembered value now.
-              if (requestedWorkspaceId !== id) return
+              if (seq !== saveSeq) return
               if (current && current.id === user.id) {
                 set({ user: { ...current, last_workspace_id: id } })
               }
             })
             .catch(() => {
-              if (requestedWorkspaceId === id) requestedWorkspaceId = null
+              if (seq === saveSeq) requestedWorkspaceId = null
             })
         }
         set({ activeDomainId: id, addedDomainIds: withoutId(get().addedDomainIds, id) })

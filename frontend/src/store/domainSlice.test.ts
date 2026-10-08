@@ -159,6 +159,7 @@ describe("domainSlice — remembered workspace (#860)", () => {
   })
 
   afterEach(() => {
+    useAppStore.setState({ user: null })
     vi.restoreAllMocks()
   })
 
