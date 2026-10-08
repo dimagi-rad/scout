@@ -26,6 +26,8 @@ export interface Thread {
   created_at: string
   updated_at: string
   last_viewed_at: string | null
+  /** An agent run holds the thread's turn (in any tab, or a background resume). */
+  turn_running?: boolean
 }
 
 export type ThreadsStatus = "idle" | "loading" | "loaded" | "error"
@@ -72,6 +74,9 @@ export interface UiSlice {
   // The server's message when "Retry verification" was itself denied. Kept apart from
   // the threads denial so the lost-access gate shows only what the retry found.
   accessRetryOutcome: string | null
+  // Threads whose turn this tab is streaming; it knows when they end, so the sidebar
+  // shows them running without polling the list for them (#856).
+  localTurnThreadIds: ReadonlySet<string>
   uiActions: {
     newThread: () => void
     selectThread: (id: string) => Promise<void>
@@ -93,6 +98,12 @@ export interface UiSlice {
     ) => Promise<Thread>
     openArtifact: (id: string) => void
     closeArtifact: () => void
+    startLocalTurn: (threadId: string) => void
+    /** The turn this tab sent is over; the list's flag shows the thread from here.
+     *  False when it was no longer tracked (the chat page was left meanwhile). */
+    endLocalTurn: (threadId: string) => boolean
+    /** The chat that streamed them is gone; the server's flag decides from here. */
+    forgetLocalTurns: () => void
   }
 }
 
@@ -128,7 +139,23 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
     threadsAccessDenialReason: null,
     threadsAccessRetryable: false,
     accessRetryOutcome: null,
+    localTurnThreadIds: new Set(),
     uiActions: {
+      startLocalTurn: (threadId: string) => {
+        set((state) => ({ localTurnThreadIds: new Set([...state.localTurnThreadIds, threadId]) }))
+      },
+      endLocalTurn: (threadId: string) => {
+        if (!get().localTurnThreadIds.has(threadId)) return false
+        set((state) => {
+          const local = new Set(state.localTurnThreadIds)
+          local.delete(threadId)
+          return { localTurnThreadIds: local }
+        })
+        return true
+      },
+      forgetLocalTurns: () => {
+        set({ localTurnThreadIds: new Set() })
+      },
       newThread: () => {
         set({ threadId: newLocalThreadId(), activeArtifactId: null })
       },
@@ -178,7 +205,8 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
             threadsAccessRetryable: denial?.retryable === true,
             accessRetryOutcome: null,
           })
-          // Can't loop: threads refetch on a workspace switch, not when the list changes.
+          // Can't loop: threads refetch on a workspace switch, not when the list changes,
+          // and the sidebar's running-turn poll pauses on an access denial.
           if (denial && ACCESS_LOSS_REASONS.has(denial.reason)) {
             void get().domainActions.revalidateDomains({ fresh: true })
           }

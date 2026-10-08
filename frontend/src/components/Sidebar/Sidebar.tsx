@@ -39,6 +39,11 @@ const ACCESS_DENIAL_SUMMARY: Record<AccessDenialReason, string> = {
 const DOMAIN_REVALIDATE_MIN_INTERVAL_MS = 15_000
 // Catches a grant while you stay on the tab. Slow on purpose: prod and staging share one RDS.
 const DOMAIN_REVALIDATE_POLL_MS = 60_000
+// While a listed thread's turn runs, refetch so its spinner clears when it ends; a
+// turn's own end refetches too, but can land just before the server lets go of it.
+export const RUNNING_THREADS_POLL_MS = 5_000
+export const RUNNING_THREADS_MAX_POLL_MS = 30_000
+const RUNNING_THREADS_STALL_MS = 30_000
 
 export function Sidebar() {
   const navigate = useNavigate()
@@ -200,6 +205,46 @@ export function Sidebar() {
       fetchThreads(activeDomainId)
     }
   }, [activeDomainId, fetchThreads])
+
+  const localTurnThreadIds = useAppStore((s) => s.localTurnThreadIds)
+  // This tab's own turns end with a refetch of their own, so only others are polled for.
+  const runningThreadIds = threads
+    .filter((thread) => thread.turn_running && !localTurnThreadIds.has(thread.id))
+    .map((thread) => thread.id)
+    .sort()
+    .join(",")
+  useEffect(() => {
+    // A denial keeps the old list (still running); refetching it would only repeat the denial.
+    if (!activeDomainId || !runningThreadIds || threadsAccessDenialReason) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let delay = RUNNING_THREADS_POLL_MS
+    const schedule = () => {
+      timer = setTimeout(async () => {
+        // Hidden ticks fetch nothing, so they earn no backoff.
+        const hidden = document.hidden
+        // A stalled request must not end the chain; fetchThreads takes no signal.
+        if (!hidden) {
+          let stall: ReturnType<typeof setTimeout> | undefined
+          await Promise.race([
+            fetchThreads(activeDomainId),
+            new Promise((resolve) => (stall = setTimeout(resolve, RUNNING_THREADS_STALL_MS))),
+          ])
+          clearTimeout(stall)
+        }
+        if (cancelled) return
+        delay = hidden
+          ? RUNNING_THREADS_POLL_MS
+          : Math.min(delay * 1.5, RUNNING_THREADS_MAX_POLL_MS)
+        schedule()
+      }, delay)
+    }
+    schedule()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [activeDomainId, runningThreadIds, threadsAccessDenialReason, fetchThreads])
 
   // Refetch threads when jobs complete so the sidebar green-dot indicator
   // picks up the bumped Thread.updated_at from the resume task.
@@ -397,6 +442,7 @@ export function Sidebar() {
                 ? new Date(thread.last_viewed_at)
                 : new Date(thread.created_at)
               const hasUnread = lastUpdated > baseline
+              const turnRunning = thread.turn_running || localTurnThreadIds.has(thread.id)
               return (
                 <button
                   key={thread.id}
@@ -440,6 +486,14 @@ export function Sidebar() {
                           {job.progress.source}
                         </span>
                       ) : null}
+                    </span>
+                  ) : turnRunning ? (
+                    <span
+                      className="flex items-center"
+                      title="Working on a reply"
+                      data-testid={`sidebar-thread-running-${thread.id}`}
+                    >
+                      <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />
                     </span>
                   ) : hasUnread ? (
                     <span

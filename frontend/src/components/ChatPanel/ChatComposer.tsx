@@ -19,6 +19,8 @@ interface ChatComposerProps {
   mode?: "send" | "add"
   /** The chat can't start a turn yet (its history is loading); typing still works. */
   sendBlocked?: boolean
+  /** Why the send is blocked, when it isn't the history loading. */
+  sendBlockedReason?: string
 }
 
 export function ChatComposer({
@@ -30,6 +32,7 @@ export function ChatComposer({
   placeholder = "Ask about your data...",
   mode = "send",
   sendBlocked = false,
+  sendBlockedReason = "Loading the conversation...",
 }: ChatComposerProps) {
   const adding = mode === "add"
   const blocked = sendBlocked && !adding
@@ -114,7 +117,7 @@ export function ChatComposer({
           <Square className="w-4 h-4" aria-hidden="true" />
         </Button>
       ) : (
-        <span className="flex" title={blocked ? "Loading the conversation..." : undefined}>
+        <span className="flex" title={blocked ? sendBlockedReason : undefined}>
           <Button
             type="submit"
             size="icon"
