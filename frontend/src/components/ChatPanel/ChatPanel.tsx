@@ -278,6 +278,8 @@ export function ChatPanel() {
   // The chat whose reload a remote turn asked for: a failed one keeps following the
   // turn instead of unblocking a send into its lease.
   const remoteReloadRef = useRef<{ chat: Chat<UIMessage>; follow: boolean } | null>(null)
+  // A remote turn's closing reload failed: its Retry still owes the title and list.
+  const remoteEndOwedRef = useRef<Chat<UIMessage> | null>(null)
   const [serverTurn, setServerTurn] =
     useState<{ chat: Chat<UIMessage>; reloadKey: number } | null>(null)
   // A left chat can finish after the panel is gone; it must not start polls then.
@@ -700,6 +702,8 @@ export function ChatPanel() {
         // send into its lease.
         const followingRemoteTurn =
           remoteReloadRef.current?.chat === chat && remoteReloadRef.current.follow
+        remoteEndOwedRef.current =
+          remoteReloadRef.current?.chat === chat && !followingRemoteTurn ? chat : null
         remoteReloadRef.current = null
         setServerTurn(followingRemoteTurn ? { chat, reloadKey } : null)
         // Nothing was reloaded, so what the tail shows is still all the turn shows;
@@ -1099,9 +1103,16 @@ export function ChatPanel() {
                 variant="outline"
                 size="sm"
                 disabled={isStreaming}
-                // Through the remote-turn path, so a retry that finds the turn over
-                // still refreshes its title, and one during it keeps following it.
-                onClick={() => reloadRemoteTurn(remoteTurnRunning)}
+                // A remote turn's goes through its path, so a retry that finds the
+                // turn over still refreshes its title, and one during it keeps
+                // following it.
+                onClick={() => {
+                  if (remoteTurnRunning || remoteEndOwedRef.current === chat) {
+                    reloadRemoteTurn(remoteTurnRunning)
+                  } else {
+                    setMessageReloadKey((k) => k + 1)
+                  }
+                }}
                 data-testid="chat-history-retry"
               >
                 Retry

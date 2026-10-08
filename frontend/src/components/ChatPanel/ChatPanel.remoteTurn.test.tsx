@@ -58,6 +58,8 @@ function mockServer() {
     detailStatus: null as number | null,
     /** Message loads answer with this status instead, while set. */
     messagesStatus: null as number | null,
+    /** Message loads wait for this, while set. */
+    messagesHeld: null as Promise<void> | null,
     chatReply: "stream" as "stream" | "busy" | "network",
     /** What the running turn has streamed for chats that did not start it. */
     liveRows: [] as { id: number; run: string; text: string; done: boolean }[],
@@ -93,6 +95,7 @@ function mockServer() {
     const messages = url.match(/\/threads\/([^/]+)\/messages\//)
     if (messages) {
       server.messageLoads += 1
+      if (server.messagesHeld) await server.messagesHeld
       if (server.messagesStatus) return Response.json({}, { status: server.messagesStatus })
       const mine = messages[1] === THREAD
       return Response.json({
@@ -267,6 +270,32 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
     server.finish()
     await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_MAX_POLL_MS))
     expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
+  })
+
+  it("carries on tailing after a failed reload, without dropping what it missed", async () => {
+    const server = mockServer()
+    server.liveRows = [{ id: 1, run: "call-1", text: "Let me check.", done: false }]
+    renderPanel()
+    await screen.findByTestId("resume-stream")
+    let fail!: () => void
+    server.messagesHeld = new Promise((resolve) => (fail = resolve))
+    server.messagesStatus = 503
+
+    // The next call starts (a reload, held), then runs on and ends meanwhile.
+    server.liveRows.push({ id: 2, run: "call-2", text: "Visits rose ", done: false })
+    await act(() => vi.advanceTimersByTimeAsync(1_000))
+    const loads = server.messageLoads
+    server.liveRows.push({ id: 3, run: "call-2", text: "in March.", done: false })
+    server.liveRows.push({ id: 4, run: "call-2", text: "", done: true })
+    server.messagesHeld = null
+    await act(async () => fail())
+    await act(() => vi.advanceTimersByTimeAsync(2_000))
+
+    // The ended call is still news to this chat: shown in full, and its end reloads.
+    await vi.waitFor(() =>
+      expect(screen.getByTestId("resume-stream")).toHaveTextContent("Visits rose in March."),
+    )
+    await vi.waitFor(() => expect(server.messageLoads).toBeGreaterThan(loads))
   })
 
   it("offers Retry, and stops loading, when the reload at the turn's end fails", async () => {

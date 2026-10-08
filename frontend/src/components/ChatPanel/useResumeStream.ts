@@ -37,7 +37,8 @@ export function useResumeStream(
   run: string | null
   done: boolean
   reset: () => void
-  /** The run's end was acted on (a reload that failed): keep its text, clear ``done``. */
+  /** The run's end was acted on (a reload that failed): keep its text, clear ``done``,
+   *  and carry on from where it read when it next tails. */
   acknowledgeDone: () => void
 } {
   const scope = `${workspaceId}\u0000${threadId}`
@@ -51,6 +52,9 @@ export function useResumeStream(
     // Pages read while catching up, held until the last so a run whose done row
     // is on a later page is still known to be finished.
     backlog: StreamChunk[]
+    // The next activation carries on from here: the gap was a reload that failed,
+    // not a stretch nothing was tailing, so what follows is still news.
+    carryOn?: boolean
   }>({ scope, after: 0, caughtUp: false, backlog: [] })
 
   useEffect(() => {
@@ -60,8 +64,12 @@ export function useResumeStream(
     }
     // Each resume is read afresh: a run that ended while nothing was tailing it
     // (its last rows never read) is an earlier answer, not this one.
-    cursorRef.current.caughtUp = false
-    cursorRef.current.backlog = []
+    if (cursorRef.current.carryOn) {
+      cursorRef.current.carryOn = false
+    } else {
+      cursorRef.current.caughtUp = false
+      cursorRef.current.backlog = []
+    }
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
     let delay = pollMs
@@ -146,6 +154,7 @@ export function useResumeStream(
   }, [])
 
   const acknowledgeDone = useCallback(() => {
+    cursorRef.current.carryOn = cursorRef.current.caughtUp
     setState((prev) => (prev.done ? { ...prev, done: false } : prev))
   }, [])
 
