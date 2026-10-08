@@ -97,7 +97,11 @@ class ToolCallingAgent(FakeAgent):
         graph.add_node(AGENT_NODE, call_tool)
         graph.add_node("tools", run_tool)
         graph.add_edge(START, AGENT_NODE)
-        graph.add_edge(AGENT_NODE, "tools")
+        # Routed as the real graph's should_continue routes, so a terminal write
+        # applied as the wrong node would leave a step pending.
+        graph.add_conditional_edges(
+            AGENT_NODE, lambda state: "tools" if state["messages"][-1].tool_calls else END
+        )
         graph.add_edge("tools", END)
         return graph.compile(checkpointer=self.checkpointer)
 
@@ -195,6 +199,7 @@ class TestResume:
         assert last.content == notice
         config = {"configurable": {"thread_id": str(thread.id)}}
         assert await repair_dangling_tool_calls(agent, config) == []
+        assert (await agent.aget_state(config)).next == ()
 
     async def test_a_failed_turn_fails_the_job_with_a_message(self):
         _ws, thread, tj = await _resumable("cont-fail", 930004)
