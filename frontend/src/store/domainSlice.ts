@@ -168,9 +168,17 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope &
         recordWorkspaceUse(id)
         const { user } = get()
         if (user && user.last_workspace_id !== id) {
-          // Best effort: a 404 for a deep link to a workspace we aren't a member of is expected.
-          api.post("/api/auth/last-workspace/", { workspace_id: id }).catch(() => undefined)
-          set({ user: { ...user, last_workspace_id: id } })
+          // Best effort: a 404 for a deep link to a workspace we aren't a member of is expected,
+          // so the local copy only follows once the server accepted it.
+          api
+            .post("/api/auth/last-workspace/", { workspace_id: id })
+            .then(() => {
+              const current = get().user
+              if (current && current.id === user.id) {
+                set({ user: { ...current, last_workspace_id: id } })
+              }
+            })
+            .catch(() => undefined)
         }
         set({ activeDomainId: id, addedDomainIds: withoutId(get().addedDomainIds, id) })
       },

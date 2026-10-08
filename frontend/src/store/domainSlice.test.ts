@@ -196,13 +196,14 @@ describe("domainSlice — remembered workspace (#860)", () => {
     expect(useAppStore.getState().activeDomainId).toBe("a")
   })
 
-  it("tells the server when the user switches workspace", () => {
+  it("tells the server when the user switches workspace", async () => {
     useAppStore.setState({ user: signedIn("a") })
     const post = vi.spyOn(api, "post").mockResolvedValue({ ok: true } as never)
 
     useAppStore.getState().domainActions.setActiveDomain("b")
 
     expect(post).toHaveBeenCalledWith("/api/auth/last-workspace/", { workspace_id: "b" })
+    await Promise.resolve()
     expect(useAppStore.getState().user?.last_workspace_id).toBe("b")
   })
 
@@ -223,6 +224,7 @@ describe("domainSlice — remembered workspace (#860)", () => {
     await Promise.resolve()
 
     expect(useAppStore.getState().activeDomainId).toBe("not-mine")
+    expect(useAppStore.getState().user?.last_workspace_id).toBe("a")
   })
 })
 
