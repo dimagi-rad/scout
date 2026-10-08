@@ -930,6 +930,7 @@ async def _flush_thread(thread_id) -> int:
 
 async def _answer_flushed_request(thread: Thread, held) -> bool:
     workspace, user = thread.workspace, thread.user
+    telemetry = background_turn("flush", user=user, workspace=workspace, thread_id=thread.id)
     try:
         agent = await build_agent_for_resume(workspace, user, conversation_id=str(thread.id))
         config = {
@@ -939,7 +940,6 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
         langfuse_handler = get_langfuse_callback(session_id=str(thread.id), user_id=str(user.id))
         if langfuse_handler is not None:
             config["callbacks"] = [langfuse_handler]
-        telemetry = background_turn("flush", user=user, workspace=workspace, thread_id=thread.id)
         telemetry.with_callbacks(config)
         try:
             async with telemetry.recording():
@@ -973,6 +973,9 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
         # Settled after: unsent, it waits again (its one flush spent) for the user to send.
         logger.exception("flush: agent failed for the held request of thread %s", thread.id)
         return False
+    finally:
+        # A no-op once the run recorded itself; this catches a failed agent build.
+        await telemetry.aflush()
     return True
 
 

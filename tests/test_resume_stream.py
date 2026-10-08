@@ -21,6 +21,7 @@ from langgraph.prebuilt import ToolNode
 from apps.chat import pending_requests, resume_stream
 from apps.chat.models import ResumeStreamChunk, Thread
 from apps.chat.services import continuation
+from apps.telemetry.models import EventKind, Outcome, TelemetryEvent
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 from tests.agent_doubles import DEFAULT_REPLY, FakeAgent
 from tests.test_pending_requests import _loading_chat, _member
@@ -334,3 +335,26 @@ async def test_a_flush_model_timeout_fails_the_flush_without_paging(caplog):
     flush_logs = [r for r in caplog.records if r.name == "apps.chat.services.continuation"]
     assert any("model request timed out" in r.getMessage() for r in flush_logs)
     assert all(r.levelno < logging.ERROR for r in flush_logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_flush_whose_agent_build_fails_is_recorded_failed():
+    _ws, _user, thread = await _thread("flush-build-fail")
+    thread = await Thread.objects.select_related("workspace", "user").aget(id=thread.id)
+    held = pending_requests.ClaimedRequest(
+        thread_id=str(thread.id),
+        request_id=uuid.uuid4(),
+        version=1,
+        text="visits?",
+        token=uuid.uuid4(),
+    )
+
+    with patch(
+        "apps.chat.services.continuation.build_agent_for_resume",
+        AsyncMock(side_effect=RuntimeError("mcp down")),
+    ):
+        assert await continuation._answer_flushed_request(thread, held) is False
+
+    turn = await TelemetryEvent.objects.aget(kind=EventKind.CHAT_TURN)
+    assert (turn.name, turn.outcome) == ("flush", Outcome.FAILED)
