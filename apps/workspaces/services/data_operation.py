@@ -53,6 +53,10 @@ class LockOrderError(RuntimeError):
     """
 
 
+class TenantLocksExpanded(LockOrderError):
+    """The tenant set grew past the held locks, as when a source is added mid-load."""
+
+
 async def run_data_thread(function, /, *args, **kwargs):
     """Keep owning locks until a sync mutation has actually stopped.
 
@@ -222,7 +226,7 @@ def sync_tenant_data_lock(tenant_ids):
         if set(keys) <= held:
             yield
             return
-        raise LockOrderError(_EXPAND_TENANTS)
+        raise TenantLocksExpanded(_EXPAND_TENANTS)
     if not keys:
         yield
         return
@@ -288,7 +292,7 @@ async def tenant_data_lock(tenant_ids):
         if set(keys) <= held:
             yield
             return
-        raise LockOrderError(_EXPAND_TENANTS)
+        raise TenantLocksExpanded(_EXPAND_TENANTS)
     if not keys:
         yield
         return
@@ -320,7 +324,7 @@ async def tenant_data_lock_if_free(tenant_id):
         if key in held:
             yield True
             return
-        raise LockOrderError(_EXPAND_TENANTS)
+        raise TenantLocksExpanded(_EXPAND_TENANTS)
     async with await psycopg.AsyncConnection.connect(
         **_connection_params(), autocommit=True
     ) as conn:

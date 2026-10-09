@@ -7,6 +7,7 @@ are stubbed.
 """
 
 import asyncio
+import logging
 import threading
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -33,6 +34,7 @@ from apps.workspaces.models import (
 from apps.workspaces.services import load_outcome, materialize, retirement
 from apps.workspaces.services.data_operation import (
     LockOrderError,
+    TenantLocksExpanded,
     tenant_data_lock,
     workspace_data_lock,
 )
@@ -765,7 +767,18 @@ async def test_a_failure_opening_the_candidate_clears_the_loading_marker(workspa
     assert ledger.requested_generation > ledger.published_generation
 
 
-async def test_a_source_added_mid_run_reports_the_view_build_plainly(user):
+@pytest.mark.parametrize(
+    ("source_added", "error", "expected_level"),
+    [
+        (True, TenantLocksExpanded, logging.WARNING),
+        (False, TenantLocksExpanded, logging.ERROR),
+        # A different lock-order failure is a bug even when a source was also added.
+        (True, LockOrderError, logging.ERROR),
+    ],
+)
+async def test_a_source_added_mid_run_reports_the_view_build_plainly(
+    user, caplog, source_added, error, expected_level
+):
     a = await Tenant.objects.acreate(provider="commcare", external_id="mid-a", canonical_name="A")
     b = await Tenant.objects.acreate(provider="commcare", external_id="mid-b", canonical_name="B")
     for t in (a, b):
@@ -775,16 +788,31 @@ async def test_a_source_added_mid_run_reports_the_view_build_plainly(user):
     for t in (a, b):
         await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
 
+    def view_build_refused(_workspace):
+        if source_added:
+            c = Tenant.objects.create(provider="commcare", external_id="mid-c", canonical_name="C")
+            WorkspaceTenant.objects.create(workspace=ws, tenant=c)
+        raise error("Cannot expand held tenant locks")
+
     pipeline = _Pipeline()
     async with _loads(pipeline):
-        with patch(
-            "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema",
-            side_effect=LockOrderError("Cannot expand held tenant locks"),
+        with (
+            patch(
+                "apps.workspaces.services.schema_manager.SchemaManager.build_view_schema",
+                side_effect=view_build_refused,
+            ),
+            caplog.at_level(logging.WARNING, logger=materialize.logger.name),
         ):
             result = await _run(ws, user)
 
     assert result["view_schema"]["ok"] is False
-    assert result["view_schema"]["error"] == materialize._SOURCE_ADDED_DURING_LOAD
+    # Only a verified add may promise the follow-up load that republishes the views.
+    assert (result["view_schema"]["error"] == materialize._SOURCE_ADDED_DURING_LOAD) is (
+        expected_level == logging.WARNING
+    )
+    # A verified mid-load add is expected; an unexplained LockOrderError is a lock bug.
+    [record] = [r for r in caplog.records if "view schema rebuild" in r.getMessage()]
+    assert record.levelno == expected_level
 
 
 async def test_a_publish_queues_the_demoted_schemas_teardown(workspace, tenant, user):

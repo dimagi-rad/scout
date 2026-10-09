@@ -52,7 +52,7 @@ from apps.workspaces.services.access_freshness import (
 )
 from apps.workspaces.services.credential_coverage import CoverageRecovery, MissingTenant
 from apps.workspaces.services.data_operation import (
-    LockOrderError,
+    TenantLocksExpanded,
     run_data_thread,
     tenant_data_lock,
     workspace_data_lock,
@@ -290,6 +290,19 @@ async def _workspace_tenant_ids(workspace_id) -> list:
             workspace_id=workspace_id
         ).values_list("tenant_id", flat=True)
     ]
+
+
+async def _source_added_since_lock(workspace_id, locked_tenant_ids) -> bool:
+    """Whether a TenantLocksExpanded is the expected mid-load source add, not a lock bug."""
+    if locked_tenant_ids is None:
+        return False
+    try:
+        current = {str(tenant_id) for tenant_id in await _workspace_tenant_ids(workspace_id)}
+    except Exception:
+        # Unverifiable: report the original failure as an error rather than lose it here.
+        logger.warning("Could not re-read sources for workspace %s", workspace_id, exc_info=True)
+        return False
+    return bool(current - locked_tenant_ids)
 
 
 async def _recorded_denial(workspace_id, user_id, denial: dict) -> dict:
@@ -731,11 +744,20 @@ async def materialize_workspace_core(
             # Don't re-raise — the resume task must still fire. The failure is
             # recorded on the WorkspaceViewSchema row (state=FAILED, last_error),
             # which the resume task reads directly.
+            source_added = isinstance(exc, TenantLocksExpanded) and await _source_added_since_lock(
+                workspace_id, locked_tenant_ids
+            )
             if isinstance(exc, NoActiveTenantSchema):
                 logger.warning(
                     "Post-materialization view schema rebuild skipped for workspace %s: %s",
                     workspace_id,
                     exc,
+                )
+            elif source_added:
+                logger.warning(
+                    "Post-materialization view schema rebuild deferred for workspace %s: "
+                    "a source was added during the load",
+                    workspace_id,
                 )
             else:
                 logger.exception(
@@ -753,9 +775,7 @@ async def materialize_workspace_core(
             )
             view_schema_outcome = {
                 "ok": False,
-                "error": (
-                    _SOURCE_ADDED_DURING_LOAD if isinstance(exc, LockOrderError) else str(exc)[:500]
-                ),
+                "error": (_SOURCE_ADDED_DURING_LOAD if source_added else str(exc)[:500]),
                 "tenant_coverage": tenant_coverage,
             }
 
