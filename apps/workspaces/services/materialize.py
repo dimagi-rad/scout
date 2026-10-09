@@ -292,6 +292,14 @@ async def _workspace_tenant_ids(workspace_id) -> list:
     ]
 
 
+async def _source_added_since_lock(workspace_id, locked_tenant_ids) -> bool:
+    """Whether a LockOrderError is the expected mid-load source add, not a lock-order bug."""
+    if locked_tenant_ids is None:
+        return False
+    current = {str(tenant_id) for tenant_id in await _workspace_tenant_ids(workspace_id)}
+    return bool(current - locked_tenant_ids)
+
+
 async def _recorded_denial(workspace_id, user_id, denial: dict) -> dict:
     """A load refused before it started still left some sources unrefreshed (#715).
 
@@ -736,6 +744,14 @@ async def materialize_workspace_core(
                     "Post-materialization view schema rebuild skipped for workspace %s: %s",
                     workspace_id,
                     exc,
+                )
+            elif isinstance(exc, LockOrderError) and await _source_added_since_lock(
+                workspace_id, locked_tenant_ids
+            ):
+                logger.warning(
+                    "Post-materialization view schema rebuild deferred for workspace %s: "
+                    "a source was added during the load",
+                    workspace_id,
                 )
             else:
                 logger.exception(
