@@ -343,9 +343,10 @@ def _apply_display_metadata(payload: dict[str, Any], field: SemanticField) -> No
         payload["currency"] = currency.strip().upper()
 
 
-# A canvas field's data_type is free text, so "number" and "float" must map here too:
-# as strings, Cube rejects their numeric formats and the whole schema (#882).
-_NUMERIC_TYPE_TOKENS = ("int", "numeric", "decimal", "double", "real", "number", "float")
+# A canvas field's data_type is free text, so "number" and "float" must map here too, and
+# the catalog formats money as currency_2: as strings, Cube rejects those formats and with
+# them the whole schema (#882).
+_NUMERIC_TYPE_TOKENS = ("int", "numeric", "decimal", "double", "real", "number", "float", "money")
 
 
 def cube_dimension_type(data_type: str) -> str:

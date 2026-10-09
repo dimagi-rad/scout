@@ -45,8 +45,8 @@ from apps.semantic.services.field_sql import (
     dataset_column_names,
 )
 
-# Cube accepts only these named formats on a string dimension; any other format
-# (number_1, a d3 spec) fails validation of the whole workspace schema (#882).
+# Cube accepts only these named formats on a non-number dimension (string, time, boolean);
+# any other format (number_1, a d3 spec) fails validation of the whole schema (#882).
 _STRING_DIMENSION_FORMATS = frozenset(
     {"imageUrl", "link", "currency", "percent", "number", "id", "object"}
 )
@@ -100,6 +100,8 @@ def compute_diagnostics(
         if change.change_type != ChangeType.CREATE and base is None:
             continue
         fields = {**serialized, **change.fields}
+        # Format is a curation key, so a format-only edit skips the expression checks below.
+        diagnostics.extend(_dimension_format_diagnostics(change, fields))
         if change.change_type != ChangeType.CREATE and set(change.fields) - FIELD_CURATION_KEYS:
             diagnostics.extend(_field_expression_diagnostics(base.dataset, change, fields))
         diagnostics.extend(_calculated_measure_diagnostics(change, fields))
@@ -345,6 +347,7 @@ def saved_field_diagnostics(field: SemanticField) -> list[dict]:
     values = serialize_field_base(field)
     return [
         *_field_expression_diagnostics(field.dataset, change, values),
+        *_dimension_format_diagnostics(change, values),
         *_calculated_measure_diagnostics(change, values),
     ]
 
@@ -363,8 +366,6 @@ def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> li
                 "Choose dimension, time_dimension, or measure.",
             )
         ]
-    if field_type == "dimension":
-        out.extend(_dimension_format_diagnostics(change, fields))
     if field_type == "measure":
         if measure_type not in MEASURE_TYPES:
             out.append(
@@ -440,20 +441,26 @@ def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> li
 
 
 def _dimension_format_diagnostics(change, fields: dict[str, Any]) -> list[dict]:
+    field_type = fields.get("field_type", "")
+    if field_type not in {"dimension", "time_dimension"}:
+        return []
     display_format = str(fields.get("format") or "").strip()
     if not display_format or display_format in _STRING_DIMENSION_FORMATS:
         return []
     data_type = str(fields.get("data_type") or "")
-    if cube_dimension_type(data_type) == "number":
+    if field_type == "dimension" and cube_dimension_type(data_type) == "number":
         return []
+    published_as = (
+        "a time" if field_type == "time_dimension" else f"'{cube_dimension_type(data_type)}'"
+    )
     return [
         _diagnostic(
             "INVALID_FORMAT",
             change,
             "format",
-            f"format '{display_format}' only applies to numeric dimensions, but data_type "
-            f"'{data_type or '(empty)'}' publishes as text. Set data_type to number, or use "
-            "format number, percent, or currency.",
+            f"format '{display_format}' only applies to numeric dimensions, but this field "
+            f"publishes as {published_as} dimension (data_type '{data_type or '(empty)'}'). "
+            "Set data_type to number, or use format number, percent, or currency.",
         )
     ]
 

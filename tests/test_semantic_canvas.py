@@ -675,26 +675,46 @@ def test_number_data_type_dimension_publishes_as_cube_number(
     assert dimension["format"] == "number_1"
 
 
+_PAID_DATE_SQL = "CASE WHEN {CUBE}.\"amount\" > 0 THEN DATE '2026-09-01' ELSE NULL END"
+
+
 @pytest.mark.parametrize(
-    ("data_type", "display_format", "blocked"),
+    ("field_type", "data_type", "display_format", "blocked"),
     [
-        ("text", "number_1", True),
-        ("", ".1f", True),
-        ("text", "percent", False),
-        ("number", "number_1", False),
-        ("double precision", ".1f", False),
+        ("dimension", "text", "number_1", True),
+        ("dimension", "", ".1f", True),
+        ("dimension", "text", "percent", False),
+        ("dimension", "number", "number_1", False),
+        ("dimension", "double precision", ".1f", False),
+        ("dimension", "money", "currency_2", False),
+        ("time_dimension", "date", "number_1", True),
+        ("time_dimension", "date", "percent", False),
     ],
 )
-def test_numeric_format_on_text_dimension_is_blocked_before_commit(
-    canvas, user, data_type, display_format, blocked
+def test_numeric_format_on_non_number_dimension_is_blocked_before_commit(
+    canvas, user, field_type, data_type, display_format, blocked
 ):
     result = _create_dimension(
         canvas,
         user,
         name="form_minutes",
+        field_type=field_type,
         data_type=data_type,
         format=display_format,
-        sql=_FORM_MINUTES_SQL,
+        sql=_PAID_DATE_SQL if field_type == "time_dimension" else _FORM_MINUTES_SQL,
+    )
+
+    codes = [d["code"] for d in result["diagnostics"]]
+    assert ("INVALID_FORMAT" in codes) is blocked
+    assert result["can_commit"] is not blocked
+
+
+@pytest.mark.parametrize(("display_format", "blocked"), [("number_1", True), ("percent", False)])
+def test_format_only_edit_on_text_dimension_is_checked(canvas, user, display_format, blocked):
+    result = apply_operations(
+        canvas,
+        [{"op": "set", "target": "field/raw_visits.username/format", "value": display_format}],
+        user,
     )
 
     codes = [d["code"] for d in result["diagnostics"]]
