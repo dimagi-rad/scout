@@ -1,5 +1,6 @@
 import { createBrowserRouter, Navigate } from "react-router-dom"
 import { BASE_PATH } from "@/config"
+import { USAGE_PATH } from "@/lib/routes"
 import { AppLayout } from "@/components/AppLayout/AppLayout"
 import { ChatRoute } from "@/components/ChatPanel/ChatRoute"
 import { ChatRedirect } from "@/components/ChatPanel/ChatRedirect"
@@ -47,7 +48,7 @@ export const router = createBrowserRouter([
       { path: "datasets/:datasetName", element: <DatasetBrowserPage /> },
       { path: "data-dictionary", element: <Navigate to="/datasets" replace /> },
       { path: "settings/connections", element: <ConnectionsPage /> },
-      { path: "usage", element: <UsagePage /> },
+      { path: USAGE_PATH, element: <UsagePage /> },
       { path: "workspaces", element: <WorkspacesPage /> },
       { path: "workspaces/:workspaceId", element: <WorkspaceDetailPage /> },
       // Pretty URL: cosmetic slug + UUID. Resolution is always by :workspaceId;

@@ -439,7 +439,9 @@ def _schema_sizes(start: datetime, days: list[date]) -> dict[str, Any]:
         # The night shown and any since: a sizing that could not run keeps an earlier
         # run's figures for its day, so the shown night can itself carry a skip.
         DailySnapshot.objects.filter(
-            metric=SnapshotMetric.SCHEMAS_SKIPPED, day__gte=latest_day or date.min
+            metric=SnapshotMetric.SCHEMAS_SKIPPED,
+            dimension="",
+            day__gte=latest_day or start.date(),
         )
         .order_by("-day")
         .values_list("day", "value")
@@ -466,7 +468,10 @@ DASHBOARD_STATEMENT_TIMEOUT = "15s"
 def build_dashboard(days: int = DEFAULT_DAYS, now: datetime | None = None) -> dict[str, Any]:
     with transaction.atomic():
         with connection.cursor() as cursor:
-            cursor.execute("SET LOCAL statement_timeout = %s", [DASHBOARD_STATEMENT_TIMEOUT])
+            # set_config, as elsewhere here: SET cannot take a bind parameter.
+            cursor.execute(
+                "SELECT set_config('statement_timeout', %s, true)", [DASHBOARD_STATEMENT_TIMEOUT]
+            )
         return _build(days, now or timezone.now())
 
 

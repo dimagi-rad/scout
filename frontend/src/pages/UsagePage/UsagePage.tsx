@@ -206,7 +206,9 @@ function SmallMultiples({
             <span className="tabular-nums">
               {values.every((value) => value === null)
                 ? "–"
-                : formatCount(values.reduce<number>((total, value) => total + (value ?? 0), 0))}
+                : `${formatCount(values.reduce<number>((total, value) => total + (value ?? 0), 0))}${
+                    values.some((value) => value === null) ? " so far" : ""
+                  }`}
             </span>
           </div>
           <DailyBars days={days} values={values} label={label} />
@@ -490,7 +492,8 @@ function NoAccess() {
 }
 
 export function UsagePage() {
-  const allowed = useAppStore((state) => state.user?.can_view_usage_dashboard === true)
+  // Absent on an older server: let the API decide rather than refuse here.
+  const allowed = useAppStore((state) => state.user?.can_view_usage_dashboard !== false)
   if (!allowed) {
     // The API refuses anyone without the permission anyway; this skips the request.
     return (

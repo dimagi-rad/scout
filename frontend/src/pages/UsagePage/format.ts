@@ -17,7 +17,7 @@ export function formatBytes(bytes: number | null | undefined): string {
   return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
 }
 
-const compact = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 })
+const compact = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 })
 
 export function formatCompact(value: number): string {
   return compact.format(value)
