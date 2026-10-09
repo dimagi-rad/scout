@@ -3,6 +3,8 @@
 import logging
 from datetime import UTC, datetime
 
+from django.db.models import BooleanField, ExpressionWrapper, Q
+from django.db.models.functions import Now
 from django.http import JsonResponse
 
 from apps.chat import pending_requests, resume_stream
@@ -25,12 +27,22 @@ from apps.workspaces.workspace_resolver import aresolve_workspace
 logger = logging.getLogger(__name__)
 
 
+# An agent run holds the thread's turn lease (a chat turn in any tab, or a background
+# resume); a holder that died clears once its lease lapses. Judged by the database
+# clock, as the lease itself is (apps/chat/turn_lease.py).
+_TURN_RUNNING = ExpressionWrapper(Q(turn_lease_expires_at__gt=Now()), output_field=BooleanField())
+
+
+def _threads():
+    return Thread.objects.annotate(lease_live=_TURN_RUNNING)
+
+
 async def _get_thread(thread_id, user, *, workspace_id=None):
     """Load a thread ensuring ownership, optionally scoped to a workspace."""
     try:
         if workspace_id is not None:
-            return await Thread.objects.aget(id=thread_id, user=user, workspace_id=workspace_id)
-        return await Thread.objects.aget(id=thread_id, user=user)
+            return await _threads().aget(id=thread_id, user=user, workspace_id=workspace_id)
+        return await _threads().aget(id=thread_id, user=user)
     except Thread.DoesNotExist:
         return None
 
@@ -41,6 +53,11 @@ async def _thread_id_taken(thread_id) -> bool:
     return await Thread.objects.filter(id=thread_id).aexists() or await athread_has_checkpoint(
         thread_id
     )
+
+
+def _turn_running(thread) -> bool:
+    # NULL (no lease) compares as NULL; a row made here, not loaded, has no lease.
+    return getattr(thread, "lease_live", None) is True
 
 
 def _thread_summary(thread):
@@ -57,6 +74,7 @@ def _thread_summary(thread):
         "created_at": thread.created_at.isoformat(),
         "updated_at": thread.updated_at.isoformat(),
         "last_viewed_at": thread.last_viewed_at.isoformat() if thread.last_viewed_at else None,
+        "turn_running": _turn_running(thread),
     }
 
 
@@ -71,7 +89,7 @@ async def _list_threads(user, *, workspace_id):
     if err is not None:
         return None, err
 
-    queryset = Thread.objects.filter(user=user, workspace=workspace).order_by("-updated_at")[:50]
+    queryset = _threads().filter(user=user, workspace=workspace).order_by("-updated_at")[:50]
     threads = [thread async for thread in queryset]
     await afill_blank_titles(threads)
     return [_thread_summary(thread) for thread in threads], None
@@ -193,7 +211,7 @@ async def thread_messages_view(request, workspace_id, thread_id):
         if await _thread_id_taken(thread_id):
             return JsonResponse({"error": "Thread not found"}, status=404)
         if with_pending:
-            return JsonResponse({"messages": [], "pending_request": None})
+            return JsonResponse({"messages": [], "pending_request": None, "turn_running": False})
         return JsonResponse([], safe=False)
 
     try:
@@ -209,6 +227,10 @@ async def thread_messages_view(request, workspace_id, thread_id):
             {
                 "messages": ui_messages,
                 "pending_request": await pending_requests.athread_pending_request(thread.id),
+                # From the row read before the checkpoint, so a turn that ends in
+                # between reads as still running (the client polls again), never as
+                # finished with its answer missing.
+                "turn_running": _turn_running(thread),
             }
         )
     return JsonResponse(ui_messages, safe=False)

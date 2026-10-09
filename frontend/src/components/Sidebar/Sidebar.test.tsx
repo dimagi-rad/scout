@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Thread } from "@/store/uiSlice"
-import { Sidebar } from "./Sidebar"
+import { RUNNING_THREADS_POLL_MS, Sidebar } from "./Sidebar"
 
 const mocks = vi.hoisted(() => {
   const fetchDomains = vi.fn()
@@ -15,7 +15,7 @@ const mocks = vi.hoisted(() => {
 
   return {
     state: {
-      user: { id: "user-1" },
+      user: { id: "user-1" } as { id: string; can_view_usage_dashboard?: boolean },
       activeDomainId: "workspace-1",
       domains: [{ id: "workspace-1", name: "Test Workspace" }],
       threadId: null,
@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
       threadsStatus: "loaded",
       threadsAccessDenialReason: null as string | null,
       threadsAccessRetryable: false,
+      localTurnThreadIds: new Set<string>(),
       domainActions: { fetchDomains, revalidateDomains },
       authActions: { logout },
       uiActions: { fetchThreads, newThread, selectThread, retryAccessVerification },
@@ -328,5 +329,141 @@ describe("Sidebar agent model label", () => {
     renderSidebar()
 
     expect(screen.queryByTestId("app-model-label")).toBeNull()
+  })
+})
+
+describe("Sidebar running threads (#856)", () => {
+  const running = (turn_running: boolean): Thread => ({
+    id: "thread-running",
+    title: "Visits by district",
+    title_is_custom: false,
+    title_source: "generated",
+    created_at: "2026-07-01T12:00:00Z",
+    updated_at: "2026-07-01T12:00:00Z",
+    last_viewed_at: "2026-07-01T12:00:00Z",
+    turn_running,
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    mocks.state.threadId = null
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    mocks.state.threads = []
+    mocks.fetchThreads.mockReset()
+  })
+
+  it("shows a spinner while a thread's turn runs, refetching until it clears", async () => {
+    mocks.state.threads = [running(true)]
+    const { rerender } = renderSidebar()
+    expect(screen.getByTestId("sidebar-thread-running-thread-running")).toBeInTheDocument()
+    const mountFetches = mocks.fetchThreads.mock.calls.length
+
+    // Still running at the first refetch: the next one waits longer.
+    await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS)
+    expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches + 1)
+    await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS)
+    expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches + 1)
+    mocks.fetchThreads.mockImplementation(() => {
+      mocks.state.threads = [running(false)]
+    })
+    await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 0.5)
+    expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches + 2)
+
+    rerender(
+      <MemoryRouter initialEntries={["/artifacts"]}>
+        <Sidebar />
+      </MemoryRouter>,
+    )
+    expect(screen.queryByTestId("sidebar-thread-running-thread-running")).toBeNull()
+    await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 10)
+    expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches + 2)
+  })
+
+  it("shows this tab's own turn running without polling for it", async () => {
+    mocks.state.threads = [running(false)]
+    mocks.state.localTurnThreadIds = new Set(["thread-running"])
+    try {
+      renderSidebar()
+      const mountFetches = mocks.fetchThreads.mock.calls.length
+      expect(screen.getByTestId("sidebar-thread-running-thread-running")).toBeInTheDocument()
+
+      // The list may say running too (refetched mid-turn): still this tab's to end.
+      mocks.state.threads = [running(true)]
+      await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 4)
+      expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches)
+    } finally {
+      mocks.state.localTurnThreadIds = new Set()
+    }
+  })
+
+  it("does not refetch while the tab is hidden", async () => {
+    mocks.state.threads = [running(true)]
+    renderSidebar()
+    const mountFetches = mocks.fetchThreads.mock.calls.length
+    Object.defineProperty(document, "hidden", { configurable: true, value: true })
+    try {
+      await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 4)
+      expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches)
+    } finally {
+      Object.defineProperty(document, "hidden", { configurable: true, value: false })
+    }
+  })
+
+  it("does not poll while the list is denied", async () => {
+    mocks.state.threads = [running(true)]
+    mocks.state.threadsStatus = "error"
+    mocks.state.threadsAccessDenialReason = "tenant_access_lost"
+    try {
+      renderSidebar()
+      const mountFetches = mocks.fetchThreads.mock.calls.length
+      await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 4)
+      expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches)
+    } finally {
+      mocks.state.threadsStatus = "loaded"
+      mocks.state.threadsAccessDenialReason = null
+    }
+  })
+
+  it("does not poll when no listed turn is running", async () => {
+    mocks.state.threads = [running(false)]
+    renderSidebar()
+    const mountFetches = mocks.fetchThreads.mock.calls.length
+
+    await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 4)
+
+    expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches)
+    expect(screen.queryByTestId("sidebar-thread-running-thread-running")).toBeNull()
+  })
+
+  it("stops polling on unmount", async () => {
+    mocks.state.threads = [running(true)]
+    const { unmount } = renderSidebar()
+    const mountFetches = mocks.fetchThreads.mock.calls.length
+    unmount()
+
+    await vi.advanceTimersByTimeAsync(RUNNING_THREADS_POLL_MS * 4)
+
+    expect(mocks.fetchThreads).toHaveBeenCalledTimes(mountFetches)
+  })
+})
+
+describe("Sidebar usage link", () => {
+  afterEach(() => {
+    mocks.state.user = { id: "user-1" }
+  })
+
+  it("is hidden from people without the usage dashboard permission", () => {
+    renderSidebar()
+    expect(screen.queryByTestId("sidebar-usage")).not.toBeInTheDocument()
+  })
+
+  it("links to the usage dashboard for people who have it", () => {
+    mocks.state.user = { id: "user-1", can_view_usage_dashboard: true }
+    renderSidebar()
+    expect(screen.getByTestId("sidebar-usage")).toHaveAttribute("href", "/usage")
   })
 })

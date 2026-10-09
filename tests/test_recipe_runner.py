@@ -21,6 +21,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from apps.agents.graph.run_policy import HEADLESS_ESCALATION_MESSAGE
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.recipes.services.runner import RecipeRunner
+from apps.telemetry.models import EventKind, Outcome, TelemetryEvent
 from mcp_server.server import mcp as scout_mcp
 
 
@@ -130,6 +131,14 @@ async def test_execute_async_builds_real_graph_and_flows_workspace_id(recipe, us
     assert "not_loaded" in step["response"]
     assert "VALIDATION_ERROR" not in step["response"]
 
+    recorded = await TelemetryEvent.objects.aget(kind=EventKind.RECIPE_RUN)
+    assert recorded.outcome == Outcome.COMPLETED
+    assert recorded.attrs["recipe_id"] == str(recipe.id)
+    assert recorded.attrs["tool_calls"] == 1
+    tool_call = await TelemetryEvent.objects.aget(kind=EventKind.TOOL_CALL)
+    assert (tool_call.name, tool_call.outcome) == ("get_schema_status", Outcome.OK)
+    assert tool_call.attrs["run_kind"] == EventKind.RECIPE_RUN
+
 
 def _fake_llm_looping_on_query():
     """A fake model that keeps calling ``query`` until the graph stops it."""
@@ -184,3 +193,7 @@ async def test_run_ending_in_escalation_is_recorded_failed(recipe, user):
     assert step["error"] == HEADLESS_ESCALATION_MESSAGE
     assert step["response"] == ""
     assert "query" in step["tools_used"]
+
+    recorded = await TelemetryEvent.objects.aget(kind=EventKind.RECIPE_RUN)
+    assert recorded.outcome == Outcome.FAILED
+    assert recorded.attrs["tool_errors"] == recorded.attrs["tool_calls"] > 0

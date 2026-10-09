@@ -8,15 +8,20 @@ move of that code.
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 
 import pytest
 from django.test import override_settings
 from django.utils import timezone
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.graph import END, START, StateGraph
 
+from apps.agents.graph.base import AGENT_NODE
+from apps.agents.graph.state import AgentState
 from apps.chat import pending_requests
 from apps.chat.constants import SYSTEM_RESUME_MARKER
+from apps.chat.helpers import repair_dangling_tool_calls
 from apps.chat.models import PendingRequest, Thread, ThreadJob
 from apps.chat.resume_stream import aread_after
 from apps.chat.services.continuation import (
@@ -26,7 +31,7 @@ from apps.chat.services.continuation import (
     RESUME_EXCEPTION_MESSAGE,
     RESUME_TIMEOUT_MESSAGE,
 )
-from apps.chat.stream import langgraph_to_ui_stream
+from apps.chat.stream import INTERRUPTED_TOOL_RESULT, langgraph_to_ui_stream
 from apps.chat.turn_lease import atry_acquire_turn_lease
 from apps.workspaces.tasks import flush_pending_requests, resume_thread_after_materialization
 from tests.agent_doubles import DEFAULT_REPLY, FakeAgent, serving
@@ -69,6 +74,44 @@ async def _streamed(thread) -> tuple[str, list[bool]]:
 
 async def _thread_is_free(thread) -> bool:
     return await atry_acquire_turn_lease(thread.id) is not None
+
+
+class ToolCallingAgent(FakeAgent):
+    """Its agent step commits a tool call; ``tool`` then runs as the tools step."""
+
+    TOOL_CALL = {"id": "tc-open", "name": "execute_sql", "args": {"sql": "select 1"}}
+
+    def __init__(self, tool: Callable[[], Awaitable[None]]):
+        self.tool = tool
+        super().__init__()
+
+    def _compile(self):
+        async def call_tool(_state: AgentState) -> dict:
+            return {"messages": [AIMessage(content="", tool_calls=[self.TOOL_CALL])]}
+
+        async def run_tool(_state: AgentState) -> dict:
+            await self.tool()
+            return {"messages": []}
+
+        graph = StateGraph(AgentState)
+        graph.add_node(AGENT_NODE, call_tool)
+        graph.add_node("tools", run_tool)
+        graph.add_edge(START, AGENT_NODE)
+        # Routed as the real graph's should_continue routes, so a terminal write
+        # applied as the wrong node would leave a step pending.
+        graph.add_conditional_edges(
+            AGENT_NODE, lambda state: "tools" if state["messages"][-1].tool_calls else END
+        )
+        graph.add_edge("tools", END)
+        return graph.compile(checkpointer=self.checkpointer)
+
+
+async def _stall():
+    await asyncio.Event().wait()
+
+
+async def _tool_crash():
+    raise RuntimeError("tool crashed")
 
 
 class TestResume:
@@ -128,6 +171,35 @@ class TestResume:
         _text, done = await _streamed(thread)
         assert done == [True]
         assert await _thread_is_free(thread)
+
+    @override_settings(AGENT_RESUME_TIMEOUT_S=1)
+    @pytest.mark.parametrize(
+        ("tool", "status", "notice", "pj_id"),
+        [
+            (_stall, "agent_timeout", RESUME_TIMEOUT_MESSAGE, 930020),
+            (_tool_crash, "agent_failed", RESUME_EXCEPTION_MESSAGE, 930021),
+        ],
+    )
+    async def test_a_turn_cut_off_mid_tool_call_answers_the_call_before_its_message(
+        self, tool, status, notice, pj_id
+    ):
+        _ws, thread, tj = await _resumable(f"cont-open-{pj_id}", pj_id)
+        agent = ToolCallingAgent(tool)
+
+        result = await _resume(agent, tj)
+
+        assert result == {"status": status}
+        *_, call, answer, last = await agent.thread_messages(thread.id)
+        assert isinstance(call, AIMessage)
+        assert call.tool_calls[0]["id"] == "tc-open"
+        assert isinstance(answer, ToolMessage)
+        assert answer.tool_call_id == "tc-open"
+        assert answer.content == INTERRUPTED_TOOL_RESULT
+        assert isinstance(last, AIMessage)
+        assert last.content == notice
+        config = {"configurable": {"thread_id": str(thread.id)}}
+        assert await repair_dangling_tool_calls(agent, config) == []
+        assert (await agent.aget_state(config)).next == ()
 
     async def test_a_failed_turn_fails_the_job_with_a_message(self):
         _ws, thread, tj = await _resumable("cont-fail", 930004)

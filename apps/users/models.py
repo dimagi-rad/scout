@@ -66,6 +66,14 @@ class User(AbstractUser):
     avatar_url = models.URLField(blank=True)
     timezone = models.CharField(max_length=50, default="UTC")
 
+    last_workspace = models.ForeignKey(
+        "workspaces.Workspace",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

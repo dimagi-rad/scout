@@ -128,6 +128,129 @@ describe("domainSlice.fetchDomains — default pick skips lost-access workspaces
   })
 })
 
+describe("domainSlice — remembered workspace (#860)", () => {
+  const ws = (id: string, has_access = true) => ({
+    id,
+    name: id,
+    display_name: id,
+    is_auto_created: false,
+    role: "manage",
+    tenants: [],
+    has_access,
+    member_count: 1,
+    schema_status: "available",
+    last_synced_at: null,
+    created_at: "2026-01-01T00:00:00Z",
+  })
+  const signedIn = (last_workspace_id: string | null) => ({
+    id: "u1",
+    email: "u@example.com",
+    name: "U",
+    is_staff: false,
+    onboarding_complete: true,
+    last_workspace_id,
+  })
+
+  beforeEach(() => {
+    // A new identity rebuilds the slices, dropping the in-flight request tracker.
+    useAppStore.setState({ user: null })
+    localStorage.clear()
+    useAppStore.setState({ activeDomainId: null, domains: [], domainsStatus: "idle" })
+  })
+
+  afterEach(() => {
+    useAppStore.setState({ user: null })
+    vi.restoreAllMocks()
+  })
+
+  it("loads the remembered workspace instead of the first one", async () => {
+    useAppStore.setState({ user: signedIn("b") })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a"), ws("b")] as never)
+
+    await useAppStore.getState().domainActions.fetchDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("b")
+  })
+
+  it("falls back to the default when the remembered workspace is not listed", async () => {
+    useAppStore.setState({ user: signedIn("gone") })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a"), ws("b")] as never)
+
+    await useAppStore.getState().domainActions.fetchDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("a")
+  })
+
+  it("falls back when the remembered workspace lost access", async () => {
+    useAppStore.setState({ user: signedIn("b") })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a"), ws("b", false)] as never)
+
+    await useAppStore.getState().domainActions.fetchDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("a")
+  })
+
+  it("lets a deep link win over the remembered workspace", async () => {
+    useAppStore.setState({ user: signedIn("b") })
+    useAppStore.setState({ activeDomainId: "a" })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("a"), ws("b")] as never)
+
+    await useAppStore.getState().domainActions.fetchDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("a")
+  })
+
+  it("tells the server when the user switches workspace", async () => {
+    useAppStore.setState({ user: signedIn("a") })
+    const post = vi.spyOn(api, "post").mockResolvedValue({ ok: true } as never)
+
+    useAppStore.getState().domainActions.setActiveDomain("b")
+
+    expect(post).toHaveBeenCalledWith("/api/auth/last-workspace/", { workspace_id: "b" })
+    await Promise.resolve()
+    expect(useAppStore.getState().user?.last_workspace_id).toBe("b")
+  })
+
+  it("does not repeat the call for the workspace already remembered", () => {
+    useAppStore.setState({ user: signedIn("a") })
+    const post = vi.spyOn(api, "post").mockResolvedValue({ ok: true } as never)
+
+    useAppStore.getState().domainActions.setActiveDomain("a")
+
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it("sends the switch back when the first switch is still in flight", async () => {
+    useAppStore.setState({ user: signedIn("a") })
+    let resolveB: () => void = () => undefined
+    const post = vi
+      .spyOn(api, "post")
+      .mockImplementationOnce(() => new Promise((r) => { resolveB = () => r({ ok: true } as never) }))
+      .mockResolvedValue({ ok: true } as never)
+
+    useAppStore.getState().domainActions.setActiveDomain("b")
+    useAppStore.getState().domainActions.setActiveDomain("a")
+    resolveB()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(post).toHaveBeenCalledTimes(2)
+    expect(post).toHaveBeenLastCalledWith("/api/auth/last-workspace/", { workspace_id: "a" })
+    expect(useAppStore.getState().user?.last_workspace_id).toBe("a")
+  })
+
+  it("survives the server rejecting the workspace", async () => {
+    useAppStore.setState({ user: signedIn("a") })
+    vi.spyOn(api, "post").mockRejectedValue(new Error("404"))
+
+    useAppStore.getState().domainActions.setActiveDomain("not-mine")
+    await Promise.resolve()
+
+    expect(useAppStore.getState().activeDomainId).toBe("not-mine")
+    expect(useAppStore.getState().user?.last_workspace_id).toBe("a")
+  })
+})
+
 describe("domainSlice.revalidateDomains — silent background refresh (#355)", () => {
   const ws = (id: string): WorkspaceListItem => ({
     id,
@@ -335,6 +458,32 @@ describe("domainSlice.addedDomainIds — workspaces someone added you to (#355)"
     await useAppStore.getState().domainActions.revalidateDomains()
 
     expect(useAppStore.getState().addedDomainIds).toEqual([])
+  })
+
+  it("doesn't record workspaces tenant discovery created just for you", async () => {
+    const discovered = (id: string) => ({ ...ws(id), is_auto_created: true, member_count: 1 })
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([
+      ws("a"),
+      discovered("opp-2049"),
+      discovered("opp-2050"),
+      discovered("opp-2051"),
+    ])
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(useAppStore.getState().domains).toHaveLength(4)
+    expect(useAppStore.getState().addedDomainIds).toEqual([])
+  })
+
+  it("records an auto-created workspace someone else shared with you", async () => {
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([
+      ws("a"),
+      { ...ws("shared"), is_auto_created: true, member_count: 2 },
+    ])
+
+    await useAppStore.getState().domainActions.revalidateDomains()
+
+    expect(useAppStore.getState().addedDomainIds).toEqual(["shared"])
   })
 
   it("forgets an added workspace that a later refresh no longer lists", async () => {

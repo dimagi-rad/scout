@@ -38,8 +38,8 @@ from anthropic import APIStatusError, InternalServerError, RateLimitError
 from asgiref.sync import sync_to_async
 from langchain_core.messages import AIMessage, ToolMessage
 
-from apps.agents.graph.base import FIXED_MESSAGE_NODES, INJECTED_TOOL_PARAMS
-from apps.agents.graph.state import TRUNCATED_TOOL_CALLS_NODE
+from apps.agents.graph.base import AGENT_NODE, FIXED_MESSAGE_NODES, INJECTED_TOOL_PARAMS
+from apps.agents.graph.state import TRUNCATED_TOOL_CALLS_NODE, all_tool_calls
 from apps.agents.llm_request import LLM_TIMEOUT_ERRORS
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
@@ -49,6 +49,7 @@ from apps.common.capacity import (
     BUSY_ERROR,
     BUSY_MESSAGE,
     RETRY_AFTER_SECONDS,
+    CapacityResource,
     classify_capacity_error,
     report_capacity_exhausted,
 )
@@ -229,33 +230,116 @@ def _subagent_parent_tool_call_id(event: dict[str, Any]) -> str | None:
 audit_logger = logging.getLogger("scout.agent.audit")
 
 STOPPED_RESPONSE_MARKER = "Response stopped by user."
+TURN_FAILED_NOTICE = "This response didn't finish. (Ref: {ref})"
+INTERRUPTED_TOOL_RESULT = "Not completed: the turn ended before this tool call returned."
+# The turn holds its lease, and the stream its notice, until the write ends; a
+# database short of connections must not stretch that to the pool timeouts.
+TERMINAL_WRITE_TIMEOUT_SECONDS = 5
 
 
-async def _persist_stopped_response(agent: Any, config: dict, partial_text: str) -> None:
-    """Append a terminal assistant message when the client cancels a stream."""
-    clean_partial = partial_text.strip()
-    content = (
-        f"{clean_partial}\n\n_{STOPPED_RESPONSE_MARKER}_"
-        if clean_partial
-        else f"_{STOPPED_RESPONSE_MARKER}_"
-    )
-    try:
-        await asyncio.shield(
-            agent.aupdate_state(
-                config,
-                {
-                    "messages": [
-                        AIMessage(
-                            content=content,
-                            response_metadata={"scout_response_stopped": True},
-                        )
-                    ]
-                },
-                as_node="agent",
-            )
+def _trailing_unanswered_tool_calls(messages: list[Any]) -> list[dict]:
+    """Tool calls of the latest AIMessage that no ToolMessage after it answers."""
+    answered: set[str] = set()
+    for msg in reversed(messages):
+        if isinstance(msg, ToolMessage):
+            if msg.tool_call_id:
+                answered.add(msg.tool_call_id)
+        elif isinstance(msg, AIMessage):
+            return [tc for tc in all_tool_calls(msg) if tc.get("id") and tc["id"] not in answered]
+        else:
+            return []
+    return []
+
+
+async def _history(agent: Any, config: dict) -> list[Any]:
+    # A load failure skips the write: a marker without the tool_results it needs
+    # would bury the open calls behind it.
+    state = await agent.aget_state(config)
+    values = getattr(state, "values", None)
+    history = values.get("messages") if isinstance(values, dict) else None
+    return history if isinstance(history, list) else []
+
+
+async def _write_terminal_message(agent: Any, config: dict, message: AIMessage) -> None:
+    # Answer the turn's unanswered tool calls before the marker, not after it: the
+    # next turn's repair only looks at the latest AIMessage, which is the marker,
+    # and a reload would show those calls as still running.
+    interrupted = [
+        ToolMessage(
+            content=INTERRUPTED_TOOL_RESULT,
+            tool_call_id=tc["id"],
+            name=tc.get("name") or "unknown",
+            status="error",
         )
+        for tc in _trailing_unanswered_tool_calls(await _history(agent, config))
+    ]
+    await agent.aupdate_state(config, {"messages": [*interrupted, message]}, as_node=AGENT_NODE)
+
+
+async def _persist_terminal_response(
+    agent: Any,
+    config: dict,
+    partial_text: str,
+    notice: str,
+    metadata: dict,
+    owns_thread: Callable[[], bool] | None,
+) -> None:
+    """Append the assistant message that ends a turn which didn't complete."""
+    clean_partial = partial_text.strip()
+    content = f"{clean_partial}\n\n_{notice}_" if clean_partial else f"_{notice}_"
+    message = AIMessage(content=content, response_metadata=metadata)
+    if owns_thread is not None and not owns_thread():
+        return
+
+    async def bounded_write() -> None:
+        async with asyncio.timeout(TERMINAL_WRITE_TIMEOUT_SECONDS):
+            await _write_terminal_message(agent, config, message)
+
+    write = asyncio.ensure_future(bounded_write())
+    try:
+        try:
+            await asyncio.shield(write)
+        except asyncio.CancelledError:
+            # The caller releases the turn lease once this returns, so a write left
+            # running could land after another turn has taken the thread. A run
+            # cancelled for losing the lease must not write at all.
+            if owns_thread is not None and not owns_thread():
+                write.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await write
+            raise
     except Exception:
-        logger.warning("Could not persist stopped chat response", exc_info=True)
+        logger.warning("Could not persist the end of an unfinished chat turn", exc_info=True)
+
+
+async def _persist_stopped_response(
+    agent: Any, config: dict, partial_text: str, owns_thread: Callable[[], bool] | None
+) -> None:
+    await _persist_terminal_response(
+        agent,
+        config,
+        partial_text,
+        STOPPED_RESPONSE_MARKER,
+        {"scout_response_stopped": True},
+        owns_thread,
+    )
+
+
+async def _persist_failed_response(
+    agent: Any,
+    config: dict,
+    partial_text: str,
+    ref: str,
+    owns_thread: Callable[[], bool] | None,
+) -> None:
+    await _persist_terminal_response(
+        agent,
+        config,
+        partial_text,
+        TURN_FAILED_NOTICE.format(ref=ref),
+        {"scout_turn_failed": True},
+        owns_thread,
+    )
 
 
 async def langgraph_to_ui_stream(
@@ -269,8 +353,8 @@ async def langgraph_to_ui_stream(
     """
     Stream LangGraph agent events as UI Message Stream Protocol (SSE) chunks.
 
-    ``owns_thread`` gates the stopped-reply write on cancellation: a run
-    cancelled because it lost the thread's turn lease must not write to it.
+    ``owns_thread`` gates the stopped and failed reply writes: a run that lost
+    the thread's turn lease must not write to it.
     ``on_success`` runs once the agent run ends without an error, before the
     finish chunk, so its work is already queued when the client sees the turn end.
     """
@@ -318,6 +402,16 @@ async def langgraph_to_ui_stream(
             await event_queue.put({"source": "parent_done"})
 
     parent_pump = asyncio.create_task(_pump_parent_events())
+
+    async def _stop_run() -> None:
+        if not parent_pump.done():
+            parent_pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await parent_pump
+        # Close the generator on every exit so an abandoned run and its
+        # upstream model call are cancelled instead of waiting for GC.
+        with contextlib.suppress(Exception):
+            await event_stream.aclose()
 
     try:
         while True:
@@ -511,6 +605,15 @@ async def langgraph_to_ui_stream(
                     }
                 )
 
+            elif (
+                event_type == "on_chain_end"
+                and event.get("name") == AGENT_NODE
+                and (event.get("metadata") or {}).get("langgraph_node") == AGENT_NODE
+            ):
+                # The step's AIMessage is checkpointed now, so an unfinished-turn
+                # marker must carry only the text streamed after it.
+                streamed_text.clear()
+
             elif event_type == "on_chain_end" and event.get("name") == TRUNCATED_TOOL_CALLS_NODE:
                 # The rejected calls fire no on_tool_start/end, so without this the
                 # retried turn's text would run on from the cut-off fragment.
@@ -551,18 +654,22 @@ async def langgraph_to_ui_stream(
                     yield _sse({"type": "text-delta", "id": text_id, "delta": esc_text})
 
     except (asyncio.CancelledError, GeneratorExit):
-        if not parent_pump.done():
-            parent_pump.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await parent_pump
-        with contextlib.suppress(Exception):
-            await event_stream.aclose()
-        if owns_thread is None or owns_thread():
-            await _persist_stopped_response(agent, config, "".join(streamed_text))
+        await _stop_run()
+        await _persist_stopped_response(agent, config, "".join(streamed_text), owns_thread)
         raise
     except Exception as exc:
+        ref = _error_ref(exc)
         capacity = classify_capacity_error(exc)
+        # With no connection to spare, the write could only time out.
+        if capacity is None or capacity.resource == CapacityResource.CUBE:
+            # Written before any yield: a left chat's turn has nobody watching it,
+            # and this is the only record that it failed. Retryable failures are
+            # recorded too: only the shown chat retries them, and the retry
+            # resends the question, so the record sits between the two.
+            await _stop_run()
+            await _persist_failed_response(agent, config, "".join(streamed_text), ref, owns_thread)
         if capacity is not None:
+            logger.warning("Capacity exhausted during agent streaming [ref=%s]", ref)
             await sync_to_async(report_capacity_exhausted)(capacity.resource, str(capacity))
             yield _sse(
                 {
@@ -583,7 +690,8 @@ async def langgraph_to_ui_stream(
             # the frontend can use to auto-retry the turn. Any open text/
             # reasoning part is closed by the shared block below.
             logger.warning(
-                "Anthropic capacity error during stream (retryable): %s",
+                "Anthropic capacity error during stream (retryable) [ref=%s]: %s",
+                ref,
                 exc.__class__.__name__,
             )
             yield _sse(
@@ -594,7 +702,6 @@ async def langgraph_to_ui_stream(
                 }
             )
         else:
-            ref = _error_ref(exc)
             if isinstance(exc, LLM_TIMEOUT_ERRORS):
                 # Expected once requests are bounded: keep it out of ERROR-level
                 # Sentry. Not auto-retried: the turn may already have run tools, and
@@ -637,14 +744,7 @@ async def langgraph_to_ui_stream(
     else:
         succeeded = True
     finally:
-        if not parent_pump.done():
-            parent_pump.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await parent_pump
-        # Close the generator on every exit so an abandoned run and its
-        # upstream model call are cancelled instead of waiting for GC.
-        with contextlib.suppress(Exception):
-            await event_stream.aclose()
+        await _stop_run()
 
     # Before any further yield: a client that disconnects at one would skip the hook.
     if succeeded and on_success is not None:

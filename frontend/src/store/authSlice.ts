@@ -9,7 +9,11 @@ export interface User {
   email: string
   name: string
   is_staff: boolean
+  // Absent on older servers. Only hides the nav link; the API checks the permission.
+  can_view_usage_dashboard?: boolean
   onboarding_complete: boolean
+  // Absent on older servers; only ever a workspace the user is still a member of.
+  last_workspace_id?: string | null
   agent_model?: { id: string; label: string }
 }
 

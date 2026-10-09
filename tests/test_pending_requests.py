@@ -878,7 +878,7 @@ async def test_messages_include_pending_for_a_thread_not_yet_created():
         f"/api/workspaces/{ws.id}/threads/{uuid.uuid4()}/messages/?include=pending"
     )
 
-    assert response.json() == {"messages": [], "pending_request": None}
+    assert response.json() == {"messages": [], "pending_request": None, "turn_running": False}
 
 
 # Step 4: requests no load of their own sends, and the workspace flush.

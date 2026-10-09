@@ -209,7 +209,8 @@ class PendingRequest(models.Model):
 
 
 class ResumeStreamChunk(models.Model):
-    """Text a background resume streamed, for an open chat to show as it is written.
+    """Text a background resume or a chat turn streamed, for an open chat to show as it
+    is written.
 
     The answer's record is still the checkpoint; these rows only let a chat tail
     a run it did not start, and are pruned soon after. See apps/chat/resume_stream.py.
@@ -219,7 +220,8 @@ class ResumeStreamChunk(models.Model):
     thread = models.ForeignKey("chat.Thread", on_delete=models.CASCADE, related_name="+")
     run = models.UUIDField()
     text = models.TextField(blank=True, default="")
-    # The run's last row: nothing follows it.
+    # The run is over (a chat turn's run can get a second: its call's end, then the
+    # turn's). Readers treat any done row as the run's end.
     done = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 

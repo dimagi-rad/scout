@@ -1387,7 +1387,13 @@ def test_read_member_get_of_manifest_less_story_writes_nothing(workspace, member
         response = client.get(url)
 
     assert response.status_code == 200, response.content
-    writes = [q["sql"] for q in captured if q["sql"].lstrip().upper().startswith(WRITE_STATEMENTS)]
+    # The view's telemetry event is the one write a read may make; it touches no artifact.
+    writes = [
+        q["sql"]
+        for q in captured
+        if q["sql"].lstrip().upper().startswith(WRITE_STATEMENTS)
+        and '"telemetry_telemetryevent"' not in q["sql"]
+    ]
     assert writes == []
     assert list(Artifact.objects.filter(pk=artifact.pk).values()) == before
     assert not ArtifactSemanticQuery.objects.filter(artifact=artifact).exists()

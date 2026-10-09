@@ -29,6 +29,7 @@ import {
   ChatBusyNotice,
   ChatErrorNotice,
   ChatOverloadNotice,
+  ChatRemoteTurnNotice,
   ChatStoppedNotice,
   ChatThinkingIndicator,
 } from "./ChatStatus"
@@ -43,7 +44,8 @@ import { readDraft, writeDraft } from "./draftStorage"
 import { classifyChatError } from "./chatErrors"
 import { PendingRequestCard } from "./PendingRequestCard"
 import { useHeldRequest, type EditOutcome } from "./useHeldRequest"
-import { useResumeStream } from "./useResumeStream"
+import { RESUME_STREAM_POLL_MS, useResumeStream } from "./useResumeStream"
+import { REMOTE_TURN_STREAM_POLL_MS, useRemoteTurnPoll } from "./useRemoteTurn"
 import { HISTORY_LOAD_TIMEOUT_MS } from "./historyLoad"
 import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -87,6 +89,52 @@ function withoutHeldMessages(messages: UIMessage[], heldIds: ReadonlySet<string>
   })
 }
 
+/** ``response`` with ``onEnd`` called once its body is done (``clean``), or failed,
+ *  cancelled or its request aborted (Stop). */
+function untilBodyEnds(
+  response: Response,
+  signal: AbortSignal | null | undefined,
+  onEnd: (clean: boolean) => void,
+): Response {
+  if (!response.body) {
+    onEnd(true)
+    return response
+  }
+  const reader = response.body.getReader()
+  let ended = false
+  const end = (clean = false) => {
+    if (ended) return
+    ended = true
+    onEnd(clean)
+  }
+  signal?.addEventListener("abort", () => end(), { once: true })
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read()
+        if (done) {
+          end(true)
+          controller.close()
+        } else {
+          controller.enqueue(value)
+        }
+      } catch (readError) {
+        end()
+        controller.error(readError)
+      }
+    },
+    cancel(reason) {
+      end()
+      return reader.cancel(reason)
+    },
+  })
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  })
+}
+
 export function ChatPanel() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const threadId = useAppStore((s) => s.threadId)
@@ -94,6 +142,8 @@ export function ChatPanel() {
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const updateThreadTitle = useAppStore((s) => s.uiActions.updateThreadTitle)
   const newThread = useAppStore((s) => s.uiActions.newThread)
+  const addSendingThread = useAppStore((s) => s.uiActions.addSendingThread)
+  const settleSendingThread = useAppStore((s) => s.uiActions.settleSendingThread)
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userId = useAppStore((s) => s.user?.id ?? null)
@@ -209,9 +259,9 @@ export function ChatPanel() {
   // sent, or its load's ThreadJob is RUNNING (the resume phase).
   const resumeAnswering =
     held.phase === "answering" || activeMaterializationJob?.state === "running"
-  const resumeStream = useResumeStream(activeDomainId, threadId, resumeAnswering)
-  const resetResumeStreamRef = useRef(resumeStream.reset)
-  resetResumeStreamRef.current = resumeStream.reset
+  // Set below, once the turn this tab can't follow is known: the hooks it needs come first.
+  const resetResumeStreamRef = useRef<() => void>(() => {})
+  const acknowledgeResumeDoneRef = useRef<() => void>(() => {})
   // Per thread, the user message that sends a held request itself ("Send now"), and
   // the request version it showed; a retry of that message names the version too.
   // Each thread's chat runs on its own, so another thread's send must not replace it.
@@ -224,12 +274,26 @@ export function ChatPanel() {
   // The load that failed or timed out, offered for retry.
   const [historyFailed, setHistoryFailed] =
     useState<{ chat: Chat<UIMessage>; reloadKey: number } | null>(null)
+  // The loaded history's turn was running on the server, as of that load (#856).
+  // The chat whose reload a remote turn asked for: a failed one keeps following the
+  // turn instead of unblocking a send into its lease.
+  const remoteReloadRef = useRef<{ chat: Chat<UIMessage>; follow: boolean } | null>(null)
+  // A remote turn's closing reload failed: its Retry still owes the title and list.
+  const remoteEndOwedRef = useRef<Chat<UIMessage> | null>(null)
+  const [serverTurn, setServerTurn] =
+    useState<{ chat: Chat<UIMessage>; reloadKey: number } | null>(null)
   // A left chat can finish after the panel is gone; it must not start polls then.
   const mountedRef = useRef(true)
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      // Its chats go with it; the server's turn_running shows their turns from here.
+      const { activeDomainId: workspaceId, localTurnThreadIds, uiActions } =
+        useAppStore.getState()
+      if (localTurnThreadIds.size === 0) return
+      uiActions.forgetLocalTurns()
+      if (workspaceId) void uiActions.fetchThreads(workspaceId)
     }
   }, [])
   // Title polls for threads whose turn finished out of view.
@@ -321,6 +385,32 @@ export function ChatPanel() {
         credentials: "include",
         headers: () => ({ "X-CSRFToken": getCsrfToken() }),
         body: () => ({ data: context }),
+        // The row exists by the time any response past validation arrives, long before the
+        // turn ends, so the server's list decides from here.
+        fetch: async (input, init) => {
+          const { uiActions } = useAppStore.getState()
+          uiActions.startLocalTurn(chatThreadId)
+          // An answered turn's end refetches the list (the status effects); any other
+          // end does it here, as the server may still be running the turn or another
+          // tab's, and the list's flag is what shows the thread from now on.
+          const endTurn = (refetch: boolean) => {
+            if (uiActions.endLocalTurn(chatThreadId) && refetch && chatWorkspaceId) {
+              void uiActions.fetchThreads(chatWorkspaceId)
+            }
+          }
+          let response: Response
+          try {
+            response = await fetch(input, init)
+          } catch (fetchError) {
+            endTurn(true)
+            throw fetchError
+          } finally {
+            if (chatWorkspaceId) uiActions.settleSendingThread(chatWorkspaceId, chatThreadId)
+          }
+          return untilBodyEnds(response, init?.signal, (clean) =>
+            endTurn(!clean || !response.ok),
+          )
+        },
         prepareSendMessagesRequest: ({ body, id, messages, trigger, messageId }) => {
           const sending = heldSends.get(chatThreadId)
           const data =
@@ -436,6 +526,56 @@ export function ChatPanel() {
   historyLoadingRef.current = historyLoading
   const historyLoadFailed =
     historyFailed?.chat === chat && historyFailed.reloadKey === messageReloadKey
+  // Its turn runs where this tab can't follow it (another tab or device, or one left
+  // before a reload or a route change): wait for it rather than send into its lease.
+  const remoteTurnRunning =
+    !isStreaming
+    && !historyLoading
+    && serverTurn?.chat === chat
+    && serverTurn.reloadKey === messageReloadKey
+  // Its text streams in as the server writes it; tool and artifact cards come with
+  // the reload once the turn is over.
+  const resumeStream = useResumeStream(
+    activeDomainId,
+    threadId,
+    resumeAnswering || remoteTurnRunning,
+    // A chat turn writes at most once a second; reading faster finds nothing new.
+    resumeAnswering ? RESUME_STREAM_POLL_MS : REMOTE_TURN_STREAM_POLL_MS,
+  )
+  resetResumeStreamRef.current = resumeStream.reset
+  acknowledgeResumeDoneRef.current = resumeStream.acknowledgeDone
+  /** Reload a remote turn's thread: a call of it ended, or the turn did. The load
+   *  says which (turn_running), and refreshes the title and list only for the latter.
+   *  ``follow``: the tail asked, mid-turn, so a failed load keeps following the turn;
+   *  the poll asks once the turn is over (or it gave up), and a failure then offers
+   *  the load's Retry instead of polling again. */
+  function reloadRemoteTurn(follow: boolean) {
+    if (!mountedRef.current) return
+    remoteReloadRef.current = { chat, follow }
+    setMessageReloadKey((k) => k + 1)
+  }
+  // The poll is the backstop: a turn that streamed no text, or whose writes failed,
+  // has no done row to read.
+  useRemoteTurnPoll(activeDomainId, threadId, remoteTurnRunning, () => reloadRemoteTurn(false))
+  const reloadRemoteTurnRef = useRef(reloadRemoteTurn)
+  reloadRemoteTurnRef.current = reloadRemoteTurn
+  // A done row ends a model call, or (written once the server has let go of the
+  // thread) the turn.
+  useEffect(() => {
+    if (remoteTurnRunning && resumeStream.done) reloadRemoteTurnRef.current(true)
+  }, [remoteTurnRunning, resumeStream.done])
+  // Each model call streams as a run of its own. A new one means the last call and
+  // its tool cards are in the history now, so reload to show them; the reload's
+  // read then starts at the call being written, rather than showing the last twice.
+  const shownRunRef = useRef<string | null>(null)
+  useEffect(() => {
+    const previous = shownRunRef.current
+    shownRunRef.current = resumeStream.run
+    if (remoteTurnRunning && previous !== null && resumeStream.run !== null
+      && previous !== resumeStream.run) {
+      reloadRemoteTurnRef.current(true)
+    }
+  }, [remoteTurnRunning, resumeStream.run])
 
   const loadThreadArtifacts = useCallback(async () => {
     if (!activeDomainId || !threadId) return
@@ -494,6 +634,7 @@ export function ChatPanel() {
       void Promise.resolve().then(() => {
         if (cancelled) return
         setLoaded({ chat, reloadKey })
+        setServerTurn(null)
         // Nothing was fetched, so a failed load stays failed and keeps its Retry.
         setHistoryFailed((failed) => (failed?.chat === chat ? { chat, reloadKey } : failed))
       })
@@ -506,7 +647,12 @@ export function ChatPanel() {
     async function loadMessages() {
       try {
         const response = await api.get<
-          UIMessage[] | { messages: UIMessage[]; pending_request: PendingRequest | null }
+          | UIMessage[]
+          | {
+              messages: UIMessage[]
+              pending_request: PendingRequest | null
+              turn_running?: boolean
+            }
         >(
           `/api/workspaces/${activeDomainId}/threads/${threadId}/messages/?include=pending`,
           abort.signal,
@@ -517,6 +663,18 @@ export function ChatPanel() {
           ? { messages: response, pending_request: null }
           : response
         setLoaded({ chat, reloadKey })
+        // A turn this tab started while the load was out is the lease it reports.
+        const remoteRunning =
+          !Array.isArray(response) && response.turn_running === true && !isChatRunning(chat)
+        setServerTurn(remoteRunning ? { chat, reloadKey } : null)
+        const followedRemoteTurn = remoteReloadRef.current?.chat === chat
+        remoteReloadRef.current = null
+        remoteEndOwedRef.current = null
+        if (followedRemoteTurn && !remoteRunning) {
+          // The turn is over: its first answer is when the thread gets a title.
+          setTitleRefreshTrigger((prev) => ({ threadId, turn: (prev?.turn ?? 0) + 1 }))
+          if (activeDomainId) void fetchThreads(activeDomainId)
+        }
         // A shown thread can't send until its history loads, so only a new chat (no
         // history) or a retry timer can have started a turn; the live turn wins.
         if (!isChatRunning(chat)) setMessages(history.messages)
@@ -539,7 +697,20 @@ export function ChatPanel() {
         // shown, and offer a retry.
         setLoaded({ chat, reloadKey })
         setHistoryFailed({ chat, reloadKey })
-        resetResumeStreamRef.current()
+        // serverTurn only ever describes the latest load: an earlier one's must not
+        // block sending now. A reload a running remote turn asked for keeps
+        // following it (its tail and poll reload again), rather than unblocking a
+        // send into its lease.
+        const followingRemoteTurn =
+          remoteReloadRef.current?.chat === chat && remoteReloadRef.current.follow
+        remoteEndOwedRef.current =
+          remoteReloadRef.current?.chat === chat && !followingRemoteTurn ? chat : null
+        remoteReloadRef.current = null
+        setServerTurn(followingRemoteTurn ? { chat, reloadKey } : null)
+        // Nothing was reloaded, so what the tail shows is still all the turn shows;
+        // only the end it reloaded for is spent, or it would reload again at once.
+        if (followingRemoteTurn) acknowledgeResumeDoneRef.current()
+        else resetResumeStreamRef.current()
       } finally {
         clearTimeout(timeout)
       }
@@ -728,8 +899,21 @@ export function ChatPanel() {
     }
     resetOverloadState()
     setStoppedNotice(false)
-    forgetLocalThread(threadId)
-    void sendMessage({ text })
+    const settle = listSendingThread(text)
+    void sendMessage({ text }).finally(settle)
+  }
+
+  /** A new chat's first message goes out: list it now, not when its turn ends (#859). */
+  function listSendingThread(text: string): () => void {
+    const workspaceId = activeDomainId
+    const sentFrom = threadId
+    if (workspaceId) addSendingThread(workspaceId, sentFrom, text, isLocalThread(sentFrom))
+    forgetLocalThread(sentFrom)
+    // The transport settles it on the response; this covers a send that failed before
+    // its request went out, which would otherwise keep the placeholder for good.
+    return () => {
+      if (workspaceId) settleSendingThread(workspaceId, sentFrom)
+    }
   }
 
   /** Send the held request as this turn, with ``extra`` after it. */
@@ -749,8 +933,9 @@ export function ChatPanel() {
     })
     resetOverloadState()
     setStoppedNotice(false)
-    forgetLocalThread(threadId)
+    const settle = listSendingThread(text)
     void sendMessage({ id: messageId, role: "user", parts: [{ type: "text", text }] })
+      .finally(settle)
   }
 
   /** Puts text the composer had already cleared back, in the chat it was typed in. */
@@ -767,7 +952,7 @@ export function ChatPanel() {
 
   async function handleSend(text: string) {
     // Defensive: the composer blocks this; keep the typed text rather than drop it.
-    if (historyLoading && !held.adding) {
+    if ((historyLoading || remoteTurnRunning) && !held.adding) {
       setInput(text)
       return
     }
@@ -810,7 +995,7 @@ export function ChatPanel() {
   }
 
   function handleSendHeldNow() {
-    if (historyLoading) return
+    if (historyLoading || remoteTurnRunning) return
     const pending = held.takeForSend()
     if (pending) sendHeld(pending)
   }
@@ -854,7 +1039,13 @@ export function ChatPanel() {
   }
 
   // While loading, or after a failed load, it is not shown as a new, empty chat.
-  if (visibleMessages.length === 0 && !held.pending && !historyLoading && !historyLoadFailed) {
+  if (
+    visibleMessages.length === 0
+    && !held.pending
+    && !historyLoading
+    && !historyLoadFailed
+    && !remoteTurnRunning
+  ) {
     return (
       <div className="flex h-full min-w-0 flex-col">
         {loadBanners}
@@ -913,7 +1104,16 @@ export function ChatPanel() {
                 variant="outline"
                 size="sm"
                 disabled={isStreaming}
-                onClick={() => setMessageReloadKey((k) => k + 1)}
+                // A remote turn's retry goes through its path, so one that finds the
+                // turn over still refreshes its title, and one during it keeps
+                // following it.
+                onClick={() => {
+                  if (remoteTurnRunning || remoteEndOwedRef.current === chat) {
+                    reloadRemoteTurn(remoteTurnRunning)
+                  } else {
+                    setMessageReloadKey((k) => k + 1)
+                  }
+                }}
                 data-testid="chat-history-retry"
               >
                 Retry
@@ -929,7 +1129,7 @@ export function ChatPanel() {
               onEdit={handleEditHeld}
               onRemovePart={held.removePart}
               onAbandonEdit={(text) => returnToComposer(activeDomainId, threadId, text)}
-              actionsDisabled={isStreaming || historyLoading}
+              actionsDisabled={isStreaming || historyLoading || remoteTurnRunning}
               onDiscard={() => void held.discard()}
             />
           )}
@@ -953,6 +1153,9 @@ export function ChatPanel() {
             </p>
           )}
           {isStreaming && <ChatThinkingIndicator />}
+          {remoteTurnRunning && !resumeAnswering && !resumeStream.text && (
+            <ChatRemoteTurnNotice />
+          )}
           {stoppedNotice && <ChatStoppedNotice />}
           {error && !busyError && (
             <ChatErrorNotice
@@ -988,7 +1191,10 @@ export function ChatPanel() {
             setInput={setInput}
             onSend={handleSend}
             isStreaming={isStreaming}
-            sendBlocked={historyLoading}
+            sendBlocked={historyLoading || remoteTurnRunning}
+            sendBlockedReason={
+              remoteTurnRunning ? "Still working on the last message..." : undefined
+            }
             onStop={handleStop}
             mode={held.adding ? "add" : "send"}
           />

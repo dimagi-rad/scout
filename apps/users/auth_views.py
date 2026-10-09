@@ -8,6 +8,7 @@ from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.sites.models import Site
 from django.core.cache import cache
+from django.core.exceptions import ValidationError
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
 from django.utils import timezone
@@ -21,11 +22,15 @@ from apps.common.commcare_servers import (
     server_for_provider,
 )
 from apps.common.http import parse_json_object, string_field
+from apps.telemetry.access import acan_view_usage_dashboard
+from apps.telemetry.models import USAGE_DASHBOARD_PERMISSION, EventKind
+from apps.telemetry.recorder import arecord
 from apps.users.decorators import async_login_required, login_required_json
 from apps.users.models import (
     SCOPED_OAUTH_PROVIDERS,
     TenantConnection,
     TenantMembership,
+    User,
 )
 from apps.users.rate_limiting import check_rate_limit, record_attempt
 from apps.users.services.credential_resolver import aiter_fresh_access_tokens
@@ -53,18 +58,46 @@ from apps.users.services.token_refresh import (
     token_health,
     token_needs_refresh,
 )
+from apps.workspaces.access import aresolve_workspace_access_ex
+from apps.workspaces.models import WorkspaceMembership
 
 logger = logging.getLogger(__name__)
 
 
-def _user_response(user, *, onboarding_complete=False):
+def _last_workspace_id(user) -> str | None:
+    """The remembered workspace id, only while the user is still a member of it."""
+    if user.last_workspace_id is None:
+        return None
+    # authz-exempt: a hint the client re-checks against its own workspace list.
+    is_member = WorkspaceMembership.objects.filter(
+        user=user, workspace_id=user.last_workspace_id
+    ).exists()
+    return str(user.last_workspace_id) if is_member else None
+
+
+async def _alast_workspace_id(user) -> str | None:
+    if user.last_workspace_id is None:
+        return None
+    # authz-exempt: a hint the client re-checks against its own workspace list.
+    is_member = await WorkspaceMembership.objects.filter(
+        user=user, workspace_id=user.last_workspace_id
+    ).aexists()
+    return str(user.last_workspace_id) if is_member else None
+
+
+def _user_response(
+    user, *, onboarding_complete=False, last_workspace_id=None, can_view_usage_dashboard=False
+):
     """Build standard user JSON response dict."""
     return {
         "id": str(user.id),
         "email": user.email,
         "name": user.get_full_name(),
         "is_staff": user.is_staff,
+        # Only hides the nav link; the dashboard API checks the permission itself.
+        "can_view_usage_dashboard": can_view_usage_dashboard,
         "onboarding_complete": onboarding_complete,
+        "last_workspace_id": last_workspace_id,
         "agent_model": {
             "id": settings.DEFAULT_LLM_MODEL,
             "label": model_display_name(settings.DEFAULT_LLM_MODEL),
@@ -138,10 +171,19 @@ async def me_view(request):
     """
     user = request._authenticated_user
 
+    last_workspace_id = await _alast_workspace_id(user)
+    can_view_usage_dashboard = await acan_view_usage_dashboard(user)
     cache_key = me_onboarding_cache_key(user)
     cached = await cache.aget(cache_key)
     if cached is not None:
-        return JsonResponse(_user_response(user, onboarding_complete=cached))
+        return JsonResponse(
+            _user_response(
+                user,
+                onboarding_complete=cached,
+                last_workspace_id=last_workspace_id,
+                can_view_usage_dashboard=can_view_usage_dashboard,
+            )
+        )
 
     onboarding_complete = await _aonboarding_complete(user)
 
@@ -162,7 +204,14 @@ async def me_view(request):
         onboarding_complete = await _aonboarding_complete(user)
 
     await cache.aset(cache_key, onboarding_complete, ME_ONBOARDING_TTL)
-    return JsonResponse(_user_response(user, onboarding_complete=onboarding_complete))
+    return JsonResponse(
+        _user_response(
+            user,
+            onboarding_complete=onboarding_complete,
+            last_workspace_id=last_workspace_id,
+            can_view_usage_dashboard=can_view_usage_dashboard,
+        )
+    )
 
 
 @require_POST
@@ -200,7 +249,43 @@ def login_view(request):
         archived_at__isnull=True,
     ).exists()
 
-    return JsonResponse(_user_response(user, onboarding_complete=onboarding_complete))
+    return JsonResponse(
+        _user_response(
+            user,
+            onboarding_complete=onboarding_complete,
+            last_workspace_id=_last_workspace_id(user),
+            can_view_usage_dashboard=user.has_perm(USAGE_DASHBOARD_PERMISSION),
+        )
+    )
+
+
+@require_POST
+@async_login_required
+async def last_workspace_view(request):
+    """Remember the workspace the user is in, so the next visit opens it."""
+    body, err = parse_json_object(request)
+    if err:
+        return err
+    workspace_id, err = string_field(body, "workspace_id")
+    if err:
+        return err
+    user = request._authenticated_user
+    try:
+        allowed = (
+            await aresolve_workspace_access_ex(user, workspace_id, verification=None)
+        ).granted
+    except (ValidationError, ValueError):
+        allowed = False
+    if not allowed:
+        return JsonResponse({"error": "Workspace not found"}, status=404)
+    switched = (
+        await User.objects.filter(pk=user.pk)
+        .exclude(last_workspace_id=workspace_id)
+        .aupdate(last_workspace_id=workspace_id)
+    )
+    if switched:
+        await arecord(EventKind.WORKSPACE_SWITCH, user_id=user.pk, workspace_id=workspace_id)
+    return JsonResponse({"ok": True})
 
 
 @require_POST

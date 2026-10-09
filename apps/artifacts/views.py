@@ -36,6 +36,8 @@ from apps.common.http import parse_json_object
 from apps.common.utils import creator_display_name
 from apps.semantic.services.date_context import DateContextError, date_context
 from apps.semantic.services.query import raise_if_capacity_exhausted
+from apps.telemetry.models import EventKind
+from apps.telemetry.recorder import record
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
@@ -779,6 +781,15 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
             return err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
         derive_missing_semantic_query_manifest(artifact)
+        # Every artifact type, stories included, is fetched here once per open; the
+        # sandbox iframe reloads on each data revision and never loads for a story.
+        record(
+            EventKind.ARTIFACT_VIEW,
+            user_id=request.user.id,
+            workspace_id=workspace.id,
+            name=artifact.artifact_type,
+            attrs={"artifact_id": artifact.id, "version": artifact.version},
+        )
         return JsonResponse(self._serialize_artifact(artifact))
 
     def _serialize_artifact(self, artifact: Artifact) -> dict[str, Any]:

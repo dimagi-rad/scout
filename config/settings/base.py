@@ -92,6 +92,7 @@ INSTALLED_APPS = [
     "apps.chat",
     "apps.transformations",
     "apps.semantic",
+    "apps.telemetry",
 ]
 
 MIDDLEWARE = [
@@ -142,6 +143,9 @@ DATABASES = {
 
 # Separate from the application DB to allow future migration to Snowflake etc.
 MANAGED_DATABASE_URL = env("MANAGED_DATABASE_URL", default="")
+
+# In-app usage and performance events (#862); off stops every write, never a request.
+TELEMETRY_ENABLED = env.bool("TELEMETRY_ENABLED", default=True)
 
 # Cube semantic-query runtime. Leave empty to disable live Cube calls in tests
 # and local setups that have not started the cube service yet.

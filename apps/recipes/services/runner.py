@@ -13,6 +13,8 @@ from apps.agents.graph.base import ESCALATION_METADATA_KEY, build_agent_graph
 from apps.agents.graph.state import all_tool_calls
 from apps.agents.mcp_client import get_mcp_tools
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
+from apps.telemetry.agent_runs import AgentRunTelemetry
+from apps.telemetry.models import EventKind, Outcome
 from apps.workspaces.models import Workspace
 
 if TYPE_CHECKING:
@@ -176,11 +178,26 @@ class RecipeRunner:
 
         self._thread_id = f"recipe-run-{self._run.id}"
 
+        telemetry = AgentRunTelemetry(
+            EventKind.RECIPE_RUN,
+            user_id=self.user.id,
+            workspace_id=self.recipe.workspace_id,
+            thread_id=self._thread_id,
+            name="recipe",
+        )
+        telemetry.attrs["recipe_id"] = str(self.recipe.id)
+        # Recorded however the run ends, including a worker shutdown mid-run.
+        async with telemetry.recording():
+            return await self._execute_graph(telemetry)
+
+    async def _execute_graph(self, telemetry: AgentRunTelemetry) -> RecipeRun:
         graph = await self._build_graph()
-        config = {
-            "configurable": {"thread_id": self._thread_id},
-            "recursion_limit": 50,
-        }
+        config = telemetry.with_callbacks(
+            {
+                "configurable": {"thread_id": self._thread_id},
+                "recursion_limit": 50,
+            }
+        )
 
         prompt = self.recipe.render_prompt(self.variable_values)
 
@@ -243,6 +260,7 @@ class RecipeRunner:
             RecipeRunStatus.COMPLETED if result["success"] else RecipeRunStatus.FAILED
         )
         self._run.completed_at = timezone.now()
+        telemetry.outcome = Outcome.COMPLETED if result["success"] else Outcome.FAILED
         await self._run.asave(update_fields=["step_results", "status", "completed_at"])
 
         return self._run

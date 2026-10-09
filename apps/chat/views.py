@@ -32,12 +32,15 @@ from apps.chat.helpers import (
 )
 from apps.chat.models import Thread
 from apps.chat.rate_limiting import chat_rate_limit
+from apps.chat.resume_stream import LiveTurnWriter
 from apps.chat.stream import _sse, langgraph_to_ui_stream
 from apps.chat.tasks import aschedule_thread_title
 from apps.chat.titles import afill_turn_title, short_thread_title
 from apps.chat.turn_lease import TurnLease, aacquire_turn_lease
 from apps.common.capacity import BUSY_ERROR, RETRY_AFTER_SECONDS, classify_capacity_error
 from apps.common.http import parse_json_object
+from apps.telemetry.agent_runs import AgentRunTelemetry
+from apps.telemetry.models import EventKind
 from apps.workspaces.access import access_denied_response, role_satisfies
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.services.load_activity import (
@@ -163,6 +166,8 @@ async def chat_view(request):
     """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    # The turn's clock: time to first token counts what the user waits through.
+    request_started = time.monotonic()
 
     user = request._authenticated_user
 
@@ -281,6 +286,7 @@ async def chat_view(request):
                 user_content=user_content,
                 pending_version=pending_version,
                 pending_request_id=pending_request_id,
+                request_started=request_started,
             )
     except asyncio.CancelledError:
         await lease.release()
@@ -396,6 +402,7 @@ async def _start_turn(
     user_content: str,
     pending_version: int | None = None,
     pending_request_id: str | None = None,
+    request_started: float | None = None,
 ):
     """Build the agent and return the turn's stream, which owns ``lease`` from here."""
     thread_id = str(thread.id)
@@ -467,6 +474,15 @@ async def _start_turn(
     )
     if langfuse_handler is not None:
         config["callbacks"] = [langfuse_handler]
+    telemetry = AgentRunTelemetry(
+        EventKind.CHAT_TURN,
+        user_id=user.id,
+        workspace_id=workspace.id,
+        thread_id=thread_id,
+        name="live",
+        started=request_started,
+    )
+    telemetry.with_callbacks(config)
 
     trace_ctx = langfuse_trace_context(
         session_id=str(thread_id),
@@ -496,28 +512,36 @@ async def _start_turn(
 
     async def _traced_stream():
         response.turn_started = True
-        # aclosing: nothing else closes the inner stream on disconnect, and its
-        # cleanup (stopping the run, saving the partial reply) must finish before
-        # the lease is released and another turn can take the thread.
-        async with lease.held():
-            try:
-                with trace_ctx:
-                    async with contextlib.aclosing(
-                        langgraph_to_ui_stream(
-                            agent,
-                            input_state,
-                            config,
-                            owns_thread=lambda: not lease.lost,
-                            on_success=lambda: aschedule_thread_title(thread),
-                        )
-                    ) as stream:
-                        async for chunk in stream:
-                            yield chunk
-            finally:
-                if claimed is not None:
-                    await pending_requests.asettle(claimed)
+        live = LiveTurnWriter(thread_id)
+        try:
+            # aclosing: nothing else closes the inner stream on disconnect, and its
+            # cleanup (stopping the run, saving the partial reply) must finish before
+            # the lease is released and another turn can take the thread.
+            async with lease.held():
+                try:
+                    with trace_ctx:
+                        async with contextlib.aclosing(
+                            langgraph_to_ui_stream(
+                                agent,
+                                input_state,
+                                config,
+                                owns_thread=lambda: not lease.lost,
+                                on_success=lambda: aschedule_thread_title(thread),
+                            )
+                        ) as stream:
+                            async for chunk in stream:
+                                live.observe(chunk)
+                                yield chunk
+                finally:
+                    if claimed is not None:
+                        await pending_requests.asettle(claimed)
+        finally:
+            # After the release: a chat tailing the turn reloads on the done row, and
+            # must find the thread free and its answer saved.
+            await live.close()
 
-    response.streaming_content = _traced_stream()
+    telemetry.attrs["held_request"] = claimed is not None
+    response.streaming_content = telemetry.wrap_stream(_traced_stream(), lost=lambda: lease.lost)
     return response
 
 

@@ -14,7 +14,7 @@ These tests cover the two-layer defense against that state.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from apps.agents.graph.base import build_agent_graph
 from apps.chat.helpers import repair_dangling_tool_calls
@@ -200,3 +200,54 @@ class TestAgentNodeGuard:
         )
         tm_idx = captured.index(tool_msgs[0])
         assert tm_idx == ai_idx + 1, "Synthetic ToolMessage must follow its AIMessage directly"
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_a_stop_marker_saved_after_an_unanswered_call_still_pairs_it(
+        self, workspace, user
+    ):
+        """Threads stopped mid-tool before #856 end in a marker after the open call.
+
+        The pre-turn repair only looks at the marker, so ``agent_node`` must still
+        put the call's tool_result straight after it, ahead of the marker.
+        """
+        captured: list = []
+
+        async def fake_ainvoke(messages, *args, **kwargs):
+            captured.extend(messages)
+            return AIMessage(content="acknowledged", id="ai-resp-2")
+
+        mock_bound = MagicMock()
+        mock_bound.ainvoke = AsyncMock(side_effect=fake_ainvoke)
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_bound
+        tool_call = AIMessage(
+            content="calling tool",
+            tool_calls=[{"id": "call_1", "name": "list_tables", "args": {}}],
+        )
+        marker = AIMessage(
+            content="_Response stopped by user._",
+            response_metadata={"scout_response_stopped": True},
+        )
+        history = [HumanMessage(content="hello"), tool_call, marker]
+
+        assert await repair_dangling_tool_calls(_mock_agent_with_state(history), CONFIG) == []
+        with patch("apps.agents.graph.base.ChatAnthropic", return_value=mock_llm):
+            agent = await build_agent_graph(workspace=workspace, user=user, mcp_tools=[])
+            await agent.ainvoke(
+                {
+                    "messages": [*history, HumanMessage(content="are you there?")],
+                    "workspace_id": str(workspace.id),
+                    "user_id": str(user.id),
+                }
+            )
+
+        sent = [m for m in captured if not isinstance(m, SystemMessage)]
+        assert [type(m).__name__ for m in sent] == [
+            "HumanMessage",
+            "AIMessage",
+            "ToolMessage",
+            "AIMessage",
+            "HumanMessage",
+        ]
+        assert sent[2].tool_call_id == "call_1"

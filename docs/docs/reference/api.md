@@ -23,6 +23,7 @@ chat turn that hits the limit mid-stream ends with a `data-chat-status` part
 |--------|------|-------------|
 | GET | `/api/auth/csrf/` | Sets the CSRF cookie and returns `{"csrfToken": "..."}`. |
 | GET | `/api/auth/me/` | Current user. 401 if not signed in. |
+| POST | `/api/auth/last-workspace/` | Remember the workspace the user is in, so the next visit opens it. |
 | POST | `/api/auth/login/` | Email/password login. |
 | POST | `/api/auth/logout/` | End the session. |
 | GET | `/api/auth/providers/` | OAuth providers configured for this site, with connection status when signed in. |
@@ -42,12 +43,22 @@ Login takes `{"email": "...", "password": "..."}`. Login and `me` return:
   "email": "user@example.com",
   "name": "Jane Doe",
   "is_staff": false,
-  "onboarding_complete": true
+  "onboarding_complete": true,
+  "last_workspace_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7"
 }
 ```
 
 `onboarding_complete` is true once the user has at least one active tenant
 membership backed by a connection.
+
+`last_workspace_id` is the workspace saved by `last-workspace`, or `null` if
+none was saved or the user is no longer a member of it. Clients treat it as a
+hint and check it against their own workspace list.
+
+`POST /api/auth/last-workspace/` takes `{"workspace_id": "..."}` and returns
+`{"ok": true}`. It returns 400 for invalid JSON or a `workspace_id` that isn't
+a string, and 404 `{"error": "Workspace not found"}` when `workspace_id` is
+missing, the workspace doesn't exist, or the user can't access it.
 
 Login returns 400 for invalid JSON or missing fields, 401 for bad credentials,
 and 429 once an email has 5 failed logins within 5 minutes.
