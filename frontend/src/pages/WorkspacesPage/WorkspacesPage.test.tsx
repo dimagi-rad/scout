@@ -54,6 +54,7 @@ function many(n: number): WorkspaceListItem[] {
 
 describe("WorkspacesPage", () => {
   beforeEach(() => {
+    localStorage.clear()
     useAppStore.setState({ domainsStatus: "loaded", domains: [] })
   })
 
@@ -92,7 +93,6 @@ describe("WorkspacesPage", () => {
 
     await userEvent.setup().selectOptions(screen.getByTestId("workspaces-sort"), "recent")
     expect(rowIds()).toEqual(["old", "mid", "newest", "new"])
-    localStorage.removeItem("scout.recentWorkspaces")
   })
 
   it("renders one page of rows and reveals more on request", async () => {
