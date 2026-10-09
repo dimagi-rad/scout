@@ -1,10 +1,10 @@
-import { useCallback, useState } from "react"
+import { useCallback, useState, useSyncExternalStore } from "react"
 
 import type { FacetSelection } from "./facets"
 
 // Bounds what a tampered or runaway entry can make us hold in memory.
 const MAX_VALUES_PER_FACET = 500
-const MAX_VALUE_LENGTH = 200
+const MAX_VALUE_LENGTH = 255
 
 /**
  * Parses a stored selection, keeping only known facet keys and string values.
@@ -63,35 +63,83 @@ export function writeFacetSelection(storageKey: string, selection: FacetSelectio
   }
 }
 
+function safeRead(storageKey: string): string | null {
+  try {
+    return localStorage.getItem(storageKey)
+  } catch {
+    return null
+  }
+}
+
+// Snapshots are cached by raw string so useSyncExternalStore sees a stable value
+// between writes. A write's value is cached even when storage rejects it, so the
+// UI still follows the user's choice in private mode or over quota.
+const snapshots = new Map<string, { raw: string | null; value: FacetSelection }>()
+const listeners = new Map<string, Set<() => void>>()
+const EMPTY: FacetSelection = {}
+
+function snapshot(storageKey: string, knownKeys: readonly string[]): FacetSelection {
+  const cacheKey = `${storageKey}\n${knownKeys.join(",")}`
+  const raw = safeRead(storageKey)
+  const cached = snapshots.get(cacheKey)
+  if (cached && cached.raw === raw) return cached.value
+  const value = parseFacetSelection(raw, knownKeys)
+  snapshots.set(cacheKey, { raw, value })
+  return value
+}
+
+function notify(storageKey: string): void {
+  for (const listener of listeners.get(storageKey) ?? []) listener()
+}
+
+function subscribe(storageKey: string, listener: () => void): () => void {
+  let set = listeners.get(storageKey)
+  if (!set) listeners.set(storageKey, (set = new Set()))
+  set.add(listener)
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === storageKey || e.key === null) listener()
+  }
+  window.addEventListener("storage", onStorage)
+  return () => {
+    set.delete(listener)
+    window.removeEventListener("storage", onStorage)
+  }
+}
+
 /**
- * A facet selection persisted under `storageKey`; a null key keeps it in memory only
- * (e.g. before the user id is known). Re-reads when the key changes, so an account
- * switch never shows the previous user's filters.
+ * A facet selection persisted under `storageKey`, kept in sync across every picker
+ * using the key (and other tabs), so one picker's write never clobbers another's.
+ * A null key keeps it in memory only (e.g. before the user id is known).
  */
 export function usePersistentFacetSelection(
   storageKey: string | null,
   knownKeys: readonly string[],
 ): [FacetSelection, (next: FacetSelection) => void] {
-  const [state, setState] = useState<{ key: string | null; selection: FacetSelection }>(() => ({
-    key: storageKey,
-    selection: storageKey ? readFacetSelection(storageKey, knownKeys) : {},
-  }))
-  let current = state
-  if (state.key !== storageKey) {
-    current = {
-      key: storageKey,
-      selection: storageKey ? readFacetSelection(storageKey, knownKeys) : {},
-    }
-    setState(current)
-  }
+  const [memory, setMemory] = useState<FacetSelection>(EMPTY)
+  const subscribeToKey = useCallback(
+    (listener: () => void) => (storageKey ? subscribe(storageKey, listener) : () => {}),
+    [storageKey],
+  )
+  const stored = useSyncExternalStore(subscribeToKey, () =>
+    storageKey ? snapshot(storageKey, knownKeys) : EMPTY,
+  )
 
   const setSelection = useCallback(
     (next: FacetSelection) => {
-      setState({ key: storageKey, selection: next })
-      if (storageKey) writeFacetSelection(storageKey, next)
+      if (!storageKey) {
+        setMemory(next)
+        return
+      }
+      writeFacetSelection(storageKey, next)
+      const raw = safeRead(storageKey)
+      for (const cacheKey of [...snapshots.keys()]) {
+        if (cacheKey.startsWith(`${storageKey}\n`)) snapshots.delete(cacheKey)
+      }
+      snapshots.set(`${storageKey}\n${knownKeys.join(",")}`, { raw, value: next })
+      notify(storageKey)
     },
-    [storageKey],
+    [storageKey, knownKeys],
   )
 
-  return [current.selection, setSelection]
+  return [storageKey ? stored : memory, setSelection]
 }

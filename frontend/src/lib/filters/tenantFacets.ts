@@ -68,8 +68,13 @@ function labelled(
 
 // Without the backend's attributes (an older API), every Connect row would read
 // Unknown/None; hiding the group then is more honest than offering a no-op filter.
+const FACETED_ATTRIBUTES = ["is_active", "end_date", "organization", "program"]
+
 function hasConnectAttributes(items: readonly UserTenant[]): boolean {
-  return items.some((t) => Object.keys(connectAttributes(t) ?? {}).length > 0)
+  return items.some((t) => {
+    const attrs = connectAttributes(t)
+    return !!attrs && FACETED_ATTRIBUTES.some((key) => attrs[key] != null)
+  })
 }
 
 const STATUS_LABELS: Record<string, string> = {

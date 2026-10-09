@@ -42,11 +42,15 @@ export function useFacetedList<T>({
     [items, visibleFacets, selection, predicate],
   )
 
-  // Writes only the touched facet, so values another picker's list still has
-  // (but this one lacks) survive in storage.
+  // Stored values absent from this list (another picker's list may still have
+  // them) survive a toggle; `replace` ("Only", per-facet clear) drops them too.
   const setFacet = useCallback(
-    (key: string, values: readonly string[]) => setStored({ ...stored, [key]: values }),
-    [stored, setStored],
+    (key: string, values: readonly string[], replace = false) => {
+      const present = new Set((options[key] ?? []).map((o) => o.value))
+      const elsewhere = replace ? [] : (stored[key] ?? []).filter((v) => !present.has(v))
+      setStored({ ...stored, [key]: [...values, ...elsewhere] })
+    },
+    [stored, setStored, options],
   )
   const clearFacets = useCallback(() => setStored({}), [setStored])
 

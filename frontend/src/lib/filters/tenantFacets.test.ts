@@ -137,7 +137,10 @@ describe("TENANT_FACETS", () => {
   })
 
   it("hides the Connect group when the API sends no attributes, and Provider for one provider", () => {
-    const legacy = [tenant("c1", "commcare_connect"), tenant("c2", "commcare_connect")]
+    const legacy = [
+      tenant("c1", "commcare_connect"),
+      tenant("c2", "commcare_connect", { visit_count: 3 }),
+    ]
     expect(availableFacets(TENANT_FACETS, legacy)).toEqual([])
   })
 })
