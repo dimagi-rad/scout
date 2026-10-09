@@ -198,6 +198,38 @@ async def test_commcare_complete_pagination_follows_meta_next(settings):
 
 
 @pytest.mark.asyncio
+async def test_commcare_unpaginated_listing_is_complete(settings):
+    # HQ's DoesNothingPaginator: total_count and no next key (#880).
+    payload = {
+        "objects": [
+            {"domain_name": "one", "project_name": "One"},
+            {"domain_name": "two", "project_name": "Two"},
+        ],
+        "meta": {"total_count": 2},
+    }
+
+    result, requests = await _verify(
+        _request("commcare"), [_response(payload=payload)], settings=settings
+    )
+
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert result.external_ids == frozenset({"one", "two"})
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_commcare_listing_short_of_its_total_count_is_indeterminate(settings):
+    payload = {
+        "objects": [{"domain_name": "one", "project_name": "One"}],
+        "meta": {"total_count": 2},
+    }
+
+    result, _ = await _verify(_request("commcare"), [_response(payload=payload)], settings=settings)
+
+    assert result.outcome == VerificationOutcome.INDETERMINATE
+
+
+@pytest.mark.asyncio
 async def test_empty_complete_response_is_success(settings):
     settings.OCS_URL = "https://ocs.example"
     result, _ = await _verify(

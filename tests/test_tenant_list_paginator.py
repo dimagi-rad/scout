@@ -173,6 +173,23 @@ def test_commcare_decoder_reports_an_undeclared_next():
     assert (page.next_url, page.next_declared) == (None, False)
 
 
+@pytest.mark.parametrize(
+    ("meta", "declared"),
+    [
+        ({"total_count": 1}, True),
+        ({"total_count": 2}, False),
+        ({"total_count": "1"}, False),
+        ({"total_count": True}, False),
+    ],
+)
+def test_commcare_decoder_reads_an_unpaginated_count_as_the_end(meta, declared):
+    page = commcare_listing.decode_page(
+        {"objects": [{"domain_name": "a", "project_name": "A"}], "meta": meta}
+    )
+
+    assert (page.next_url, page.next_declared) == (None, declared)
+
+
 def test_commcare_request_needs_a_known_server_and_a_whole_key():
     assert commcare_listing.list_request("mars", "oauth", "tok") is None
     assert commcare_listing.list_request("", "api_key", "no-separator") is None

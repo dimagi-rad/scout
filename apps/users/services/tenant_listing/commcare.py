@@ -50,4 +50,17 @@ def decode_page(payload: Any) -> TenantListPage:
     tenants = tuple(
         descriptor(row, id_key="domain_name", name_key="project_name") for row in payload["objects"]
     )
-    return TenantListPage(tenants, next_url, next_declared="next" in meta)
+    return TenantListPage(tenants, next_url, next_declared=_declares_end(meta, len(tenants)))
+
+
+def _declares_end(meta: dict, row_count: int) -> bool:
+    """Whether the page says where the list ends.
+
+    HQ serves user_domains unpaginated (``DoesNothingPaginator``): ``meta`` holds only
+    ``total_count``, never ``next``. That count matching the rows is the whole list;
+    anything short of it is a truncation verification must not trust (#880).
+    """
+    if "next" in meta:
+        return True
+    total_count = meta.get("total_count")
+    return type(total_count) is int and total_count == row_count
