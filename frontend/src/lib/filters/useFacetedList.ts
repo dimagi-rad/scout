@@ -64,15 +64,13 @@ export function useFacetedList<T>({
     },
     [stored, setStored, absentStored],
   )
+  // Only facets on offer: one hidden for this data (e.g. Connect facets while the API
+  // sends no attributes) keeps its stored selection for when it shows again.
   const clearFacets = useCallback(() => {
-    if (listIsComplete) {
-      setStored({})
-      return
-    }
     const next: Record<string, readonly string[]> = { ...stored }
     for (const facet of visibleFacets) next[facet.key] = absentStored(facet.key)
     setStored(next)
-  }, [listIsComplete, stored, setStored, visibleFacets, absentStored])
+  }, [stored, setStored, visibleFacets, absentStored])
 
   return {
     facets: visibleFacets,

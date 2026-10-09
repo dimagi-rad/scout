@@ -5,7 +5,7 @@ import {
   availableFacets,
   computeFacetOptions,
   effectiveSelection,
-  isFiltering,
+  facetTestIdValue,
   type FacetDef,
 } from "./facets"
 
@@ -136,8 +136,10 @@ describe("availableFacets", () => {
   })
 })
 
-it("isFiltering ignores empty selections", () => {
-  expect(isFiltering({})).toBe(false)
-  expect(isFiltering({ kind: [] })).toBe(false)
-  expect(isFiltering({ kind: ["a"] })).toBe(true)
+it("keeps safe values as test ids and gives sanitised ones distinct suffixes", () => {
+  expect(facetTestIdValue("commcare_connect")).toBe("commcare_connect")
+  const spaced = facetTestIdValue("org a")
+  expect(spaced).toMatch(/^orga-[0-9a-z]+$/)
+  expect(spaced).not.toBe(facetTestIdValue("org:a"))
+  expect(facetTestIdValue("برنامج")).toMatch(/^value-[0-9a-z]+$/)
 })

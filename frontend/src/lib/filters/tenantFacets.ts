@@ -64,7 +64,7 @@ function labelled(
     },
     optionLabel: (value, t) => {
       if (value === NONE) return "None"
-      return nonEmptyString(connectAttributes(t)?.[nameKey]) ?? value
+      return nonEmptyString(connectAttributes(t)?.[nameKey])
     },
   }
 }

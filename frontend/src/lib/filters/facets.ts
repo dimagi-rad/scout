@@ -18,8 +18,11 @@ export interface FacetDef<T> {
    * the item. Not-applicable items are never hidden by this facet and are not counted.
    */
   getValue: (item: T) => string | undefined
-  /** Display label for a value; `item` is one item carrying that value. */
-  optionLabel?: (value: string, item: T) => string
+  /**
+   * Display label for a value, from one item carrying it. Return undefined when this
+   * item has no name for the value; another item may, and the raw value is the fallback.
+   */
+  optionLabel?: (value: string, item: T) => string | undefined
   /** Fixed display order; values not listed sort after, by label. */
   valueOrder?: readonly string[]
   /** Values that always sort last (e.g. "None"). */
@@ -31,6 +34,18 @@ export interface FacetDef<T> {
 }
 
 export type FacetSelection = Readonly<Record<string, readonly string[]>>
+
+/**
+ * A facet value made safe for a data-testid selector. A value that had to change
+ * gets a hash of the original, so distinct values keep distinct ids.
+ */
+export function facetTestIdValue(value: string): string {
+  const safe = value.replace(/[^A-Za-z0-9_-]+/g, "")
+  if (safe === value) return value
+  let hash = 0
+  for (const ch of value) hash = (Math.imul(hash, 31) + ch.codePointAt(0)!) | 0
+  return `${safe || "value"}-${(hash >>> 0).toString(36)}`
+}
 
 export interface FacetOption {
   value: string
@@ -107,10 +122,6 @@ export function effectiveSelection<T>(
   return result
 }
 
-export function isFiltering(selection: FacetSelection): boolean {
-  return Object.values(selection).some((values) => values.length > 0)
-}
-
 /** Items passing `predicate` (e.g. the text search) and every facet. */
 export function applyFacets<T>(
   items: readonly T[],
@@ -153,16 +164,23 @@ export function computeFacetOptions<T>(
   const result: Record<string, FacetOption[]> = {}
   for (const def of defs) {
     const options = new Map<string, FacetOption>()
+    // Values still awaiting a display name: the first row may lack one a later row has.
+    const unnamed = new Set<string>()
     items.forEach((item, index) => {
       const value = def.getValue(item)
       if (value === undefined) return
       let option = options.get(value)
       if (!option) {
-        option = { value, label: def.optionLabel?.(value, item) ?? value, count: 0 }
+        option = { value, label: value, count: 0 }
         options.set(value, option)
-      } else if (option.label === value && def.optionLabel) {
-        // The first row may lack a display name that a later row carries.
-        option.label = def.optionLabel(value, item)
+        if (def.optionLabel) unnamed.add(value)
+      }
+      if (unnamed.has(value)) {
+        const label = def.optionLabel?.(value, item)
+        if (label !== undefined) {
+          option.label = label
+          unnamed.delete(value)
+        }
       }
       if (searched[index] && matchesAll(item, defs, sets, def.key)) option.count++
     })

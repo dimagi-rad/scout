@@ -5,20 +5,16 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { SearchFilterBar } from "@/components/SearchFilterBar/SearchFilterBar"
-import type { FacetDef, FacetOption, FacetSelection } from "@/lib/filters/facets"
+import {
+  facetTestIdValue,
+  type FacetDef,
+  type FacetOption,
+  type FacetSelection,
+} from "@/lib/filters/facets"
 import { cn } from "@/lib/utils"
 
 export const FACET_COLLAPSED_LIMIT = 12
 
-// Values are untrusted (org slugs, program names); keep test ids selector-safe.
-// A value that needed changing gets a hash of the original, so ids stay unique.
-function testIdValue(value: string): string {
-  const safe = value.replace(/[^A-Za-z0-9_-]+/g, "")
-  if (safe === value) return value
-  let hash = 0
-  for (const ch of value) hash = (Math.imul(hash, 31) + ch.codePointAt(0)!) | 0
-  return `${safe || "value"}-${(hash >>> 0).toString(36)}`
-}
 
 interface FacetFilterBarProps<T> {
   /** Prefix for every data-testid, e.g. "create-sources-filter". */
@@ -214,7 +210,7 @@ function FacetPopover<T>({
           ) : (
             visible.map((option, index) => {
               const id = `${idBase}-${index}`
-              const valueId = testIdValue(option.value)
+              const valueId = facetTestIdValue(option.value)
               return (
                 <div
                   key={option.value}
@@ -246,6 +242,8 @@ function FacetPopover<T>({
                     </span>
                     <button
                       type="button"
+                      // Unlike Clear, Only replaces outright, dropping values another
+                      // picker's list has; see onFacetChange's `replace`.
                       onClick={() => onChange([option.value], true)}
                       // Untappable while invisible, so a click on the count cannot trigger it unseen.
                       className="pointer-events-none absolute inset-y-0 right-0 rounded px-1 opacity-0 hover:text-foreground hover:underline focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:static pointer-coarse:opacity-100"

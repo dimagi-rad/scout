@@ -84,6 +84,25 @@ it("drops values a complete list lacks, so revoked ones cannot linger", () => {
   expect(localStorage.getItem(KEY)).toBeNull()
 })
 
+it("clears only offered facets on a complete list, keeping hidden ones", () => {
+  localStorage.setItem(KEY, JSON.stringify({ org: ["foo"], gone: ["x"] }))
+  const facetsWithGone: FacetDef<Row>[] = [
+    ...facets,
+    { key: "gone", label: "Gone", getValue: () => undefined },
+  ]
+  const { result } = renderHook(() =>
+    useFacetedList({
+      items: [{ org: "foo" }],
+      facets: facetsWithGone,
+      storageKey: KEY,
+      predicate: always,
+      listIsComplete: true,
+    }),
+  )
+  act(() => result.current.clearFacets())
+  expect(stored()).toEqual({ gone: ["x"] })
+})
+
 it("keeps two pickers on the same key in sync", () => {
   const items = [{ org: "dimagi" }, { org: "foo" }]
   const a = renderHook(() => useFacetedList({ items, facets, storageKey: KEY, predicate: always }))
