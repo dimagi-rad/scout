@@ -113,8 +113,8 @@ function notify(storageKey: string): void {
 }
 
 function subscribe(storageKey: string, listener: () => void): () => void {
-  let set = listeners.get(storageKey)
-  if (!set) listeners.set(storageKey, (set = new Set()))
+  const set = listeners.get(storageKey) ?? new Set<() => void>()
+  listeners.set(storageKey, set)
   set.add(listener)
   const onStorage = (e: StorageEvent) => {
     if (e.key === storageKey || e.key === null) listener()
@@ -122,6 +122,7 @@ function subscribe(storageKey: string, listener: () => void): () => void {
   window.addEventListener("storage", onStorage)
   return () => {
     set.delete(listener)
+    if (set.size === 0) listeners.delete(storageKey)
     window.removeEventListener("storage", onStorage)
   }
 }

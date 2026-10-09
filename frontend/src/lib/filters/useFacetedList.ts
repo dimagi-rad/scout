@@ -52,7 +52,16 @@ export function useFacetedList<T>({
     },
     [stored, setStored, options],
   )
-  const clearFacets = useCallback(() => setStored({}), [setStored])
+  // Like setFacet, keeps values this list lacks and facets it does not offer, so
+  // clearing in the add-source panel does not wipe what the other picker applies.
+  const clearFacets = useCallback(() => {
+    const next: Record<string, readonly string[]> = { ...stored }
+    for (const facet of visibleFacets) {
+      const present = new Set((options[facet.key] ?? []).map((o) => o.value))
+      next[facet.key] = (stored[facet.key] ?? []).filter((v) => !present.has(v))
+    }
+    setStored(next)
+  }, [stored, setStored, visibleFacets, options])
 
   return {
     facets: visibleFacets,

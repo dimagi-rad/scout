@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react"
+import { useCallback, useEffect, useState, type ReactNode } from "react"
 import { MemoryRouter } from "react-router-dom"
 import type { Meta, StoryObj } from "@storybook/react-vite"
 
@@ -88,12 +88,16 @@ const STORY_USER = {
   onboarding_complete: true,
 }
 
-function seedStore() {
-  if (useAppStore.getState().user?.id !== STORY_USER.id) {
+// Seeds after mount and restores on unmount; the pickers load once the user id appears.
+function SeededStore({ children }: { children: ReactNode }) {
+  useEffect(() => {
+    const previous = useAppStore.getState()
+    setCachedUserTenants(STORY_USER.id, DEMO_TENANTS)
     useAppStore.setState({ user: STORY_USER, authStatus: "authenticated" })
-  }
-  useAppStore.setState({ domains: [], domainsStatus: "loaded" })
-  setCachedUserTenants(STORY_USER.id, DEMO_TENANTS)
+    useAppStore.setState({ domains: [], domainsStatus: "loaded" })
+    return () => useAppStore.setState(previous)
+  }, [])
+  return children
 }
 
 const meta = {
@@ -151,24 +155,22 @@ export const Standalone: Story = {
 }
 
 export const InCreateWorkspaceModal: Story = {
-  render: () => {
-    seedStore()
-    return (
+  render: () => (
+    <SeededStore>
       <MemoryRouter>
         <CreateWorkspaceModal onClose={() => {}} />
       </MemoryRouter>
-    )
-  },
+    </SeededStore>
+  ),
 }
 
 export const InAddSourcePanel: Story = {
   parameters: { layout: "padded" },
-  render: () => {
-    seedStore()
-    return (
+  render: () => (
+    <SeededStore>
       <div className="max-w-3xl">
         <TenantsTab workspaceId="storybook-workspace" isManager onWorkspaceDeleted={() => {}} />
       </div>
-    )
-  },
+    </SeededStore>
+  ),
 }

@@ -7,6 +7,7 @@ export interface UserTenant {
   tenant_uuid: string // internal Tenant UUID — use this for workspace API calls
   tenant_name: string
   last_selected_at: string | null
+  // Which deployment hosts the tenant (CommCare HQ: "" = www, "eu" = EU); not shown yet.
   server?: string
   // Provider-specific metadata for filtering (Connect: is_active, is_test, organization, …).
   // Absent from older API responses and {} for providers that send none; treat every key as untrusted.

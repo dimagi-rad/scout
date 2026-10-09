@@ -45,7 +45,15 @@ function endDateHasPassed(value: unknown, today: string): boolean {
   return date.slice(0, 10) < today
 }
 
-export function connectStatus(t: UserTenant, today = localIsoDate(new Date())): string | undefined {
+// getValue runs per row per facet on every keystroke; format the day once per minute.
+let cachedToday = { day: "", until: 0 }
+function currentDay(): string {
+  const now = Date.now()
+  if (now >= cachedToday.until) cachedToday = { day: localIsoDate(new Date(now)), until: now + 60_000 }
+  return cachedToday.day
+}
+
+export function connectStatus(t: UserTenant, today = currentDay()): string | undefined {
   const attrs = connectAttributes(t)
   if (!attrs) return undefined
   if (endDateHasPassed(attrs.end_date, today)) return "inactive"

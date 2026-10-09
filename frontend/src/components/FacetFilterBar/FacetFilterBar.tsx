@@ -233,17 +233,17 @@ function FacetPopover<T>({
                   >
                     {option.label}
                   </label>
-                  {/* "Only" takes the count's place on hover or keyboard focus. */}
-                  <span className="relative w-9 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                  {/* "Only" takes the count's place on hover or keyboard focus; touch
+                      screens have no hover, so there it always shows beside the count. */}
+                  <span className="relative flex w-9 shrink-0 items-center justify-end gap-2 text-xs tabular-nums text-muted-foreground pointer-coarse:w-auto">
                     <span className="group-hover:invisible group-has-[button:focus-visible]:invisible">
                       {option.count}
                     </span>
                     <button
                       type="button"
                       onClick={() => onChange([option.value], true)}
-                      // Invisible until hover/focus, and untappable then, so a touch
-                      // on the count cannot trigger it unseen.
-                      className="pointer-events-none absolute inset-y-0 right-0 rounded px-1 opacity-0 hover:text-foreground hover:underline focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
+                      // Untappable while invisible, so a click on the count cannot trigger it unseen.
+                      className="pointer-events-none absolute inset-y-0 right-0 rounded px-1 opacity-0 hover:text-foreground hover:underline focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:static pointer-coarse:opacity-100"
                       aria-label={`Only ${option.label}`}
                       data-testid={`${testId}-only-${valueId}`}
                     >
