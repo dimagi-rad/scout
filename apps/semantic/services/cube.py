@@ -275,7 +275,7 @@ def _cube_dimension(
         else _cube_sql(field.expression),
         "type": "time"
         if field.field_type == SemanticField.FieldType.TIME_DIMENSION
-        else _cube_type(field.data_type),
+        else cube_dimension_type(field.data_type),
     }
     if is_primary_key:
         payload["primary_key"] = True
@@ -343,9 +343,25 @@ def _apply_display_metadata(payload: dict[str, Any], field: SemanticField) -> No
         payload["currency"] = currency.strip().upper()
 
 
-def _cube_type(data_type: str) -> str:
+# A canvas field's data_type is free text, so "number" and "float" must map here too, and
+# the catalog formats money as currency_2: as strings, Cube rejects those formats and with
+# them the whole schema (#882).
+_NUMERIC_TYPE_TOKENS = (
+    "int",
+    "numeric",
+    "decimal",
+    "double",
+    "real",
+    "number",
+    "float",
+    "money",
+    "serial",
+)
+
+
+def cube_dimension_type(data_type: str) -> str:
     lowered = data_type.lower()
-    if any(token in lowered for token in ("int", "numeric", "decimal", "double", "real")):
+    if any(token in lowered for token in _NUMERIC_TYPE_TOKENS):
         return "number"
     if "bool" in lowered:
         return "boolean"

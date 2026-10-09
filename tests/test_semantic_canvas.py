@@ -42,8 +42,12 @@ from apps.semantic.models import (
 )
 from apps.semantic.services import catalog as catalog_service
 from apps.semantic.services.catalog import PhysicalTable
-from apps.semantic.services.cube import generate_cube_schema
-from apps.semantic.services.cube_schema import CubeValidatorUnavailableError
+from apps.semantic.services.cube import cube_dimension_type, generate_cube_schema
+from apps.semantic.services.cube_schema import (
+    CubeSchemaBuildError,
+    CubeValidatorUnavailableError,
+    _diagnostics_from_validation,
+)
 
 
 @pytest.fixture
@@ -625,6 +629,135 @@ def test_saved_invalid_dimension_sql_cannot_be_promoted_by_compiler(semantic_mod
     )
     with pytest.raises(ValueError, match="not allowed"):
         generate_cube_schema(semantic_model)
+
+
+_FORM_MINUTES_SQL = 'EXTRACT(EPOCH FROM ({CUBE}."amount")) / 60.0'
+
+
+def _create_dimension(canvas, user, **value):
+    return apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {"dataset": "raw_visits", "field_type": "dimension", **value},
+            }
+        ],
+        user,
+    )
+
+
+def test_number_data_type_dimension_publishes_as_cube_number(
+    canvas, semantic_model, monkeypatch, user
+):
+    monkeypatch.setattr(
+        canvas_commit_module,
+        "build_and_promote_cube_schema",
+        lambda ws, model, **_: SimpleNamespace(content_hash="number-dimension-test"),
+    )
+    result = _create_dimension(
+        canvas,
+        user,
+        name="form_minutes",
+        data_type="number",
+        format="number_1",
+        sql=_FORM_MINUTES_SQL,
+    )
+    assert result["diagnostics"] == []
+    assert commit_canvas(canvas, user)["blocked"] is False
+
+    cube = next(
+        c for c in generate_cube_schema(semantic_model)["cubes"] if c["name"] == "raw_visits"
+    )
+    dimension = next(d for d in cube["dimensions"] if d["name"] == "form_minutes")
+    assert dimension["type"] == "number"
+    assert dimension["format"] == "number_1"
+
+
+_PAID_DATE_SQL = "CASE WHEN {CUBE}.\"amount\" > 0 THEN DATE '2026-09-01' ELSE NULL END"
+
+
+@pytest.mark.parametrize(
+    ("field_type", "data_type", "display_format", "blocked"),
+    [
+        ("dimension", "text", "number_1", True),
+        ("dimension", "", ".1f", True),
+        ("dimension", "text", "percent", False),
+        ("dimension", "number", "number_1", False),
+        ("dimension", "double precision", ".1f", False),
+        ("dimension", "money", "currency_2", False),
+        ("time_dimension", "date", "number_1", True),
+        ("time_dimension", "date", "percent", False),
+    ],
+)
+def test_numeric_format_on_non_number_dimension_is_blocked_before_commit(
+    canvas, user, field_type, data_type, display_format, blocked
+):
+    result = _create_dimension(
+        canvas,
+        user,
+        name="form_minutes",
+        field_type=field_type,
+        data_type=data_type,
+        format=display_format,
+        sql=_PAID_DATE_SQL if field_type == "time_dimension" else _FORM_MINUTES_SQL,
+    )
+
+    codes = [d["code"] for d in result["diagnostics"]]
+    assert ("INVALID_FORMAT" in codes) is blocked
+    assert result["can_commit"] is not blocked
+
+
+@pytest.mark.parametrize(("display_format", "blocked"), [("number_1", True), ("percent", False)])
+def test_format_only_edit_on_text_dimension_is_checked(canvas, user, display_format, blocked):
+    result = apply_operations(
+        canvas,
+        [{"op": "set", "target": "field/raw_visits.username/format", "value": display_format}],
+        user,
+    )
+
+    codes = [d["code"] for d in result["diagnostics"]]
+    assert ("INVALID_FORMAT" in codes) is blocked
+    assert result["can_commit"] is not blocked
+
+
+def test_every_catalog_numeric_type_publishes_as_a_cube_number():
+    # The catalog stamps numeric formats on these; as Cube strings they fail validation.
+    assert {t: cube_dimension_type(t) for t in catalog_service._NUMERIC_TYPES} == dict.fromkeys(
+        catalog_service._NUMERIC_TYPES, "number"
+    )
+
+
+def test_failed_cube_validation_after_commit_reports_the_validator_reason(
+    canvas, semantic_model, user, monkeypatch
+):
+    def rejected(ws, model, **_):
+        raise CubeSchemaBuildError(
+            "Generated Cube schema failed validation.",
+            diagnostics=_diagnostics_from_validation(
+                {
+                    "valid": False,
+                    "errors": [
+                        {
+                            "message": "short",
+                            "full_message": "raw_visits cube: format must be one of [number]",
+                        }
+                    ],
+                }
+            ),
+        )
+
+    monkeypatch.setattr(canvas_commit_module, "build_and_promote_cube_schema", rejected)
+    _create_dimension(canvas, user, name="amount_copy", expression="amount", data_type="numeric")
+
+    outcome = commit_canvas(canvas, user)["cube_schema"]
+
+    assert outcome == {
+        "ok": False,
+        "error": "Generated Cube schema failed validation.",
+        "validator_errors": ["raw_visits cube: format must be one of [number]"],
+    }
 
 
 def test_unreachable_validator_after_commit_warns_without_an_error(

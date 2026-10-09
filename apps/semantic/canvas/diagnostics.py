@@ -35,6 +35,7 @@ from apps.semantic.models import (
     SemanticField,
     SemanticRelationship,
 )
+from apps.semantic.services.cube import cube_dimension_type
 from apps.semantic.services.field_sql import (
     DimensionSQLValidationError,
     MeasureSQLValidationError,
@@ -42,6 +43,12 @@ from apps.semantic.services.field_sql import (
     compile_measure_filter_sql,
     compile_measure_sql,
     dataset_column_names,
+)
+
+# Cube accepts only these named formats on a non-number dimension (string, time, boolean);
+# any other format (number_1, a d3 spec) fails validation of the whole schema (#882).
+_STRING_DIMENSION_FORMATS = frozenset(
+    {"imageUrl", "link", "currency", "percent", "number", "id", "object"}
 )
 
 _DIRECT_MEMBER_DIVISION_RE = re.compile(
@@ -93,6 +100,10 @@ def compute_diagnostics(
         if change.change_type != ChangeType.CREATE and base is None:
             continue
         fields = {**serialized, **change.fields}
+        # Format is a curation key, so a format-only edit skips the expression checks below.
+        # A settled row (no fields) is persisted state, which is not this changeset's to block.
+        if change.fields:
+            diagnostics.extend(_dimension_format_diagnostics(change, fields))
         if change.change_type != ChangeType.CREATE and set(change.fields) - FIELD_CURATION_KEYS:
             diagnostics.extend(_field_expression_diagnostics(base.dataset, change, fields))
         diagnostics.extend(_calculated_measure_diagnostics(change, fields))
@@ -338,6 +349,7 @@ def saved_field_diagnostics(field: SemanticField) -> list[dict]:
     values = serialize_field_base(field)
     return [
         *_field_expression_diagnostics(field.dataset, change, values),
+        *_dimension_format_diagnostics(change, values),
         *_calculated_measure_diagnostics(change, values),
     ]
 
@@ -428,6 +440,28 @@ def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> li
             )
         )
     return out
+
+
+def _dimension_format_diagnostics(change, fields: dict[str, Any]) -> list[dict]:
+    field_type = fields.get("field_type", "")
+    if field_type not in {"dimension", "time_dimension"}:
+        return []
+    display_format = str(fields.get("format") or "").strip()
+    if not display_format or display_format in _STRING_DIMENSION_FORMATS:
+        return []
+    data_type = str(fields.get("data_type") or "")
+    if field_type == "dimension" and cube_dimension_type(data_type) == "number":
+        return []
+    allowed = ", ".join(sorted(_STRING_DIMENSION_FORMATS))
+    if field_type == "time_dimension":
+        message = f"A time dimension only takes format {allowed}; '{display_format}' is not one."
+    else:
+        message = (
+            f"format '{display_format}' needs a numeric dimension, but data_type "
+            f"'{data_type or '(empty)'}' publishes as a {cube_dimension_type(data_type)}. "
+            f"Set data_type to number, or use format {allowed}."
+        )
+    return [_diagnostic("INVALID_FORMAT", change, "format", message)]
 
 
 def _measure_filter_diagnostics(change, filters: Any, columns: set[str]) -> list[dict]:
