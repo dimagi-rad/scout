@@ -2,6 +2,8 @@ from datetime import timedelta
 from unittest.mock import MagicMock
 
 import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 
 from apps.common.identifiers import view_name
 from apps.semantic.models import (
@@ -248,6 +250,30 @@ def test_compile_rejects_unknown_member(monkeypatch, workspace, semantic_model):
             workspace,
             {"measures": ["visits.missing"]},
         )
+
+
+def test_compile_member_lookups_do_not_scale_with_member_count(
+    monkeypatch, workspace, semantic_model
+):
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
+
+    with CaptureQueriesContext(connection) as single:
+        query_service._compile_semantic_query(workspace, {"measures": ["visits.count"]})
+    with CaptureQueriesContext(connection) as many:
+        query_service._compile_semantic_query(
+            workspace,
+            {
+                "measures": ["visits.count", "visits.sum_amount"],
+                "dimensions": ["visits.username"],
+                "time_dimension": "visits.visit_date",
+                "granularity": "day",
+                "filters": [{"field": "visits.username", "operator": "set"}],
+            },
+        )
+
+    assert len(many) == len(single)
 
 
 def test_compile_rejects_cross_dataset_query(monkeypatch, workspace, semantic_model):

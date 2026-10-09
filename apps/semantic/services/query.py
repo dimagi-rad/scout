@@ -6,6 +6,7 @@ members and Scout translates the narrow supported query shape into a Cube query.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -226,12 +227,20 @@ def _compile_semantic_query(
     if granularity and not time_dimension:
         raise SemanticQueryError("A granularity requires a time_dimension.")
 
+    resolver = _MemberResolver(
+        model,
+        [
+            *measures,
+            *dimensions,
+            time_dimension,
+            *(f.get("field") or f.get("member") for f in filters if isinstance(f, dict)),
+        ],
+    )
     resolved_measures = [
-        _resolve_member(model, m, expected=SemanticField.FieldType.MEASURE) for m in measures
+        resolver.resolve(m, expected=SemanticField.FieldType.MEASURE) for m in measures
     ]
     resolved_dimensions = [
-        _resolve_member(
-            model,
+        resolver.resolve(
             d,
             expected_any={
                 SemanticField.FieldType.DIMENSION,
@@ -241,13 +250,13 @@ def _compile_semantic_query(
         for d in dimensions
     ]
     resolved_time = (
-        _resolve_member(model, time_dimension, expected=SemanticField.FieldType.TIME_DIMENSION)
+        resolver.resolve(time_dimension, expected=SemanticField.FieldType.TIME_DIMENSION)
         if time_dimension
         else None
     )
     resolved_filters = [
         _resolve_filter(
-            model, f, timezone_name=(query_spec.get("query_context") or {}).get("timezone")
+            resolver, f, timezone_name=(query_spec.get("query_context") or {}).get("timezone")
         )
         for f in filters
     ]
@@ -395,38 +404,62 @@ def _coerce_limit(value: Any, max_limit: int = MAX_SEMANTIC_LIMIT) -> int:
     return max(1, min(limit, max_limit))
 
 
-def _resolve_member(
-    model,
-    member: str,
-    *,
-    expected: str | None = None,
-    expected_any: set[str] | None = None,
-) -> ResolvedMember:
-    if not isinstance(member, str) or "." not in member:
-        raise SemanticQueryError(f"Invalid semantic member '{member}'. Use dataset.field.")
-    dataset_name, field_name = member.split(".", 1)
-    dataset = model.datasets.filter(name=dataset_name, is_visible=True).first()
-    if dataset is None:
-        raise SemanticMemberError(f"Unknown dataset '{dataset_name}'.")
-    field = dataset.fields.filter(name=field_name, is_visible=True).first()
-    if field is None:
-        raise SemanticMemberError(f"Unknown semantic field '{member}'.")
-    allowed = expected_any or ({expected} if expected else None)
-    if allowed and field.field_type not in allowed:
-        allowed_display = ", ".join(sorted(allowed))
-        raise SemanticMemberError(f"Member '{member}' must be one of: {allowed_display}.")
-    return ResolvedMember(dataset=dataset, field=field, member=member)
+class _MemberResolver:
+    """Resolves ``dataset.field`` members for one query from a single batched lookup.
+
+    Per-member lookups cost two queries each, which Sentry flagged as an N+1 on
+    /semantic-query/ (SCOUT-DJANGO-3X).
+    """
+
+    def __init__(self, model, members: list) -> None:
+        pairs = [m.split(".", 1) for m in members if isinstance(m, str) and "." in m]
+        self._datasets = {
+            dataset.name: dataset
+            for dataset in model.datasets.filter(
+                is_visible=True, name__in={dataset_name for dataset_name, _ in pairs}
+            )
+        }
+        datasets_by_id = {dataset.id: dataset for dataset in self._datasets.values()}
+        self._fields: dict[tuple[uuid.UUID, str], SemanticField] = {}
+        for field in SemanticField.objects.filter(
+            dataset_id__in=list(datasets_by_id),
+            is_visible=True,
+            name__in={field_name for _, field_name in pairs},
+        ):
+            field.dataset = datasets_by_id[field.dataset_id]
+            self._fields[(field.dataset_id, field.name)] = field
+
+    def resolve(
+        self,
+        member: str,
+        *,
+        expected: str | None = None,
+        expected_any: set[str] | None = None,
+    ) -> ResolvedMember:
+        if not isinstance(member, str) or "." not in member:
+            raise SemanticQueryError(f"Invalid semantic member '{member}'. Use dataset.field.")
+        dataset_name, field_name = member.split(".", 1)
+        dataset = self._datasets.get(dataset_name)
+        if dataset is None:
+            raise SemanticMemberError(f"Unknown dataset '{dataset_name}'.")
+        field = self._fields.get((dataset.id, field_name))
+        if field is None:
+            raise SemanticMemberError(f"Unknown semantic field '{member}'.")
+        allowed = expected_any or ({expected} if expected else None)
+        if allowed and field.field_type not in allowed:
+            allowed_display = ", ".join(sorted(allowed))
+            raise SemanticMemberError(f"Member '{member}' must be one of: {allowed_display}.")
+        return ResolvedMember(dataset=dataset, field=field, member=member)
 
 
 def _resolve_filter(
-    model, filter_spec: dict[str, Any], *, timezone_name=None
+    resolver: _MemberResolver, filter_spec: dict[str, Any], *, timezone_name=None
 ) -> tuple[ResolvedMember, dict[str, Any]]:
     if not isinstance(filter_spec, dict):
         raise SemanticQueryError("Each filter must be an object.")
     validate_date_filter(filter_spec, timezone_name)
     field = filter_spec.get("field") or filter_spec.get("member")
-    member = _resolve_member(
-        model,
+    member = resolver.resolve(
         field,
         expected_any={
             SemanticField.FieldType.DIMENSION,
