@@ -1138,3 +1138,51 @@ async def test_external_ids_do_not_change_other_providers(settings):
     assert result.outcome == VerificationOutcome.COMPLETE
     assert result.scoped is False
     assert [url for url, _kwargs in requests] == ["https://ocs.example/api/experiments/"]
+
+
+class _HangingAfterFirstClient:
+    """Answers the first opportunity with ``first``; every other request hangs."""
+
+    def __init__(self, first):
+        self.first = first
+        self.cancelled = 0
+        self.calls = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def get(self, url, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return self.first
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+
+
+@pytest.mark.asyncio
+async def test_connect_decisive_answer_does_not_wait_for_a_hung_sibling(settings):
+    settings.CONNECT_API_URL = "https://connect.example"
+    client = _HangingAfterFirstClient(_response(401))
+
+    result = await asyncio.wait_for(
+        verify_provider(
+            _request("commcare_connect"),
+            deadline=100.0,
+            clock=lambda: 0.0,
+            client_factory=lambda: client,
+            settings=settings,
+            limiter=asyncio.Semaphore(1),
+            external_ids=frozenset({"1", "2", "3"}),
+        ),
+        timeout=5,
+    )
+
+    assert result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
+    # Nothing is left running against the client once the check has returned.
+    assert client.cancelled == 2

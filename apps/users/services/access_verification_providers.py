@@ -67,6 +67,8 @@ class ProcessNetworkLimiter:
         self._permits.release()
 
 
+# Bounds provider checks, not sockets: one Connect check holds a single permit for
+# up to CONNECT_LIGHT_CONCURRENCY requests.
 NETWORK_LIMITER = ProcessNetworkLimiter(4)
 
 logger = logging.getLogger(__name__)
@@ -185,66 +187,74 @@ async def _verify_connect_opportunities(
             return response, "light_deadline_after_response"
         return response, None
 
-    answers = await asyncio.gather(*(fetch(external_id) for external_id in ids))
-    confirmed = []
-    omitted = False
+    # Judged in order as each lands, so a decisive early answer (a 401) need not wait
+    # for a slow sibling, and nothing is left running once the check returns.
+    tasks = [asyncio.ensure_future(fetch(external_id)) for external_id in ids]
+    try:
+        confirmed = []
+        omitted = False
 
-    def settle(index, failure, *, cause, status=None):
-        """``failure`` is a thunk, so a settled attempt does not log as unavailable."""
-        if omitted:
-            log(f"settled_after_omission:{cause}", status=status, outcome="partial")
-            return ProviderVerificationResult.complete(confirmed, scope=ids[:index])
-        return failure()
+        def settle(index, failure, *, cause, status=None):
+            """``failure`` is a thunk, so a settled attempt does not log as unavailable."""
+            if omitted:
+                log(f"settled_after_omission:{cause}", status=status, outcome="partial")
+                return ProviderVerificationResult.complete(confirmed, scope=ids[:index])
+            return failure()
 
-    for index, (external_id, (response, cause)) in enumerate(zip(ids, answers, strict=True)):
-        if cause == "unsafe_url":
+        for index, (external_id, task) in enumerate(zip(ids, tasks, strict=True)):
+            response, cause = await task
+            if cause == "unsafe_url":
 
-            def unsafe():
-                log("light_unsafe_url", outcome="indeterminate")
-                return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+                def unsafe():
+                    log("light_unsafe_url", outcome="indeterminate")
+                    return ProviderVerificationResult.indeterminate(_INDETERMINATE)
 
-            return settle(index, unsafe, cause=cause)
-        if response is None:
-            return settle(index, lambda cause=cause: unavailable(cause), cause=cause)
-        if cause is not None:
-            status = response.status_code
-            return settle(
-                index,
-                lambda cause=cause, status=status: unavailable(cause, status=status),
-                cause=cause,
-                status=status,
-            )
-        if connect_listing.is_no_access_answer(response):
-            omitted = True
-            continue
-        if response.status_code == 404:
-            # Not DRF's answer, so likely the route itself is gone; the listing
-            # can still decide, and must never read this as an omission.
-            return settle(index, lambda: None, cause="route_404", status=404)
-        status_result = _status_result(response.status_code)
-        if response.status_code == 401:
-            logger.info(
-                "Provider commcare_connect answered verification for connection %s "
-                "with HTTP 401 (%s)",
-                connection_id,
-                "invalid_token" if _names_invalid_token(response) else "no token error",
-            )
-            # Credential-level, so it outranks a per-opportunity omission.
-            return status_result
-        if status_result is not None:
+                return settle(index, unsafe, cause=cause)
+            if response is None:
+                return settle(index, lambda cause=cause: unavailable(cause), cause=cause)
+            if cause is not None:
+                status = response.status_code
+                return settle(
+                    index,
+                    lambda cause=cause, status=status: unavailable(cause, status=status),
+                    cause=cause,
+                    status=status,
+                )
+            if connect_listing.is_no_access_answer(response):
+                omitted = True
+                continue
+            if response.status_code == 404:
+                # Not DRF's answer, so likely the route itself is gone; the listing
+                # can still decide, and must never read this as an omission.
+                return settle(index, lambda: None, cause="route_404", status=404)
+            status_result = _status_result(response.status_code)
+            if response.status_code == 401:
+                logger.info(
+                    "Provider commcare_connect answered verification for connection %s "
+                    "with HTTP 401 (%s)",
+                    connection_id,
+                    "invalid_token" if _names_invalid_token(response) else "no token error",
+                )
+                # Credential-level, so it outranks a per-opportunity omission.
+                return status_result
+            if status_result is not None:
 
-            def failed(result=status_result, status=response.status_code):
-                log("light_http_status", status=status, outcome=result.outcome.value)
-                return result
+                def failed(result=status_result, status=response.status_code):
+                    log("light_http_status", status=status, outcome=result.outcome.value)
+                    return result
 
-            return settle(index, failed, cause="light_http_status", status=response.status_code)
-        if not connect_listing.confirms_opportunity(response, external_id):
-            # A changed response shape must cost a slow check, not every check.
-            return settle(
-                index, lambda: None, cause="unrecognized_answer", status=response.status_code
-            )
-        confirmed.append(external_id)
-    return ProviderVerificationResult.complete(confirmed, scope=ids)
+                return settle(index, failed, cause="light_http_status", status=response.status_code)
+            if not connect_listing.confirms_opportunity(response, external_id):
+                # A changed response shape must cost a slow check, not every check.
+                return settle(
+                    index, lambda: None, cause="unrecognized_answer", status=response.status_code
+                )
+            confirmed.append(external_id)
+        return ProviderVerificationResult.complete(confirmed, scope=ids)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _names_invalid_token(response) -> bool:
