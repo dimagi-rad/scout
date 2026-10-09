@@ -47,6 +47,10 @@ const dashboard: UsageDashboard = {
     total: 3,
     failed: 1,
     duration_ms: pair,
+    by_source: [
+      { source: "ocs", total: 2, failed: 1, duration_ms: pair },
+      { source: "mixed", total: 1, failed: 0, duration_ms: pair },
+    ],
     phases: [{ phase: "building_tables", p50_ms: 60000, p95_ms: 90000 }],
   },
   materializations: { total: 4, states: { completed: 3, failed: 1 }, duration_ms: pair },
@@ -88,6 +92,9 @@ describe("Usage page", () => {
     expect(screen.getByTestId("usage-tenant-size-t1")).toHaveTextContent("4.0 KB")
     expect(screen.getByTestId("usage-schema-retained")).toHaveTextContent("1.0 KB")
     expect(screen.getByTestId("usage-schema-skipped")).toHaveTextContent("2026-10-08")
+    expect(screen.getByTestId("usage-load-source-ocs")).toHaveTextContent("OCS")
+    expect(screen.getByTestId("usage-load-source-ocs")).toHaveTextContent("50.0%")
+    expect(screen.getByTestId("usage-load-source-mixed")).toHaveTextContent("Mixed")
     expect(mocked.dashboard).toHaveBeenCalledWith(30, expect.any(AbortSignal))
   })
 
