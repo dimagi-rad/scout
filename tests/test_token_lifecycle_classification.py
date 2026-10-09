@@ -163,8 +163,8 @@ class TestSyncRefreshLogLevels:
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
     @pytest.mark.parametrize("status", [500, 502, 503])
-    def test_5xx_still_reaches_sentry(self, caplog, status):
-        """A provider's token endpoint 500ing is NOT expected — keep it loud."""
+    def test_5xx_are_warnings(self, caplog, status):
+        """A provider outage is handled and retryable, not a Scout bug (SCOUT-DJANGO-21)."""
         caplog.set_level(logging.DEBUG)
         with patch(
             "apps.users.services.token_refresh.requests.post",
@@ -174,9 +174,9 @@ class TestSyncRefreshLogLevels:
                 refresh_oauth_token_sync(_social_token(), "https://provider.test/o/token/")
             assert caught.type is TokenRefreshUnavailable
             assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
-        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
-        assert errors, f"HTTP {status} must stay at ERROR"
-        assert any(r.exc_info for r in errors)
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(f"HTTP {status}" in r.getMessage() for r in warnings)
 
     def test_non_http_failures_still_reach_sentry(self, caplog):
         """A connection error / bug in this code path is not an expected state."""
