@@ -53,6 +53,7 @@ LIVE_CLOSE_TIMEOUT_SECONDS = 2.0
 # tailing chat a reload that finds nothing new, and the first half of that message
 # until the turn ends.
 _CALL_ENDS = frozenset({"text-end", "tool-input-available", "tool-output-available"})
+_CALL_END_MARKS = tuple(f'"type": "{kind}"' for kind in _CALL_ENDS)
 
 
 def _is_answer(chunk, metadata: dict) -> bool:
@@ -224,7 +225,7 @@ class LiveTurnWriter:
         # The part's type leads every frame (stream.py's _sse), so only a text delta,
         # whose text is needed, is parsed; a tool's output can be large.
         head = sse_chunk[:48]
-        if any(f'"type": "{kind}"' in head for kind in _CALL_ENDS):
+        if any(mark in head for mark in _CALL_END_MARKS):
             self._end_run()
             return
         if '"type": "text-delta"' not in head:

@@ -669,6 +669,7 @@ export function ChatPanel() {
         setServerTurn(remoteRunning ? { chat, reloadKey } : null)
         const followedRemoteTurn = remoteReloadRef.current?.chat === chat
         remoteReloadRef.current = null
+        remoteEndOwedRef.current = null
         if (followedRemoteTurn && !remoteRunning) {
           // The turn is over: its first answer is when the thread gets a title.
           setTitleRefreshTrigger((prev) => ({ threadId, turn: (prev?.turn ?? 0) + 1 }))
@@ -1103,7 +1104,7 @@ export function ChatPanel() {
                 variant="outline"
                 size="sm"
                 disabled={isStreaming}
-                // A remote turn's goes through its path, so a retry that finds the
+                // A remote turn's retry goes through its path, so one that finds the
                 // turn over still refreshes its title, and one during it keeps
                 // following it.
                 onClick={() => {

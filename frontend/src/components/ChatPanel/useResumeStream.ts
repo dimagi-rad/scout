@@ -76,6 +76,8 @@ export function useResumeStream(
 
     async function poll() {
       const cursor = cursorRef.current
+      // Still tailing, so no reactivation is coming to use it up.
+      cursor.carryOn = false
       if (typeof document !== "undefined" && document.hidden) {
         timer = setTimeout(poll, RESUME_STREAM_IDLE_POLL_MS)
         return
