@@ -6,6 +6,7 @@ containing one .sql file per asset plus a merged schema.yml for tests.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,9 @@ import yaml
 
 if TYPE_CHECKING:
     from apps.transformations.models import TransformationAsset
+
+# Overrides dbt-postgres' backup/intermediate relation naming; see the file header.
+_MACROS_DIR = Path(__file__).resolve().parent.parent / "dbt_macros"
 
 
 def write_dbt_project(
@@ -26,6 +30,7 @@ def write_dbt_project(
     - output_dir/dbt_project.yml
     - output_dir/models/{asset.name}.sql  (one per asset)
     - output_dir/models/schema.yml  (merged test YAML from assets that have test_yaml)
+    - output_dir/macros/  (Scout's dbt macro overrides)
 
     Returns output_dir for convenience.
     """
@@ -39,10 +44,13 @@ def write_dbt_project(
         "config-version": 2,
         "profile": "data_explorer",
         "model-paths": ["models"],
+        "macro-paths": ["macros"],
         "test-paths": ["tests"],
         "models": {"+materialized": "table"},
     }
     (output_dir / "dbt_project.yml").write_text(yaml.dump(project_config, default_flow_style=False))
+
+    shutil.copytree(_MACROS_DIR, output_dir / "macros", dirs_exist_ok=True)
 
     for asset in assets:
         (models_dir / f"{asset.name}.sql").write_text(asset.sql_content)

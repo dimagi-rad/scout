@@ -25,6 +25,8 @@ def test_creates_dbt_project_yml(tmp_path):
     assert config["profile"] == "data_explorer"
     assert config["config-version"] == 2
     assert config["models"] == {"+materialized": "table"}
+    assert config["macro-paths"] == ["macros"]
+    assert (result / "macros" / "scout_relation_names.sql").exists()
 
 
 def test_creates_one_sql_file_per_asset(tmp_path):
