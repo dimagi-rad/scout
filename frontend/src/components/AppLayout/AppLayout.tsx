@@ -67,7 +67,8 @@ export function AppLayout() {
         <OfflineBanner />
         <LostAccessModal />
         <WorkspaceAddedNotice />
-        <div className="fixed right-4 top-4 z-40 w-96 max-w-[calc(100vw-2rem)]">
+        {/* Below the h-11 TopBar so its page actions stay clickable. */}
+        <div className="fixed right-4 top-14 z-40 w-96 max-w-[calc(100vw-2rem)]">
           <OcsAccessNotice showConnectionsLink />
         </div>
       </div>

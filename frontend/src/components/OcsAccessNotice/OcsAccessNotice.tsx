@@ -12,7 +12,8 @@ interface Props {
 export function OcsAccessNotice({ showConnectionsLink = false }: Props) {
   const denied = useAppStore((s) => s.user?.ocs_access_denied)
   const dismiss = useAppStore((s) => s.authActions.dismissOcsAccessNotice)
-  if (!denied) return null
+  if (!denied?.teams.length) return null
+  const named = denied.teams.filter((t) => t.slug).map((t) => t.name)
 
   return (
     <div
@@ -25,9 +26,10 @@ export function OcsAccessNotice({ showConnectionsLink = false }: Props) {
         <p className="font-medium">Open Chat Studio didn't share your chatbots</p>
         <p>
           Open Chat Studio refused Scout access to{" "}
-          {denied.team ? (
+          {named.length ? (
             <>
-              the chatbots of team <span className="font-medium">{denied.team.name}</span>
+              the chatbots of {named.length === 1 ? "team" : "teams"}{" "}
+              <span className="font-medium">{named.join(", ")}</span>
             </>
           ) : (
             "your chatbots"

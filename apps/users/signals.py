@@ -152,6 +152,7 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
     # logger.exception so Sentry pages. Logging at WARNING left the user with
     # zero TenantMembership rows and an empty data-sources page that looked
     # identical to "account has no opportunities", with nobody told (07#6).
+    # The one exception is an OCS 403, which the user is told about instead.
     elif provider == "commcare_connect":
         try:
             # allauth signal receivers are sync.
@@ -170,14 +171,16 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
             if error.status_code != 403:
                 logger.exception("Failed to resolve OCS chatbots after OAuth")
             else:
-                # The user's team permission, not a Scout fault: the banner tells them,
-                # so it no longer pages (Sentry SCOUT-DJANGO-3E).
+                # Usually the user's team permission, which the banner explains, so it no
+                # longer pages (SCOUT-DJANGO-3E). Trade-off: a Scout-side cause that 403s
+                # every OCS login (e.g. a scope OCS stops accepting) now surfaces only as
+                # user reports and these warnings.
                 logger.warning("OCS refused the chatbot list after OAuth", exc_info=True)
-                ocs_access_notice.set_notice(request, sociallogin.account)
+                ocs_access_notice.record_refusal(request, sociallogin.account)
         except Exception:
             logger.exception("Failed to resolve OCS chatbots after OAuth")
         else:
-            ocs_access_notice.clear_notice(request)
+            ocs_access_notice.clear_refusal(request, sociallogin.account)
     elif provider.startswith("commcare"):
         try:
             # allauth signal receivers are sync.

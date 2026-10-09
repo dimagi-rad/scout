@@ -9,6 +9,9 @@ was suppressed by Sentry's ERROR event-level default, so nobody was told.
 The handler must still not break login (a resolution failure can't 500 the OAuth
 callback), but it must surface the failure at ERROR level so Sentry pages and an
 operator can tell "resolution failed" from "no opportunities."
+
+The exception is an OCS 403, which tells the user instead of paging; see
+test_ocs_login_access_notice.py.
 """
 
 import logging
