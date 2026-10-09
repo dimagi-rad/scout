@@ -23,7 +23,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 SIBLING_PREFIX = "stg_form_final_quiz_test_your_knowledge__repeat_join_"
-SIBLINGS = [f"{SIBLING_PREFIX}{tail}".ljust(63, "x")[:63] for tail in ("aaa", "bbb")]
+MATERIALIZATIONS = {"aaa": "table", "bbb": "table", "ccc": "view", "ddd": "incremental"}
+SIBLINGS = [f"{SIBLING_PREFIX}{tail}".ljust(63, "x")[:63] for tail in MATERIALIZATIONS]
 SHORT = "stg_cases"
 
 NAME_SQL = (
@@ -33,9 +34,9 @@ NAME_SQL = (
 
 
 class _Asset:
-    def __init__(self, name):
+    def __init__(self, name, materialized="table"):
         self.name = name
-        self.sql_content = NAME_SQL
+        self.sql_content = f"{{{{ config(materialized='{materialized}') }}}}\n{NAME_SQL}"
         self.test_yaml = ""
 
 
@@ -55,16 +56,20 @@ def schema():
 def test_long_sibling_models_get_distinct_backup_names(schema, tmp_path, monkeypatch):
     monkeypatch.setenv("DBT_SEND_ANONYMOUS_USAGE_STATS", "false")
     schema_name, conn = schema
-    assert SIBLINGS[0][:51] == SIBLINGS[1][:51]
+    assert len({m[:51] for m in SIBLINGS}) == 1
     models = [*SIBLINGS, SHORT]
-    project = write_dbt_project(tmp_path / "project", "scout_names", [_Asset(m) for m in models])
+    assets = [
+        *(_Asset(m, kind) for m, kind in zip(SIBLINGS, MATERIALIZATIONS.values(), strict=True)),
+        _Asset(SHORT),
+    ]
+    project = write_dbt_project(tmp_path / "project", "scout_names", assets)
     profiles = tmp_path / "profiles"
     profiles.mkdir()
     generate_profiles_yml(
         profiles / "profiles.yml", schema_name, os.environ["MANAGED_DATABASE_URL"]
     )
 
-    # The second run renames each existing table to its backup, the step that collided.
+    # The second run renames each existing relation to its backup, the step that collided.
     for _ in range(2):
         result = run_dbt(str(project), str(profiles), models)
         assert result["success"], result.get("error")
