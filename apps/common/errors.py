@@ -188,6 +188,8 @@ class UpstreamUnavailable(ExpectedUpstreamError):
 # leaves the user on an empty data-sources page and the Sentry event is the only
 # signal anything broke (#371's precondition; see rule 3 in the module
 # docstring). Classifying the base would silence that path without replacing it.
+# The one exception is an OCS 403 there, which tells the user via
+# ``ocs_access_notice`` and logs at WARNING instead (SCOUT-DJANGO-3E).
 #
 # Expectedness therefore lives on the leaf classes, which only the loaders raise.
 # The loader path DOES satisfy rule 3 — its failures reach the user through the

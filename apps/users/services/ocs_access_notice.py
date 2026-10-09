@@ -10,7 +10,7 @@ re-resolve, which runs only before onboarding completes.
 
 from __future__ import annotations
 
-from apps.users.services.oauth_scope import account_scope
+from apps.users.services.oauth_scope import account_scope, ocs_scope_unusable
 from apps.users.services.ocs_team_flow import teams_from_claims
 
 
@@ -32,7 +32,14 @@ def with_refusal(refused: dict | None, account) -> dict:
 
 
 def without_refusal(refused: dict | None, account) -> dict:
-    return {k: v for k, v in (refused or {}).items() if k != account_scope(account)}
+    """``refused`` less ``account``'s team, whose resolve has just returned.
+
+    An unusable scope returns [] without asking OCS, so it proves nothing about access.
+    """
+    scope = account_scope(account)
+    if ocs_scope_unusable("ocs", scope):
+        return dict(refused or {})
+    return {k: v for k, v in (refused or {}).items() if k != scope}
 
 
 def payload(refused: dict | None) -> dict | None:

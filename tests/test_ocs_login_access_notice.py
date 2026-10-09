@@ -92,6 +92,14 @@ def test_the_refused_teams_own_success_clears_it():
     assert KEY not in session
 
 
+def test_a_skipped_scope_at_sign_in_keeps_the_refusal():
+    session = {}
+    _login(_refused(), session)
+    with patch.object(ocs_access_notice, "ocs_scope_unusable", return_value=True):
+        _login(AsyncMock(return_value=[]), session)
+    assert ocs_access_notice.payload(session[KEY]) == {"teams": [ACME]}
+
+
 def test_a_broken_notice_does_not_break_login(caplog):
     with (
         patch.object(ocs_access_notice, "clear_refusal", side_effect=AttributeError("drift")),
@@ -169,7 +177,7 @@ class TestMeReportsTheNotice:
         assert denied == {"teams": [ACME, BETA]}
 
     def test_unusable_scope_proves_nothing(self, client, user):
-        with patch.object(auth_views, "ocs_scope_unusable", return_value=True):
+        with patch.object(ocs_access_notice, "ocs_scope_unusable", return_value=True):
             denied = self._me_resolving_acme(client, user, AsyncMock(return_value=[]))
         assert denied == {"teams": [ACME, BETA]}
 

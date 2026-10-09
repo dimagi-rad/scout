@@ -208,12 +208,9 @@ async def me_view(request):
         ocs_resolved = await _atry_onboarding_resolve_provider(
             user, "ocs", resolve_ocs_chatbots, "OCS"
         )
-        # A team admin may have granted access since the sign-in refusal. An unusable
-        # scope returns [] without asking OCS, so it proves nothing about access.
+        # A team admin may have granted access since the sign-in refusal.
         remaining = refused
         for account in ocs_resolved:
-            if ocs_scope_unusable("ocs", account_scope(account)):
-                continue
             remaining = ocs_access_notice.without_refusal(remaining, account)
         if refused and remaining != refused:
             if remaining:
