@@ -640,7 +640,7 @@ async def test_exact_row_bound_is_complete(settings):
 _PROVIDERS_LOGGER = "apps.users.services.access_verification_providers"
 
 
-def _unavailable_records(caplog):
+def _unconfirmed_records(caplog):
     return [
         record
         for record in caplog.records
@@ -669,7 +669,7 @@ async def test_unavailable_logs_cause_at_warning_without_secrets(
     result, _ = await _verify(request, responses, settings=settings, deadline=deadline)
 
     assert result.outcome == VerificationOutcome.UNAVAILABLE
-    [record] = _unavailable_records(caplog)
+    [record] = _unconfirmed_records(caplog)
     assert record.levelname == "WARNING"
     message = record.getMessage()
     assert "provider=ocs" in message
@@ -703,7 +703,7 @@ async def test_unavailable_log_reports_request_timeout_and_elapsed_ms(settings, 
     )
 
     assert result.outcome == VerificationOutcome.UNAVAILABLE
-    [record] = _unavailable_records(caplog)
+    [record] = _unconfirmed_records(caplog)
     message = record.getMessage()
     assert "cause=request_timeout" in message
     assert "page=1" in message
@@ -729,7 +729,7 @@ async def test_unavailable_log_reports_limiter_wait_timeout(settings, caplog):
         limiter.release()
 
     assert result.outcome == VerificationOutcome.UNAVAILABLE
-    [record] = _unavailable_records(caplog)
+    [record] = _unconfirmed_records(caplog)
     assert "cause=limiter_wait_timeout" in record.getMessage()
 
 
@@ -743,7 +743,7 @@ async def test_non_unavailable_outcomes_do_not_log_unavailable(settings, caplog)
 
     assert rejected.outcome != VerificationOutcome.UNAVAILABLE
     assert indeterminate.outcome != VerificationOutcome.UNAVAILABLE
-    [record] = _unavailable_records(caplog)
+    [record] = _unconfirmed_records(caplog)
     assert record.getMessage().startswith("Upstream access verification indeterminate")
     assert "status=403" in record.getMessage()
 
@@ -774,7 +774,7 @@ async def test_cancellation_by_the_caller_is_logged_and_propagates(settings, cap
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    [record] = _unavailable_records(caplog)
+    [record] = _unconfirmed_records(caplog)
     assert record.getMessage().startswith("Upstream access verification cancelled")
     assert "cause=cancelled" in record.getMessage()
     assert "page=1" in record.getMessage()
@@ -802,7 +802,7 @@ async def test_unavailable_log_reports_a_response_past_the_deadline(settings, ca
     )
 
     assert result.outcome == VerificationOutcome.UNAVAILABLE
-    [record] = _unavailable_records(caplog)
+    [record] = _unconfirmed_records(caplog)
     message = record.getMessage()
     assert "cause=deadline_after_response" in message
     assert "status=200" in message

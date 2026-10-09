@@ -126,7 +126,7 @@ def _provider_request(snapshot, settings):
         decode_page = connect_listing.decode_page
     else:
         return None
-    return None if request is None else (provider, request, decode_page)
+    return None if request is None else (request, decode_page)
 
 
 def _connect_light_ids(snapshot, external_ids) -> tuple[str, ...] | None:
@@ -171,11 +171,12 @@ async def _verify_connect_opportunities(
         try:
             request = connect_listing.verify_subset_request(listing, external_id)
         except UnsafeProviderURL:
-            return settle(
-                index,
-                lambda: ProviderVerificationResult.indeterminate(_INDETERMINATE),
-                cause="unsafe_url",
-            )
+
+            def unsafe():
+                log("light_unsafe_url", outcome="indeterminate")
+                return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+
+            return settle(index, unsafe, cause="unsafe_url")
         # A share of what is left, so one slow opportunity cannot starve the rest,
         # but never so small that an ordinary slow answer is cut off. On the 10s
         # interactive budget the floor wins, so allocation is effectively greedy.
@@ -230,8 +231,7 @@ async def _verify_connect_opportunities(
         if status_result is not None:
 
             def failed(result=status_result, status=response.status_code):
-                if result.outcome == VerificationOutcome.UNAVAILABLE:
-                    log("light_http_status", status=status)
+                log("light_http_status", status=status, outcome=result.outcome.value)
                 return result
 
             return settle(index, failed, cause="light_http_status", status=response.status_code)
@@ -312,7 +312,7 @@ async def verify_provider(
     request = _provider_request(snapshot, settings)
     if request is None:
         return indeterminate("no_request")
-    _, list_request, decode_page = request
+    list_request, decode_page = request
     light_ids = _connect_light_ids(snapshot, external_ids)
 
     try:
@@ -415,7 +415,7 @@ async def verify_provider(
                 return status_result
             except TenantListError as error:
                 # Off-origin next, a cycle, the page cap or a malformed page.
-                return indeterminate(f"list_error:{type(error).__name__}", page=page)
+                return indeterminate(f"list_error:{type(error).__name__}", page=error.page or page)
             return ProviderVerificationResult.complete(seen_rows)
     except TimeoutError:
         # Before the permit is held this is the shared limiter wait; after, a stray
