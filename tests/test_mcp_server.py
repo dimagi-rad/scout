@@ -5,6 +5,7 @@ Tests the full tool handler → service → response envelope chain.
 Database access is mocked at the Django ORM / psycopg boundary.
 """
 
+import logging
 from unittest.mock import patch
 
 import psycopg
@@ -185,15 +186,21 @@ class TestExecuteQuery:
             psycopg.errors.UndefinedTable,
             psycopg.errors.UndefinedObject,
             psycopg.errors.DatatypeMismatch,
+            psycopg.errors.GroupingError,
         ],
     )
     @patch(POOLED_EXEC)
-    async def test_sqlstate_query_error_is_actionable(self, mock_exec, project_context, error_type):
+    async def test_sqlstate_query_error_is_actionable(
+        self, mock_exec, project_context, error_type, caplog
+    ):
         mock_exec.side_effect = error_type("invalid query detail")
-        result = await execute_query(project_context, "SELECT 1")
+        with caplog.at_level(logging.WARNING, logger="mcp_server.services.query"):
+            result = await execute_query(project_context, "SELECT 1")
         assert result["error"]["code"] == VALIDATION_ERROR
         assert "invalid query detail" in result["error"]["message"]
         assert "Reformulate" in result["error"]["message"]
+        # The agent retries its own bad SQL; it must not reach Sentry, which takes ERROR.
+        assert [r.levelno for r in caplog.records] == [logging.WARNING]
 
     @pytest.mark.asyncio
     async def test_unexpected_validation_failure_returns_envelope(self, project_context):
@@ -215,11 +222,13 @@ class TestExecuteQuery:
     )
     @patch(POOLED_EXEC)
     async def test_infrastructure_errors_stay_connection_errors(
-        self, mock_exec, project_context, error
+        self, mock_exec, project_context, error, caplog
     ):
         mock_exec.side_effect = error
-        result = await execute_query(project_context, "SELECT 1")
+        with caplog.at_level(logging.WARNING, logger="mcp_server.services.query"):
+            result = await execute_query(project_context, "SELECT 1")
         assert result["error"]["code"] == CONNECTION_ERROR
+        assert [r.levelno for r in caplog.records] == [logging.ERROR]
 
     @pytest.mark.asyncio
     @patch(POOLED_EXEC)
