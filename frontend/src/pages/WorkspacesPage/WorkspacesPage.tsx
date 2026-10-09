@@ -188,6 +188,7 @@ export function WorkspacesPage() {
   const domains = useAppStore((s) => s.domains)
   const domainsStatus = useAppStore((s) => s.domainsStatus)
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
+  const activeDomainId = useAppStore((s) => s.activeDomainId)
   const [showCreate, setShowCreate] = useState(false)
 
   const [search, setSearch] = useState("")
@@ -196,7 +197,10 @@ export function WorkspacesPage() {
     provider: null,
   })
   const [sort, setSort] = useState<SortKey>("newest")
-  const [recentIds, setRecentIds] = useState(getRecentWorkspaceIds)
+  // Recents live in localStorage and are written just before activeDomainId changes
+  // (including from the top-bar switcher on this page), so re-read on that and on sort.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const recentIds = useMemo(() => getRecentWorkspaceIds(), [activeDomainId, sort])
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
 
   const isLoading = domainsStatus === "loading" || domainsStatus === "idle"
@@ -283,7 +287,6 @@ export function WorkspacesPage() {
   }
 
   function handleSortChange(value: SortKey) {
-    if (value === "recent") setRecentIds(getRecentWorkspaceIds())
     setSort(value)
     setVisibleCount(PAGE_SIZE)
   }
