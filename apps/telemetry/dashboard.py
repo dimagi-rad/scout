@@ -326,10 +326,47 @@ def _loads(start: datetime) -> dict[str, Any]:
         """,
         [start],
     )
+    # A load runs per workspace, so its source type is the workspace's providers as
+    # they are now; a workspace combining providers is "mixed".
+    by_source = _rows(
+        """
+        WITH source AS (
+            SELECT wt.workspace_id,
+                CASE WHEN COUNT(DISTINCT t.provider) > 1 THEN 'mixed'
+                    ELSE MIN(t.provider) END AS source
+            FROM workspaces_workspacetenant wt
+            JOIN users_tenant t ON t.id = wt.tenant_id
+            GROUP BY wt.workspace_id
+        )
+        SELECT COALESCE(source.source, 'unknown'), COUNT(*),
+            COUNT(*) FILTER (WHERE NOT succeeded),
+            percentile_cont(0.5) WITHIN GROUP (
+                ORDER BY EXTRACT(EPOCH FROM completed_at - started_at) * 1000
+            ) FILTER (WHERE succeeded),
+            percentile_cont(0.95) WITHIN GROUP (
+                ORDER BY EXTRACT(EPOCH FROM completed_at - started_at) * 1000
+            ) FILTER (WHERE succeeded)
+        FROM workspaces_workspaceloadtiming
+        LEFT JOIN source USING (workspace_id)
+        WHERE completed_at >= %s
+        GROUP BY 1
+        ORDER BY COUNT(*) DESC, 1
+        """,
+        [start],
+    )
     return {
         "total": total,
         "failed": failed,
         "duration_ms": {"p50": _ms(p50), "p95": _ms(p95)},
+        "by_source": [
+            {
+                "source": source,
+                "total": count,
+                "failed": source_failed,
+                "duration_ms": {"p50": _ms(source_p50), "p95": _ms(source_p95)},
+            }
+            for source, count, source_failed, source_p50, source_p95 in by_source
+        ],
         "phases": [
             {"phase": phase, "p50_ms": _ms(p50), "p95_ms": _ms(p95)} for phase, p50, p95 in phases
         ],

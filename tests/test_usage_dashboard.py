@@ -23,11 +23,13 @@ from apps.telemetry.models import (
     SnapshotMetric,
     TelemetryEvent,
 )
-from apps.users.models import User
+from apps.users.models import Tenant, User
 from apps.workspaces.models import (
     MaterializationRun,
     TenantSchema,
+    Workspace,
     WorkspaceLoadTiming,
+    WorkspaceTenant,
 )
 
 URL = "/api/telemetry/dashboard/"
@@ -265,6 +267,50 @@ def test_dashboard_adds_up_events_and_existing_tables(user, workspace, tenant):
     assert data["schema_sizes"]["top_tenants"][0]["bytes"] == 900
     assert data["schema_sizes"]["retained_bytes"] == 100
     assert len(data["days"]) == 30
+
+
+@pytest.mark.django_db
+def test_loads_split_by_the_workspace_source_type(user, workspace):
+    now = timezone.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    ocs = Tenant.objects.create(provider="ocs", external_id="team", canonical_name="Team")
+    connect = Tenant.objects.create(
+        provider="commcare_connect", external_id="org", canonical_name="Org"
+    )
+    ocs_only = Workspace.objects.create(name="OCS", created_by=user)
+    WorkspaceTenant.objects.create(workspace=ocs_only, tenant=ocs)
+    mixed = Workspace.objects.create(name="Mixed", created_by=user)
+    WorkspaceTenant.objects.create(workspace=mixed, tenant=ocs)
+    WorkspaceTenant.objects.create(workspace=mixed, tenant=connect)
+    loads = [
+        (workspace, 1, True),
+        (workspace, 3, True),
+        (ocs_only, 2, True),
+        (ocs_only, 9, False),
+        (mixed, 5, True),
+        # A workspace with no sources should never exist (#381); its load still counts.
+        (Workspace.objects.create(name="Sourceless", created_by=user), 4, False),
+    ]
+    for job_id, (ws, seconds, succeeded) in enumerate(loads, start=1):
+        WorkspaceLoadTiming.objects.create(
+            workspace=ws,
+            job_id=job_id,
+            started_at=now - timedelta(minutes=20),
+            completed_at=now - timedelta(minutes=20) + timedelta(seconds=seconds),
+            succeeded=succeeded,
+        )
+
+    loads_data = build_dashboard(days=1, now=now)["loads"]
+    by_source = {row["source"]: row for row in loads_data["by_source"]}
+
+    assert set(by_source) == {"commcare", "ocs", "mixed", "unknown"}
+    assert sum(row["total"] for row in by_source.values()) == loads_data["total"]
+    assert sum(row["failed"] for row in by_source.values()) == loads_data["failed"]
+    assert (by_source["commcare"]["total"], by_source["commcare"]["failed"]) == (2, 0)
+    assert by_source["commcare"]["duration_ms"]["p50"] == 2000
+    # Only the successful load times an OCS load.
+    assert (by_source["ocs"]["total"], by_source["ocs"]["failed"]) == (2, 1)
+    assert by_source["ocs"]["duration_ms"]["p50"] == 2000
+    assert by_source["mixed"]["total"] == 1
 
 
 @pytest.mark.django_db
