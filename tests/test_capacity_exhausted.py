@@ -1,6 +1,6 @@
 """Running out of connections is a calm "busy" retry for the user and one alert for us.
 
-Prod and staging share one RDS instance; in July it filled and users saw a red
+Every service draws from one small RDS instance; in July it filled and users saw a red
 "server unreachable" bar. Every layer that can hit the limit must answer with the
 same retryable 503 (or the chat stream's busy event), and escalate to Sentry once
 per window under a stable fingerprint.

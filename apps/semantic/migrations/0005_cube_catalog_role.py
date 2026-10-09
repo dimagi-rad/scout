@@ -1,8 +1,8 @@
 from django.db import migrations
 
-# Must match CATALOG_ROLE in cube_config/cube.js. Roles are cluster-wide and prod and
-# staging share one RDS instance, so both databases grant to the same role and the
-# reverse migration only revokes this database's grant (#421).
+# Must match CATALOG_ROLE in cube_config/cube.js. Roles are cluster-wide, so another
+# database on the instance may grant to the same role; the reverse migration only
+# revokes this database's grant (#421).
 CATALOG_ROLE = "scout_cube_catalog"
 
 GRANT = """

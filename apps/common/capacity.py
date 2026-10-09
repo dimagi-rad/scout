@@ -1,10 +1,10 @@
 """Connection-capacity exhaustion: one classification, one user response, one alert.
 
-Prod and staging share one RDS instance, and the API's Django connections, the
-LangGraph checkpointer pool and Cube's pools all draw from its
-``max_connections``. When that ceiling is hit, each layer fails in its own
-dialect — a libpq ``FATAL`` at connect, a ``PoolTimeout``, a Cube error body —
-and before this module each surfaced as a 500 or a red "server unreachable" bar.
+The API's Django connections, the LangGraph checkpointer pool and Cube's pools
+all draw from one small RDS instance's ``max_connections``. When that ceiling is
+hit, each layer fails in its own dialect — a libpq ``FATAL`` at connect, a
+``PoolTimeout``, a Cube error body — and before this module each surfaced as a
+500 or a red "server unreachable" bar.
 
 ``classify_capacity_error`` recognises every dialect and returns one
 ``CapacityExhausted``. Callers turn that into a calm, retryable "Scout is busy"

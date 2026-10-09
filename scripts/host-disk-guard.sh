@@ -10,16 +10,16 @@
 set -euo pipefail
 shopt -s nullglob dotglob
 
-# Stopped workers to keep per destination, matching retain_containers elsewhere.
+# Stopped production workers to keep, matching retain_containers elsewhere.
 WORKER_RETAIN=3
 
 run_docker() { timeout --foreground 60s docker "$@"; }
 
 prune_workers() {
-  local account home destination label stopped not_removed error
-  # Worker deploys skip Kamal's service-wide prune so a stopped worker named by
-  # either destination's pending drain receipt survives (DEPLOYMENT.md). Only
-  # prune when no receipt exists anywhere; otherwise leave cleanup to an operator.
+  local account home stopped not_removed error
+  # Worker deploys skip Kamal's service-wide prune so a stopped worker named by a
+  # pending drain receipt survives (DEPLOYMENT.md). Only prune when no receipt
+  # exists anywhere; otherwise leave cleanup to an operator.
   account=$(timeout --foreground 15s getent passwd scout) || {
     echo "::warning title=Worker prune skipped::Could not resolve the scout account."
     return 0
@@ -60,17 +60,10 @@ prune_workers() {
     done
   fi
 
-  # The staging stack is retired (#808), but its stopped workers may still sit on
-  # this host pinning images; keep trimming them so they cannot fill the disk.
-  for destination in production staging; do
-    [[ "$destination" == production ]] && label="" || label="staging"
-    # docker ps lists newest first, so everything after the first N is older.
-    stopped=$(run_docker ps --all --no-trunc --quiet \
-      --filter label=service=scout-worker --filter "label=destination=$label" \
-      --filter status=created --filter status=exited --filter status=dead) || {
-      echo "::warning title=Worker prune incomplete::Could not list stopped $destination workers."
-      continue
-    }
+  # docker ps lists newest first, so everything after the first N is older.
+  if stopped=$(run_docker ps --all --no-trunc --quiet \
+      --filter label=service=scout-worker --filter label=destination= \
+      --filter status=created --filter status=exited --filter status=dead); then
     # A container that is already gone is fine; report every other failure,
     # including an unreachable daemon or a timeout.
     not_removed=$(tail -n "+$((WORKER_RETAIN + 1))" <<< "$stopped" | while read -r container; do
@@ -82,9 +75,11 @@ prune_workers() {
       fi
     done)
     if [[ -n "$not_removed" ]]; then
-      echo "::warning title=Worker prune incomplete::$(wc -l <<< "$not_removed" | tr -d ' ') stopped $destination worker(s) could not be removed."
+      echo "::warning title=Worker prune incomplete::$(wc -l <<< "$not_removed" | tr -d ' ') stopped production worker(s) could not be removed."
     fi
-  done
+  else
+    echo "::warning title=Worker prune incomplete::Could not list stopped production workers."
+  fi
   # Only images no container references; stopped rollback containers keep theirs.
   run_docker image prune --force >/dev/null
 }
