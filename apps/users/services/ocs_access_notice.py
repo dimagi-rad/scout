@@ -13,7 +13,11 @@ from __future__ import annotations
 from apps.users.services.oauth_scope import account_scope
 from apps.users.services.ocs_team_flow import teams_from_claims
 
-SESSION_KEY = "ocs_access_denied"
+
+def session_key(user_pk) -> str:
+    # Written before allauth logs the user in, so an abandoned sign-in would leave it on
+    # the anonymous session for whoever logs in next on that browser; the pk scopes it.
+    return f"ocs_access_denied:{user_pk}"
 
 
 def _team(account) -> dict:
@@ -38,15 +42,17 @@ def payload(refused: dict | None) -> dict | None:
     return {"teams": sorted(refused.values(), key=lambda t: t["slug"])}
 
 
-def record_refusal(request, account) -> None:
+def record_refusal(request, user, account) -> None:
     if request is not None and hasattr(request, "session"):
-        request.session[SESSION_KEY] = with_refusal(request.session.get(SESSION_KEY), account)
+        key = session_key(user.pk)
+        request.session[key] = with_refusal(request.session.get(key), account)
 
 
-def clear_refusal(request, account) -> None:
-    if request is not None and hasattr(request, "session") and SESSION_KEY in request.session:
-        remaining = without_refusal(request.session[SESSION_KEY], account)
+def clear_refusal(request, user, account) -> None:
+    key = session_key(user.pk)
+    if request is not None and hasattr(request, "session") and key in request.session:
+        remaining = without_refusal(request.session[key], account)
         if remaining:
-            request.session[SESSION_KEY] = remaining
+            request.session[key] = remaining
         else:
-            del request.session[SESSION_KEY]
+            del request.session[key]

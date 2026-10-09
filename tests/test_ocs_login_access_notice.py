@@ -22,6 +22,7 @@ from apps.users.services.onboarding_cache import me_onboarding_cache_key
 SIGNALS_LOGGER = "apps.users.signals"
 ACME = {"slug": "acme", "name": "Acme Health"}
 BETA = {"slug": "beta", "name": "Beta"}
+KEY = ocs_access_notice.session_key(1)
 
 
 def _account(slug):
@@ -57,7 +58,7 @@ def test_403_warns_and_leaves_a_notice(caplog):
 
     levels = {r.levelno for r in caplog.records if r.name == SIGNALS_LOGGER}
     assert levels == {logging.WARNING}
-    assert ocs_access_notice.payload(session[ocs_access_notice.SESSION_KEY]) == {"teams": [ACME]}
+    assert ocs_access_notice.payload(session[KEY]) == {"teams": [ACME]}
 
 
 @pytest.mark.parametrize(
@@ -70,7 +71,7 @@ def test_other_failures_still_page_without_a_notice(error, caplog):
         _login(AsyncMock(side_effect=error), session)
 
     assert logging.ERROR in {r.levelno for r in caplog.records if r.name == SIGNALS_LOGGER}
-    assert ocs_access_notice.SESSION_KEY not in session
+    assert KEY not in session
 
 
 def test_another_teams_success_keeps_the_refusal():
@@ -78,7 +79,7 @@ def test_another_teams_success_keeps_the_refusal():
     session = {}
     _login(_refused(), session, slug="acme")
     _login(AsyncMock(return_value=[]), session, slug="beta")
-    assert ocs_access_notice.payload(session[ocs_access_notice.SESSION_KEY]) == {"teams": [ACME]}
+    assert ocs_access_notice.payload(session[KEY]) == {"teams": [ACME]}
 
 
 def test_the_refused_teams_own_success_clears_it():
@@ -86,9 +87,18 @@ def test_the_refused_teams_own_success_clears_it():
     _login(_refused(), session, slug="acme")
     _login(_refused(), session, slug="beta")
     _login(AsyncMock(return_value=[]), session, slug="acme")
-    assert ocs_access_notice.payload(session[ocs_access_notice.SESSION_KEY]) == {"teams": [BETA]}
+    assert ocs_access_notice.payload(session[KEY]) == {"teams": [BETA]}
     _login(AsyncMock(return_value=[]), session, slug="beta")
-    assert ocs_access_notice.SESSION_KEY not in session
+    assert KEY not in session
+
+
+def test_a_broken_notice_does_not_break_login(caplog):
+    with (
+        patch.object(ocs_access_notice, "clear_refusal", side_effect=AttributeError("drift")),
+        caplog.at_level(logging.WARNING, logger=SIGNALS_LOGGER),
+    ):
+        _login(AsyncMock(return_value=[]), {})
+    assert "Failed to update the OCS access notice" in caplog.text
 
 
 def test_teamless_identity_has_an_empty_slug():
@@ -103,21 +113,21 @@ def test_notice_survives_session_rotation_at_login(user):
     """The signal runs before allauth logs the user in; login() must keep the key."""
     request = RequestFactory().get("/accounts/ocs/login/callback/")
     SessionMiddleware(lambda r: None).process_request(request)
-    request.session[ocs_access_notice.SESSION_KEY] = {"acme": ACME}
+    request.session[ocs_access_notice.session_key(user.pk)] = {"acme": ACME}
     request.session.save()
     before = request.session.session_key
 
     login(request, user, backend="django.contrib.auth.backends.ModelBackend")
 
     assert request.session.session_key != before
-    assert request.session[ocs_access_notice.SESSION_KEY] == {"acme": ACME}
+    assert request.session[ocs_access_notice.session_key(user.pk)] == {"acme": ACME}
 
 
 @pytest.mark.django_db
 class TestMeReportsTheNotice:
-    def _refuse(self, client, *teams):
+    def _refuse(self, client, user, *teams):
         session = client.session
-        session[ocs_access_notice.SESSION_KEY] = {t["slug"]: t for t in teams}
+        session[ocs_access_notice.session_key(user.pk)] = {t["slug"]: t for t in teams}
         session.save()
 
     def test_absent_by_default(self, client, user):
@@ -126,7 +136,7 @@ class TestMeReportsTheNotice:
 
     def test_reported_until_dismissed(self, client, user):
         client.force_login(user)
-        self._refuse(client, ACME)
+        self._refuse(client, user, ACME)
 
         assert client.get("/api/auth/me/").json()["ocs_access_denied"] == {"teams": [ACME]}
         assert client.post("/api/auth/ocs/access-notice/dismiss/").status_code == 200
@@ -134,7 +144,7 @@ class TestMeReportsTheNotice:
 
     def _me_resolving_acme(self, client, user, resolver):
         client.force_login(user)
-        self._refuse(client, ACME, BETA)
+        self._refuse(client, user, ACME, BETA)
         cache.delete(me_onboarding_cache_key(user))
 
         async def tokens(_user, provider):
@@ -152,11 +162,22 @@ class TestMeReportsTheNotice:
         denied = self._me_resolving_acme(client, user, AsyncMock(return_value=chatbots))
 
         assert denied == {"teams": [BETA]}
-        assert client.session[ocs_access_notice.SESSION_KEY] == {"beta": BETA}
+        assert client.session[ocs_access_notice.session_key(user.pk)] == {"beta": BETA}
 
     def test_onboarding_resolve_still_refused_keeps_it(self, client, user):
         denied = self._me_resolving_acme(client, user, _refused())
         assert denied == {"teams": [ACME, BETA]}
+
+    def test_unusable_scope_proves_nothing(self, client, user):
+        with patch.object(auth_views, "ocs_scope_unusable", return_value=True):
+            denied = self._me_resolving_acme(client, user, AsyncMock(return_value=[]))
+        assert denied == {"teams": [ACME, BETA]}
+
+    def test_another_users_refusal_is_not_reported(self, client, user, other_user):
+        """An abandoned sign-in leaves its refusal on the anonymous session."""
+        self._refuse(client, other_user, ACME)
+        client.force_login(user)
+        assert client.get("/api/auth/me/").json()["ocs_access_denied"] is None
 
     def test_dismiss_requires_login(self, client):
         assert client.post("/api/auth/ocs/access-notice/dismiss/").status_code == 401

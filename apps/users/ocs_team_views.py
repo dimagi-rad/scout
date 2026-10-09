@@ -142,5 +142,6 @@ async def ocs_teams_dismiss_view(request):
 @async_login_required
 async def ocs_access_notice_dismiss_view(request):
     """Forget the sign-in refusal notice ``/api/auth/me/`` reports."""
-    await request.session.apop(ocs_access_notice.SESSION_KEY, None)
+    key = ocs_access_notice.session_key(request._authenticated_user.pk)
+    await request.session.apop(key, None)
     return JsonResponse({"status": "dismissed"})

@@ -28,7 +28,9 @@ Because raising one silences an alert, the bar is deliberately explicit. Raise
 signal path (``apps/users/signals.py``) is deliberately *not* classified as
 expected: a failed tenant resolution there leaves the user with an empty
 data-sources page indistinguishable from "this account has no data", and the
-Sentry event is the only signal that anything went wrong at all.
+Sentry event is the only signal that anything went wrong at all. The exception is
+an OCS 403 there, which now tells the user through ``ocs_access_notice`` and so
+logs at WARNING (SCOUT-DJANGO-3E).
 
 If any of the four fail, raise a plain ``Exception``. **An expected state that
 nobody is told about is not an expected state — it is a silent failure.**

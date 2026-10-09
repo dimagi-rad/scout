@@ -162,11 +162,13 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
         except Exception:
             logger.exception("Failed to resolve Connect opportunities after OAuth")
     elif provider == "ocs":
+        refused = None
         try:
             # allauth signal receivers are sync.
             async_to_sync(resolve_ocs_chatbots)(
                 sociallogin.user, token.token, social_account=sociallogin.account
             )
+            refused = False
         except OCSAuthError as error:
             if error.status_code != 403:
                 logger.exception("Failed to resolve OCS chatbots after OAuth")
@@ -176,11 +178,16 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
                 # every OCS login (e.g. a scope OCS stops accepting) now surfaces only as
                 # user reports and these warnings.
                 logger.warning("OCS refused the chatbot list after OAuth", exc_info=True)
-                ocs_access_notice.record_refusal(request, sociallogin.account)
+                refused = True
         except Exception:
             logger.exception("Failed to resolve OCS chatbots after OAuth")
-        else:
-            ocs_access_notice.clear_refusal(request, sociallogin.account)
+        try:
+            if refused:
+                ocs_access_notice.record_refusal(request, sociallogin.user, sociallogin.account)
+            elif refused is False:
+                ocs_access_notice.clear_refusal(request, sociallogin.user, sociallogin.account)
+        except Exception:
+            logger.exception("Failed to update the OCS access notice after OAuth")
     elif provider.startswith("commcare"):
         try:
             # allauth signal receivers are sync.

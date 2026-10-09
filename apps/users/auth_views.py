@@ -177,7 +177,8 @@ async def me_view(request):
 
     last_workspace_id = await _alast_workspace_id(user)
     can_view_usage_dashboard = await acan_view_usage_dashboard(user)
-    refused = await request.session.aget(ocs_access_notice.SESSION_KEY)
+    notice_key = ocs_access_notice.session_key(user.pk)
+    refused = await request.session.aget(notice_key)
     ocs_access_denied = ocs_access_notice.payload(refused)
     cache_key = me_onboarding_cache_key(user)
     cached = await cache.aget(cache_key)
@@ -207,15 +208,18 @@ async def me_view(request):
         ocs_resolved = await _atry_onboarding_resolve_provider(
             user, "ocs", resolve_ocs_chatbots, "OCS"
         )
-        # A team admin may have granted access since the sign-in refusal.
+        # A team admin may have granted access since the sign-in refusal. An unusable
+        # scope returns [] without asking OCS, so it proves nothing about access.
         remaining = refused
         for account in ocs_resolved:
+            if ocs_scope_unusable("ocs", account_scope(account)):
+                continue
             remaining = ocs_access_notice.without_refusal(remaining, account)
         if refused and remaining != refused:
             if remaining:
-                await request.session.aset(ocs_access_notice.SESSION_KEY, remaining)
+                await request.session.aset(notice_key, remaining)
             else:
-                await request.session.apop(ocs_access_notice.SESSION_KEY, None)
+                await request.session.apop(notice_key, None)
             ocs_access_denied = ocs_access_notice.payload(remaining)
         # Authoritative flag = persisted state after the resolution attempt. This
         # is True only if a provider actually created a connection-backed
