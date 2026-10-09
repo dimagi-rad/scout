@@ -205,7 +205,7 @@ CASES = [
     ),
     ("other-4xx", _status(404), None, "TokenRefreshError", True, logging.WARNING),
     ("throttled-429", _status(429), None, "TokenRefreshUnavailable", False, logging.WARNING),
-    ("server-500", _status(500), None, "TokenRefreshUnavailable", False, logging.ERROR),
+    ("server-500", _status(500), None, "TokenRefreshUnavailable", False, logging.WARNING),
     (
         "connection-error",
         _raises(httpx.ConnectError("down"), requests.ConnectionError("down")),
@@ -637,7 +637,7 @@ async def test_async_record_failure_false_keeps_the_verdict_but_leaves_no_marker
         ),
         (404, {}, TokenRefreshError, True, logging.WARNING, "other"),
         (429, {"transient": True}, TokenRefreshUnavailable, False, logging.WARNING, "other"),
-        (503, {"transient": True}, TokenRefreshUnavailable, False, logging.ERROR, "other"),
+        (503, {"transient": True}, TokenRefreshUnavailable, False, logging.WARNING, "other"),
         (None, {}, TokenRefreshError, True, logging.ERROR, "other"),
         (None, {"transient": True}, TokenRefreshUnavailable, False, logging.ERROR, "other"),
     ],

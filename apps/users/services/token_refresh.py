@@ -389,11 +389,12 @@ def classify_http_failure(
         error = TokenRefreshUnavailable(f"Failed to refresh OAuth token: {cause}")
     else:
         error = TokenRefreshError(f"Failed to refresh OAuth token: {cause}")
-    # A 4xx is an expected outcome (typically 400 invalid_grant on a dead refresh
-    # token), not a bug worth a Sentry event.
+    # Any provider HTTP error is a handled outcome, not a Scout bug worth a Sentry event:
+    # typically 400 invalid_grant on a dead refresh token, or a provider 5xx that is
+    # retried later (SCOUT-DJANGO-21). A refused client is alerted separately.
     log_level = (
         logging.WARNING
-        if status is not None and 400 <= status < 500 and not misconfigured
+        if status is not None and status >= 400 and not misconfigured
         else logging.ERROR
     )
     reason = "invalid_grant" if rejected else "invalid_client" if misconfigured else "other"
@@ -1029,7 +1030,7 @@ async def refresh_oauth_token_result(
         else:
             logger.log(
                 verdict.log_level,
-                "Token refresh rejected for app %s: HTTP %s (%s)",
+                "Token refresh failed for app %s: HTTP %s (%s)",
                 social_token.app.client_id,
                 status,
                 verdict.reason,
@@ -1203,7 +1204,7 @@ def refresh_oauth_token_result_sync(
         else:
             logger.log(
                 verdict.log_level,
-                "Sync token refresh rejected for app %s: HTTP %s (%s)",
+                "Sync token refresh failed for app %s: HTTP %s (%s)",
                 social_token.app.client_id,
                 status,
                 verdict.reason,

@@ -242,8 +242,8 @@ class TestTokenRefresh:
         assert "leaked-body-marker" not in caplog.text
 
     @pytest.mark.asyncio
-    async def test_refresh_500_logs_exception(self, httpx_mock, caplog):
-        """A 5xx is genuinely unexpected: keep exception-level logging."""
+    async def test_refresh_503_logs_warning(self, httpx_mock, caplog):
+        """A provider outage is handled and retryable, so it stays out of Sentry."""
         token_url = "https://example.com/oauth/token/"
         httpx_mock.add_response(url=token_url, method="POST", status_code=503)
 
@@ -258,9 +258,9 @@ class TestTokenRefresh:
             assert caught.type is TokenRefreshUnavailable
             assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
 
-        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
-        assert error_records, "expected an ERROR/exception-level log record"
-        assert any(r.exc_info for r in error_records)
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("HTTP 503" in r.getMessage() for r in warnings)
 
     @pytest.mark.asyncio
     async def test_refresh_network_error_logs_exception(self, httpx_mock, caplog):
