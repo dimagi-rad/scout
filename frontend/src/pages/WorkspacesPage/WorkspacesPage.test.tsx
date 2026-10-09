@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { render, screen } from "@testing-library/react"
+import { act, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
 import { WorkspacesPage } from "./WorkspacesPage"
 import { useAppStore } from "@/store/store"
+import { recordWorkspaceUse } from "@/lib/recentWorkspaces"
 import type { WorkspaceListItem } from "@/api/workspaces"
 
 vi.mock("@/api/workspaces", async (importOriginal) => {
@@ -54,7 +55,8 @@ function many(n: number): WorkspaceListItem[] {
 
 describe("WorkspacesPage", () => {
   beforeEach(() => {
-    useAppStore.setState({ domainsStatus: "loaded", domains: [] })
+    localStorage.clear()
+    useAppStore.setState({ domainsStatus: "loaded", domains: [], activeDomainId: null })
   })
 
   it("sorts newest first by default, and by name or oldest on request", async () => {
@@ -76,6 +78,40 @@ describe("WorkspacesPage", () => {
 
     await user.selectOptions(screen.getByTestId("workspaces-sort"), "oldest")
     expect(rowIds()).toEqual(["old", "mid", "new"])
+  })
+
+  it("sorts recently used workspaces first, then the rest newest first", async () => {
+    localStorage.setItem("scout.recentWorkspaces", JSON.stringify(["old", "gone", "mid"]))
+    useAppStore.setState({
+      domains: [
+        ws("mid", "Alpha", "2026-02-01T00:00:00Z"),
+        ws("new", "bravo", "2026-03-01T00:00:00Z"),
+        ws("old", "Charlie", "2026-01-01T00:00:00Z"),
+        ws("newest", "Delta", "2026-04-01T00:00:00Z"),
+      ],
+    })
+    renderPage()
+
+    await userEvent.setup().selectOptions(screen.getByTestId("workspaces-sort"), "recent")
+    expect(rowIds()).toEqual(["old", "mid", "newest", "new"])
+  })
+
+  it("re-sorts by recency when the active workspace changes", async () => {
+    useAppStore.setState({
+      domains: [
+        ws("a", "Alpha", "2026-01-01T00:00:00Z"),
+        ws("b", "Bravo", "2026-02-01T00:00:00Z"),
+      ],
+    })
+    renderPage()
+    await userEvent.setup().selectOptions(screen.getByTestId("workspaces-sort"), "recent")
+    expect(rowIds()).toEqual(["b", "a"])
+
+    act(() => {
+      recordWorkspaceUse("a")
+      useAppStore.setState({ activeDomainId: "a" })
+    })
+    expect(rowIds()).toEqual(["a", "b"])
   })
 
   it("renders one page of rows and reveals more on request", async () => {
