@@ -52,7 +52,6 @@ from apps.workspaces.services.access_freshness import (
 )
 from apps.workspaces.services.credential_coverage import CoverageRecovery, MissingTenant
 from apps.workspaces.services.data_operation import (
-    LockOrderError,
     TenantLocksExpanded,
     run_data_thread,
     tenant_data_lock,
@@ -294,7 +293,7 @@ async def _workspace_tenant_ids(workspace_id) -> list:
 
 
 async def _source_added_since_lock(workspace_id, locked_tenant_ids) -> bool:
-    """Whether a LockOrderError is the expected mid-load source add, not a lock-order bug."""
+    """Whether a TenantLocksExpanded is the expected mid-load source add, not a lock bug."""
     if locked_tenant_ids is None:
         return False
     try:
@@ -745,15 +744,16 @@ async def materialize_workspace_core(
             # Don't re-raise — the resume task must still fire. The failure is
             # recorded on the WorkspaceViewSchema row (state=FAILED, last_error),
             # which the resume task reads directly.
+            source_added = isinstance(exc, TenantLocksExpanded) and await _source_added_since_lock(
+                workspace_id, locked_tenant_ids
+            )
             if isinstance(exc, NoActiveTenantSchema):
                 logger.warning(
                     "Post-materialization view schema rebuild skipped for workspace %s: %s",
                     workspace_id,
                     exc,
                 )
-            elif isinstance(exc, TenantLocksExpanded) and await _source_added_since_lock(
-                workspace_id, locked_tenant_ids
-            ):
+            elif source_added:
                 logger.warning(
                     "Post-materialization view schema rebuild deferred for workspace %s: "
                     "a source was added during the load",
@@ -775,9 +775,7 @@ async def materialize_workspace_core(
             )
             view_schema_outcome = {
                 "ok": False,
-                "error": (
-                    _SOURCE_ADDED_DURING_LOAD if isinstance(exc, LockOrderError) else str(exc)[:500]
-                ),
+                "error": (_SOURCE_ADDED_DURING_LOAD if source_added else str(exc)[:500]),
                 "tenant_coverage": tenant_coverage,
             }
 

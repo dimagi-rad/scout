@@ -806,7 +806,10 @@ async def test_a_source_added_mid_run_reports_the_view_build_plainly(
             result = await _run(ws, user)
 
     assert result["view_schema"]["ok"] is False
-    assert result["view_schema"]["error"] == materialize._SOURCE_ADDED_DURING_LOAD
+    # Only a verified add may promise the follow-up load that republishes the views.
+    assert (result["view_schema"]["error"] == materialize._SOURCE_ADDED_DURING_LOAD) is (
+        expected_level == logging.WARNING
+    )
     # A verified mid-load add is expected; an unexplained LockOrderError is a lock bug.
     [record] = [r for r in caplog.records if "view schema rebuild" in r.getMessage()]
     assert record.levelno == expected_level
