@@ -145,6 +145,18 @@ class Tenant(models.Model):
         ),
     )
     canonical_name = models.CharField(max_length=255)
+    provider_attributes = models.JSONField(
+        default=dict,
+        # Older processes omit this column during a rolling deployment.
+        db_default={},
+        blank=True,
+        help_text=(
+            "Display/filter hints the provider reports for this tenant (e.g. a Connect "
+            "opportunity's status and program), refreshed by each member's discovery. "
+            "Never used for access decisions; TenantMetadata holds the copy taken at "
+            "materialization."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

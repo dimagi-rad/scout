@@ -45,6 +45,7 @@ from apps.users.services.api_key_providers.base import (
 )
 from apps.users.services.api_key_providers.commcare import CommCareStrategy
 from apps.users.services.api_key_providers.ocs import OCSStrategy
+from apps.users.services.tenant_listing import connect as connect_listing
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -864,6 +865,134 @@ async def test_connect_rejected_token_outranks_the_scoped_check(upstream):
 
     assert outcome.verdict == VerificationOutcome.CREDENTIAL_REJECTED
     assert CONNECT_LISTING not in upstream.requests
+
+
+CONNECT_ATTRIBUTES = {
+    "101": {
+        "is_active": True,
+        "is_test": False,
+        "end_date": "2026-12-31",
+        "date_created": "2026-03-02T09:15:00+00:00",
+        "organization": "acme-health",
+        "organization_name": "Acme Health",
+        "program": "7",
+        "program_name": "Community Health",
+        "visit_count": 1204,
+    },
+    "102": {
+        "is_active": True,
+        "end_date": None,
+        "date_created": "2026-05-11T14:40:00+00:00",
+        "organization": "acme-health",
+        "organization_name": "Acme Health",
+        "visit_count": 88,
+    },
+}
+
+
+def connect_attributes(payload) -> dict[str, dict]:
+    page = connect_listing.decode_page(payload)
+    return {tenant.external_id: dict(tenant.attributes) for tenant in page.tenants}
+
+
+async def test_connect_listing_decodes_attributes_and_resolves_names():
+    """``is_test`` passes through where the export has it and is absent elsewhere."""
+    assert connect_attributes(saved("connect_opp_org_program_list")) == CONNECT_ATTRIBUTES
+
+
+async def test_connect_dates_are_stored_in_extended_iso_form():
+    listing = saved("connect_opp_org_program_list")
+    listing["opportunities"][0] |= {"end_date": "20261231", "date_created": "20260302T091500Z"}
+
+    attributes = connect_attributes(listing)["101"]
+
+    assert (attributes["end_date"], attributes["date_created"]) == (
+        "2026-12-31",
+        "2026-03-02T09:15:00+00:00",
+    )
+
+
+CONNECT_BAD_ATTRIBUTES = {
+    "is_active": "yes",
+    "is_test": 1,
+    "end_date": "next year",
+    "date_created": 20260302,
+    "naive-date_created": "2026-03-02T09:15:00",
+    "organization": {"slug": "acme-health"},
+    "program": True,
+    "nul-organization": "acme\x00health",
+    "long-program": "7" * 256,
+    "surrogate-organization": "acme\ud800",
+    "visit_count": "1204",
+}
+
+
+@pytest.mark.parametrize(("key", "value"), CONNECT_BAD_ATTRIBUTES.items())
+async def test_connect_unusable_attribute_is_dropped_not_raised(key, value):
+    key = key.rpartition("-")[2]
+    listing = saved("connect_opp_org_program_list")
+    listing["opportunities"][0][key] = value
+
+    attributes = connect_attributes(listing)
+
+    dependent = {"organization": "organization_name", "program": "program_name"}.get(key)
+    expected = {
+        name: kept
+        for name, kept in CONNECT_ATTRIBUTES["101"].items()
+        if name not in {key, dependent}
+    }
+    assert attributes["101"] == expected
+    assert attributes["102"] == CONNECT_ATTRIBUTES["102"]
+
+
+@pytest.mark.parametrize(
+    "lookups",
+    [
+        {"organizations": "acme", "programs": None},
+        {
+            "organizations": [None, {"slug": "acme-health"}],
+            "programs": [
+                {"id": 7, "name": 7},
+                {"id": 7, "name": "Bad\x00"},
+                {"id": 7, "name": "Bad\ud800"},
+            ],
+        },
+    ],
+    ids=["not-lists", "unusable-entries"],
+)
+async def test_connect_unresolvable_names_are_omitted(lookups):
+    listing = saved("connect_opp_org_program_list") | lookups
+
+    attributes = connect_attributes(listing)
+
+    for external_id, expected in CONNECT_ATTRIBUTES.items():
+        assert attributes[external_id] == {
+            name: kept
+            for name, kept in expected.items()
+            if name not in {"organization_name", "program_name"}
+        }
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_connect_discovery_stores_attributes_on_the_tenant(upstream):
+    upstream.routes[CONNECT_LISTING] = json_answer(saved("connect_opp_org_program_list"))
+    await Tenant.objects.acreate(
+        provider="commcare_connect",
+        external_id="101",
+        canonical_name="Malaria Visits",
+        provider_attributes={"is_active": False, "stale": True},
+    )
+
+    outcome = await run(CONNECT_PATHS[0], upstream)
+
+    assert_listed(CONNECT_PATHS[0], outcome, CONNECT_IDS)
+    stored = {
+        tenant.external_id: tenant.provider_attributes
+        async for tenant in Tenant.objects.filter(
+            provider="commcare_connect", external_id__in=CONNECT_IDS
+        )
+    }
+    assert stored == CONNECT_ATTRIBUTES
 
 
 REDIRECTS = ("redirect-off-origin", "redirect-same-origin")

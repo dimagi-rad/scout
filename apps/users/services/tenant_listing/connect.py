@@ -6,6 +6,8 @@ caller reads only part of it, so any pagination field is a malformed page.
 
 from __future__ import annotations
 
+import datetime
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -53,10 +55,97 @@ def decode_page(payload: Any) -> TenantListPage:
         or _PAGINATION_KEYS.intersection(payload)
     ):
         raise MalformedTenantList("Connect response is incomplete or paginated")
-    tenants = tuple(
-        descriptor(row, id_key="id", name_key="name") for row in payload["opportunities"]
-    )
-    return TenantListPage(tenants, None)
+    organization_names = _names_by(payload.get("organizations"), "slug")
+    program_names = _names_by(payload.get("programs"), "id")
+    tenants = []
+    for row in payload["opportunities"]:
+        tenant = descriptor(row, id_key="id", name_key="name")
+        attributes = _attributes(row, organization_names, program_names)
+        tenants.append(tenant._replace(attributes=attributes))
+    return TenantListPage(tuple(tenants), None)
+
+
+def _names_by(entries: Any, key: str) -> dict[str, str]:
+    if not isinstance(entries, list):
+        return {}
+    names = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        ref, name = _ref(entry.get(key)), _text(entry.get("name"))
+        if ref is not None and name is not None:
+            names[ref] = name
+    return names
+
+
+def _text(value: Any) -> str | None:
+    # Postgres jsonb rejects NUL and lone surrogates, and a failed tenant write
+    # fails the whole resolution.
+    if not isinstance(value, str) or not value or "\x00" in value or len(value) > 255:
+        return None
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return value
+
+
+def _ref(value: Any) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    return _text(str(value))
+
+
+def _iso(value: Any, parse: Callable[[str], datetime.date]) -> str | None:
+    """``value`` in extended ISO form; Python also accepts basic and week forms JS can't read."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return parse(value).isoformat()
+    except ValueError:
+        return None
+
+
+def _aware_iso(value: Any) -> str | None:
+    """JS reads an offset-less datetime as the viewer's local time, so one is dropped."""
+    iso = _iso(value, datetime.datetime.fromisoformat)
+    if iso is None or datetime.datetime.fromisoformat(iso).tzinfo is None:
+        return None
+    return iso
+
+
+def _attributes(
+    row: dict, organization_names: dict[str, str], program_names: dict[str, str]
+) -> dict[str, Any]:
+    """The row's filter hints; a field of the wrong type is dropped, never raised.
+
+    These only decorate the tenant list, so a surprising export must not cost
+    the user access to an opportunity they can otherwise see.
+    """
+    attributes: dict[str, Any] = {}
+    for key in ("is_active", "is_test"):
+        if isinstance(row.get(key), bool):
+            attributes[key] = row[key]
+    if "end_date" in row and row["end_date"] is None:
+        attributes["end_date"] = None
+    elif end_date := _iso(row.get("end_date"), datetime.date.fromisoformat):
+        attributes["end_date"] = end_date
+    if date_created := _aware_iso(row.get("date_created")):
+        attributes["date_created"] = date_created
+    organization = _text(row.get("organization"))
+    if organization:
+        attributes["organization"] = organization
+        if organization in organization_names:
+            attributes["organization_name"] = organization_names[organization]
+    program = _ref(row.get("program"))
+    if program:
+        attributes["program"] = program
+        if program in program_names:
+            attributes["program_name"] = program_names[program]
+    visit_count = row.get("visit_count")
+    if isinstance(visit_count, int) and not isinstance(visit_count, bool):
+        attributes["visit_count"] = visit_count
+    return attributes
 
 
 def subset_ids(external_ids) -> tuple[str, ...] | None:

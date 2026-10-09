@@ -1,6 +1,6 @@
 import pytest
 
-from apps.users.services.api_key_providers import CredentialVerificationError
+from apps.users.services.api_key_providers import CredentialVerificationError, TenantDescriptor
 from apps.users.services.api_key_providers.ocs import OCSStrategy
 
 
@@ -37,7 +37,10 @@ async def test_verify_and_discover_single_page(httpx_mock, settings):
         status_code=200,
     )
     descriptors = await OCSStrategy.verify_and_discover({"api_key": "k"})
-    assert descriptors == [("exp-1", "Bot One"), ("exp-2", "Bot Two")]
+    assert descriptors == [
+        TenantDescriptor("exp-1", "Bot One"),
+        TenantDescriptor("exp-2", "Bot Two"),
+    ]
     request = httpx_mock.get_request()
     assert request.headers["X-api-key"] == "k"
 

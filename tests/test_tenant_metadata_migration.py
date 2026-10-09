@@ -7,7 +7,9 @@ migration against production-shaped data: a tenant with three memberships whose
 metadata disagrees, one of them archived and holding the freshest row.
 
 The rewind/replay is guarded by ``try/finally`` so a failure here cannot leave the
-test database on an older schema for the rest of the session.
+test database on an older schema for the rest of the session. Seeding uses the
+historical models: rewinding workspaces also reverses later users migrations, so
+the current models would write columns this schema no longer has.
 """
 
 from datetime import timedelta
@@ -16,8 +18,6 @@ import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.utils import timezone
-
-from apps.users.models import Tenant, TenantMembership
 
 BEFORE = ("workspaces", "0007_tenantmetadata_add_tenant")
 AFTER = ("workspaces", "0008_backfill_tenantmetadata_tenant")
@@ -38,85 +38,75 @@ def _leaves():
     return executor.loader.graph.leaf_nodes()
 
 
+def _historical_apps(target):
+    executor = MigrationExecutor(connection)
+    executor.loader.build_graph()
+    return executor.loader.project_state([target]).apps
+
+
 def _historical_metadata_model(target):
-    executor = MigrationExecutor(connection)
-    executor.loader.build_graph()
-    return executor.loader.project_state([target]).apps.get_model("workspaces", "TenantMetadata")
+    return _historical_apps(target).get_model("workspaces", "TenantMetadata")
 
 
-def _historical_user_model(target):
-    executor = MigrationExecutor(connection)
-    executor.loader.build_graph()
-    return executor.loader.project_state([target]).apps.get_model("users", "User")
-
-
-def _membership(tenant, suffix, *, archived=False):
-    # Rewinding workspaces also reverses users.User.last_workspace, so the current
-    # User model would insert a column this schema no longer has.
-    user = _historical_user_model(BEFORE).objects.create(email=f"m{suffix}@example.com")
-    # bulk_create skips the post_save signal that auto-creates a workspace: its
-    # WorkspaceTenant is the current model, which this rewound schema predates.
-    (membership,) = TenantMembership.all_objects.bulk_create(
-        [
-            TenantMembership(
-                user_id=user.pk,
-                tenant=tenant,
-                archived_at=timezone.now() if archived else None,
-            )
-        ]
+def _membership(old_apps, tenant, suffix, *, archived=False):
+    # Historical models fire no app signals, so no workspace is auto-created.
+    user = old_apps.get_model("users", "User").objects.create(email=f"m{suffix}@example.com")
+    return old_apps.get_model("users", "TenantMembership").objects.create(
+        user=user, tenant=tenant, archived_at=timezone.now() if archived else None
     )
-    return membership
 
 
 @pytest.fixture
 def production_shaped_metadata(transactional_db):
     """Seed at the pre-backfill schema and yield the historical model + expectations."""
     leaves = _leaves()
-    _migrate(BEFORE)
-    Metadata = _historical_metadata_model(BEFORE)
-
-    now = timezone.now()
-    contested = Tenant.objects.create(
-        provider="commcare", external_id="contested", canonical_name="Contested"
-    )
-    stale_live = _membership(contested, "stale")
-    fresh_live = _membership(contested, "fresh")
-    archived = _membership(contested, "archived", archived=True)
-
-    Metadata.objects.create(
-        tenant_membership_id=stale_live.id,
-        metadata={"owner": "stale-live"},
-        discovered_at=now - timedelta(days=2),
-    )
-    winner = Metadata.objects.create(
-        tenant_membership_id=fresh_live.id,
-        metadata={"owner": "fresh-live"},
-        discovered_at=now - timedelta(days=1),
-    )
-    # Freshest row of the three, but on a revoked membership: it must lose.
-    Metadata.objects.create(
-        tenant_membership_id=archived.id,
-        metadata={"owner": "archived"},
-        discovered_at=now,
-    )
-
-    revoked = Tenant.objects.create(
-        provider="commcare", external_id="revoked", canonical_name="Revoked"
-    )
-    revoked_only = _membership(revoked, "revoked", archived=True)
-    Metadata.objects.create(
-        tenant_membership_id=revoked_only.id,
-        metadata={"owner": "revoked-only"},
-        discovered_at=now,
-    )
-
-    single = Tenant.objects.create(
-        provider="commcare", external_id="single", canonical_name="Single"
-    )
-    single_m = _membership(single, "single")
-    Metadata.objects.create(tenant_membership_id=single_m.id, metadata={"owner": "single"})
-
     try:
+        _migrate(BEFORE)
+        old_apps = _historical_apps(BEFORE)
+        Tenant = old_apps.get_model("users", "Tenant")
+        Metadata = old_apps.get_model("workspaces", "TenantMetadata")
+
+        now = timezone.now()
+        contested = Tenant.objects.create(
+            provider="commcare", external_id="contested", canonical_name="Contested"
+        )
+        stale_live = _membership(old_apps, contested, "stale")
+        fresh_live = _membership(old_apps, contested, "fresh")
+        archived = _membership(old_apps, contested, "archived", archived=True)
+
+        Metadata.objects.create(
+            tenant_membership_id=stale_live.id,
+            metadata={"owner": "stale-live"},
+            discovered_at=now - timedelta(days=2),
+        )
+        winner = Metadata.objects.create(
+            tenant_membership_id=fresh_live.id,
+            metadata={"owner": "fresh-live"},
+            discovered_at=now - timedelta(days=1),
+        )
+        # Freshest row of the three, but on a revoked membership: it must lose.
+        Metadata.objects.create(
+            tenant_membership_id=archived.id,
+            metadata={"owner": "archived"},
+            discovered_at=now,
+        )
+
+        revoked = Tenant.objects.create(
+            provider="commcare", external_id="revoked", canonical_name="Revoked"
+        )
+        revoked_only = _membership(old_apps, revoked, "revoked", archived=True)
+        Metadata.objects.create(
+            tenant_membership_id=revoked_only.id,
+            metadata={"owner": "revoked-only"},
+            discovered_at=now,
+        )
+
+        single = Tenant.objects.create(
+            provider="commcare", external_id="single", canonical_name="Single"
+        )
+        single_m = _membership(old_apps, single, "single")
+        Metadata.objects.create(tenant_membership_id=single_m.id, metadata={"owner": "single"})
+
         yield {
             "model": Metadata,
             "contested": contested,

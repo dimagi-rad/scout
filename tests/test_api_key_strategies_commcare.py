@@ -1,6 +1,6 @@
 import pytest
 
-from apps.users.services.api_key_providers import CredentialVerificationError
+from apps.users.services.api_key_providers import CredentialVerificationError, TenantDescriptor
 from apps.users.services.api_key_providers.commcare import CommCareStrategy
 
 
@@ -35,7 +35,7 @@ async def test_verify_and_discover_happy_path(httpx_mock):
     descriptors = await CommCareStrategy.verify_and_discover(
         {"domain": "dimagi", "username": "user@d.org", "api_key": "k"}
     )
-    assert descriptors == [("dimagi", "dimagi")]
+    assert descriptors == [TenantDescriptor("dimagi", "dimagi")]
     request = httpx_mock.get_request()
     assert request.headers["Authorization"] == "ApiKey user@d.org:k"
 
