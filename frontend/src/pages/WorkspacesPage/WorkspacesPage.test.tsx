@@ -56,7 +56,7 @@ function many(n: number): WorkspaceListItem[] {
 describe("WorkspacesPage", () => {
   beforeEach(() => {
     localStorage.clear()
-    useAppStore.setState({ domainsStatus: "loaded", domains: [] })
+    useAppStore.setState({ domainsStatus: "loaded", domains: [], activeDomainId: null })
   })
 
   it("sorts newest first by default, and by name or oldest on request", async () => {
