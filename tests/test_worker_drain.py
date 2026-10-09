@@ -220,13 +220,12 @@ def test_empty_destination_is_a_successful_first_deploy(drain_cli):
 
 def test_clean_exit_between_discovery_and_inspection_needs_no_signal(drain_cli, tmp_path):
     result, state = drain_cli(
-        {WORKER: {"destination": ""}, OTHER: {"destination": "staging"}},
+        {WORKER: {"destination": ""}},
         options={"exit_after_discovery": {"exit": 0, "oom": False}},
     )
     assert result.returncode == 0, result.stderr
     assert "All 1 selected" in result.stdout
     assert not any(command[0] == "kill" for command in state["commands"])
-    assert state["containers"][OTHER].get("status", "running") == "running"
     assert list((tmp_path / RECEIPT_ROOT / "production").iterdir()) == []
 
 
@@ -240,19 +239,12 @@ def test_failed_discovery_exit_still_blocks_without_signalling(drain_cli, exit_s
     assert not any(command[0] == "kill" for command in state["commands"])
 
 
-def test_all_old_versions_are_signalled_once_without_touching_leftover_staging(drain_cli, tmp_path):
-    result, state = drain_cli(
-        {
-            WORKER: {"destination": ""},
-            OTHER: {"destination": ""},
-            "c" * 64: {"destination": "staging"},
-        },
-    )
+def test_all_old_versions_are_signalled_once(drain_cli, tmp_path):
+    result, state = drain_cli({WORKER: {"destination": ""}, OTHER: {"destination": ""}})
     assert result.returncode == 0, result.stderr
     for ident in (WORKER, OTHER):
         assert state["containers"][ident]["signals"] == 1
     assert not list((tmp_path / RECEIPT_ROOT / "production").iterdir())
-    assert "signals" not in state["containers"]["c" * 64]
     assert {command[0] for command in state["commands"]} <= {"ps", "inspect", "kill"}
 
 
@@ -307,23 +299,27 @@ def test_late_unknown_worker_blocks_without_signalling_guessed_ownership(
     assert (tmp_path / RECEIPT_ROOT / "production" / f"{WORKER}-{STARTED}").is_dir()
 
 
-# The retired staging stack (#808) shared this host; a leftover staging-labelled
-# worker must neither block nor be signalled by a production drain.
+# The retired staging stack (#808) and its host leftovers are gone, so a
+# staging label is as unknown as any other and must not be tolerated again.
 @pytest.mark.parametrize("status", ["running", "restarting", "paused"])
-def test_leftover_staging_worker_is_not_signalled_or_marked(drain_cli, tmp_path, status):
-    result, state = drain_cli({OTHER: {"destination": "staging", "status": status}})
-    assert result.returncode == 0, result.stderr
+def test_staging_labelled_worker_blocks_drain(drain_cli, tmp_path, status):
+    result, state = drain_cli(
+        {WORKER: {"destination": ""}, OTHER: {"destination": "staging", "status": status}}
+    )
+    assert result.returncode != 0
+    assert "missing or unknown role/destination labels" in result.stderr
     assert not any(command[0] == "kill" for command in state["commands"])
     assert not list((tmp_path / RECEIPT_ROOT / "production").iterdir())
     assert not (tmp_path / RECEIPT_ROOT / "staging").exists()
 
 
-def test_leftover_staging_worker_arriving_during_drain_is_unaffected(drain_cli):
+def test_staging_labelled_worker_arriving_during_drain_blocks_without_signal(drain_cli):
     result, state = drain_cli(
         {WORKER: {"destination": ""}},
         options={"new_worker_after_signal": True, "arriving_worker": {"destination": "staging"}},
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
+    assert "missing or unknown role/destination labels" in result.stderr
     assert state["containers"][WORKER]["signal_calls"] == 1
     assert not state["containers"]["c" * 64].get("signal_calls")
 

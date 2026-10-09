@@ -225,18 +225,13 @@ BuildKit secret (`--secret id=sentry_auth_token`) and never lands in an image la
 
 A staging stack used to run co-located on the production host (`-d staging`
 overlays, the `scout_staging_shared` network and the `agent_platform_staging`
-database). It was shut down and its configuration removed (#808). Two traces stay
-on purpose:
-
-- The `agent_platform_staging` database remains on the shared RDS instance until
-  it is dropped as a separate, signed-off step. PostgreSQL roles are
-  cluster-scoped, so tenant `<schema>_ro` / `<schema>_dbt` roles and
-  `scout_cube_catalog` may still hold grants in that database; a `DROP ROLE`
-  during schema teardown can log "objects depend on it … in database
-  agent_platform_staging" until it is gone.
-- The drain helper still tolerates (but never signals) a leftover
-  staging-labelled worker, and the disk guard keeps trimming stopped ones, so
-  stale containers on the host cannot block or fill a production deploy.
+database). It was shut down and its configuration removed (#808). The
+`agent_platform_staging` database was dropped, and the leftover staging
+containers and `scout_staging_shared` network were removed from the host, on
+2026-10-09. A worker still labelled `destination=staging` is now an unknown
+label: the drain helper fails closed on it, and the disk guard never prunes it.
+The only remaining trace is the `UserData` line that recreates the staging
+network (see [Infrastructure Changes](#infrastructure-changes)).
 
 ## Migration-safe backend handoff
 
@@ -278,8 +273,7 @@ The workflow drains **all active old production worker versions** before
 starting the new API. It also validates active containers
 across the `scout-worker` service before any signal and while waiting: missing
 or unsupported role/destination labels block the handoff rather than producing
-a misleading empty inventory. Leftover workers labelled for the retired staging
-destination are observed only and never signalled or given drain receipts.
+a misleading empty inventory.
 Procrastinate's first `SIGTERM` stops
 claiming jobs and lets running jobs finish. The drain helper sends that signal
 once per container/process start and waits up to 10 minutes for clean exit.
@@ -357,9 +351,9 @@ and [per-role boot environment upload](https://github.com/basecamp/kamal/blob/v2
 Unlike `deploy`,
 this omits Kamal 2.12's **service-wide** pruning, which could erase a stopped
 worker referenced by a pending receipt. Instead, the pre-deploy disk guard
-(`scripts/host-disk-guard.sh prune-workers`) removes stopped workers beyond the
-newest three (per destination label, so leftover staging workers are trimmed
-too), and only when **no** receipt exists and no legacy receipt path is present;
+(`scripts/host-disk-guard.sh prune-workers`) removes stopped production workers
+beyond the newest three, and only when **no** receipt exists and no legacy
+receipt path is present;
 otherwise it leaves every stopped worker in place and warns (see
 [Host disk full](#host-disk-full)). Any other worker cleanup is deliberate: do it
 only after checking receipts and worker/job state. Do not

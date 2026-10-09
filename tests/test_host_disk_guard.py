@@ -118,12 +118,15 @@ def _removed(commands):
     return [args[1] for args in commands if args[0] == "rm"]
 
 
-def test_prunes_stopped_workers_beyond_retention_including_leftover_staging(guard):
+def test_prunes_stopped_production_workers_beyond_retention(guard):
     stopped = {"production": ["p1", "p2", "p3", "p4", "p5"], "staging": ["s1", "s2", "s3", "s4"]}
     result, commands = guard("prune-workers", stopped=stopped)
     assert result.returncode == 0, result.stderr
-    # docker ps lists newest first; the newest three per destination survive.
-    assert _removed(commands) == ["p4", "p5", "s4"]
+    # docker ps lists newest first; the newest three survive.
+    assert _removed(commands) == ["p4", "p5"]
+    listed = [args for args in commands if args[0] == "ps"]
+    assert len(listed) == 1
+    assert "label=destination=" in listed[0]
     assert ["image", "prune", "--force"] in commands
     assert not any("-a" in args or "--all" in args for args in commands if args[0] == "image")
 
@@ -131,9 +134,9 @@ def test_prunes_stopped_workers_beyond_retention_including_leftover_staging(guar
 def test_empty_receipt_directories_do_not_block_pruning(guard):
     for destination in ("production", "staging"):
         (guard.home / ".scout-worker-drains-v1" / destination).mkdir(parents=True)
-    result, commands = guard("prune-workers", stopped={"staging": ["s1", "s2", "s3", "s4"]})
+    result, commands = guard("prune-workers", stopped={"production": ["p1", "p2", "p3", "p4"]})
     assert result.returncode == 0, result.stderr
-    assert _removed(commands) == ["s4"]
+    assert _removed(commands) == ["p4"]
 
 
 @pytest.mark.parametrize(
@@ -146,8 +149,7 @@ def test_empty_receipt_directories_do_not_block_pruning(guard):
 )
 def test_any_pending_or_legacy_drain_receipt_keeps_every_stopped_worker(guard, blocker):
     (guard.home / blocker).mkdir(parents=True)
-    stopped = {"production": ["p1", "p2", "p3", "p4"], "staging": ["s1", "s2", "s3", "s4"]}
-    result, commands = guard("prune-workers", stopped=stopped)
+    result, commands = guard("prune-workers", stopped={"production": ["p1", "p2", "p3", "p4"]})
     assert result.returncode == 0, result.stderr
     assert "Worker prune skipped" in result.stdout
     assert commands == []
@@ -199,10 +201,10 @@ def test_unreadable_home_or_kamal_keeps_every_stopped_worker(guard, unreadable):
 
 
 def test_listing_or_removal_failures_do_not_abort_the_rest_of_the_prune(guard):
-    stopped = {"production": ["p1", "p2", "p3", "gone", "p5"], "staging": ["s1", "s2", "s3", "s4"]}
+    stopped = {"production": ["p1", "p2", "p3", "gone", "p5"]}
     result, commands = guard("prune-workers", stopped=stopped, fail={"rm gone"})
     assert result.returncode == 0, result.stderr
-    assert _removed(commands) == ["gone", "p5", "s4"]
+    assert _removed(commands) == ["gone", "p5"]
     assert "1 stopped production worker(s) could not be removed" in result.stdout
 
     result, commands = guard("prune-workers", stopped=stopped, missing={"gone"})
@@ -213,7 +215,7 @@ def test_listing_or_removal_failures_do_not_abort_the_rest_of_the_prune(guard):
     result, commands = guard("prune-workers", stopped=stopped, fail={"ps production"})
     assert result.returncode == 0, result.stderr
     assert "Worker prune incomplete::Could not list stopped production workers" in result.stdout
-    assert _removed(commands) == ["s4"]
+    assert _removed(commands) == []
     assert ["image", "prune", "--force"] in commands
 
 

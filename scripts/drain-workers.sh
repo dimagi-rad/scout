@@ -43,11 +43,8 @@ inspect_worker() {
   [[ "$container_id" == "$expected_id" && "$container_service" == "scout-worker" ]] \
     || fail "Worker labels do not match the selected destination."
   if [[ "$validation_scope" == any_destination ]]; then
-    # "staging" stays accepted: the retired staging stack (#808) shared this host,
-    # and a leftover staging-labelled worker must not fail the production drain.
-    # It is validated here only, never selected or signalled.
     [[ "$container_role" == web && "$destination_presence" == present && \
-       ( "$container_destination" == "" || "$container_destination" == staging ) ]] \
+       "$container_destination" == "" ]] \
       || fail "Worker labels do not match a supported deployment: missing or unknown role/destination labels."
   else
     [[ "$container_role" == web && "$container_destination" == "$destination_label" && \
