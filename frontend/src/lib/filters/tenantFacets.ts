@@ -76,7 +76,7 @@ const FACETED_ATTRIBUTES = ["is_active", "end_date", "organization", "program"]
 function hasConnectAttributes(items: readonly UserTenant[]): boolean {
   return items.some((t) => {
     const attrs = connectAttributes(t)
-    return !!attrs && FACETED_ATTRIBUTES.some((key) => attrs[key] != null)
+    return !!attrs && FACETED_ATTRIBUTES.some((key) => attrs[key] !== null && attrs[key] !== undefined)
   })
 }
 

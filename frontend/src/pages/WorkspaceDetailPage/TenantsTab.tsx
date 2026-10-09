@@ -23,13 +23,7 @@ import { Plus, RefreshCw } from "lucide-react"
 import { FacetFilterBar } from "@/components/FacetFilterBar/FacetFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
-import { useFacetedList } from "@/lib/filters/useFacetedList"
-import {
-  TENANT_FACETS,
-  normalizeTenantSearch,
-  tenantMatchesSearch,
-} from "@/lib/filters/tenantFacets"
-import { sourceFiltersStorageKey } from "@/lib/filters/sourceFilterStorage"
+import { useTenantFacetFilters } from "@/lib/filters/useTenantFacetFilters"
 
 type AvailableStatus = "idle" | "loading" | "ready" | "error"
 
@@ -67,18 +61,12 @@ export function TenantsTab({
   const [addingId, setAddingId] = useState<string | null>(null)
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
-  const [query, setQuery] = useState("")
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
   // The workspace's last source: removing it deletes the whole workspace (#381).
   const [lastSource, setLastSource] = useState<WorkspaceTenant | null>(null)
   const [deletingWorkspace, setDeletingWorkspace] = useState(false)
   const [deleteWorkspaceError, setDeleteWorkspaceError] = useState<string | null>(null)
-
-  // Facet selections persist across openings (see useFacetedList); the search does not.
-  useEffect(() => {
-    if (!showAdd) setQuery("")
-  }, [showAdd])
 
   // Never blocked on the (slower) available list.
   const loadConnected = useCallback(async () => {
@@ -144,23 +132,14 @@ export function TenantsTab({
   // Internal-UUID → external opportunity ID, for the connected list display.
   const externalIdByUuid = new Map(userTenants.map((t) => [t.tenant_uuid, t.tenant_id]))
 
-  const normalizedQuery = normalizeTenantSearch(query)
-  const matchesSearch = useCallback(
-    (t: UserTenant) => tenantMatchesSearch(t, normalizedQuery),
-    [normalizedQuery],
-  )
-  const facetList = useFacetedList({
-    items: available,
-    facets: TENANT_FACETS,
-    storageKey: sourceFiltersStorageKey(userId),
-    predicate: matchesSearch,
-  })
-  const filteredAvailable = facetList.filtered
+  const sourceFilters = useTenantFacetFilters({ items: available, userId })
+  const filteredAvailable = sourceFilters.filtered
+  const { setSearch } = sourceFilters
 
-  function clearFilters() {
-    setQuery("")
-    facetList.clearFacets()
-  }
+  // Facet selections persist across openings (see useFacetedList); the search does not.
+  useEffect(() => {
+    if (!showAdd) setSearch("")
+  }, [showAdd, setSearch])
 
   async function handleAdd(tenant: UserTenant) {
     setAddingId(tenant.tenant_uuid)
@@ -324,19 +303,7 @@ export function TenantsTab({
           ) : (
             <>
               <div className="mb-3">
-                <FacetFilterBar
-                  testIdPrefix="available-sources-filter"
-                  search={query}
-                  onSearchChange={setQuery}
-                  searchPlaceholder="Search by name or opportunity ID…"
-                  facets={facetList.facets}
-                  options={facetList.options}
-                  selection={facetList.selection}
-                  onFacetChange={facetList.setFacet}
-                  onClear={clearFilters}
-                  shownCount={filteredAvailable.length}
-                  totalCount={available.length}
-                />
+                <FacetFilterBar testIdPrefix="available-sources-filter" {...sourceFilters.barProps} />
               </div>
               {filteredAvailable.length === 0 ? (
                 <div
@@ -348,7 +315,7 @@ export function TenantsTab({
                     variant="outline"
                     size="sm"
                     className="mt-2"
-                    onClick={clearFilters}
+                    onClick={sourceFilters.clearFilters}
                     data-testid="available-sources-filter-empty-clear"
                   >
                     Clear filters

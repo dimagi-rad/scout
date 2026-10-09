@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react"
 import { MemoryRouter } from "react-router-dom"
 import type { Meta, StoryObj } from "@storybook/react-vite"
+import { within } from "storybook/test"
 
 import type { UserTenant } from "@/api/auth"
-import { setCachedUserTenants } from "@/api/userTenantsCache"
+import { clearUserTenantsCache, setCachedUserTenants } from "@/api/userTenantsCache"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal/CreateWorkspaceModal"
 import { TenantsTab } from "@/pages/WorkspaceDetailPage/TenantsTab"
 import { useFacetedList } from "@/lib/filters/useFacetedList"
@@ -95,7 +96,10 @@ function SeededStore({ children }: { children: ReactNode }) {
     setCachedUserTenants(STORY_USER.id, DEMO_TENANTS)
     useAppStore.setState({ user: STORY_USER, authStatus: "authenticated" })
     useAppStore.setState({ domains: [], domainsStatus: "loaded" })
-    return () => useAppStore.setState(previous)
+    return () => {
+      useAppStore.setState(previous)
+      clearUserTenantsCache()
+    }
   }, [])
   return children
 }
@@ -166,6 +170,10 @@ export const InCreateWorkspaceModal: Story = {
 
 export const InAddSourcePanel: Story = {
   parameters: { layout: "padded" },
+  // The connected-sources section errors here: this story has no backend for it.
+  play: async ({ canvasElement, userEvent }) => {
+    await userEvent.click(await within(canvasElement).findByRole("button", { name: /add data source/i }))
+  },
   render: () => (
     <SeededStore>
       <div className="max-w-3xl">

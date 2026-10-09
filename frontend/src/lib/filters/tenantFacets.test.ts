@@ -134,6 +134,14 @@ describe("TENANT_FACETS", () => {
     ])
   })
 
+  it("labels an organization by name even when its first row lacks one", () => {
+    const rows = [
+      tenant("x1", "commcare_connect", { is_active: true, organization: "acme" }),
+      tenant("x2", "commcare_connect", { organization: "acme", organization_name: "Acme Health" }),
+    ]
+    expect(computeFacetOptions(rows, TENANT_FACETS, {}).organization[0].label).toBe("Acme Health")
+  })
+
   it("hides Type when no row reports is_test", () => {
     const noTest = sources.map((t) => ({
       ...t,

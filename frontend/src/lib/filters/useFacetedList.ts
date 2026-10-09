@@ -5,7 +5,6 @@ import {
   availableFacets,
   computeFacetOptions,
   effectiveSelection,
-  isFiltering,
   type FacetDef,
 } from "./facets"
 import { usePersistentFacetSelection } from "./facetStorage"
@@ -82,6 +81,5 @@ export function useFacetedList<T>({
     filtered,
     setFacet,
     clearFacets,
-    filtering: isFiltering(selection),
   }
 }

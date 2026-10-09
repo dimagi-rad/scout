@@ -160,6 +160,9 @@ export function computeFacetOptions<T>(
       if (!option) {
         option = { value, label: def.optionLabel?.(value, item) ?? value, count: 0 }
         options.set(value, option)
+      } else if (option.label === value && def.optionLabel) {
+        // The first row may lack a display name that a later row carries.
+        option.label = def.optionLabel(value, item)
       }
       if (searched[index] && matchesAll(item, defs, sets, def.key)) option.count++
     })

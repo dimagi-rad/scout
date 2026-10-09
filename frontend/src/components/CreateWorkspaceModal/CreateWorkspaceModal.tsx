@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { Link, useLocation, useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
@@ -22,13 +22,7 @@ import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
 import { CONNECTIONS_PATH } from "@/lib/routes"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
-import { useFacetedList } from "@/lib/filters/useFacetedList"
-import {
-  TENANT_FACETS,
-  normalizeTenantSearch,
-  tenantMatchesSearch,
-} from "@/lib/filters/tenantFacets"
-import { sourceFiltersStorageKey } from "@/lib/filters/sourceFilterStorage"
+import { useTenantFacetFilters } from "@/lib/filters/useTenantFacetFilters"
 
 interface Props {
   onClose: () => void
@@ -55,7 +49,6 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const [sourcesRefreshing, setSourcesRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [search, setSearch] = useState("")
   // Set once the user opts to "Create anyway" past the duplicate warning.
   const [duplicateAcknowledged, setDuplicateAcknowledged] = useState(false)
 
@@ -129,31 +122,19 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     )
   }, [domains, selected])
 
-  const normalizedSearch = normalizeTenantSearch(search)
-  const matchesSearch = useCallback(
-    (t: UserTenant) => tenantMatchesSearch(t, normalizedSearch),
-    [normalizedSearch],
-  )
   const sortedSources = useMemo(() => [...sources].sort(compareUserTenantsByName), [sources])
-  const facetList = useFacetedList({
+  const sourceFilters = useTenantFacetFilters({
     items: sortedSources,
-    facets: TENANT_FACETS,
-    storageKey: sourceFiltersStorageKey(userId),
-    predicate: matchesSearch,
+    userId,
     // Every source the user has, so a stored value missing here is gone for good.
     listIsComplete: true,
   })
-  const filteredSources = facetList.filtered
+  const filteredSources = sourceFilters.filtered
   // Filters only narrow the list; they never change the selection.
   const hiddenSelectedCount = useMemo(() => {
     const shown = new Set(filteredSources.map((t) => t.tenant_uuid))
     return [...selected].filter((id) => !shown.has(id)).length
   }, [filteredSources, selected])
-
-  function clearFilters() {
-    setSearch("")
-    facetList.clearFacets()
-  }
 
   function toggleSource(uuid: string) {
     // Changing the selection invalidates a prior "create anyway" decision: the
@@ -301,19 +282,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                 </p>
               ) : (
                 <div className="space-y-3">
-                  <FacetFilterBar
-                    testIdPrefix="create-sources-filter"
-                    search={search}
-                    onSearchChange={setSearch}
-                    searchPlaceholder="Search by name or opportunity ID…"
-                    facets={facetList.facets}
-                    options={facetList.options}
-                    selection={facetList.selection}
-                    onFacetChange={facetList.setFacet}
-                    onClear={clearFilters}
-                    shownCount={filteredSources.length}
-                    totalCount={sources.length}
-                  />
+                  <FacetFilterBar testIdPrefix="create-sources-filter" {...sourceFilters.barProps} />
                   <div
                     className="max-h-56 space-y-1 overflow-y-auto rounded-md border p-1"
                     data-testid="create-sources-list"
@@ -326,7 +295,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                           variant="outline"
                           size="sm"
                           className="mt-2"
-                          onClick={clearFilters}
+                          onClick={sourceFilters.clearFilters}
                           data-testid="create-sources-filter-empty-clear"
                         >
                           Clear filters
