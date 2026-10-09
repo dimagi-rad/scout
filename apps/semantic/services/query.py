@@ -6,6 +6,7 @@ members and Scout translates the narrow supported query shape into a Cube query.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -419,9 +420,9 @@ class _MemberResolver:
             )
         }
         datasets_by_id = {dataset.id: dataset for dataset in self._datasets.values()}
-        self._fields: dict[tuple[int, str], SemanticField] = {}
+        self._fields: dict[tuple[uuid.UUID, str], SemanticField] = {}
         for field in SemanticField.objects.filter(
-            dataset_id__in=datasets_by_id,
+            dataset_id__in=list(datasets_by_id),
             is_visible=True,
             name__in={field_name for _, field_name in pairs},
         ):
