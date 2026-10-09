@@ -1116,13 +1116,15 @@ class TestHoldWhileASourceChangeRebuildsViews:
 
     async def test_dropping_to_one_source_keeps_answering(self, agent_layer):
         ws, _user, client = await _serving_workspace("remove-to-one")
-        wt = await WorkspaceTenant.objects.filter(workspace=ws).alast()
+        wt = await WorkspaceTenant.objects.filter(workspace=ws).afirst()
         await sync_to_async(remove_workspace_tenant)(ws, wt)
         thread_id = str(uuid.uuid4())
 
         response = await _post(client, ws, thread_id, "visits?")
         [chunk async for chunk in response.streaming_content]
 
+        view = await WorkspaceViewSchema.objects.aget(workspace=ws)
+        assert view.state == SchemaState.TEARDOWN
         assert len(agent_layer.inputs) == 1
         assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
 
