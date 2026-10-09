@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { expect, it } from "vitest"
 
@@ -48,6 +48,24 @@ it("cuts long lists off behind Show more and searches them", async () => {
 
   await user.type(screen.getByTestId("t-facet-org-search"), "org-1")
   expect(optionCount()).toBe(10)
+})
+
+it("swallows Enter in the popover so it cannot submit a surrounding form", async () => {
+  const user = userEvent.setup()
+  render(<Harness />)
+  await user.click(screen.getByTestId("t-facet-org"))
+  expect(fireEvent.keyDown(screen.getByTestId("t-facet-org-option-org-00"), { key: "Enter" })).toBe(false)
+  expect(fireEvent.keyDown(screen.getByTestId("t-facet-org-search"), { key: "Enter" })).toBe(false)
+})
+
+it("keeps a value ticked during a search listed after the search clears", async () => {
+  const user = userEvent.setup()
+  render(<Harness />)
+  await user.click(screen.getByTestId("t-facet-org"))
+  await user.type(screen.getByTestId("t-facet-org-search"), "org-19")
+  await user.click(screen.getByTestId("t-facet-org-option-org-19"))
+  await user.clear(screen.getByTestId("t-facet-org-search"))
+  expect(screen.getByTestId("t-facet-org-option-org-19")).toBeChecked()
 })
 
 it("keeps a selection beyond the cut-off listed when reopened, and labels the button", async () => {

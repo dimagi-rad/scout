@@ -10,6 +10,11 @@ import { cn } from "@/lib/utils"
 
 export const FACET_COLLAPSED_LIMIT = 12
 
+// Values are untrusted (org slugs, program ids); keep test ids kebab-case-safe.
+function testIdValue(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]+/g, "") || "blank"
+}
+
 interface FacetFilterBarProps<T> {
   /** Prefix for every data-testid, e.g. "create-sources-filter". */
   testIdPrefix: string
@@ -19,7 +24,8 @@ interface FacetFilterBarProps<T> {
   facets: readonly FacetDef<T>[]
   options: Readonly<Record<string, FacetOption[]>>
   selection: FacetSelection
-  onFacetChange: (key: string, values: string[]) => void
+  /** `replace` marks "Only" and per-facet clear, which overwrite rather than toggle. */
+  onFacetChange: (key: string, values: string[], replace?: boolean) => void
   onClear: () => void
   shownCount: number
   totalCount: number
@@ -49,7 +55,7 @@ export function FacetFilterBar<T>({
       def={def}
       options={options[def.key] ?? []}
       selected={selection[def.key] ?? []}
-      onChange={(values) => onFacetChange(def.key, values)}
+      onChange={(values, replace) => onFacetChange(def.key, values, replace)}
       testId={`${testIdPrefix}-facet-${def.key}`}
     />
   )
@@ -82,7 +88,7 @@ export function FacetFilterBar<T>({
         </div>
       )}
       <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span data-testid={`${testIdPrefix}-count`} aria-live="polite">
+        <span data-testid={`${testIdPrefix}-count`}>
           Showing {shownCount} of {totalCount}
         </span>
         {canClear && (
@@ -118,13 +124,13 @@ function FacetPopover<T>({
   def: FacetDef<T>
   options: FacetOption[]
   selected: readonly string[]
-  onChange: (values: string[]) => void
+  onChange: (values: string[], replace?: boolean) => void
   testId: string
 }) {
   const idBase = useId()
   const [query, setQuery] = useState("")
   const [expanded, setExpanded] = useState(false)
-  // Values selected when the popover opened stay listed while it is open, so
+  // Values selected while the popover is open stay listed until it closes, so
   // unticking one below the cut-off does not make it vanish under the cursor.
   const [pinned, setPinned] = useState<ReadonlySet<string>>(new Set())
 
@@ -139,6 +145,7 @@ function FacetPopover<T>({
   }
 
   function toggle(value: string) {
+    setPinned((prev) => new Set(prev).add(value))
     onChange(
       selectedSet.has(value) ? selected.filter((v) => v !== value) : [...selected, value],
     )
@@ -178,15 +185,17 @@ function FacetPopover<T>({
         align="start"
         className="w-72 p-1"
         data-testid={`${testId}-popover`}
+        // Rendered inside the create-workspace <form>: Enter in a checkbox or the
+        // search box would otherwise submit it (Firefox submits from checkboxes).
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && e.target instanceof HTMLInputElement) e.preventDefault()
+        }}
       >
         {def.searchable && (
           <div className="p-1">
             <Input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") e.preventDefault()
-              }}
               placeholder={`Search ${def.label.toLowerCase()}…`}
               aria-label={`Search ${def.label.toLowerCase()}`}
               className="h-7 text-xs"
@@ -198,8 +207,9 @@ function FacetPopover<T>({
           {visible.length === 0 ? (
             <p className="px-2 py-3 text-center text-xs text-muted-foreground">No matches</p>
           ) : (
-            visible.map((option) => {
-              const id = `${idBase}-${option.value}`
+            visible.map((option, index) => {
+              const id = `${idBase}-${index}`
+              const valueId = testIdValue(option.value)
               return (
                 <div
                   key={option.value}
@@ -211,7 +221,7 @@ function FacetPopover<T>({
                     className="size-3.5 shrink-0 accent-primary"
                     checked={selectedSet.has(option.value)}
                     onChange={() => toggle(option.value)}
-                    data-testid={`${testId}-option-${option.value}`}
+                    data-testid={`${testId}-option-${valueId}`}
                   />
                   <label
                     htmlFor={id}
@@ -230,10 +240,12 @@ function FacetPopover<T>({
                     </span>
                     <button
                       type="button"
-                      onClick={() => onChange([option.value])}
-                      className="absolute inset-y-0 right-0 rounded px-1 opacity-0 hover:text-foreground hover:underline focus-visible:opacity-100 group-hover:opacity-100"
+                      onClick={() => onChange([option.value], true)}
+                      // Invisible until hover/focus, and untappable then, so a touch
+                      // on the count cannot trigger it unseen.
+                      className="pointer-events-none absolute inset-y-0 right-0 rounded px-1 opacity-0 hover:text-foreground hover:underline focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
                       aria-label={`Only ${option.label}`}
-                      data-testid={`${testId}-only-${option.value}`}
+                      data-testid={`${testId}-only-${valueId}`}
                     >
                       Only
                     </button>
@@ -260,7 +272,7 @@ function FacetPopover<T>({
             {active && (
               <button
                 type="button"
-                onClick={() => onChange([])}
+                onClick={() => onChange([], true)}
                 className="text-xs text-muted-foreground hover:text-foreground hover:underline"
                 data-testid={`${testId}-reset`}
               >
