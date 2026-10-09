@@ -80,4 +80,43 @@ describe("WorkspaceAddedNotice (#355)", () => {
     renderNotice()
     expect(screen.getByTestId("workspace-added-notice")).toBeEmptyDOMElement()
   })
+  describe("with many added at once", () => {
+    const many = Array.from({ length: 5 }, (_, i) => ws(`w${i}`, `Workspace ${i}`))
+
+    beforeEach(() => {
+      useAppStore.setState({
+        domains: [ws("home", "Home"), ...many],
+        addedDomainIds: many.map((w) => w.id),
+      })
+    })
+
+    it("shows the first three and offers the rest behind Show more", async () => {
+      renderNotice()
+
+      expect(screen.getByTestId("workspace-added-notice-w2")).toBeInTheDocument()
+      expect(screen.queryByTestId("workspace-added-notice-w3")).not.toBeInTheDocument()
+      const showMore = screen.getByTestId("workspace-added-notice-show-more")
+      expect(showMore).toHaveTextContent("Show 2 more")
+
+      await userEvent.click(showMore)
+
+      expect(screen.getByTestId("workspace-added-notice-w4")).toBeInTheDocument()
+      expect(screen.queryByTestId("workspace-added-notice-show-more")).not.toBeInTheDocument()
+    })
+
+    it("clears every notice with Dismiss all", async () => {
+      renderNotice()
+
+      await userEvent.click(screen.getByTestId("workspace-added-notice-dismiss-all"))
+
+      expect(useAppStore.getState().addedDomainIds).toEqual([])
+      expect(screen.getByTestId("workspace-added-notice")).toBeEmptyDOMElement()
+    })
+  })
+
+  it("offers no Dismiss all for a single notice", () => {
+    useAppStore.setState({ addedDomainIds: ["new"] })
+    renderNotice()
+    expect(screen.queryByTestId("workspace-added-notice-dismiss-all")).not.toBeInTheDocument()
+  })
 })
