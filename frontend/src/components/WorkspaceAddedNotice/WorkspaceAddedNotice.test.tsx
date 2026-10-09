@@ -110,8 +110,9 @@ describe("WorkspaceAddedNotice (#355)", () => {
     it("starts a later burst capped again after the first is cleared one by one", async () => {
       renderNotice()
       await userEvent.click(screen.getByTestId("workspace-added-notice-show-more"))
+      await userEvent.click(screen.getByTestId("workspace-added-notice-dismiss-w0"))
+      await userEvent.click(screen.getByTestId("workspace-added-notice-dismiss-w1"))
 
-      act(() => useAppStore.setState({ addedDomainIds: [] }))
       act(() => useAppStore.setState({ addedDomainIds: many.map((w) => w.id) }))
 
       expect(screen.queryByTestId("workspace-added-notice-w0")).not.toBeInTheDocument()
