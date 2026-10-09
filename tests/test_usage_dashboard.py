@@ -287,6 +287,8 @@ def test_loads_split_by_the_workspace_source_type(user, workspace):
         (ocs_only, 2, True),
         (ocs_only, 9, False),
         (mixed, 5, True),
+        # A workspace with no sources should never exist (#381); its load still counts.
+        (Workspace.objects.create(name="Sourceless", created_by=user), 4, False),
     ]
     for job_id, (ws, seconds, succeeded) in enumerate(loads, start=1):
         WorkspaceLoadTiming.objects.create(
@@ -297,11 +299,12 @@ def test_loads_split_by_the_workspace_source_type(user, workspace):
             succeeded=succeeded,
         )
 
-    by_source = {
-        row["source"]: row for row in build_dashboard(days=1, now=now)["loads"]["by_source"]
-    }
+    loads_data = build_dashboard(days=1, now=now)["loads"]
+    by_source = {row["source"]: row for row in loads_data["by_source"]}
 
-    assert set(by_source) == {"commcare", "ocs", "mixed"}
+    assert set(by_source) == {"commcare", "ocs", "mixed", "unknown"}
+    assert sum(row["total"] for row in by_source.values()) == loads_data["total"]
+    assert sum(row["failed"] for row in by_source.values()) == loads_data["failed"]
     assert (by_source["commcare"]["total"], by_source["commcare"]["failed"]) == (2, 0)
     assert by_source["commcare"]["duration_ms"]["p50"] == 2000
     # Only the successful load times an OCS load.
