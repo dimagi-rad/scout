@@ -23,7 +23,11 @@ export function WorkspaceAddedNotice() {
     .map((id) => domains.find((d) => d.id === id))
     .filter((d) => d !== undefined)
   const [expanded, setExpanded] = useState(false)
-  const visible = expanded ? added : added.slice(0, MAX_VISIBLE)
+  // Collapse once the overflow is gone, so a later burst starts capped again.
+  const overflowing = added.length > MAX_VISIBLE
+  if (expanded && !overflowing) setExpanded(false)
+  // Newest last in the store, so a fresh grant is never the one hidden.
+  const visible = expanded ? added : added.slice(-MAX_VISIBLE)
   const hiddenCount = added.length - visible.length
 
   // Stays mounted while empty: screen readers skip a live region inserted along with its content.
@@ -74,16 +78,18 @@ export function WorkspaceAddedNotice() {
         </div>
       ))}
       {added.length > 1 && (
-        <div className="flex items-center justify-between gap-3 rounded-lg border bg-card px-3 py-2 text-sm shadow-lg">
-          {hiddenCount > 0 ? (
+        <div className="sticky bottom-0 flex items-center justify-between gap-3 rounded-lg border bg-card px-3 py-2 text-sm shadow-lg">
+          {overflowing ? (
+            // One button for both states, so keyboard focus survives the toggle.
             <Button
               variant="link"
               size="sm"
               className="h-auto p-0"
-              onClick={() => setExpanded(true)}
+              aria-expanded={expanded}
+              onClick={() => setExpanded(!expanded)}
               data-testid="workspace-added-notice-show-more"
             >
-              Show {hiddenCount} more
+              {expanded ? "Show fewer" : `Show ${hiddenCount} more`}
             </Button>
           ) : (
             <span />
@@ -92,10 +98,7 @@ export function WorkspaceAddedNotice() {
             variant="ghost"
             size="sm"
             className="h-7"
-            onClick={() => {
-              setExpanded(false)
-              dismissAllAddedDomains()
-            }}
+            onClick={dismissAllAddedDomains}
             data-testid="workspace-added-notice-dismiss-all"
           >
             Dismiss all

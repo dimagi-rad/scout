@@ -530,6 +530,16 @@ describe("domainSlice.addedDomainIds — workspaces someone added you to (#355)"
     expect(useAppStore.getState().addedDomainIds).toEqual([])
   })
 
+  it("clears every added workspace on Dismiss all, leaving the list and selection alone", () => {
+    useAppStore.setState({ domains: [ws("a"), ws("x"), ws("y")], addedDomainIds: ["x", "y"] })
+
+    useAppStore.getState().domainActions.dismissAllAddedDomains()
+
+    expect(useAppStore.getState().addedDomainIds).toEqual([])
+    expect(useAppStore.getState().domains).toHaveLength(3)
+    expect(useAppStore.getState().activeDomainId).toBe("a")
+  })
+
   it("forgets an added workspace once it's dismissed or opened", async () => {
     vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("x"), ws("y"), ws("a")])
     const actions = useAppStore.getState().domainActions
