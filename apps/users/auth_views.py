@@ -33,6 +33,7 @@ from apps.users.models import (
     User,
 )
 from apps.users.rate_limiting import check_rate_limit, record_attempt
+from apps.users.services import ocs_access_notice
 from apps.users.services.credential_resolver import aiter_fresh_access_tokens
 from apps.users.services.oauth_scope import (
     account_scope,
@@ -86,7 +87,12 @@ async def _alast_workspace_id(user) -> str | None:
 
 
 def _user_response(
-    user, *, onboarding_complete=False, last_workspace_id=None, can_view_usage_dashboard=False
+    user,
+    *,
+    onboarding_complete=False,
+    last_workspace_id=None,
+    can_view_usage_dashboard=False,
+    ocs_access_denied=None,
 ):
     """Build standard user JSON response dict."""
     return {
@@ -98,6 +104,7 @@ def _user_response(
         "can_view_usage_dashboard": can_view_usage_dashboard,
         "onboarding_complete": onboarding_complete,
         "last_workspace_id": last_workspace_id,
+        "ocs_access_denied": ocs_access_denied,
         "agent_model": {
             "id": settings.DEFAULT_LLM_MODEL,
             "label": model_display_name(settings.DEFAULT_LLM_MODEL),
@@ -111,29 +118,26 @@ async def _atry_onboarding_resolve_provider(user, provider, resolve_fn, provider
     Only ``me_view`` calls it, and only before onboarding completes; it is not
     a way to revalidate access for an onboarded user.
 
-    Returns ``True`` only when the resolver actually persisted at least one
-    membership. A bare "token exists and the resolver didn't raise" is NOT
-    onboarding completion: ``resolve_commcare_domains`` (and friends) can return
-    ``[]`` without raising, which previously flapped ``onboarding_complete`` to
-    ``True`` while the persisted state stayed incomplete (arch #254, 07#4). The
-    caller derives the authoritative flag from the persisted membership state,
-    not from this return value.
+    Returns the identities whose resolution did not raise. That is NOT onboarding
+    completion: ``resolve_commcare_domains`` (and friends) can return ``[]``
+    without raising, and treating that as complete once flapped
+    ``onboarding_complete`` to ``True`` while the persisted state stayed
+    incomplete (arch #254, 07#4). The caller derives the authoritative flag from
+    the persisted membership state, not from this return value.
 
     Every identity the user holds for the provider is resolved, not just one: an
     OCS token is team-scoped, so stopping at the first would leave a second
     team's chatbots undiscovered (#156). One team failing must not skip the rest.
     """
-    resolved_any = False
+    resolved_accounts = []
     for account, access_token in await aiter_fresh_access_tokens(user, provider):
         try:
-            resolved = await resolve_fn(
-                user, access_token, social_account=account, allow_replace=False
-            )
+            await resolve_fn(user, access_token, social_account=account, allow_replace=False)
         except Exception:
             logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)
             continue
-        resolved_any = resolved_any or bool(resolved)
-    return resolved_any  # falsy/empty = "resolved nothing" so the flag can't flap
+        resolved_accounts.append(account)
+    return resolved_accounts
 
 
 async def _aonboarding_complete(user) -> bool:
@@ -173,6 +177,9 @@ async def me_view(request):
 
     last_workspace_id = await _alast_workspace_id(user)
     can_view_usage_dashboard = await acan_view_usage_dashboard(user)
+    notice_key = ocs_access_notice.session_key(user.pk)
+    refused = await request.session.aget(notice_key)
+    ocs_access_denied = ocs_access_notice.payload(refused)
     cache_key = me_onboarding_cache_key(user)
     cached = await cache.aget(cache_key)
     if cached is not None:
@@ -182,6 +189,7 @@ async def me_view(request):
                 onboarding_complete=cached,
                 last_workspace_id=last_workspace_id,
                 can_view_usage_dashboard=can_view_usage_dashboard,
+                ocs_access_denied=ocs_access_denied,
             )
         )
 
@@ -197,7 +205,19 @@ async def me_view(request):
         await _atry_onboarding_resolve_provider(
             user, "commcare_connect", resolve_connect_opportunities, "Connect"
         )
-        await _atry_onboarding_resolve_provider(user, "ocs", resolve_ocs_chatbots, "OCS")
+        ocs_resolved = await _atry_onboarding_resolve_provider(
+            user, "ocs", resolve_ocs_chatbots, "OCS"
+        )
+        # A team admin may have granted access since the sign-in refusal.
+        remaining = refused
+        for account in ocs_resolved:
+            remaining = ocs_access_notice.without_refusal(remaining, account)
+        if refused and remaining != refused:
+            if remaining:
+                await request.session.aset(notice_key, remaining)
+            else:
+                await request.session.apop(notice_key, None)
+            ocs_access_denied = ocs_access_notice.payload(remaining)
         # Authoritative flag = persisted state after the resolution attempt. This
         # is True only if a provider actually created a connection-backed
         # membership, so the flag can't flap True for a token-but-no-tenant user.
@@ -210,6 +230,7 @@ async def me_view(request):
             onboarding_complete=onboarding_complete,
             last_workspace_id=last_workspace_id,
             can_view_usage_dashboard=can_view_usage_dashboard,
+            ocs_access_denied=ocs_access_denied,
         )
     )
 

@@ -10,7 +10,7 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
 from apps.users.decorators import async_login_required
-from apps.users.services import ocs_team_flow
+from apps.users.services import ocs_access_notice, ocs_team_flow
 from apps.users.services.oauth_scope import account_scope, provider_accounts
 
 
@@ -135,4 +135,13 @@ async def ocs_teams_stop_view(request):
 async def ocs_teams_dismiss_view(request):
     """Forget the flow and its message."""
     await request.session.apop(ocs_team_flow.SESSION_KEY, None)
+    return JsonResponse({"status": "dismissed"})
+
+
+@require_http_methods(["POST"])
+@async_login_required
+async def ocs_access_notice_dismiss_view(request):
+    """Forget the sign-in refusal notice ``/api/auth/me/`` reports."""
+    key = ocs_access_notice.session_key(request._authenticated_user.pk)
+    await request.session.apop(key, None)
     return JsonResponse({"status": "dismissed"})

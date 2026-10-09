@@ -12,6 +12,7 @@ from apps.users.auth_views import (
     providers_view,
 )
 from apps.users.ocs_team_views import (
+    ocs_access_notice_dismiss_view,
     ocs_teams_connect_all_view,
     ocs_teams_dismiss_view,
     ocs_teams_stop_view,
@@ -53,5 +54,10 @@ urlpatterns = [
     path("ocs/teams/connect-all/", ocs_teams_connect_all_view, name="ocs-teams-connect-all"),
     path("ocs/teams/stop/", ocs_teams_stop_view, name="ocs-teams-stop"),
     path("ocs/teams/dismiss/", ocs_teams_dismiss_view, name="ocs-teams-dismiss"),
+    path(
+        "ocs/access-notice/dismiss/",
+        ocs_access_notice_dismiss_view,
+        name="ocs-access-notice-dismiss",
+    ),
     path("api-key-providers/", api_key_providers_view, name="api-key-providers"),
 ]

@@ -14,6 +14,9 @@ export interface User {
   onboarding_complete: boolean
   // Absent on older servers; only ever a workspace the user is still a member of.
   last_workspace_id?: string | null
+  // Set when Open Chat Studio refused the chatbot list at sign-in; absent on older servers.
+  // A team-less identity's refusal has an empty slug.
+  ocs_access_denied?: { teams: { slug: string; name: string }[] } | null
   agent_model?: { id: string; label: string }
 }
 
@@ -25,11 +28,14 @@ export interface AuthSlice {
     fetchMe: () => Promise<void>
     login: (email: string, password: string) => Promise<void>
     logout: () => Promise<void>
+    dismissOcsAccessNotice: () => Promise<void>
   }
 }
 
-export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set) => {
+export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set, get) => {
   let requestId = 0
+  let ocsDismissals = 0
+  let dismissesInFlight = 0
   let pendingMutations = 0
   let mutationQueue = Promise.resolve()
 
@@ -50,6 +56,7 @@ export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set)
         // or supersede an explicit login that has not established its cookie yet.
         if (pendingMutations > 0) return
         const request = ++requestId
+        const dismissals = ocsDismissals
         set({ authStatus: "loading", authError: null })
         try {
           // GET sets the CSRF cookie as a side effect
@@ -57,6 +64,10 @@ export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set)
           if (request !== requestId) return
           const user = await api.get<User>("/api/auth/me/")
           if (request !== requestId) return
+          // A /me read before a dismiss landed must not bring the notice back.
+          if (dismissals !== ocsDismissals || dismissesInFlight > 0) {
+            user.ocs_access_denied = null
+          }
           set({ user, authStatus: "authenticated" })
         } catch (e) {
           if (request !== requestId) return
@@ -95,6 +106,21 @@ export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set)
         set({ user: null, authStatus: "unauthenticated", authError: null })
         // Serialize cookie writes so an older logout cannot erase B's new login.
         await mutateSession(() => api.post<void>("/api/auth/logout/"))
+      },
+
+      dismissOcsAccessNotice: async () => {
+        ocsDismissals += 1
+        dismissesInFlight += 1
+        const user = get().user
+        if (user) set({ user: { ...user, ocs_access_denied: null } })
+        try {
+          await api.post<void>("/api/auth/ocs/access-notice/dismiss/")
+        } catch (e) {
+          // The next /me brings the notice back, so the user can dismiss it again.
+          console.error("Failed to dismiss the Open Chat Studio notice", e)
+        } finally {
+          dismissesInFlight -= 1
+        }
       },
     },
   }

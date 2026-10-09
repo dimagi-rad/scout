@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { OcsAccessNotice } from "@/components/OcsAccessNotice/OcsAccessNotice"
 
 // Shown before providers load (or if they fail); the same connect flow as once loaded.
 const WWW_COMMCARE_FALLBACK: OAuthProvider = {
@@ -255,6 +256,7 @@ export function OnboardingWizard() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <OcsAccessNotice />
           {/* Until providers load, the www link is the historical default; once they
               have, it is offered only if this deployment configured it. */}
           {(commcare || providersState !== "loaded") && (

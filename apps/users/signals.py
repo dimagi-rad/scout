@@ -12,6 +12,8 @@ from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.utils import timezone
 
+from apps.common.errors import OCSAuthError
+from apps.users.services import ocs_access_notice
 from apps.users.services.email_proof import proven_emails, verified_social_email
 from apps.users.services.merge import merge_users
 from apps.users.services.oauth_scope import canonical_provider
@@ -150,6 +152,7 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
     # logger.exception so Sentry pages. Logging at WARNING left the user with
     # zero TenantMembership rows and an empty data-sources page that looked
     # identical to "account has no opportunities", with nobody told (07#6).
+    # The one exception is an OCS 403, which the user is told about instead.
     elif provider == "commcare_connect":
         try:
             # allauth signal receivers are sync.
@@ -159,13 +162,32 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
         except Exception:
             logger.exception("Failed to resolve Connect opportunities after OAuth")
     elif provider == "ocs":
+        outcome = None
         try:
             # allauth signal receivers are sync.
             async_to_sync(resolve_ocs_chatbots)(
                 sociallogin.user, token.token, social_account=sociallogin.account
             )
+            outcome = "resolved"
+        except OCSAuthError as error:
+            if error.status_code != 403:
+                logger.exception("Failed to resolve OCS chatbots after OAuth")
+            else:
+                # Usually the user's team permission, which the banner explains, so it no
+                # longer pages (SCOUT-DJANGO-3E). Trade-off: a Scout-side cause that 403s
+                # every OCS login (e.g. a scope OCS stops accepting) now surfaces only as
+                # user reports and these warnings.
+                logger.warning("OCS refused the chatbot list after OAuth", exc_info=True)
+                outcome = "refused"
         except Exception:
             logger.exception("Failed to resolve OCS chatbots after OAuth")
+        try:
+            if outcome == "refused":
+                ocs_access_notice.record_refusal(request, sociallogin.user, sociallogin.account)
+            elif outcome == "resolved":
+                ocs_access_notice.clear_refusal(request, sociallogin.user, sociallogin.account)
+        except Exception:
+            logger.exception("Failed to update the OCS access notice after OAuth")
     elif provider.startswith("commcare"):
         try:
             # allauth signal receivers are sync.
