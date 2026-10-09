@@ -46,7 +46,10 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services import load_activity
-from apps.workspaces.services.workspace_service import add_workspace_tenant
+from apps.workspaces.services.workspace_service import (
+    add_workspace_tenant,
+    remove_workspace_tenant,
+)
 from apps.workspaces.task_dispatch import (
     adefer_materialize_workspace,
     adefer_rebuild_workspace_view_schema,
@@ -1022,12 +1025,40 @@ class TestHoldForNewWorkspaceOverLoadedSources:
         assert agent.last_run.messages[-1].content == "visits?"
         assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
 
-    async def _serving_workspace_gains_a_source(self, slug, *, source_serves):
-        ws, user, client = await _new_workspace_over_loaded_sources(slug)
+    async def test_once_its_views_serve_it_is_answered(self, agent_layer):
+        ws, _user, client = await _new_workspace_over_loaded_sources("served")
         await WorkspaceViewSchema.objects.acreate(
-            workspace=ws, schema_name=f"v_{slug}", state=SchemaState.ACTIVE
+            workspace=ws, schema_name="v_served", state=SchemaState.ACTIVE
         )
         await _ready_data_model(ws)
+        await adefer_rebuild_workspace_view_schema(workspace_id=str(ws.id))
+        thread_id = str(uuid.uuid4())
+
+        response = await _post(client, ws, thread_id, "visits?")
+        [chunk async for chunk in response.streaming_content]
+
+        assert len(agent_layer.inputs) == 1
+        assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+
+
+async def _serving_workspace(slug):
+    """A workspace whose sources and own views serve, with its data model built."""
+    ws, user, client = await _new_workspace_over_loaded_sources(slug)
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=ws, schema_name=f"v_{slug}", state=SchemaState.ACTIVE
+    )
+    await _ready_data_model(ws)
+    return ws, user, client
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("queued_jobs", "checkpoint")
+class TestHoldWhileASourceChangeRebuildsViews:
+    """A serving workspace holds chat only while a source change takes its views offline."""
+
+    async def _serving_workspace_gains_a_source(self, slug, *, source_serves):
+        ws, user, client = await _serving_workspace(slug)
         added = await Tenant.objects.acreate(
             external_id=f"t3-{slug}", provider="commcare", canonical_name=f"Added {slug}"
         )
@@ -1065,13 +1096,28 @@ class TestHoldForNewWorkspaceOverLoadedSources:
         assert len(agent_layer.inputs) == 1
         assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
 
-    async def test_once_its_views_serve_it_is_answered(self, agent_layer):
-        ws, _user, client = await _new_workspace_over_loaded_sources("served")
-        await WorkspaceViewSchema.objects.acreate(
-            workspace=ws, schema_name="v_served", state=SchemaState.ACTIVE
+    async def test_removing_a_source_from_three_holds_chat_for_the_rebuild(self, agent_layer):
+        ws, _user, client = await _serving_workspace("remove-of-three")
+        third = await Tenant.objects.acreate(
+            external_id="t3-remove-of-three", provider="commcare", canonical_name="Third"
         )
-        await _ready_data_model(ws)
-        await adefer_rebuild_workspace_view_schema(workspace_id=str(ws.id))
+        await TenantSchema.objects.acreate(
+            tenant=third, schema_name="s_t3_remove_of_three", state=SchemaState.ACTIVE
+        )
+        wt = await WorkspaceTenant.objects.acreate(workspace=ws, tenant=third)
+        await sync_to_async(remove_workspace_tenant)(ws, wt)
+        thread_id = str(uuid.uuid4())
+
+        held = await _held_events(await _post(client, ws, thread_id, "visits?"))
+
+        assert agent_layer.inputs == []
+        assert held["workspace_load_pending"] is True
+        assert await pending_requests.aflushable_thread_ids(ws.id) == [uuid.UUID(thread_id)]
+
+    async def test_dropping_to_one_source_keeps_answering(self, agent_layer):
+        ws, _user, client = await _serving_workspace("remove-to-one")
+        wt = await WorkspaceTenant.objects.filter(workspace=ws).alast()
+        await sync_to_async(remove_workspace_tenant)(ws, wt)
         thread_id = str(uuid.uuid4())
 
         response = await _post(client, ws, thread_id, "visits?")
