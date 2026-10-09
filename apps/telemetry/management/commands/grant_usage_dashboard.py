@@ -43,12 +43,12 @@ class Command(BaseCommand):
         else:
             if has_it:
                 self.stdout.write(f"{user.email} already has usage dashboard access; no change.")
-                return
-            user.user_permissions.add(permission)
-            forget_usage_dashboard_flag(user.pk)
-            self.stdout.write(f"Granted usage dashboard access to {user.email}.")
-        if user.is_superuser:
-            self.stdout.write("Note: superusers can see the dashboard regardless.")
+            else:
+                user.user_permissions.add(permission)
+                forget_usage_dashboard_flag(user.pk)
+                self.stdout.write(f"Granted usage dashboard access to {user.email}.")
+            if user.is_superuser:
+                self.stdout.write("Note: superusers can see the dashboard regardless.")
 
     def _warn_if_still_granted(self, user_model, user):
         # A fresh instance: has_perm caches on the object it was first asked of.

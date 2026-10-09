@@ -437,7 +437,10 @@ def _schema_sizes(start: datetime, days: list[date]) -> dict[str, Any]:
         else None
     )
     last_skip = (
-        DailySnapshot.objects.filter(metric=SnapshotMetric.SCHEMAS_SKIPPED, day__gte=start.date())
+        # Nights since the one the panel shows: what it cannot account for.
+        DailySnapshot.objects.filter(
+            metric=SnapshotMetric.SCHEMAS_SKIPPED, day__gt=latest_day or date.min
+        )
         .order_by("-day")
         .values_list("day", "value")
         .first()
