@@ -1,9 +1,14 @@
-import { useCallback, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 
 import type { UserTenant } from "@/api/auth"
 
 import { sourceFiltersStorageKey } from "./sourceFilterStorage"
-import { TENANT_FACETS, normalizeTenantSearch, tenantMatchesSearch } from "./tenantFacets"
+import {
+  TENANT_FACETS,
+  normalizeTenantSearch,
+  parseTenantIdList,
+  tenantMatchesSearch,
+} from "./tenantFacets"
 import { useFacetedList } from "./useFacetedList"
 
 /**
@@ -39,8 +44,20 @@ export function useTenantFacetFilters({
     clearFacets()
   }, [clearFacets])
 
+  // A pasted id list: which of its ids no source in `items` carries, so a typo or a
+  // source the user cannot see is named instead of silently missing.
+  const idList = useMemo(() => parseTenantIdList(normalized), [normalized])
+  const unmatchedIds = useMemo(() => {
+    if (!idList) return []
+    const known = new Set(items.map((t) => t.tenant_id))
+    return idList.filter((id) => !known.has(id))
+  }, [idList, items])
+
   return {
     filtered: list.filtered,
+    /** The ids of a pasted id list (null when the search is not one). */
+    idList,
+    unmatchedIds,
     setSearch,
     clearFilters,
     /** Spread onto FacetFilterBar alongside its testIdPrefix. */

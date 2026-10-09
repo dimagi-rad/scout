@@ -148,6 +148,12 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     })
   }
 
+  // A pasted id list narrows the list to those sources; this ticks them all.
+  function selectAllShown() {
+    setDuplicateAcknowledged(false)
+    setSelected((prev) => new Set([...prev, ...filteredSources.map((t) => t.tenant_uuid)]))
+  }
+
   function goToExistingWorkspace() {
     if (!duplicateWorkspace) return
     setActiveDomain(duplicateWorkspace.id)
@@ -283,6 +289,29 @@ export function CreateWorkspaceModal({ onClose }: Props) {
               ) : (
                 <div className="space-y-3">
                   <FacetFilterBar testIdPrefix="create-sources-filter" {...sourceFilters.barProps} />
+                  {sourceFilters.idList && (
+                    <div
+                      className="flex items-center justify-between gap-2 text-xs text-muted-foreground"
+                      data-testid="create-sources-id-list"
+                    >
+                      <span>
+                        {sourceFilters.unmatchedIds.length > 0
+                          ? `${sourceFilters.unmatchedIds.length} not found: ${sourceFilters.unmatchedIds.join(", ")}`
+                          : `All ${sourceFilters.idList.length} IDs found`}
+                      </span>
+                      {filteredSources.length > 0 && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={selectAllShown}
+                          data-testid="create-sources-select-shown"
+                        >
+                          Select all shown ({filteredSources.length})
+                        </Button>
+                      )}
+                    </div>
+                  )}
                   <div
                     className="max-h-56 space-y-1 overflow-y-auto rounded-md border p-1"
                     data-testid="create-sources-list"

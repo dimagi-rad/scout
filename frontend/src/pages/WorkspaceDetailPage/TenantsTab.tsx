@@ -304,6 +304,16 @@ export function TenantsTab({
             <>
               <div className="mb-3">
                 <FacetFilterBar testIdPrefix="available-sources-filter" {...sourceFilters.barProps} />
+                {sourceFilters.unmatchedIds.length > 0 && (
+                  <p
+                    className="mt-2 text-xs text-muted-foreground"
+                    data-testid="available-sources-id-list-unmatched"
+                  >
+                    {/* `available` leaves out sources already in this workspace. */}
+                    Not available to add (already connected, or not one of your sources):{" "}
+                    {sourceFilters.unmatchedIds.join(", ")}
+                  </p>
+                )}
               </div>
               {filteredAvailable.length === 0 ? (
                 <div

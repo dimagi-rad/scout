@@ -263,3 +263,23 @@ it("shows the refreshed sources after the initial load failed", async () => {
   expect(await screen.findByTestId("create-source-tenant-a")).toBeInTheDocument()
   expect(screen.queryByTestId("create-sources-error")).toBeNull()
 })
+
+it("narrows to a pasted id list, names the ids it cannot find, and selects all shown", async () => {
+  vi.mocked(getUserTenantsCached).mockResolvedValue([
+    connect("523", "Nama Wellness", { is_active: false }),
+    connect("1234", "KMC GHI", { is_active: true }),
+    connect("1236", "KMC EHA", { is_active: true }),
+  ])
+  const { user, onClose } = await openModal()
+
+  await user.click(screen.getByTestId("search-filter-input"))
+  await user.paste("523, 1236, 759")
+  expect(shown()).toEqual(["1236", "523"])
+  expect(screen.getByTestId("create-sources-id-list")).toHaveTextContent("1 not found: 759")
+
+  await user.click(screen.getByTestId("create-sources-select-shown"))
+  expect(screen.getByTestId("create-sources-selected")).toHaveTextContent("2 selected")
+  await user.click(screen.getByTestId("create-workspace-submit"))
+  await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+  expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", ["tenant-1236", "tenant-523"])
+})
