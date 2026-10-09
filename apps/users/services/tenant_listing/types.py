@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -14,6 +14,8 @@ class TenantDescriptor(NamedTuple):
 
     external_id: str
     canonical_name: str
+    # Provider facts shown to the user as filter hints; never consulted for access.
+    attributes: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)

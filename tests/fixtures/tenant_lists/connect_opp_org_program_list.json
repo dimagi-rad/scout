@@ -1,5 +1,5 @@
 {
-  "organizations": [{"slug": "acme-health", "name": "Acme Health"}],
+  "organizations": [{"id": 3, "slug": "acme-health", "name": "Acme Health", "funder": "Gates"}],
   "opportunities": [
     {
       "id": 101,
@@ -8,6 +8,7 @@
       "organization": "acme-health",
       "end_date": "2026-12-31",
       "is_active": true,
+      "is_test": false,
       "program": 7,
       "visit_count": 1204
     },

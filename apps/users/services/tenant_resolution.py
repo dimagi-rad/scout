@@ -384,7 +384,10 @@ async def resolve_connect_opportunities(
         tenant, _ = await Tenant.objects.aupdate_or_create(
             provider="commcare_connect",
             external_id=opp.external_id,
-            defaults={"canonical_name": opp.canonical_name},
+            defaults={
+                "canonical_name": opp.canonical_name,
+                "provider_attributes": dict(opp.attributes or {}),
+            },
         )
         fresh.append(tenant)
 
