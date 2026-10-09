@@ -57,6 +57,10 @@ class CubeSchemaBuildError(RuntimeError):
 
     code = ErrorCode.SCHEMA_BUILD_FAILED
 
+    def __init__(self, message: str, *, diagnostics: list[dict[str, Any]] | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or []
+
 
 class NoActiveCubeSchema(ExpectedStateError, CubeSchemaBuildError):
     """The workspace has no ACTIVE Cube schema, so the semantic layer cannot answer."""
@@ -358,8 +362,12 @@ def _build_validate_and_promote(
                 },
             )
         if settings.CUBE_SCHEMA_VALIDATION_REQUIRED:
-            raise CubeSchemaBuildError("Generated Cube schema failed validation.")
-        raise CubeSchemaBuildError(_diagnostics_message(validation_diagnostics))
+            raise CubeSchemaBuildError(
+                "Generated Cube schema failed validation.", diagnostics=validation_diagnostics
+            )
+        raise CubeSchemaBuildError(
+            _diagnostics_message(validation_diagnostics), diagnostics=validation_diagnostics
+        )
 
     with transaction.atomic():
         CubeSchema.objects.filter(
@@ -500,7 +508,10 @@ def _diagnostics_from_validation(validation: dict[str, Any]) -> list[dict[str, A
     errors = validation.get("errors") or []
     diagnostics: list[dict[str, Any]] = []
     for error in errors:
-        diagnostics.append({"level": "error", "message": str(error)})
+        message = (
+            (error.get("full_message") or error.get("message")) if isinstance(error, dict) else None
+        )
+        diagnostics.append({"level": "error", "message": str(message or error)})
     if validation.get("skipped"):
         diagnostics.append(
             {

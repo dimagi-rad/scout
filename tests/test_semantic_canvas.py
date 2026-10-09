@@ -43,7 +43,11 @@ from apps.semantic.models import (
 from apps.semantic.services import catalog as catalog_service
 from apps.semantic.services.catalog import PhysicalTable
 from apps.semantic.services.cube import generate_cube_schema
-from apps.semantic.services.cube_schema import CubeValidatorUnavailableError
+from apps.semantic.services.cube_schema import (
+    CubeSchemaBuildError,
+    CubeValidatorUnavailableError,
+    _diagnostics_from_validation,
+)
 
 
 @pytest.fixture
@@ -696,6 +700,37 @@ def test_numeric_format_on_text_dimension_is_blocked_before_commit(
     codes = [d["code"] for d in result["diagnostics"]]
     assert ("INVALID_FORMAT" in codes) is blocked
     assert result["can_commit"] is not blocked
+
+
+def test_failed_cube_validation_after_commit_reports_the_validator_reason(
+    canvas, semantic_model, user, monkeypatch
+):
+    def rejected(ws, model, **_):
+        raise CubeSchemaBuildError(
+            "Generated Cube schema failed validation.",
+            diagnostics=_diagnostics_from_validation(
+                {
+                    "valid": False,
+                    "errors": [
+                        {
+                            "message": "short",
+                            "full_message": "raw_visits cube: format must be one of [number]",
+                        }
+                    ],
+                }
+            ),
+        )
+
+    monkeypatch.setattr(canvas_commit_module, "build_and_promote_cube_schema", rejected)
+    _create_dimension(canvas, user, name="amount_copy", expression="amount", data_type="numeric")
+
+    outcome = commit_canvas(canvas, user)["cube_schema"]
+
+    assert outcome == {
+        "ok": False,
+        "error": "Generated Cube schema failed validation.",
+        "validator_errors": ["raw_visits cube: format must be one of [number]"],
+    }
 
 
 def test_unreachable_validator_after_commit_warns_without_an_error(

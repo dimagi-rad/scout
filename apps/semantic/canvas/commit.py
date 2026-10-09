@@ -145,7 +145,16 @@ def rebuild_cube_schema(workspace, model) -> dict[str, Any]:
             "Cube schema rebuild failed after data model change for workspace %s",
             workspace.id,
         )
-        return {"ok": False, "error": str(exc)[:500]}
+        failure = {"ok": False, "error": str(exc)[:500]}
+        # The agent can only repair the field Cube names, so pass the validator's reason on.
+        validator_errors = [
+            str(d.get("message", ""))[:1000]
+            for d in getattr(exc, "diagnostics", [])
+            if d.get("level") == "error"
+        ]
+        if validator_errors:
+            failure["validator_errors"] = validator_errors[:5]
+        return failure
 
 
 def undo_revision(workspace, revision_id, user=None, thread_id=None) -> dict[str, Any]:
