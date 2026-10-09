@@ -325,6 +325,26 @@ def test_tenant_list_includes_uuid(user, client):
 
 
 @pytest.mark.django_db
+def test_tenant_list_includes_provider_attributes(user, client):
+    connect = _make_membership(user, "101", "Malaria Visits", provider="commcare_connect")
+    connect.tenant.provider_attributes = {"is_active": True, "program_name": "Community Health"}
+    connect.tenant.save(update_fields=["provider_attributes"])
+    _make_membership(user, "dimagi", "Dimagi", provider="commcare")
+    _make_membership(user, "bot-1", "Bot", provider="ocs")
+    client.force_login(user)
+
+    response = client.get("/api/auth/tenants/")
+
+    assert response.status_code == 200
+    attributes = {entry["provider"]: entry["attributes"] for entry in response.json()}
+    assert attributes == {
+        "commcare_connect": {"is_active": True, "program_name": "Community Health"},
+        "commcare": {},
+        "ocs": {},
+    }
+
+
+@pytest.mark.django_db
 class TestTenantCrossAccessAPI:
     def test_cross_tenant_access_blocked_by_structure(self, user, other_user):
         """A user who guesses another tenant's external_id cannot gain access
