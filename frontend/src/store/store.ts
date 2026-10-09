@@ -8,6 +8,7 @@ import { createRecipeSlice, type RecipeSlice } from "./recipeSlice"
 import { createDomainSlice, type DomainSlice } from "./domainSlice"
 import type { AccountSessionScope } from "./accountSession"
 import { clearAllDrafts, clearOtherUsersDrafts } from "@/components/ChatPanel/draftStorage"
+import { clearAllSourceFilters, clearOtherUsersSourceFilters } from "@/lib/filters/sourceFilterStorage"
 import { newLocalThreadId } from "./localThreads"
 
 export type AppStore = ArtifactSlice & AuthSlice & UiSlice & DatasetSlice & KnowledgeSlice & RecipeSlice & DomainSlice & AccountSessionScope
@@ -43,10 +44,16 @@ export function createAppStore() {
   store.subscribe((state, previous) => {
     if (state.user?.id === previous.user?.id) return
     if (session) session.snapshot = previous
-    // First load (null -> user) keeps drafts; leaving an identity (logout, session
-    // expiry, or an account switch, which passes through null) drops them.
-    if (previous.user) clearAllDrafts()
-    if (state.user) clearOtherUsersDrafts(state.user.id)
+    // First load (null -> user) keeps drafts and source filters; leaving an identity
+    // (logout, session expiry, or an account switch, which passes through null) drops them.
+    if (previous.user) {
+      clearAllDrafts()
+      clearAllSourceFilters()
+    }
+    if (state.user) {
+      clearOtherUsersDrafts(state.user.id)
+      clearOtherUsersSourceFilters(state.user.id)
+    }
     // Recreate the slices so even A → logout → A cannot revive old responses.
     // Seed account-owned fields only after setting the identity.
     store.setState(accountState(store.setState, store.getState, store))

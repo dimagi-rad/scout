@@ -1,10 +1,10 @@
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { beforeEach, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ApiError } from "@/api/client"
 import { workspaceApi } from "@/api/workspaces"
-import { getUserTenantsCached } from "@/api/userTenantsCache"
+import { getUserTenantsCached, refreshUserTenants } from "@/api/userTenantsCache"
 import { TenantsTab } from "./TenantsTab"
 
 vi.mock("@/api/workspaces", () => ({
@@ -111,4 +111,81 @@ it("keeps the workspace and reloads its sources when one was added before confir
   expect(await screen.findByTestId("tenant-row-wt-b")).toBeInTheDocument()
   expect(screen.queryByTestId("tenant-row-wt-a")).not.toBeInTheDocument()
   expect(onWorkspaceDeleted).not.toHaveBeenCalled()
+})
+
+const F = "available-sources-filter"
+const STORAGE_KEY = "scout:source-filters:v1:user"
+
+function connect(id: string, name: string, attributes: Record<string, unknown>) {
+  return {
+    id: `m-${id}`, tenant_uuid: `tenant-${id}`, provider: "commcare_connect",
+    tenant_id: id, tenant_name: name, last_selected_at: null, attributes,
+  }
+}
+
+const userSources = [
+  { id: "m-a", tenant_uuid: "tenant-a", provider: "commcare", tenant_id: "a", tenant_name: "Alpha", last_selected_at: null, attributes: {} },
+  connect("c1", "Kenya Live", { is_active: true, organization: "dimagi" }),
+  connect("c2", "Kenya Old", { is_active: false, organization: "dimagi" }),
+  connect("c3", "Ghana Live", { is_active: true, organization: "acme" }),
+]
+
+function shownAvailable() {
+  return [
+    ...screen.getByTestId("available-sources-list").querySelectorAll("[data-testid^='add-tenant-']"),
+  ].map((el) => el.getAttribute("data-testid")!.replace("add-tenant-tenant-", ""))
+}
+
+async function openAddPanel() {
+  vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+  vi.mocked(getUserTenantsCached).mockResolvedValue(userSources)
+  render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+  await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+  await screen.findByTestId(`${F}-count`)
+}
+
+describe("available source filters", () => {
+  beforeEach(() => localStorage.clear())
+
+  it("combines facets with the search and keeps facets, not the search, across openings", async () => {
+    await openAddPanel()
+    await userEvent.click(screen.getByTestId(`${F}-facet-status`))
+    await userEvent.click(await screen.findByTestId(`${F}-facet-status-option-active`))
+    expect(shownAvailable()).toEqual(["a", "c3", "c1"])
+
+    await userEvent.type(screen.getByTestId("search-filter-input"), "kenya")
+    expect(shownAvailable()).toEqual(["c1"])
+    expect(screen.getByTestId(`${F}-count`)).toHaveTextContent("Showing 1 of 4")
+
+    await userEvent.keyboard("{Escape}")
+    await userEvent.click(screen.getByTestId("add-tenant-btn"))
+    await userEvent.click(screen.getByTestId("add-tenant-btn"))
+
+    expect(screen.getByTestId("search-filter-input")).toHaveValue("")
+    expect(shownAvailable()).toEqual(["a", "c3", "c1"])
+    expect(screen.getByTestId(`${F}-facet-status`)).toHaveTextContent("Status: Active")
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual({ status: ["active"] })
+  })
+
+  it("offers Clear filters when nothing matches", async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ provider: ["commcare_connect"] }))
+    await openAddPanel()
+    await userEvent.type(screen.getByTestId("search-filter-input"), "alpha")
+    expect(screen.getByTestId("available-sources-empty")).toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId(`${F}-empty-clear`))
+
+    expect(shownAvailable()).toEqual(["a", "c3", "c1", "c2"])
+  })
+
+  it("drops a persisted facet value the refreshed list no longer has", async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ organization: ["acme"] }))
+    vi.mocked(refreshUserTenants).mockResolvedValue(userSources.filter((t) => t.tenant_id !== "c3"))
+    await openAddPanel()
+    expect(shownAvailable()).toEqual(["a", "c3"])
+
+    await userEvent.click(screen.getByTestId("refresh-available-sources"))
+
+    await waitFor(() => expect(shownAvailable()).toEqual(["a", "c1", "c2"]))
+  })
 })

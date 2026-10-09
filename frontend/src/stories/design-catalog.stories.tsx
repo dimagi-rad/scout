@@ -28,6 +28,7 @@ const primitiveGroups = [
       ["ArtifactCard", "src/components/ArtifactCard/ArtifactCard.tsx", "Artifact"],
       ["RoleBadge", "src/components/RoleBadge/RoleBadge.tsx", "Status"],
       ["SearchFilterBar", "src/components/SearchFilterBar/SearchFilterBar.tsx", "Filter"],
+      ["FacetFilterBar", "src/components/FacetFilterBar/FacetFilterBar.tsx", "Filter"],
       ["NavItem", "src/components/Sidebar/NavItem.tsx", "Navigation"],
       ["WorkspaceSwitcher", "src/components/WorkspaceSwitcher/WorkspaceSwitcher.tsx", "Navigation"],
       ["ChatComposer", "src/components/ChatPanel/ChatComposer.tsx", "Composer"],

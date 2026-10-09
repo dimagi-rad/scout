@@ -20,9 +20,10 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { Plus, RefreshCw } from "lucide-react"
-import { SearchFilterBar, type FilterGroup } from "@/components/SearchFilterBar/SearchFilterBar"
+import { FacetFilterBar } from "@/components/FacetFilterBar/FacetFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
+import { useTenantFacetFilters } from "@/lib/filters/useTenantFacetFilters"
 
 type AvailableStatus = "idle" | "loading" | "ready" | "error"
 
@@ -60,21 +61,12 @@ export function TenantsTab({
   const [addingId, setAddingId] = useState<string | null>(null)
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
-  const [query, setQuery] = useState("")
-  const [providerFilter, setProviderFilter] = useState<string | null>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
   // The workspace's last source: removing it deletes the whole workspace (#381).
   const [lastSource, setLastSource] = useState<WorkspaceTenant | null>(null)
   const [deletingWorkspace, setDeletingWorkspace] = useState(false)
   const [deleteWorkspaceError, setDeleteWorkspaceError] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!showAdd) {
-      setQuery("")
-      setProviderFilter(null)
-    }
-  }, [showAdd])
 
   // Never blocked on the (slower) available list.
   const loadConnected = useCallback(async () => {
@@ -129,7 +121,7 @@ export function TenantsTab({
     }
   }
 
-  // Memoized so providerFilterGroups' memo can hit; otherwise every keystroke re-sorts.
+  // Memoized so the facet memos can hit; otherwise every keystroke re-sorts.
   const available = useMemo(() => {
     const inWorkspaceIds = new Set(tenants.map((t) => t.tenant_id))
     return userTenants
@@ -140,39 +132,14 @@ export function TenantsTab({
   // Internal-UUID → external opportunity ID, for the connected list display.
   const externalIdByUuid = new Map(userTenants.map((t) => [t.tenant_uuid, t.tenant_id]))
 
-  // Only shown when >1 provider present; a single-provider set renders just the search box.
-  const providerFilterGroups = useMemo((): FilterGroup[] => {
-    const counts = new Map<string, number>()
-    for (const t of available) {
-      counts.set(t.provider, (counts.get(t.provider) ?? 0) + 1)
-    }
-    if (counts.size <= 1) return []
-    return [
-      {
-        name: "provider",
-        options: [...counts.entries()]
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([value, count]) => ({
-            value,
-            label: getProviderMeta(value).label,
-            count,
-          })),
-      },
-    ]
-  }, [available])
+  const sourceFilters = useTenantFacetFilters({ items: available, userId })
+  const filteredAvailable = sourceFilters.filtered
+  const { setSearch } = sourceFilters
 
-  const normalizedQuery = query.trim().replace(/^#/, "").toLowerCase()
-  const filteredAvailable = available.filter((t) => {
-    if (providerFilter && t.provider !== providerFilter) return false
-    if (
-      normalizedQuery &&
-      !t.tenant_name.toLowerCase().includes(normalizedQuery) &&
-      !t.tenant_id.toLowerCase().includes(normalizedQuery)
-    ) {
-      return false
-    }
-    return true
-  })
+  // Facet selections persist across openings (see useFacetedList); the search does not.
+  useEffect(() => {
+    if (!showAdd) setSearch("")
+  }, [showAdd, setSearch])
 
   async function handleAdd(tenant: UserTenant) {
     setAddingId(tenant.tenant_uuid)
@@ -336,24 +303,29 @@ export function TenantsTab({
           ) : (
             <>
               <div className="mb-3">
-                <SearchFilterBar
-                  search={query}
-                  onSearchChange={setQuery}
-                  placeholder="Search by name or opportunity ID…"
-                  filters={providerFilterGroups}
-                  activeFilters={{ provider: providerFilter }}
-                  onFilterChange={(_group, value) => setProviderFilter(value)}
-                />
+                <FacetFilterBar testIdPrefix="available-sources-filter" {...sourceFilters.barProps} />
               </div>
               {filteredAvailable.length === 0 ? (
-                <p
+                <div
                   className="rounded-md border border-dashed bg-background py-6 text-center text-sm text-muted-foreground"
                   data-testid="available-sources-empty"
                 >
-                  No data sources match your filters.
-                </p>
+                  <p>No data sources match your filters.</p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    onClick={sourceFilters.clearFilters}
+                    data-testid="available-sources-filter-empty-clear"
+                  >
+                    Clear filters
+                  </Button>
+                </div>
               ) : (
-                <div className="space-y-1.5" data-testid="available-sources-list">
+                <div
+                  className="max-h-[60vh] space-y-1.5 overflow-y-auto"
+                  data-testid="available-sources-list"
+                >
                   {filteredAvailable.map((t) => {
                     const { label, Icon } = getProviderMeta(t.provider)
                     return (
