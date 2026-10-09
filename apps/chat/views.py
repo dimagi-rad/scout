@@ -326,8 +326,11 @@ async def _hold_while_loading(workspace, thread_id: str, message: dict, text: st
     Only while the workspace serves no data: a refresh over served data answers
     from what is there. Serving is the workspace's status, not its sources': a new
     workspace over several sources another one already loaded serves nothing until
-    its own views are built, and neither does one whose views are rebuilding after
-    a source was added or removed (its data tools are offline until then). A single
+    its own views are built, and neither does one whose source change moved its
+    views out of ACTIVE (adding a source that already serves, or removing one from
+    a workspace that stays multi-source), since its data tools are offline until
+    they are rebuilt. Adding a source that still has to load leaves the views
+    ACTIVE, so chat answers normally meanwhile. A single
     loaded source serves through SQL at once, even before the workspace's data
     model is built (#714). The load is this
     chat's own, or else another load or rebuild of this workspace (its creation

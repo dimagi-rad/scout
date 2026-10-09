@@ -46,6 +46,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services import load_activity
+from apps.workspaces.services.workspace_service import add_workspace_tenant
 from apps.workspaces.task_dispatch import (
     adefer_materialize_workspace,
     adefer_rebuild_workspace_view_schema,
@@ -1021,19 +1022,48 @@ class TestHoldForNewWorkspaceOverLoadedSources:
         assert agent.last_run.messages[-1].content == "visits?"
         assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
 
-    async def test_a_message_while_a_source_change_rebuilds_its_views_is_held(self, agent_layer):
-        ws, _user, client = await _new_workspace_over_loaded_sources("source-change")
+    async def _serving_workspace_gains_a_source(self, slug, *, source_serves):
+        ws, user, client = await _new_workspace_over_loaded_sources(slug)
         await WorkspaceViewSchema.objects.acreate(
-            workspace=ws, schema_name="v_source_change", state=SchemaState.PROVISIONING
+            workspace=ws, schema_name=f"v_{slug}", state=SchemaState.ACTIVE
         )
         await _ready_data_model(ws)
-        await adefer_rebuild_workspace_view_schema(workspace_id=str(ws.id))
+        added = await Tenant.objects.acreate(
+            external_id=f"t3-{slug}", provider="commcare", canonical_name=f"Added {slug}"
+        )
+        await TenantMembership.objects.acreate(
+            user=user, tenant=added, connection=await ausable_connection(user, added.provider)
+        )
+        if source_serves:
+            await TenantSchema.objects.acreate(
+                tenant=added, schema_name=f"s_{added.external_id}", state=SchemaState.ACTIVE
+            )
+        await sync_to_async(add_workspace_tenant)(ws, added, actor_id=user.id)
+        return ws, client
+
+    async def test_adding_a_source_that_already_serves_holds_chat_for_the_rebuild(
+        self, agent_layer
+    ):
+        ws, client = await self._serving_workspace_gains_a_source("add-served", source_serves=True)
         thread_id = str(uuid.uuid4())
 
         held = await _held_events(await _post(client, ws, thread_id, "visits?"))
 
         assert agent_layer.inputs == []
         assert held["workspace_load_pending"] is True
+        assert await pending_requests.aflushable_thread_ids(ws.id) == [uuid.UUID(thread_id)]
+
+    async def test_adding_a_source_that_must_load_keeps_answering(self, agent_layer):
+        ws, client = await self._serving_workspace_gains_a_source(
+            "add-unserved", source_serves=False
+        )
+        thread_id = str(uuid.uuid4())
+
+        response = await _post(client, ws, thread_id, "visits?")
+        [chunk async for chunk in response.streaming_content]
+
+        assert len(agent_layer.inputs) == 1
+        assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
 
     async def test_once_its_views_serve_it_is_answered(self, agent_layer):
         ws, _user, client = await _new_workspace_over_loaded_sources("served")
