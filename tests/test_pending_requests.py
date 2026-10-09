@@ -1021,6 +1021,20 @@ class TestHoldForNewWorkspaceOverLoadedSources:
         assert agent.last_run.messages[-1].content == "visits?"
         assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
 
+    async def test_a_message_while_a_source_change_rebuilds_its_views_is_held(self, agent_layer):
+        ws, _user, client = await _new_workspace_over_loaded_sources("source-change")
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=ws, schema_name="v_source_change", state=SchemaState.PROVISIONING
+        )
+        await _ready_data_model(ws)
+        await adefer_rebuild_workspace_view_schema(workspace_id=str(ws.id))
+        thread_id = str(uuid.uuid4())
+
+        held = await _held_events(await _post(client, ws, thread_id, "visits?"))
+
+        assert agent_layer.inputs == []
+        assert held["workspace_load_pending"] is True
+
     async def test_once_its_views_serve_it_is_answered(self, agent_layer):
         ws, _user, client = await _new_workspace_over_loaded_sources("served")
         await WorkspaceViewSchema.objects.acreate(
