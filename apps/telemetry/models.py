@@ -7,6 +7,8 @@ text, query text or anything a user typed.
 from django.db import models
 from django.utils import timezone
 
+USAGE_DASHBOARD_PERMISSION = "telemetry.view_usage_dashboard"
+
 
 class EventKind:
     """The event kinds the platform records; ``kind`` is free text so a new one needs no migration."""
@@ -45,6 +47,7 @@ class TelemetryEvent(models.Model):
     attrs = models.JSONField(default=dict, blank=True)
 
     class Meta:
+        permissions = [("view_usage_dashboard", "Can view the usage dashboard")]
         indexes = [
             models.Index(fields=["kind", "occurred_at"], name="telemetry_kind_time"),
             # The retention prune scans by time across every kind.
@@ -60,7 +63,9 @@ class SnapshotMetric:
     # Of the total, bytes in schemas not serving queries: refreshes being built,
     # failed candidates kept for a resume, teardowns still referenced.
     SCHEMA_BYTES_RETAINED = "schema_bytes_retained"
-    # Schemas a lock kept from being sized; totals are not written on such a night.
+    # Schemas left unsized that night: a lock skipped some (totals withheld), or the
+    # sizing could not run (every schema counted; earlier sizes for the day kept).
+    # Read it alongside the size series.
     SCHEMAS_SKIPPED = "schemas_skipped"
     THREADS = "threads"
     ARTIFACTS = "artifacts"

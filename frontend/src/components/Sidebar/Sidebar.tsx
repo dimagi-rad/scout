@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   LogOut,
   Plus,
+  BarChart3,
   Link2,
   Loader2,
 } from "lucide-react"
@@ -19,7 +20,7 @@ import { isWorkspaceArtifactPath } from "@/lib/artifactPath"
 import { NavItem } from "./NavItem"
 import { Button } from "@/components/ui/button"
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"
-import { CONNECTIONS_PATH } from "@/lib/routes"
+import { CONNECTIONS_PATH, USAGE_PATH } from "@/lib/routes"
 import type { AccessDenialReason } from "@/store/uiSlice"
 
 // The server's message names every source and remedy, too long for the sidebar;
@@ -527,6 +528,21 @@ export function Sidebar() {
               </span>
             </Link>
           </Button>
+          {user?.can_view_usage_dashboard && !isEmbed && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="scout-sidebar-nav-link w-full px-2 lg:px-3"
+              asChild
+              title="Usage"
+              data-testid="sidebar-usage"
+            >
+              <Link to={USAGE_PATH} onClick={collapseSidebar}>
+                <BarChart3 className="h-4 w-4 shrink-0" />
+                <span className="scout-sidebar-label min-w-0 truncate">Usage</span>
+              </Link>
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"

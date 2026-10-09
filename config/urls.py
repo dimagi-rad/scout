@@ -109,4 +109,5 @@ urlpatterns = [
     path("api/chat/", chat_view, name="chat"),
     path("api/auth/", include("apps.users.auth_urls")),
     path("api/memory/", include("apps.memory.urls")),
+    path("api/telemetry/", include("apps.telemetry.urls")),
 ]
