@@ -627,6 +627,50 @@ def test_saved_invalid_dimension_sql_cannot_be_promoted_by_compiler(semantic_mod
         generate_cube_schema(semantic_model)
 
 
+_FORM_MINUTES_SQL = 'EXTRACT(EPOCH FROM ({CUBE}."amount")) / 60.0'
+
+
+def _create_dimension(canvas, user, **value):
+    return apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {"dataset": "raw_visits", "field_type": "dimension", **value},
+            }
+        ],
+        user,
+    )
+
+
+def test_number_data_type_dimension_publishes_as_cube_number(
+    canvas, semantic_model, monkeypatch, user
+):
+    monkeypatch.setattr(
+        canvas_commit_module,
+        "build_and_promote_cube_schema",
+        lambda ws, model, **_: SimpleNamespace(content_hash="number-dimension-test"),
+    )
+    result = _create_dimension(
+        canvas,
+        user,
+        name="form_minutes",
+        data_type="number",
+        format="number_1",
+        sql=_FORM_MINUTES_SQL,
+    )
+    assert result["diagnostics"] == []
+    assert commit_canvas(canvas, user)["blocked"] is False
+
+    cube = next(
+        c for c in generate_cube_schema(semantic_model)["cubes"] if c["name"] == "raw_visits"
+    )
+    dimension = next(d for d in cube["dimensions"] if d["name"] == "form_minutes")
+    assert dimension["type"] == "number"
+    assert dimension["format"] == "number_1"
+
+
 def test_unreachable_validator_after_commit_warns_without_an_error(
     canvas, semantic_model, user, monkeypatch, caplog
 ):
