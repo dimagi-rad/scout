@@ -521,3 +521,33 @@ describe("composer drafts", () => {
     expect(localStorage.getItem(DRAFT_KEY)).toBeNull()
   })
 })
+
+describe("source filters", () => {
+  const filterKey = (account: User) => `scout:source-filters:v1:${account.id}`
+  const seedFilters = (account = USER_A) =>
+    localStorage.setItem(filterKey(account), JSON.stringify({ organization: ["acme"] }))
+
+  it("keeps the user's filters when the first identity loads, dropping another account's", () => {
+    seedFilters(USER_A)
+    seedFilters(USER_B)
+    const store = createAppStore()
+    store.setState({ user: USER_A, authStatus: "authenticated" })
+    expect(localStorage.getItem(filterKey(USER_A))).not.toBeNull()
+    expect(localStorage.getItem(filterKey(USER_B))).toBeNull()
+  })
+
+  it("drops filters on logout", async () => {
+    const store = signedIn()
+    seedFilters()
+    vi.mocked(api.post).mockResolvedValue(undefined)
+    await store.getState().authActions.logout()
+    expect(localStorage.getItem(filterKey(USER_A))).toBeNull()
+  })
+
+  it("drops filters on an account switch through login", async () => {
+    const store = signedIn()
+    seedFilters()
+    await loginAs(store, USER_B)
+    expect(localStorage.getItem(filterKey(USER_A))).toBeNull()
+  })
+})

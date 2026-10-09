@@ -63,6 +63,26 @@ export function writeFacetSelection(storageKey: string, selection: FacetSelectio
   }
 }
 
+/**
+ * Removes every stored selection under `prefix` except `keepKey`. Org and program
+ * names identify the user's work, so they must not outlive the session on a shared browser.
+ */
+export function clearStoredFacetSelections(prefix: string, keepKey?: string | null): void {
+  try {
+    const doomed: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (key?.startsWith(prefix) && key !== keepKey) doomed.push(key)
+    }
+    for (const key of doomed) {
+      localStorage.removeItem(key)
+      notify(key)
+    }
+  } catch {
+    // Best-effort.
+  }
+}
+
 function safeRead(storageKey: string): string | null {
   try {
     return localStorage.getItem(storageKey)
