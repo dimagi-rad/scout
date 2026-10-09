@@ -150,7 +150,7 @@ def rebuild_cube_schema(workspace, model) -> dict[str, Any]:
         validator_errors = [
             str(d.get("message", ""))[:1000]
             for d in getattr(exc, "diagnostics", [])
-            if d.get("level") == "error"
+            if isinstance(d, dict) and d.get("level") == "error"
         ]
         if validator_errors:
             failure["validator_errors"] = validator_errors[:5]

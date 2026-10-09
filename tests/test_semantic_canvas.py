@@ -42,7 +42,7 @@ from apps.semantic.models import (
 )
 from apps.semantic.services import catalog as catalog_service
 from apps.semantic.services.catalog import PhysicalTable
-from apps.semantic.services.cube import generate_cube_schema
+from apps.semantic.services.cube import cube_dimension_type, generate_cube_schema
 from apps.semantic.services.cube_schema import (
     CubeSchemaBuildError,
     CubeValidatorUnavailableError,
@@ -720,6 +720,13 @@ def test_format_only_edit_on_text_dimension_is_checked(canvas, user, display_for
     codes = [d["code"] for d in result["diagnostics"]]
     assert ("INVALID_FORMAT" in codes) is blocked
     assert result["can_commit"] is not blocked
+
+
+def test_every_catalog_numeric_type_publishes_as_a_cube_number():
+    # The catalog stamps numeric formats on these; as Cube strings they fail validation.
+    assert {t: cube_dimension_type(t) for t in catalog_service._NUMERIC_TYPES} == dict.fromkeys(
+        catalog_service._NUMERIC_TYPES, "number"
+    )
 
 
 def test_failed_cube_validation_after_commit_reports_the_validator_reason(

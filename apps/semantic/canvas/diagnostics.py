@@ -101,7 +101,9 @@ def compute_diagnostics(
             continue
         fields = {**serialized, **change.fields}
         # Format is a curation key, so a format-only edit skips the expression checks below.
-        diagnostics.extend(_dimension_format_diagnostics(change, fields))
+        # A settled row (no fields) is persisted state, which is not this changeset's to block.
+        if change.fields:
+            diagnostics.extend(_dimension_format_diagnostics(change, fields))
         if change.change_type != ChangeType.CREATE and set(change.fields) - FIELD_CURATION_KEYS:
             diagnostics.extend(_field_expression_diagnostics(base.dataset, change, fields))
         diagnostics.extend(_calculated_measure_diagnostics(change, fields))
@@ -450,19 +452,16 @@ def _dimension_format_diagnostics(change, fields: dict[str, Any]) -> list[dict]:
     data_type = str(fields.get("data_type") or "")
     if field_type == "dimension" and cube_dimension_type(data_type) == "number":
         return []
-    published_as = (
-        "a time" if field_type == "time_dimension" else f"'{cube_dimension_type(data_type)}'"
-    )
-    return [
-        _diagnostic(
-            "INVALID_FORMAT",
-            change,
-            "format",
-            f"format '{display_format}' only applies to numeric dimensions, but this field "
-            f"publishes as {published_as} dimension (data_type '{data_type or '(empty)'}'). "
-            "Set data_type to number, or use format number, percent, or currency.",
+    allowed = ", ".join(sorted(_STRING_DIMENSION_FORMATS))
+    if field_type == "time_dimension":
+        message = f"A time dimension only takes format {allowed}; '{display_format}' is not one."
+    else:
+        message = (
+            f"format '{display_format}' needs a numeric dimension, but data_type "
+            f"'{data_type or '(empty)'}' publishes as a {cube_dimension_type(data_type)}. "
+            f"Set data_type to number, or use format {allowed}."
         )
-    ]
+    return [_diagnostic("INVALID_FORMAT", change, "format", message)]
 
 
 def _measure_filter_diagnostics(change, filters: Any, columns: set[str]) -> list[dict]:
