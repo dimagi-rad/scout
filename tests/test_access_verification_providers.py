@@ -218,15 +218,22 @@ async def test_commcare_unpaginated_listing_is_complete(settings):
 
 
 @pytest.mark.asyncio
-async def test_commcare_listing_short_of_its_total_count_is_indeterminate(settings):
+async def test_commcare_listing_short_of_its_total_count_is_indeterminate(settings, caplog):
     payload = {
         "objects": [{"domain_name": "one", "project_name": "One"}],
         "meta": {"total_count": 2},
     }
 
-    result, _ = await _verify(_request("commcare"), [_response(payload=payload)], settings=settings)
+    with caplog.at_level("WARNING", logger="apps.users.services.access_verification_providers"):
+        result, _ = await _verify(
+            _request("commcare"), [_response(payload=payload)], settings=settings
+        )
 
     assert result.outcome == VerificationOutcome.INDETERMINATE
+    assert any(
+        "indeterminate" in r.getMessage() and "cause=next_undeclared" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 @pytest.mark.asyncio
@@ -736,7 +743,9 @@ async def test_non_unavailable_outcomes_do_not_log_unavailable(settings, caplog)
 
     assert rejected.outcome != VerificationOutcome.UNAVAILABLE
     assert indeterminate.outcome != VerificationOutcome.UNAVAILABLE
-    assert _unavailable_records(caplog) == []
+    [record] = _unavailable_records(caplog)
+    assert record.getMessage().startswith("Upstream access verification indeterminate")
+    assert "status=403" in record.getMessage()
 
 
 @pytest.mark.asyncio
