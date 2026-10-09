@@ -6,6 +6,7 @@ import { ArtifactPanel } from "@/components/ArtifactPanel/ArtifactPanel"
 import { OfflineBanner } from "@/components/OfflineBanner/OfflineBanner"
 import { LostAccessModal } from "@/components/LostAccessModal/LostAccessModal"
 import { WorkspaceAddedNotice } from "@/components/WorkspaceAddedNotice/WorkspaceAddedNotice"
+import { OcsAccessNotice } from "@/components/OcsAccessNotice/OcsAccessNotice"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { useAppStore } from "@/store/store"
 import { WorkspaceJobsProvider } from "@/contexts/WorkspaceJobsContext"
@@ -66,6 +67,9 @@ export function AppLayout() {
         <OfflineBanner />
         <LostAccessModal />
         <WorkspaceAddedNotice />
+        <div className="fixed right-4 top-4 z-40 w-96 max-w-[calc(100vw-2rem)]">
+          <OcsAccessNotice showConnectionsLink />
+        </div>
       </div>
     </WorkspaceJobsProvider>
   )

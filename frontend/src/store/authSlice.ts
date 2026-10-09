@@ -14,6 +14,8 @@ export interface User {
   onboarding_complete: boolean
   // Absent on older servers; only ever a workspace the user is still a member of.
   last_workspace_id?: string | null
+  // Set when Open Chat Studio refused the chatbot list at sign-in; absent on older servers.
+  ocs_access_denied?: { team: { slug: string; name: string } | null } | null
   agent_model?: { id: string; label: string }
 }
 
@@ -25,10 +27,11 @@ export interface AuthSlice {
     fetchMe: () => Promise<void>
     login: (email: string, password: string) => Promise<void>
     logout: () => Promise<void>
+    dismissOcsAccessNotice: () => Promise<void>
   }
 }
 
-export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set) => {
+export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set, get) => {
   let requestId = 0
   let pendingMutations = 0
   let mutationQueue = Promise.resolve()
@@ -95,6 +98,17 @@ export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set)
         set({ user: null, authStatus: "unauthenticated", authError: null })
         // Serialize cookie writes so an older logout cannot erase B's new login.
         await mutateSession(() => api.post<void>("/api/auth/logout/"))
+      },
+
+      dismissOcsAccessNotice: async () => {
+        const user = get().user
+        if (user) set({ user: { ...user, ocs_access_denied: null } })
+        try {
+          await api.post<void>("/api/auth/ocs/access-notice/dismiss/")
+        } catch (e) {
+          // The next /me brings the notice back, so the user can dismiss it again.
+          console.error("Failed to dismiss the Open Chat Studio notice", e)
+        }
       },
     },
   }

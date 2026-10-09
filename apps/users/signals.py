@@ -12,6 +12,8 @@ from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.utils import timezone
 
+from apps.common.errors import OCSAuthError
+from apps.users.services import ocs_access_notice
 from apps.users.services.email_proof import proven_emails, verified_social_email
 from apps.users.services.merge import merge_users
 from apps.users.services.oauth_scope import canonical_provider
@@ -164,8 +166,14 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
             async_to_sync(resolve_ocs_chatbots)(
                 sociallogin.user, token.token, social_account=sociallogin.account
             )
+        except OCSAuthError as error:
+            logger.exception("Failed to resolve OCS chatbots after OAuth")
+            if error.status_code == 403:
+                ocs_access_notice.set_notice(request, sociallogin.account)
         except Exception:
             logger.exception("Failed to resolve OCS chatbots after OAuth")
+        else:
+            ocs_access_notice.clear_notice(request)
     elif provider.startswith("commcare"):
         try:
             # allauth signal receivers are sync.

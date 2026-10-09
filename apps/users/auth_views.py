@@ -33,6 +33,7 @@ from apps.users.models import (
     User,
 )
 from apps.users.rate_limiting import check_rate_limit, record_attempt
+from apps.users.services import ocs_access_notice
 from apps.users.services.credential_resolver import aiter_fresh_access_tokens
 from apps.users.services.oauth_scope import (
     account_scope,
@@ -86,7 +87,12 @@ async def _alast_workspace_id(user) -> str | None:
 
 
 def _user_response(
-    user, *, onboarding_complete=False, last_workspace_id=None, can_view_usage_dashboard=False
+    user,
+    *,
+    onboarding_complete=False,
+    last_workspace_id=None,
+    can_view_usage_dashboard=False,
+    ocs_access_denied=None,
 ):
     """Build standard user JSON response dict."""
     return {
@@ -98,6 +104,7 @@ def _user_response(
         "can_view_usage_dashboard": can_view_usage_dashboard,
         "onboarding_complete": onboarding_complete,
         "last_workspace_id": last_workspace_id,
+        "ocs_access_denied": ocs_access_denied,
         "agent_model": {
             "id": settings.DEFAULT_LLM_MODEL,
             "label": model_display_name(settings.DEFAULT_LLM_MODEL),
@@ -173,6 +180,7 @@ async def me_view(request):
 
     last_workspace_id = await _alast_workspace_id(user)
     can_view_usage_dashboard = await acan_view_usage_dashboard(user)
+    ocs_access_denied = await request.session.aget(ocs_access_notice.SESSION_KEY)
     cache_key = me_onboarding_cache_key(user)
     cached = await cache.aget(cache_key)
     if cached is not None:
@@ -182,6 +190,7 @@ async def me_view(request):
                 onboarding_complete=cached,
                 last_workspace_id=last_workspace_id,
                 can_view_usage_dashboard=can_view_usage_dashboard,
+                ocs_access_denied=ocs_access_denied,
             )
         )
 
@@ -210,6 +219,7 @@ async def me_view(request):
             onboarding_complete=onboarding_complete,
             last_workspace_id=last_workspace_id,
             can_view_usage_dashboard=can_view_usage_dashboard,
+            ocs_access_denied=ocs_access_denied,
         )
     )
 
