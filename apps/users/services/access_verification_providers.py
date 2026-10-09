@@ -39,8 +39,9 @@ PROVIDER_BUDGET_SECONDS = 20.0
 PER_REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_PAGES = 100
 MAX_ROWS = 10_000
-CONNECT_LIGHT_REQUEST_FLOOR_SECONDS = 4.0
 CONNECT_LISTING_RESERVE_SECONDS = 5.0
+# Concurrent per-opportunity requests within one connection's check.
+CONNECT_LIGHT_CONCURRENCY = 8
 
 
 class ProcessNetworkLimiter:
@@ -144,12 +145,47 @@ async def _verify_connect_opportunities(
 ):
     """Check each opportunity; None means fall back to the full listing.
 
+    The requests run concurrently, but their answers are judged in ``ids`` order
+    as if sequential, so a failure decides exactly what it would have one by one.
     A no-access 404 is an omission, which publication archives as the listing would
     have. Once one is seen, a later failure ends the check with what was decided so
     far rather than discarding that revocation.
     """
     # Keep part of the budget back, or the listing fallback could never finish.
     light_deadline = deadline - min(CONNECT_LISTING_RESERVE_SECONDS, (deadline - clock()) / 2)
+    slots = asyncio.Semaphore(CONNECT_LIGHT_CONCURRENCY)
+
+    async def fetch(external_id):
+        """``(response, None)``, or ``(None, cause)`` when there was no answer."""
+        try:
+            request = connect_listing.verify_subset_request(listing, external_id)
+        except UnsafeProviderURL:
+            return None, "unsafe_url"
+        async with slots:
+            remaining = light_deadline - clock()
+            if remaining <= 0:
+                return None, "light_deadline_before_request"
+            request_timeout = min(PER_REQUEST_TIMEOUT_SECONDS, remaining)
+            try:
+                response = await asyncio.wait_for(
+                    client.get(
+                        request.url,
+                        headers=dict(request.headers),
+                        follow_redirects=False,
+                        timeout=request_timeout,
+                    ),
+                    timeout=request_timeout,
+                )
+            except TimeoutError:
+                return None, "light_request_timeout"
+            except httpx.RequestError as exc:
+                # The class name only: str(exc) can carry the request URL.
+                return None, f"light_request_error:{type(exc).__name__}"
+        if clock() >= deadline:
+            return response, "light_deadline_after_response"
+        return response, None
+
+    answers = await asyncio.gather(*(fetch(external_id) for external_id in ids))
     confirmed = []
     omitted = False
 
@@ -160,55 +196,22 @@ async def _verify_connect_opportunities(
             return ProviderVerificationResult.complete(confirmed, scope=ids[:index])
         return failure()
 
-    for index, external_id in enumerate(ids):
-        remaining = light_deadline - clock()
-        if remaining <= 0:
-            return settle(
-                index,
-                lambda: unavailable("light_deadline_before_request"),
-                cause="light_deadline_before_request",
-            )
-        try:
-            request = connect_listing.verify_subset_request(listing, external_id)
-        except UnsafeProviderURL:
+    for index, (external_id, (response, cause)) in enumerate(zip(ids, answers, strict=True)):
+        if cause == "unsafe_url":
 
             def unsafe():
                 log("light_unsafe_url", outcome="indeterminate")
                 return ProviderVerificationResult.indeterminate(_INDETERMINATE)
 
-            return settle(index, unsafe, cause="unsafe_url")
-        # A share of what is left, so one slow opportunity cannot starve the rest,
-        # but never so small that an ordinary slow answer is cut off. On the 10s
-        # interactive budget the floor wins, so allocation is effectively greedy.
-        request_timeout = min(
-            PER_REQUEST_TIMEOUT_SECONDS,
-            remaining,
-            max(remaining / (len(ids) - index), CONNECT_LIGHT_REQUEST_FLOOR_SECONDS),
-        )
-        try:
-            response = await asyncio.wait_for(
-                client.get(
-                    request.url,
-                    headers=dict(request.headers),
-                    follow_redirects=False,
-                    timeout=request_timeout,
-                ),
-                timeout=request_timeout,
-            )
-        except TimeoutError:
-            return settle(
-                index, lambda: unavailable("light_request_timeout"), cause="light_request_timeout"
-            )
-        except httpx.RequestError as exc:
-            # The class name only: str(exc) can carry the request URL.
-            cause = f"light_request_error:{type(exc).__name__}"
+            return settle(index, unsafe, cause=cause)
+        if response is None:
             return settle(index, lambda cause=cause: unavailable(cause), cause=cause)
-        if clock() >= deadline:
+        if cause is not None:
             status = response.status_code
             return settle(
                 index,
-                lambda status=status: unavailable("light_deadline_after_response", status=status),
-                cause="light_deadline_after_response",
+                lambda cause=cause, status=status: unavailable(cause, status=status),
+                cause=cause,
                 status=status,
             )
         if connect_listing.is_no_access_answer(response):

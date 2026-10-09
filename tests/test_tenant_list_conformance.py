@@ -850,7 +850,7 @@ async def test_connect_routing_404_falls_back_to_the_whole_listing(upstream):
 
 async def test_connect_many_opportunities_use_the_whole_listing(upstream):
     upstream.routes[CONNECT_LISTING] = json_answer(saved("connect_opp_org_program_list"))
-    wanted = {str(external_id) for external_id in range(101, 107)}
+    wanted = {str(101 + i) for i in range(connect_listing.MAX_SUBSET + 1)}
 
     outcome = await run(CONNECT_VERIFICATION, upstream, external_ids=wanted)
 
