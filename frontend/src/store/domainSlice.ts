@@ -32,6 +32,7 @@ export interface DomainSlice {
     setActiveDomainByTenantId: (provider: string, tenantId: string) => void
     ensureTenant: (provider: string, tenantId: string) => Promise<void>
     dismissAddedDomain: (id: string) => void
+    dismissAllAddedDomains: () => void
   }
 }
 
@@ -177,6 +178,10 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope &
 
       dismissAddedDomain: (id: string) => {
         set({ addedDomainIds: withoutId(get().addedDomainIds, id) })
+      },
+
+      dismissAllAddedDomains: () => {
+        set({ addedDomainIds: [] })
       },
 
       setActiveDomain: (id: string) => {
