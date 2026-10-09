@@ -21,8 +21,10 @@ from apps.users.services.tenant_listing.types import (
 )
 from mcp_server.loaders._urls import ProviderURLPolicy
 
-# Above this many opportunities, one full listing beats one request each.
-MAX_SUBSET = 5
+# Above this many opportunities, one full listing beats one request each. The
+# listing takes 10s+ for a user with hundreds of opportunities, so this must stay
+# above the largest Connect workspace (11 in prod on 2026-10-09).
+MAX_SUBSET = 25
 
 _PAGINATION_KEYS = frozenset(
     {

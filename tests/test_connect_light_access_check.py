@@ -31,6 +31,7 @@ from apps.users.services.access_verification_types import (
     AccessVerificationStatus,
     VerificationResult,
 )
+from apps.users.services.tenant_listing.connect import MAX_SUBSET
 
 
 class _Client:
@@ -254,7 +255,7 @@ async def test_connect_many_opportunities_use_the_listing_and_archive_omissions(
 ):
     connection, opp_7, opp_8 = connect_setup
     extra = []
-    for external_id in ("101", "102", "103", "104", "105"):
+    for external_id in (str(100 + i) for i in range(MAX_SUBSET)):
         tenant = await Tenant.objects.acreate(
             provider="commcare_connect", external_id=external_id, canonical_name=external_id
         )

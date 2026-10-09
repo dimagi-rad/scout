@@ -14,12 +14,17 @@ from asgiref.sync import async_to_sync
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantConnection
-from apps.users.services.access_verification_providers import ProcessNetworkLimiter, verify_provider
+from apps.users.services.access_verification_providers import (
+    CONNECT_LIGHT_CONCURRENCY,
+    ProcessNetworkLimiter,
+    verify_provider,
+)
 from apps.users.services.access_verification_types import (
     CredentialObservation,
     CredentialRequestSnapshot,
     VerificationOutcome,
 )
+from apps.users.services.tenant_listing.connect import MAX_SUBSET
 
 
 class _Client:
@@ -973,19 +978,19 @@ async def test_connect_fallback_discards_partial_light_results(settings):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("deadline", "count", "expected"),
+    ("deadline", "expected"),
     [
-        # 5s of the 20s kept back for the listing; the rest shared across two.
-        pytest.param(20.0, 2, 7.5, id="share"),
-        # The share would be 2.25s; an ordinary slow answer still gets 4s.
-        pytest.param(14.0, 4, 4.0, id="floor"),
+        # 5s of the 20s kept back for the listing; each request is still capped at 10s.
+        pytest.param(20.0, 10.0, id="per-request-cap"),
+        # Concurrent, so every request may use all that is left, not a share of it.
+        pytest.param(14.0, 9.0, id="remaining"),
         # Under 10s, half is kept back.
-        pytest.param(6.0, 4, 3.0, id="reserve-half"),
+        pytest.param(6.0, 3.0, id="reserve-half"),
     ],
 )
-async def test_connect_light_check_budget(settings, deadline, count, expected):
+async def test_connect_light_check_budget(settings, deadline, expected):
     settings.CONNECT_API_URL = "https://connect.example"
-    ids = [str(i) for i in range(1, count + 1)]
+    ids = ["1", "2", "3", "4"]
     _result, requests = await _verify(
         _request("commcare_connect"),
         [_response(payload={"id": int(i)}) for i in ids],
@@ -994,7 +999,86 @@ async def test_connect_light_check_budget(settings, deadline, count, expected):
         external_ids=set(ids),
     )
 
-    assert requests[0][1]["timeout"] == expected
+    assert {kwargs["timeout"] for _url, kwargs in requests} == {expected}
+
+
+class _GatedClient:
+    """Answers each opportunity only once ``gate`` requests are in flight together."""
+
+    def __init__(self, gate):
+        self.gate = gate
+        self.in_flight = 0
+        self.peak = 0
+        self.urls = []
+        self.released = asyncio.Event()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def get(self, url, **kwargs):
+        self.urls.append(url)
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        if self.in_flight >= self.gate:
+            self.released.set()
+        await self.released.wait()
+        self.in_flight -= 1
+        opp_id = int(url.rstrip("/").rsplit("/", 1)[1])
+        return _response(payload={"id": opp_id}, url=url)
+
+
+@pytest.mark.asyncio
+async def test_connect_checks_a_seven_source_workspace_concurrently(settings):
+    """A 7-opportunity workspace for a user with hundreds of opportunities was sent to
+    the full export, which outlasts the interactive budget (KC - 12 opps, 2026-10-09)."""
+    settings.CONNECT_API_URL = "https://connect.example"
+    ids = {"523", "524", "874", "938", "1487", "1488", "2166"}
+    client = _GatedClient(gate=len(ids))
+
+    result = await asyncio.wait_for(
+        verify_provider(
+            _request("commcare_connect"),
+            deadline=100.0,
+            clock=lambda: 0.0,
+            client_factory=lambda: client,
+            settings=settings,
+            limiter=asyncio.Semaphore(1),
+            external_ids=frozenset(ids),
+        ),
+        timeout=5,
+    )
+
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert result.external_ids == frozenset(ids)
+    assert result.scope == frozenset(ids)
+    assert client.peak == len(ids)
+    assert not any("opp_org_program_list" in url for url in client.urls)
+
+
+@pytest.mark.asyncio
+async def test_connect_light_check_bounds_its_concurrency(settings):
+    settings.CONNECT_API_URL = "https://connect.example"
+    ids = {str(i) for i in range(1, CONNECT_LIGHT_CONCURRENCY + 4)}
+    client = _GatedClient(gate=CONNECT_LIGHT_CONCURRENCY)
+
+    result = await asyncio.wait_for(
+        verify_provider(
+            _request("commcare_connect"),
+            deadline=100.0,
+            clock=lambda: 0.0,
+            client_factory=lambda: client,
+            settings=settings,
+            limiter=asyncio.Semaphore(1),
+            external_ids=frozenset(ids),
+        ),
+        timeout=5,
+    )
+
+    assert result.external_ids == frozenset(ids)
+    assert client.peak == CONNECT_LIGHT_CONCURRENCY
 
 
 @pytest.mark.asyncio
@@ -1022,7 +1106,7 @@ async def test_connect_light_check_keeps_credential_and_transient_semantics(
     "external_ids",
     [
         pytest.param(frozenset(), id="none-requested"),
-        pytest.param(frozenset(str(i) for i in range(6)), id="above-cap"),
+        pytest.param(frozenset(str(i) for i in range(1, MAX_SUBSET + 2)), id="above-cap"),
         pytest.param(frozenset({"7", "abc"}), id="non-numeric"),
         pytest.param(frozenset({"007"}), id="zero-padded"),
     ],
@@ -1054,3 +1138,51 @@ async def test_external_ids_do_not_change_other_providers(settings):
     assert result.outcome == VerificationOutcome.COMPLETE
     assert result.scoped is False
     assert [url for url, _kwargs in requests] == ["https://ocs.example/api/experiments/"]
+
+
+class _HangingAfterFirstClient:
+    """Answers the first opportunity with ``first``; every other request hangs."""
+
+    def __init__(self, first):
+        self.first = first
+        self.cancelled = 0
+        self.calls = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def get(self, url, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return self.first
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+
+
+@pytest.mark.asyncio
+async def test_connect_decisive_answer_does_not_wait_for_a_hung_sibling(settings):
+    settings.CONNECT_API_URL = "https://connect.example"
+    client = _HangingAfterFirstClient(_response(401))
+
+    result = await asyncio.wait_for(
+        verify_provider(
+            _request("commcare_connect"),
+            deadline=100.0,
+            clock=lambda: 0.0,
+            client_factory=lambda: client,
+            settings=settings,
+            limiter=asyncio.Semaphore(1),
+            external_ids=frozenset({"1", "2", "3"}),
+        ),
+        timeout=5,
+    )
+
+    assert result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
+    # Nothing is left running against the client once the check has returned.
+    assert client.cancelled == 2
