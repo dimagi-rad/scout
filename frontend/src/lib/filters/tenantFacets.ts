@@ -141,8 +141,24 @@ export function normalizeTenantSearch(query: string): string {
   return query.trim().replace(/^#/, "").toLowerCase()
 }
 
+/**
+ * A pasted list of external ids — "523, 524, 675" or one per line, "#" optional —
+ * or null when the query is anything else. Two or more numeric ids, so a single
+ * number still searches as before (a prefix of an id or part of a name).
+ */
+export function parseTenantIdList(query: string): string[] | null {
+  const tokens = query
+    .split(/[\s,;]+/)
+    .map((token) => token.replace(/^#/, ""))
+    .filter(Boolean)
+  if (tokens.length < 2 || !tokens.every((token) => /^\d+$/.test(token))) return null
+  return [...new Set(tokens)]
+}
+
 export function tenantMatchesSearch(t: UserTenant, normalized: string): boolean {
   if (!normalized) return true
+  const ids = parseTenantIdList(normalized)
+  if (ids) return ids.includes(t.tenant_id)
   return (
     t.tenant_name.toLowerCase().includes(normalized) ||
     t.tenant_id.toLowerCase().includes(normalized)

@@ -9,6 +9,7 @@ import {
   UNKNOWN,
   connectStatus,
   connectType,
+  parseTenantIdList,
   tenantMatchesSearch,
   normalizeTenantSearch,
 } from "./tenantFacets"
@@ -169,6 +170,27 @@ it("searches name or external id, ignoring a leading #", () => {
   expect(tenantMatchesSearch(t, normalizeTenantSearch("#81"))).toBe(true)
   expect(tenantMatchesSearch(t, normalizeTenantSearch(" KENYA "))).toBe(true)
   expect(tenantMatchesSearch(t, normalizeTenantSearch("ghana"))).toBe(false)
+})
+
+describe("a pasted list of ids", () => {
+  it("parses commas, spaces, semicolons, newlines and a leading # into unique ids", () => {
+    expect(parseTenantIdList("523, 524,675;874\n#938  523")).toEqual(["523", "524", "675", "874", "938"])
+  })
+
+  it("leaves a single id and any non-numeric query to the ordinary search", () => {
+    expect(parseTenantIdList("523")).toBeNull()
+    expect(parseTenantIdList("kmc kenya")).toBeNull()
+    expect(parseTenantIdList("523, kenya")).toBeNull()
+    expect(parseTenantIdList("")).toBeNull()
+  })
+
+  it("matches each listed id exactly, never as a prefix or a name", () => {
+    const list = normalizeTenantSearch("523, 1234")
+    expect(tenantMatchesSearch(tenant("523", "commcare_connect", {}, "Nama Wellness"), list)).toBe(true)
+    expect(tenantMatchesSearch(tenant("1234", "commcare_connect", {}, "GHI"), list)).toBe(true)
+    expect(tenantMatchesSearch(tenant("5230", "commcare_connect", {}, "Other"), list)).toBe(false)
+    expect(tenantMatchesSearch(tenant("99", "commcare_connect", {}, "Opp 523"), list)).toBe(false)
+  })
 })
 
 it("scopes the storage key to the user", () => {
