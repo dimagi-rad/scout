@@ -167,8 +167,12 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
                 sociallogin.user, token.token, social_account=sociallogin.account
             )
         except OCSAuthError as error:
-            logger.exception("Failed to resolve OCS chatbots after OAuth")
-            if error.status_code == 403:
+            if error.status_code != 403:
+                logger.exception("Failed to resolve OCS chatbots after OAuth")
+            else:
+                # The user's team permission, not a Scout fault: the banner tells them,
+                # so it no longer pages (Sentry SCOUT-DJANGO-3E).
+                logger.warning("OCS refused the chatbot list after OAuth", exc_info=True)
                 ocs_access_notice.set_notice(request, sociallogin.account)
         except Exception:
             logger.exception("Failed to resolve OCS chatbots after OAuth")

@@ -1,6 +1,7 @@
-"""An OCS 403 at sign-in leaves a notice on ``/api/auth/me/`` (SCOUT-DJANGO-3E).
+"""An OCS 403 at sign-in is the user's team permission, not a Scout fault (SCOUT-DJANGO-3E).
 
-Until now only Sentry heard about it; the user landed on an empty onboarding screen.
+The user is told through a notice on ``/api/auth/me/`` instead of Sentry being paged.
+Any other OCS failure still pages.
 """
 
 import logging
@@ -38,9 +39,13 @@ def _login(resolver, session):
         signals.resolve_tenant_on_social_login(request=request, sociallogin=_sociallogin())
 
 
-def test_403_leaves_a_notice():
+def test_403_warns_and_leaves_a_notice(caplog):
     session = {}
-    _login(AsyncMock(side_effect=OCSAuthError("refused", status_code=403)), session)
+    with caplog.at_level(logging.WARNING, logger=SIGNALS_LOGGER):
+        _login(AsyncMock(side_effect=OCSAuthError("refused", status_code=403)), session)
+
+    levels = {r.levelno for r in caplog.records if r.name == SIGNALS_LOGGER}
+    assert levels == {logging.WARNING}
     assert session[ocs_access_notice.SESSION_KEY] == DENIED
 
 
