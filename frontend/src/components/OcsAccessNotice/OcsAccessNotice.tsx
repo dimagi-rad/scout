@@ -12,7 +12,7 @@ interface Props {
 export function OcsAccessNotice({ showConnectionsLink = false }: Props) {
   const denied = useAppStore((s) => s.user?.ocs_access_denied)
   const dismiss = useAppStore((s) => s.authActions.dismissOcsAccessNotice)
-  if (!denied?.teams.length) return null
+  if (!denied?.teams?.length) return null
   const named = denied.teams.filter((t) => t.slug).map((t) => t.name)
 
   return (
