@@ -128,8 +128,9 @@ async def pipeline_list_tables(
 
     for model_name in pipeline_config.dbt_models:
         if live_table_names and model_name not in live_table_names:
-            # Only surface dbt models that physically exist; with no live set
-            # (MANAGED_DATABASE_URL unset) they are listed optimistically.
+            # Only surface dbt models that physically exist. An empty live set
+            # (MANAGED_DATABASE_URL unset, or an empty/dropped schema) still lists
+            # them; unreachable today since no pipeline defines dbt models.
             continue
         tables.append(
             {
@@ -185,6 +186,9 @@ async def _live_tables_in_schema(schema_name: str) -> set[str]:
         )
     except Exception as exc:
         reraise_if_capacity(exc)
+        # Some callers turn the raise into a bare "Data unavailable" with no
+        # logging, so this is the only record of the underlying cause.
+        logger.warning("Could not enumerate live tables in schema %s", schema_name, exc_info=True)
         raise
     return {row[0] for row in (result.get("rows") or [])}
 
