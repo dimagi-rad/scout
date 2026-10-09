@@ -11,6 +11,7 @@ import {
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 import { RoleBadge } from "@/components/RoleBadge"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
+import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 import { workspacePath } from "@/lib/workspacePath"
 import { CONNECTIONS_PATH } from "@/lib/routes"
 import { Badge } from "@/components/ui/badge"
@@ -31,16 +32,25 @@ const MAX_VISIBLE_TENANTS = 4
 // Users with hundreds of workspaces (#358) got every row rendered at once.
 const PAGE_SIZE = 50
 
-type SortKey = "newest" | "oldest" | "name"
+type SortKey = "recent" | "newest" | "oldest" | "name"
 
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
+  { value: "recent", label: "Recently used" },
   { value: "newest", label: "Newest first" },
   { value: "oldest", label: "Oldest first" },
   { value: "name", label: "Name (A–Z)" },
 ]
 
-function compareWorkspaces(sort: SortKey) {
+function compareWorkspaces(sort: SortKey, recentIds: string[]) {
+  const recentRank = new Map(recentIds.map((id, i) => [id, i]))
   return (a: WorkspaceListItem, b: WorkspaceListItem): number => {
+    if (sort === "recent") {
+      // Recently used first, in recency order; the rest fall back to newest first.
+      const ra = recentRank.get(a.id) ?? Infinity
+      const rb = recentRank.get(b.id) ?? Infinity
+      if (ra !== rb) return ra < rb ? -1 : 1
+      return Date.parse(b.created_at) - Date.parse(a.created_at)
+    }
     if (sort === "name") {
       return (
         a.display_name.localeCompare(b.display_name, undefined, { numeric: true }) ||
@@ -186,6 +196,7 @@ export function WorkspacesPage() {
     provider: null,
   })
   const [sort, setSort] = useState<SortKey>("newest")
+  const [recentIds] = useState(getRecentWorkspaceIds)
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
 
   const isLoading = domainsStatus === "loading" || domainsStatus === "idle"
@@ -252,8 +263,8 @@ export function WorkspacesPage() {
         if (!tenants.some((t) => t.provider === activeFilters.provider)) return false
       }
       return true
-    }).sort(compareWorkspaces(sort))
-  }, [domains, search, activeFilters, sort])
+    }).sort(compareWorkspaces(sort, recentIds))
+  }, [domains, search, activeFilters, sort, recentIds])
 
   const visible = filtered.slice(0, visibleCount)
   const reconnectCount = useMemo(

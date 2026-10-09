@@ -78,6 +78,23 @@ describe("WorkspacesPage", () => {
     expect(rowIds()).toEqual(["old", "mid", "new"])
   })
 
+  it("sorts recently used workspaces first, then the rest newest first", async () => {
+    localStorage.setItem("scout.recentWorkspaces", JSON.stringify(["old", "gone", "mid"]))
+    useAppStore.setState({
+      domains: [
+        ws("mid", "Alpha", "2026-02-01T00:00:00Z"),
+        ws("new", "bravo", "2026-03-01T00:00:00Z"),
+        ws("old", "Charlie", "2026-01-01T00:00:00Z"),
+        ws("newest", "Delta", "2026-04-01T00:00:00Z"),
+      ],
+    })
+    renderPage()
+
+    await userEvent.setup().selectOptions(screen.getByTestId("workspaces-sort"), "recent")
+    expect(rowIds()).toEqual(["old", "mid", "newest", "new"])
+    localStorage.removeItem("scout.recentWorkspaces")
+  })
+
   it("renders one page of rows and reveals more on request", async () => {
     useAppStore.setState({ domains: many(120) })
     renderPage()
