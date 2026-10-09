@@ -32,6 +32,7 @@ from apps.chat.helpers import (
 )
 from apps.chat.models import Thread
 from apps.chat.rate_limiting import chat_rate_limit
+from apps.chat.resume_stream import LiveTurnWriter
 from apps.chat.stream import _sse, langgraph_to_ui_stream
 from apps.chat.tasks import aschedule_thread_title
 from apps.chat.titles import afill_turn_title, short_thread_title
@@ -507,26 +508,33 @@ async def _start_turn(
 
     async def _traced_stream():
         response.turn_started = True
-        # aclosing: nothing else closes the inner stream on disconnect, and its
-        # cleanup (stopping the run, saving the partial reply) must finish before
-        # the lease is released and another turn can take the thread.
-        async with lease.held():
-            try:
-                with trace_ctx:
-                    async with contextlib.aclosing(
-                        langgraph_to_ui_stream(
-                            agent,
-                            input_state,
-                            config,
-                            owns_thread=lambda: not lease.lost,
-                            on_success=lambda: aschedule_thread_title(thread),
-                        )
-                    ) as stream:
-                        async for chunk in stream:
-                            yield chunk
-            finally:
-                if claimed is not None:
-                    await pending_requests.asettle(claimed)
+        live = LiveTurnWriter(thread_id)
+        try:
+            # aclosing: nothing else closes the inner stream on disconnect, and its
+            # cleanup (stopping the run, saving the partial reply) must finish before
+            # the lease is released and another turn can take the thread.
+            async with lease.held():
+                try:
+                    with trace_ctx:
+                        async with contextlib.aclosing(
+                            langgraph_to_ui_stream(
+                                agent,
+                                input_state,
+                                config,
+                                owns_thread=lambda: not lease.lost,
+                                on_success=lambda: aschedule_thread_title(thread),
+                            )
+                        ) as stream:
+                            async for chunk in stream:
+                                live.observe(chunk)
+                                yield chunk
+                finally:
+                    if claimed is not None:
+                        await pending_requests.asettle(claimed)
+        finally:
+            # After the release: a chat tailing the turn reloads on the done row, and
+            # must find the thread free and its answer saved.
+            await live.close()
 
     telemetry.attrs["held_request"] = claimed is not None
     response.streaming_content = telemetry.wrap_stream(_traced_stream(), lost=lambda: lease.lost)

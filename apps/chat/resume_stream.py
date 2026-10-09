@@ -1,4 +1,4 @@
-"""Streaming a background resume's answer into an open chat.
+"""Streaming a background resume's answer, or a chat turn's, into an open chat.
 
 A resume (or the held-request flush) runs in a worker, not in a chat request,
 so the chat cannot read its token stream directly. The worker writes the text it
@@ -6,11 +6,17 @@ streams to ResumeStreamChunk rows in small batches, and the chat tails them by i
 (GET .../resume-stream/?after=<id>), so a reconnect resumes where it left off and
 any number of tabs can follow. The final message still comes from the checkpoint
 once the run ends; these rows are best-effort and pruned soon after.
+
+A chat turn's text is written the same way by ``LiveTurnWriter``, for chats that
+are not the one running it: another tab or device, or one reopened after a reload
+or a route change (#856).
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import json
 import logging
 import time
 import uuid
@@ -34,6 +40,20 @@ RETENTION = timedelta(minutes=30)
 STREAMED_NODE = AGENT_NODE
 # Between the answer's model calls (text, tools, more text), as the reload shows them.
 CALL_SEPARATOR = "\n\n"
+# A chat turn writes at most one row per interval while it streams text, and none
+# while tools run: the platform database is shared and short of connections.
+LIVE_FLUSH_INTERVAL_SECONDS = 1.0
+# Writing the last row and clearing the run must never hold up the end of a turn.
+LIVE_CLOSE_TIMEOUT_SECONDS = 2.0
+# The end of a text part ends its model call's text: the stream ends one only for a
+# tool (some tools send their part only once they finish, or none if they fail),
+# thinking, a retried or fixed reply, or the end of the turn. A tool part covers the
+# rest. Thinking is taken to start the next call: a response's thinking comes before
+# its text. If one ever thought after its text, the split would only cost the
+# tailing chat a reload that finds nothing new, and the first half of that message
+# until the turn ends.
+_CALL_ENDS = frozenset({"text-end", "tool-input-available", "tool-output-available"})
+_CALL_END_MARKS = tuple(f'"type": "{kind}"' for kind in _CALL_ENDS)
 
 
 def _is_answer(chunk, metadata: dict) -> bool:
@@ -161,3 +181,159 @@ async def aprune() -> int:
         created_at__lt=timezone.now() - RETENTION
     ).adelete()
     return deleted
+
+
+class LiveTurnWriter:
+    """Writes a chat turn's answer text for chats that did not start it. Never raises.
+
+    Each model call's text is a run of its own: by the time the next call streams,
+    the checkpoint holds the last one's message, so a chat that loads the thread
+    mid-turn shows it from there and tails only the call still being written
+    (``aread_after`` starts at the latest run). A chat already tailing reloads when
+    a new run starts, which brings in the finished call and its tool cards.
+
+    ``observe`` takes the turn's stream parts as the chat sends them and only
+    buffers; a background task writes what is buffered at most once per
+    ``LIVE_FLUSH_INTERVAL_SECONDS``, so the turn's stream never waits on the
+    database. The writes run on the request's own database connection (async ORM
+    calls share the request's thread), so writing opens no connection. ``close``
+    writes the done row, on which a chat tailing the turn reloads, and deletes the
+    thread's earlier turns' text rows. This turn's stay until the next turn or the
+    prune: a chat that reads them late would otherwise show only the last row's
+    text as the whole answer until its reload lands.
+    """
+
+    def __init__(self, thread_id):
+        self.thread_id = thread_id
+        self.run = uuid.uuid4()
+        self.rows_written = 0
+        # (run, text, ends the run) in order; a flush can span two calls.
+        self._buffer: list[tuple[uuid.UUID, str, bool]] = []
+        # This turn's first row: the close clears earlier turns' rows, and must not
+        # touch a run that took the thread after this one let go of it.
+        self._first_row_id: int | None = None
+        self._has_text = False
+        self._run_has_text = False
+        self._run_ended = False
+        self._broken = False
+        self._stop = asyncio.Event()
+        self._flusher: asyncio.Task | None = None
+
+    def observe(self, sse_chunk: str) -> None:
+        if self._broken:
+            return
+        # The part's type leads every frame (stream.py's _sse), so only a text delta,
+        # whose text is needed, is parsed; a tool's output can be large.
+        head = sse_chunk[:48]
+        if any(mark in head for mark in _CALL_END_MARKS):
+            self._end_run()
+            return
+        if '"type": "text-delta"' not in head:
+            return
+        try:
+            part = json.loads(sse_chunk.removeprefix("data: "))
+        except ValueError:
+            return
+        if not isinstance(part, dict):
+            return
+        if part.get("type") != "text-delta":
+            return
+        text = part.get("delta")
+        if not isinstance(text, str) or not text:
+            return
+        if self._run_ended:
+            self.run = uuid.uuid4()
+            self._run_ended = False
+        self._run_has_text = True
+        self._has_text = True
+        self._buffer.append((self.run, text, False))
+        if self._flusher is None:
+            self._flusher = asyncio.ensure_future(self._flush_periodically())
+
+    def _end_run(self) -> None:
+        # Now, not when the next call's text starts: a chat that loads the thread while
+        # the tool runs has this call from history already.
+        if self._run_has_text and not self._run_ended:
+            self._buffer.append((self.run, "", True))
+            self._run_ended = True
+            self._run_has_text = False
+
+    async def close(self) -> None:
+        if not self._has_text:
+            return
+        closing = asyncio.ensure_future(self._finish())
+        try:
+            # Shielded: the stream closes from a cancelled task when the client leaves,
+            # and an unwritten done row would read as an answer still being written.
+            await asyncio.shield(closing)
+        except asyncio.CancelledError:
+            # Still within the request (bounded by the close timeout), so its
+            # writes stay on the request's connection.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await closing
+            raise
+
+    async def _flush_periodically(self) -> None:
+        while not self._broken and not self._stop.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._stop.wait(), LIVE_FLUSH_INTERVAL_SECONDS)
+            if self._buffer and not self._stop.is_set():
+                await self._write(done=False)
+
+    async def _finish(self) -> None:
+        try:
+            async with asyncio.timeout(LIVE_CLOSE_TIMEOUT_SECONDS):
+                # Stopped, not cancelled: a write in progress finishes rather than
+                # dropping its text between two rows.
+                self._stop.set()
+                if self._flusher is not None:
+                    # Its own share of the budget, so a slow write still leaves time for
+                    # the done row; a write left running is ahead of it on the
+                    # request's thread either way.
+                    await asyncio.wait({self._flusher}, timeout=LIVE_CLOSE_TIMEOUT_SECONDS / 2)
+                await self._write(done=True)
+                if self._first_row_id is not None:
+                    await ResumeStreamChunk.objects.filter(
+                        thread_id=self.thread_id, done=False, id__lt=self._first_row_id
+                    ).adelete()
+        except Exception:
+            logger.warning(
+                "Could not finish the live stream of thread %s", self.thread_id, exc_info=True
+            )
+        finally:
+            if self._flusher is not None and not self._flusher.done():
+                self._flusher.cancel()
+
+    async def _write(self, *, done: bool) -> None:
+        buffered, self._buffer = self._buffer, []
+        # The done row is still tried after a failed write: without it a reader
+        # would take the partial text for an answer still being written.
+        if self._broken:
+            buffered = []
+        rows: list[list] = []  # [run, texts, ends]
+        for run, text, ends in buffered:
+            if rows and rows[-1][0] == run and not rows[-1][2]:
+                rows[-1][1].append(text)
+                rows[-1][2] = ends
+            else:
+                rows.append([run, [text], ends])
+        # The turn's end, merged into this run's last row if it is still buffered;
+        # else a row of its own, even for a run already ended, as a chat that
+        # reloaded on that end is tailing for this one.
+        if done:
+            if rows and rows[-1][0] == self.run:
+                rows[-1][2] = True
+            else:
+                rows.append([self.run, [], True])
+        try:
+            for run, texts, ends in rows:
+                row = await ResumeStreamChunk.objects.acreate(
+                    thread_id=self.thread_id, run=run, text="".join(texts), done=ends
+                )
+                if self._first_row_id is None:
+                    self._first_row_id = row.id
+                self.rows_written += 1
+        except Exception:
+            # The answer still lands in the checkpoint; only the live view is lost.
+            self._broken = True
+            logger.warning("Could not stream the turn of thread %s", self.thread_id, exc_info=True)

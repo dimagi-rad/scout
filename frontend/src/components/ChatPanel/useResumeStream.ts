@@ -17,22 +17,33 @@ interface StreamState {
   scope: string
   run: string | null
   text: string
+  /** The shown run wrote its last row. */
+  done: boolean
 }
 
 /**
  * The answer a background resume of this chat is writing, tailed while
  * ``active`` (the resume is running). The text stays until ``reset``, which the
  * chat calls once its reloaded messages carry the final answer, so the answer
- * never blinks out between the two.
+ * never blinks out between the two. ``done``: the run it shows has ended.
  */
 export function useResumeStream(
   workspaceId: string | null,
   threadId: string,
   active: boolean,
-): { text: string; reset: () => void } {
+  pollMs: number = RESUME_STREAM_POLL_MS,
+): {
+  text: string
+  run: string | null
+  done: boolean
+  reset: () => void
+  /** The run's end was acted on (a reload that failed): keep its text, clear ``done``,
+   *  and carry on from where it read when it next tails. */
+  acknowledgeDone: () => void
+} {
   const scope = `${workspaceId}\u0000${threadId}`
-  const [state, setState] = useState<StreamState>({ scope, run: null, text: "" })
-  if (state.scope !== scope) setState({ scope, run: null, text: "" })
+  const [state, setState] = useState<StreamState>({ scope, run: null, text: "", done: false })
+  if (state.scope !== scope) setState({ scope, run: null, text: "", done: false })
   // Where this chat has read up to; per chat, so a switch starts over.
   const cursorRef = useRef<{
     scope: string
@@ -41,6 +52,9 @@ export function useResumeStream(
     // Pages read while catching up, held until the last so a run whose done row
     // is on a later page is still known to be finished.
     backlog: StreamChunk[]
+    // The next activation carries on from here: the gap was a reload that failed,
+    // not a stretch nothing was tailing, so what follows is still news.
+    carryOn?: boolean
   }>({ scope, after: 0, caughtUp: false, backlog: [] })
 
   useEffect(() => {
@@ -50,14 +64,20 @@ export function useResumeStream(
     }
     // Each resume is read afresh: a run that ended while nothing was tailing it
     // (its last rows never read) is an earlier answer, not this one.
-    cursorRef.current.caughtUp = false
-    cursorRef.current.backlog = []
+    if (cursorRef.current.carryOn) {
+      cursorRef.current.carryOn = false
+    } else {
+      cursorRef.current.caughtUp = false
+      cursorRef.current.backlog = []
+    }
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
-    let delay = RESUME_STREAM_POLL_MS
+    let delay = pollMs
 
     async function poll() {
       const cursor = cursorRef.current
+      // Still tailing, so no reactivation is coming to use it up.
+      cursor.carryOn = false
       if (typeof document !== "undefined" && document.hidden) {
         timer = setTimeout(poll, RESUME_STREAM_IDLE_POLL_MS)
         return
@@ -92,25 +112,27 @@ export function useResumeStream(
         cursor.caughtUp = true
         const fresh = read.filter((chunk) => !finished.has(chunk.run))
         delay = fresh.length
-          ? RESUME_STREAM_POLL_MS
-          : Math.min(delay * 2, RESUME_STREAM_IDLE_POLL_MS)
+          ? pollMs
+          : Math.min(delay * 2, Math.max(pollMs, RESUME_STREAM_IDLE_POLL_MS))
         if (fresh.length) {
           setState((prev) => {
-            let { run, text } = prev
+            let { run, text, done } = prev
             for (const chunk of fresh) {
               if (chunk.run !== run) {
                 run = chunk.run
                 text = ""
+                done = false
               }
               text += chunk.text
+              if (chunk.done) done = true
             }
-            return { ...prev, run, text }
+            return { ...prev, run, text, done }
           })
         }
       } catch {
         // A missed poll is caught up by the next; the answer also lands on reload.
         // One that keeps failing is retried less often.
-        delay = Math.min(delay * 2, RESUME_STREAM_IDLE_POLL_MS)
+        delay = Math.min(delay * 2, Math.max(pollMs, RESUME_STREAM_IDLE_POLL_MS))
       }
       if (!cancelled) timer = setTimeout(poll, delay)
     }
@@ -120,14 +142,23 @@ export function useResumeStream(
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [active, workspaceId, threadId, scope])
+  }, [active, workspaceId, threadId, scope, pollMs])
 
   const reset = useCallback(() => {
     // Read the live run from its start again: a reload in the middle of a run
     // does not carry what it streamed so far. A run already finished is skipped.
     cursorRef.current = { scope: cursorRef.current.scope, after: 0, caughtUp: false, backlog: [] }
-    setState((prev) => (prev.text === "" && prev.run === null ? prev : { ...prev, run: null, text: "" }))
+    setState((prev) =>
+      prev.text === "" && prev.run === null && !prev.done
+        ? prev
+        : { ...prev, run: null, text: "", done: false },
+    )
   }, [])
 
-  return { text: state.text, reset }
+  const acknowledgeDone = useCallback(() => {
+    cursorRef.current.carryOn = cursorRef.current.caughtUp
+    setState((prev) => (prev.done ? { ...prev, done: false } : prev))
+  }, [])
+
+  return { text: state.text, run: state.run, done: state.done, reset, acknowledgeDone }
 }

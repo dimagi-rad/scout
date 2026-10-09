@@ -56,7 +56,14 @@ function mockServer() {
     chatPosts: 0,
     /** Detail polls answer with this status instead, while set. */
     detailStatus: null as number | null,
+    /** Message loads answer with this status instead, while set. */
+    messagesStatus: null as number | null,
+    /** Message loads wait for this, while set. */
+    messagesHeld: null as Promise<void> | null,
     chatReply: "stream" as "stream" | "busy" | "network",
+    /** What the running turn has streamed for chats that did not start it. */
+    liveRows: [] as { id: number; run: string; text: string; done: boolean }[],
+    tailReads: 0,
     /** Holds this tab's own turn open until called. */
     endReply: () => {},
     finish() {
@@ -88,12 +95,21 @@ function mockServer() {
     const messages = url.match(/\/threads\/([^/]+)\/messages\//)
     if (messages) {
       server.messageLoads += 1
+      if (server.messagesHeld) await server.messagesHeld
+      if (server.messagesStatus) return Response.json({}, { status: server.messagesStatus })
       const mine = messages[1] === THREAD
       return Response.json({
         messages: mine ? (server.running ? [QUESTION] : [QUESTION, ANSWER]) : [],
         pending_request: null,
         turn_running: mine && server.running,
       })
+    }
+    const tail = url.match(/\/threads\/([^/]+)\/resume-stream\/\?after=(\d+)/)
+    if (tail) {
+      server.tailReads += 1
+      const after = Number(tail[2])
+      const rows = tail[1] === THREAD ? server.liveRows.filter((row) => row.id > after) : []
+      return Response.json({ chunks: rows, more: false })
     }
     const detail = url.match(/\/threads\/([^/]+)\/$/)
     if (detail) {
@@ -252,8 +268,80 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
     expect(server.detailPolls).toHaveLength(REMOTE_TURN_MAX_FAILURES + 1)
     server.detailStatus = null
     server.finish()
-    await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_POLL_MS))
+    await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_MAX_POLL_MS))
     expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
+  })
+
+  it("carries on tailing after a failed reload, without dropping what it missed", async () => {
+    const server = mockServer()
+    server.liveRows = [{ id: 1, run: "call-1", text: "Let me check.", done: false }]
+    renderPanel()
+    await screen.findByTestId("resume-stream")
+    let fail!: () => void
+    server.messagesHeld = new Promise((resolve) => (fail = resolve))
+    server.messagesStatus = 503
+
+    // The next call starts (a reload, held), then runs on and ends meanwhile.
+    server.liveRows.push({ id: 2, run: "call-2", text: "Visits rose ", done: false })
+    await act(() => vi.advanceTimersByTimeAsync(1_000))
+    const loads = server.messageLoads
+    server.liveRows.push({ id: 3, run: "call-2", text: "in March.", done: false })
+    server.liveRows.push({ id: 4, run: "call-2", text: "", done: true })
+    server.messagesHeld = null
+    await act(async () => fail())
+    await act(() => vi.advanceTimersByTimeAsync(2_000))
+
+    // The ended call is still news to this chat: shown in full, and its end reloads.
+    await vi.waitFor(() =>
+      expect(screen.getByTestId("resume-stream")).toHaveTextContent("Visits rose in March."),
+    )
+    await vi.waitFor(() => expect(server.messageLoads).toBeGreaterThan(loads))
+  })
+
+  it("offers Retry, and stops loading, when the reload at the turn's end fails", async () => {
+    const server = mockServer()
+    renderPanel()
+    await screen.findByTestId("chat-remote-turn")
+    server.messagesStatus = 503
+    server.finish()
+
+    await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_POLL_MS))
+    expect(await screen.findByTestId("chat-history-retry")).toBeInTheDocument()
+    const loads = server.messageLoads
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "and by month?" } })
+    expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled()
+
+    await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_MAX_POLL_MS * 3))
+    expect(server.messageLoads).toBe(loads)
+    expect(screen.queryByTestId("chat-remote-turn")).toBeNull()
+  })
+
+  it("keeps following a running turn when a reload it asked for fails", async () => {
+    const server = mockServer()
+    server.liveRows = [{ id: 1, run: "call-1", text: "Let me check.", done: false }]
+    renderPanel()
+    await screen.findByTestId("resume-stream")
+    server.messagesStatus = 503
+
+    // The first call ends at its tool; the reload for it fails.
+    server.liveRows.push({ id: 2, run: "call-1", text: "", done: true })
+    await act(() => vi.advanceTimersByTimeAsync(2_000))
+    expect(await screen.findByTestId("chat-history-retry")).toBeInTheDocument()
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "and by month?" } })
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled()
+    // Nothing was reloaded, so the streamed call stays on screen.
+    expect(screen.getByTestId("resume-stream")).toHaveTextContent("Let me check.")
+    // The end it reloaded for is spent: no reload storm while the turn runs on.
+    const loadsAfterFailure = server.messageLoads
+    await act(() => vi.advanceTimersByTimeAsync(2_000))
+    expect(server.messageLoads).toBe(loadsAfterFailure)
+
+    // Still following: the turn's end reloads it.
+    server.messagesStatus = null
+    server.finish()
+    await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_MAX_POLL_MS))
+    expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled()
   })
 
   it("leaves a background resume's own progress to show, without the placeholder", async () => {
@@ -402,5 +490,124 @@ describe("a thread whose turn runs where this tab can't follow it (#856)", () =>
 
     await vi.waitFor(() => expect(server.detailPolls).toEqual([THREAD]))
     expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
+  })
+
+  describe("its text, streamed as the server writes it", () => {
+    it("shows the text as it arrives and reloads on the turn's done row", async () => {
+      const server = mockServer()
+      server.liveRows = [{ id: 1, run: "r1", text: "Visits rose ", done: false }]
+      renderPanel()
+
+      expect(await screen.findByTestId("resume-stream")).toHaveTextContent("Visits rose")
+      expect(screen.queryByTestId("chat-remote-turn")).toBeNull()
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "and by month?" } })
+      expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled()
+
+      server.liveRows.push({ id: 2, run: "r1", text: "in March.", done: false })
+      await act(() => vi.advanceTimersByTimeAsync(1_000))
+      expect(screen.getByTestId("resume-stream")).toHaveTextContent("Visits rose in March.")
+
+      // The server writes the done row once it has let go of the thread.
+      server.finish()
+      server.liveRows.push({ id: 3, run: "r1", text: "", done: true })
+      await act(() => vi.advanceTimersByTimeAsync(1_000))
+
+      expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
+      await vi.waitFor(() => expect(screen.queryByTestId("resume-stream")).toBeNull())
+      // The done row ended the wait before the thread poll had to.
+      expect(server.detailPolls).toEqual([])
+      expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled()
+    })
+
+    it("shows the placeholder until text arrives, and skips a run that already ended", async () => {
+      const server = mockServer()
+      server.liveRows = [{ id: 1, run: "earlier", text: "An earlier answer.", done: true }]
+      renderPanel()
+
+      await screen.findByTestId("chat-remote-turn")
+      await act(() => vi.advanceTimersByTimeAsync(1_000))
+      expect(screen.queryByTestId("resume-stream")).toBeNull()
+
+      server.liveRows.push({ id: 2, run: "r2", text: "Visits rose.", done: false })
+      await act(() => vi.advanceTimersByTimeAsync(3_000))
+      expect(screen.getByTestId("resume-stream")).toHaveTextContent("Visits rose.")
+      expect(screen.queryByTestId("chat-remote-turn")).toBeNull()
+    })
+
+    it("reloads when the next model call starts, so the last one comes from history", async () => {
+      const server = mockServer()
+      server.liveRows = [{ id: 1, run: "call-1", text: "Let me check.", done: false }]
+      renderPanel()
+      expect(await screen.findByTestId("resume-stream")).toHaveTextContent("Let me check.")
+      const loads = server.messageLoads
+
+      // The server reads after=0 from the latest run, which is now the second call.
+      server.liveRows = [{ id: 2, run: "call-2", text: "Visits rose.", done: false }]
+      await act(() => vi.advanceTimersByTimeAsync(2_000))
+
+      await vi.waitFor(() => expect(server.messageLoads).toBe(loads + 1))
+      await vi.waitFor(() =>
+        expect(screen.getByTestId("resume-stream")).toHaveTextContent("Visits rose."),
+      )
+      expect(screen.getByTestId("resume-stream")).not.toHaveTextContent("Let me check.")
+      expect(screen.getByTestId("chat-input")).toBeInTheDocument()
+    })
+
+    it("reloads when a call ends at its tool, then tails the next call", async () => {
+      const server = mockServer()
+      server.liveRows = [{ id: 1, run: "call-1", text: "Let me check.", done: false }]
+      renderPanel()
+      expect(await screen.findByTestId("resume-stream")).toHaveTextContent("Let me check.")
+      const loads = server.messageLoads
+
+      // The tool starts: the first call's run ends, and its message is in the history.
+      server.liveRows.push({ id: 2, run: "call-1", text: "", done: true })
+      await act(() => vi.advanceTimersByTimeAsync(2_000))
+      await vi.waitFor(() => expect(server.messageLoads).toBe(loads + 1))
+      await vi.waitFor(() => expect(screen.queryByTestId("resume-stream")).toBeNull())
+      // Still running: the wait goes on, without showing the ended call twice.
+      expect(await screen.findByTestId("chat-remote-turn")).toBeInTheDocument()
+
+      server.liveRows.push({ id: 3, run: "call-2", text: "Visits rose.", done: false })
+      await act(() => vi.advanceTimersByTimeAsync(2_000))
+      expect(await screen.findByTestId("resume-stream")).toHaveTextContent("Visits rose.")
+      expect(screen.getByTestId("resume-stream")).not.toHaveTextContent("Let me check.")
+    })
+
+    it("tails a remote turn no faster than the server writes it", async () => {
+      const server = mockServer()
+      server.liveRows = [{ id: 1, run: "r1", text: "Visits rose ", done: false }]
+      renderPanel()
+      await screen.findByTestId("resume-stream")
+      const reads = server.tailReads
+
+      await act(() => vi.advanceTimersByTimeAsync(3_000))
+
+      expect(server.tailReads - reads).toBeLessThanOrEqual(3)
+    })
+
+    it("falls back to the thread poll when the turn wrote no done row", async () => {
+      const server = mockServer()
+      server.liveRows = [{ id: 1, run: "r1", text: "Visits rose ", done: false }]
+      renderPanel()
+      await screen.findByTestId("resume-stream")
+
+      server.finish()
+      await act(() => vi.advanceTimersByTimeAsync(REMOTE_TURN_POLL_MS))
+
+      expect(await screen.findByText("Here are the visits.")).toBeInTheDocument()
+      expect(server.detailPolls).toEqual([THREAD])
+    })
+
+    it("does not tail a thread whose turn is not running", async () => {
+      const server = mockServer()
+      server.finish()
+      renderPanel()
+      await screen.findByText("Here are the visits.")
+
+      await act(() => vi.advanceTimersByTimeAsync(5_000))
+
+      expect(server.tailReads).toBe(0)
+    })
   })
 })

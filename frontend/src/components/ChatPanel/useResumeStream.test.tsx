@@ -32,6 +32,34 @@ describe("useResumeStream", () => {
     expect(spy.mock.calls[1][0]).toContain("after=1")
   })
 
+  it("reports the run it shows as done once its last row is read, until reset", async () => {
+    serve(
+      [{ id: 1, run: "r", text: "There were ", done: false }],
+      [{ id: 2, run: "r", text: "42 visits.", done: true }],
+    )
+    const { result } = renderHook(() => useResumeStream("ws", "t", true))
+    await waitFor(() => expect(result.current.text).toBe("There were "))
+    expect(result.current.done).toBe(false)
+
+    await waitFor(() => expect(result.current.done).toBe(true), { timeout: 3000 })
+    expect(result.current.text).toBe("There were 42 visits.")
+
+    act(() => result.current.reset())
+    expect(result.current.done).toBe(false)
+  })
+
+  it("does not report an earlier run's end as done when it starts reading", async () => {
+    serve([
+      { id: 1, run: "old", text: "An earlier answer.", done: false },
+      { id: 2, run: "old", text: "", done: true },
+    ])
+    const { result } = renderHook(() => useResumeStream("ws", "t", true))
+
+    await act(() => new Promise((resolve) => setTimeout(resolve, 700)))
+    expect(result.current.done).toBe(false)
+    expect(result.current.text).toBe("")
+  })
+
   it("skips an earlier answer already finished when it starts reading", async () => {
     serve([
       { id: 1, run: "old", text: "An earlier answer.", done: false },
