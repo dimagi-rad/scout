@@ -118,12 +118,12 @@ async def _atry_onboarding_resolve_provider(user, provider, resolve_fn, provider
     Only ``me_view`` calls it, and only before onboarding completes; it is not
     a way to revalidate access for an onboarded user.
 
-    Returns the identities whose resolution persisted at least one membership. A bare "token exists and the resolver didn't raise" is NOT
-    onboarding completion: ``resolve_commcare_domains`` (and friends) can return
-    ``[]`` without raising, which previously flapped ``onboarding_complete`` to
-    ``True`` while the persisted state stayed incomplete (arch #254, 07#4). The
-    caller derives the authoritative flag from the persisted membership state,
-    not from this return value.
+    Returns the identities whose resolution did not raise. That is NOT onboarding
+    completion: ``resolve_commcare_domains`` (and friends) can return ``[]``
+    without raising, and treating that as complete once flapped
+    ``onboarding_complete`` to ``True`` while the persisted state stayed
+    incomplete (arch #254, 07#4). The caller derives the authoritative flag from
+    the persisted membership state, not from this return value.
 
     Every identity the user holds for the provider is resolved, not just one: an
     OCS token is team-scoped, so stopping at the first would leave a second
@@ -132,15 +132,12 @@ async def _atry_onboarding_resolve_provider(user, provider, resolve_fn, provider
     resolved_accounts = []
     for account, access_token in await aiter_fresh_access_tokens(user, provider):
         try:
-            resolved = await resolve_fn(
-                user, access_token, social_account=account, allow_replace=False
-            )
+            await resolve_fn(user, access_token, social_account=account, allow_replace=False)
         except Exception:
             logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)
             continue
-        if resolved:
-            resolved_accounts.append(account)
-    return resolved_accounts  # empty = "resolved nothing" so the flag can't flap
+        resolved_accounts.append(account)
+    return resolved_accounts
 
 
 async def _aonboarding_complete(user) -> bool:

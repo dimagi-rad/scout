@@ -35,6 +35,7 @@ export interface AuthSlice {
 export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set, get) => {
   let requestId = 0
   let ocsDismissals = 0
+  let dismissesInFlight = 0
   let pendingMutations = 0
   let mutationQueue = Promise.resolve()
 
@@ -64,7 +65,9 @@ export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set,
           const user = await api.get<User>("/api/auth/me/")
           if (request !== requestId) return
           // A /me read before a dismiss landed must not bring the notice back.
-          if (dismissals !== ocsDismissals) user.ocs_access_denied = null
+          if (dismissals !== ocsDismissals || dismissesInFlight > 0) {
+            user.ocs_access_denied = null
+          }
           set({ user, authStatus: "authenticated" })
         } catch (e) {
           if (request !== requestId) return
@@ -107,6 +110,7 @@ export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set,
 
       dismissOcsAccessNotice: async () => {
         ocsDismissals += 1
+        dismissesInFlight += 1
         const user = get().user
         if (user) set({ user: { ...user, ocs_access_denied: null } })
         try {
@@ -114,6 +118,8 @@ export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set,
         } catch (e) {
           // The next /me brings the notice back, so the user can dismiss it again.
           console.error("Failed to dismiss the Open Chat Studio notice", e)
+        } finally {
+          dismissesInFlight -= 1
         }
       },
     },

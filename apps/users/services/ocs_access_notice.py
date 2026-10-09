@@ -3,8 +3,9 @@
 On a first connect of a team no ``TenantConnection`` exists yet, so the denial
 cannot be recorded on one and Connected Accounts shows nothing; the user lands
 on an empty onboarding screen. The session carries the refused teams to the SPA
-via ``/api/auth/me/``, keyed by team so one team's later success clears only its
-own refusal, until the user dismisses them.
+via ``/api/auth/me/``, keyed by team. A team's refusal clears when the user
+dismisses it or the team later resolves: on its next sign-in, or on ``/me``'s
+re-resolve, which runs only before onboarding completes.
 """
 
 from __future__ import annotations

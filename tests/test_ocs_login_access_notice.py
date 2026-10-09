@@ -132,7 +132,7 @@ class TestMeReportsTheNotice:
         assert client.post("/api/auth/ocs/access-notice/dismiss/").status_code == 200
         assert client.get("/api/auth/me/").json()["ocs_access_denied"] is None
 
-    def test_onboarding_resolve_clears_a_team_granted_since(self, client, user):
+    def _me_resolving_acme(self, client, user, resolver):
         client.force_login(user)
         self._refuse(client, ACME, BETA)
         cache.delete(me_onboarding_cache_key(user))
@@ -142,12 +142,21 @@ class TestMeReportsTheNotice:
 
         with (
             patch.object(auth_views, "aiter_fresh_access_tokens", side_effect=tokens),
-            patch.object(auth_views, "resolve_ocs_chatbots", AsyncMock(return_value=[object()])),
+            patch.object(auth_views, "resolve_ocs_chatbots", resolver),
         ):
-            denied = client.get("/api/auth/me/").json()["ocs_access_denied"]
+            return client.get("/api/auth/me/").json()["ocs_access_denied"]
+
+    # [] is a granted team with no chatbots yet: access is no longer refused.
+    @pytest.mark.parametrize("chatbots", [[object()], []])
+    def test_onboarding_resolve_clears_a_team_granted_since(self, client, user, chatbots):
+        denied = self._me_resolving_acme(client, user, AsyncMock(return_value=chatbots))
 
         assert denied == {"teams": [BETA]}
         assert client.session[ocs_access_notice.SESSION_KEY] == {"beta": BETA}
+
+    def test_onboarding_resolve_still_refused_keeps_it(self, client, user):
+        denied = self._me_resolving_acme(client, user, _refused())
+        assert denied == {"teams": [ACME, BETA]}
 
     def test_dismiss_requires_login(self, client):
         assert client.post("/api/auth/ocs/access-notice/dismiss/").status_code == 401
