@@ -35,6 +35,7 @@ from apps.semantic.models import (
     SemanticField,
     SemanticRelationship,
 )
+from apps.semantic.services.cube import cube_dimension_type
 from apps.semantic.services.field_sql import (
     DimensionSQLValidationError,
     MeasureSQLValidationError,
@@ -42,6 +43,12 @@ from apps.semantic.services.field_sql import (
     compile_measure_filter_sql,
     compile_measure_sql,
     dataset_column_names,
+)
+
+# Cube accepts only these named formats on a string dimension; any other format
+# (number_1, a d3 spec) fails validation of the whole workspace schema (#882).
+_STRING_DIMENSION_FORMATS = frozenset(
+    {"imageUrl", "link", "currency", "percent", "number", "id", "object"}
 )
 
 _DIRECT_MEMBER_DIVISION_RE = re.compile(
@@ -356,6 +363,8 @@ def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> li
                 "Choose dimension, time_dimension, or measure.",
             )
         ]
+    if field_type == "dimension":
+        out.extend(_dimension_format_diagnostics(change, fields))
     if field_type == "measure":
         if measure_type not in MEASURE_TYPES:
             out.append(
@@ -428,6 +437,25 @@ def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> li
             )
         )
     return out
+
+
+def _dimension_format_diagnostics(change, fields: dict[str, Any]) -> list[dict]:
+    display_format = str(fields.get("format") or "").strip()
+    if not display_format or display_format in _STRING_DIMENSION_FORMATS:
+        return []
+    data_type = str(fields.get("data_type") or "")
+    if cube_dimension_type(data_type) == "number":
+        return []
+    return [
+        _diagnostic(
+            "INVALID_FORMAT",
+            change,
+            "format",
+            f"format '{display_format}' only applies to numeric dimensions, but data_type "
+            f"'{data_type or '(empty)'}' publishes as text. Set data_type to number, or use "
+            "format number, percent, or currency.",
+        )
+    ]
 
 
 def _measure_filter_diagnostics(change, filters: Any, columns: set[str]) -> list[dict]:

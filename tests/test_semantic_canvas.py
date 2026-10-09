@@ -671,6 +671,33 @@ def test_number_data_type_dimension_publishes_as_cube_number(
     assert dimension["format"] == "number_1"
 
 
+@pytest.mark.parametrize(
+    ("data_type", "display_format", "blocked"),
+    [
+        ("text", "number_1", True),
+        ("", ".1f", True),
+        ("text", "percent", False),
+        ("number", "number_1", False),
+        ("double precision", ".1f", False),
+    ],
+)
+def test_numeric_format_on_text_dimension_is_blocked_before_commit(
+    canvas, user, data_type, display_format, blocked
+):
+    result = _create_dimension(
+        canvas,
+        user,
+        name="form_minutes",
+        data_type=data_type,
+        format=display_format,
+        sql=_FORM_MINUTES_SQL,
+    )
+
+    codes = [d["code"] for d in result["diagnostics"]]
+    assert ("INVALID_FORMAT" in codes) is blocked
+    assert result["can_commit"] is not blocked
+
+
 def test_unreachable_validator_after_commit_warns_without_an_error(
     canvas, semantic_model, user, monkeypatch, caplog
 ):
