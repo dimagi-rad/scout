@@ -230,8 +230,10 @@ database). It was shut down and its configuration removed (#808). The
 containers and `scout_staging_shared` network were removed from the host, on
 2026-10-09. A worker still labelled `destination=staging` is now an unknown
 label: the drain helper fails closed on it, and the disk guard never prunes it.
-The only remaining trace is the `UserData` line that recreates the staging
-network (see [Infrastructure Changes](#infrastructure-changes)).
+The `UserData` line that recreates the staging network remains (see
+[Infrastructure Changes](#infrastructure-changes), #888). PostgreSQL roles are
+cluster-wide, so roles staging created may outlive its database;
+`sweep_orphan_view_roles` clears the workspace view (`ws_*_ro`/`ws_*_dbt`) ones.
 
 ## Migration-safe backend handoff
 

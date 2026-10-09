@@ -8,7 +8,7 @@ const IDENTIFIER_RE = /^[a-z][a-z0-9_]*$/;
 const PUBLICATION_REVISION = Symbol('scoutPublicationRevision');
 const CATALOG_QUERY_TIMEOUT_MS = 5000;
 const DRIVER_STATEMENT_TIMEOUT_MS = 30000;
-// Every service shares one RDS instance that has already run out of
+// Prod's services share one RDS instance that has already run out of
 // connections, so every pool here is capped and sheds idle connections quickly.
 // Cube's Postgres query queue runs two queries per orchestrator at a time.
 const DRIVER_POOL_MAX = 2;

@@ -66,7 +66,8 @@ grants the `SELECT`, so it needs no new credential or deploy setting.
 
 Cube deploys before the API runs migrations, so on the first deploy with this
 change the grant is briefly missing. The role is cluster-wide and another
-database on the instance may have created it already, so Cube checks that the role can read this database's
+database on the instance may have created it already, so Cube checks that the
+role can read this database's
 `semantic_cubeschema`, not just that it exists. Until it can, Cube reads the
 catalog as the owner, as before, re-checking every 60 seconds (5 seconds after a
 failed check) and logging a warning. Once it can, every catalog read uses the

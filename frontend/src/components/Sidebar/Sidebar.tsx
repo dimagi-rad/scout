@@ -38,7 +38,8 @@ const ACCESS_DENIAL_SUMMARY: Record<AccessDenialReason, string> = {
 
 // Focus and visibilitychange both fire on a tab switch, and alt-tabbing fires focus often.
 const DOMAIN_REVALIDATE_MIN_INTERVAL_MS = 15_000
-// Catches a grant while you stay on the tab. Slow on purpose: every service shares one small RDS instance.
+// Catches a grant while you stay on the tab. Slow on purpose: the database's
+// connection budget is shared with every other prod service.
 const DOMAIN_REVALIDATE_POLL_MS = 60_000
 // While a listed thread's turn runs, refetch so its spinner clears when it ends; a
 // turn's own end refetches too, but can land just before the server lets go of it.
