@@ -198,6 +198,45 @@ async def test_commcare_complete_pagination_follows_meta_next(settings):
 
 
 @pytest.mark.asyncio
+async def test_commcare_unpaginated_listing_is_complete(settings):
+    # HQ's DoesNothingPaginator: total_count and no next key (#880).
+    payload = {
+        "objects": [
+            {"domain_name": "one", "project_name": "One"},
+            {"domain_name": "two", "project_name": "Two"},
+        ],
+        "meta": {"total_count": 2},
+    }
+
+    result, requests = await _verify(
+        _request("commcare"), [_response(payload=payload)], settings=settings
+    )
+
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert result.external_ids == frozenset({"one", "two"})
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_commcare_listing_short_of_its_total_count_is_indeterminate(settings, caplog):
+    payload = {
+        "objects": [{"domain_name": "one", "project_name": "One"}],
+        "meta": {"total_count": 2},
+    }
+
+    with caplog.at_level("WARNING", logger="apps.users.services.access_verification_providers"):
+        result, _ = await _verify(
+            _request("commcare"), [_response(payload=payload)], settings=settings
+        )
+
+    assert result.outcome == VerificationOutcome.INDETERMINATE
+    assert any(
+        "indeterminate" in r.getMessage() and "cause=next_undeclared" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_empty_complete_response_is_success(settings):
     settings.OCS_URL = "https://ocs.example"
     result, _ = await _verify(
@@ -601,7 +640,7 @@ async def test_exact_row_bound_is_complete(settings):
 _PROVIDERS_LOGGER = "apps.users.services.access_verification_providers"
 
 
-def _unavailable_records(caplog):
+def _unconfirmed_records(caplog):
     return [
         record
         for record in caplog.records
@@ -630,7 +669,7 @@ async def test_unavailable_logs_cause_at_warning_without_secrets(
     result, _ = await _verify(request, responses, settings=settings, deadline=deadline)
 
     assert result.outcome == VerificationOutcome.UNAVAILABLE
-    [record] = _unavailable_records(caplog)
+    [record] = _unconfirmed_records(caplog)
     assert record.levelname == "WARNING"
     message = record.getMessage()
     assert "provider=ocs" in message
@@ -664,7 +703,7 @@ async def test_unavailable_log_reports_request_timeout_and_elapsed_ms(settings, 
     )
 
     assert result.outcome == VerificationOutcome.UNAVAILABLE
-    [record] = _unavailable_records(caplog)
+    [record] = _unconfirmed_records(caplog)
     message = record.getMessage()
     assert "cause=request_timeout" in message
     assert "page=1" in message
@@ -690,7 +729,7 @@ async def test_unavailable_log_reports_limiter_wait_timeout(settings, caplog):
         limiter.release()
 
     assert result.outcome == VerificationOutcome.UNAVAILABLE
-    [record] = _unavailable_records(caplog)
+    [record] = _unconfirmed_records(caplog)
     assert "cause=limiter_wait_timeout" in record.getMessage()
 
 
@@ -704,7 +743,9 @@ async def test_non_unavailable_outcomes_do_not_log_unavailable(settings, caplog)
 
     assert rejected.outcome != VerificationOutcome.UNAVAILABLE
     assert indeterminate.outcome != VerificationOutcome.UNAVAILABLE
-    assert _unavailable_records(caplog) == []
+    [record] = _unconfirmed_records(caplog)
+    assert record.getMessage().startswith("Upstream access verification indeterminate")
+    assert "status=403" in record.getMessage()
 
 
 @pytest.mark.asyncio
@@ -733,7 +774,7 @@ async def test_cancellation_by_the_caller_is_logged_and_propagates(settings, cap
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    [record] = _unavailable_records(caplog)
+    [record] = _unconfirmed_records(caplog)
     assert record.getMessage().startswith("Upstream access verification cancelled")
     assert "cause=cancelled" in record.getMessage()
     assert "page=1" in record.getMessage()
@@ -761,7 +802,7 @@ async def test_unavailable_log_reports_a_response_past_the_deadline(settings, ca
     )
 
     assert result.outcome == VerificationOutcome.UNAVAILABLE
-    [record] = _unavailable_records(caplog)
+    [record] = _unconfirmed_records(caplog)
     message = record.getMessage()
     assert "cause=deadline_after_response" in message
     assert "status=200" in message

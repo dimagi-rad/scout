@@ -126,7 +126,7 @@ def _provider_request(snapshot, settings):
         decode_page = connect_listing.decode_page
     else:
         return None
-    return None if request is None else (provider, request, decode_page)
+    return None if request is None else (request, decode_page)
 
 
 def _connect_light_ids(snapshot, external_ids) -> tuple[str, ...] | None:
@@ -171,11 +171,12 @@ async def _verify_connect_opportunities(
         try:
             request = connect_listing.verify_subset_request(listing, external_id)
         except UnsafeProviderURL:
-            return settle(
-                index,
-                lambda: ProviderVerificationResult.indeterminate(_INDETERMINATE),
-                cause="unsafe_url",
-            )
+
+            def unsafe():
+                log("light_unsafe_url", outcome="indeterminate")
+                return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+
+            return settle(index, unsafe, cause="unsafe_url")
         # A share of what is left, so one slow opportunity cannot starve the rest,
         # but never so small that an ordinary slow answer is cut off. On the 10s
         # interactive budget the floor wins, so allocation is effectively greedy.
@@ -230,8 +231,7 @@ async def _verify_connect_opportunities(
         if status_result is not None:
 
             def failed(result=status_result, status=response.status_code):
-                if result.outcome == VerificationOutcome.UNAVAILABLE:
-                    log("light_http_status", status=status)
+                log("light_http_status", status=status, outcome=result.outcome.value)
                 return result
 
             return settle(index, failed, cause="light_http_status", status=response.status_code)
@@ -284,11 +284,7 @@ async def verify_provider(
         deadline if deadline is not None else float("inf"),
         clock() + PROVIDER_BUDGET_SECONDS,
     )
-    request = _provider_request(snapshot, settings)
-    if request is None:
-        return ProviderVerificationResult.indeterminate(_INDETERMINATE)
-    provider, list_request, decode_page = request
-    light_ids = _connect_light_ids(snapshot, external_ids)
+    provider = canonical_provider(snapshot.observation.provider)
 
     def log(cause, *, page=0, status=None, outcome="unavailable"):
         _log_unconfirmed(
@@ -307,10 +303,22 @@ async def verify_provider(
         log(cause, page=page, status=status)
         return ProviderVerificationResult.unavailable(_UNAVAILABLE)
 
+    # Logged because an indeterminate answer denies the workspace and the user cannot
+    # retry past it; #880 left no trace while these returns were silent.
+    def indeterminate(cause, *, page=0, status=None):
+        log(cause, page=page, status=status, outcome="indeterminate")
+        return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+
+    request = _provider_request(snapshot, settings)
+    if request is None:
+        return indeterminate("no_request")
+    list_request, decode_page = request
+    light_ids = _connect_light_ids(snapshot, external_ids)
+
     try:
         ProviderURLPolicy(list_request.url)
     except UnsafeProviderURL:
-        return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+        return indeterminate("unsafe_url")
 
     remaining = deadline - clock()
     if remaining <= 0:
@@ -362,15 +370,15 @@ async def verify_provider(
                 async with aclosing(pages):
                     async for listed in pages:
                         if not listed.next_declared:
-                            return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+                            return indeterminate("next_undeclared", page=page)
                         total_rows += len(listed.tenants)
                         if total_rows > MAX_ROWS:
-                            return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+                            return indeterminate("row_cap", page=page)
                         for tenant in listed.tenants:
                             name = seen_rows.setdefault(tenant.external_id, tenant.canonical_name)
                             if name != tenant.canonical_name:
                                 # One id under two names: the listing cannot be trusted.
-                                return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+                                return indeterminate("conflicting_names", page=page)
                         page += 1
             except ListingDeadlineExceeded as error:
                 if error.status_code is None:
@@ -394,12 +402,20 @@ async def verify_provider(
                         if _names_invalid_token(error.response)
                         else "no token error",
                     )
-                if status_result.outcome == VerificationOutcome.UNAVAILABLE:
-                    log("http_status", page=error.page, status=error.status_code)
+                if status_result.outcome in (
+                    VerificationOutcome.UNAVAILABLE,
+                    VerificationOutcome.INDETERMINATE,
+                ):
+                    log(
+                        "http_status",
+                        page=error.page,
+                        status=error.status_code,
+                        outcome=status_result.outcome.value,
+                    )
                 return status_result
-            except TenantListError:
+            except TenantListError as error:
                 # Off-origin next, a cycle, the page cap or a malformed page.
-                return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+                return indeterminate(f"list_error:{type(error).__name__}", page=error.page or page)
             return ProviderVerificationResult.complete(seen_rows)
     except TimeoutError:
         # Before the permit is held this is the shared limiter wait; after, a stray
