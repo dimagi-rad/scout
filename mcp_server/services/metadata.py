@@ -128,8 +128,8 @@ async def pipeline_list_tables(
 
     for model_name in pipeline_config.dbt_models:
         if live_table_names and model_name not in live_table_names:
-            # If we were able to query information_schema, only surface dbt
-            # models that physically exist; otherwise list them optimistically.
+            # Only surface dbt models that physically exist; with no live set
+            # (MANAGED_DATABASE_URL unset) they are listed optimistically.
             continue
         tables.append(
             {
