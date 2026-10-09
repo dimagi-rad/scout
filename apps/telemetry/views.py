@@ -40,7 +40,7 @@ class UsageDashboardView(APIView):
         days = min(WINDOWS, key=lambda window: abs(window - asked))
         try:
             data = cache.get_or_set(
-                f"usage_dashboard:v1:{days}", lambda: build_dashboard(days=days), CACHE_SECONDS
+                f"usage_dashboard:v2:{days}", lambda: build_dashboard(days=days), CACHE_SECONDS
             )
         except OperationalError:
             # Most often the statement timeout cancelling a query on a busy database.
