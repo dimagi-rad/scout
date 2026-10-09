@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react"
+import { useState, useEffect, useMemo, useCallback } from "react"
 import { Link, useLocation, useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
@@ -17,14 +17,18 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { AlertTriangle, Check, RefreshCw } from "lucide-react"
-import {
-  SearchFilterBar,
-  type FilterGroup,
-} from "@/components/SearchFilterBar/SearchFilterBar"
+import { FacetFilterBar } from "@/components/FacetFilterBar/FacetFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
 import { CONNECTIONS_PATH } from "@/lib/routes"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
+import { useFacetedList } from "@/lib/filters/useFacetedList"
+import {
+  TENANT_FACETS,
+  normalizeTenantSearch,
+  sourceFiltersStorageKey,
+  tenantMatchesSearch,
+} from "@/lib/filters/tenantFacets"
 
 interface Props {
   onClose: () => void
@@ -52,7 +56,6 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const [refreshError, setRefreshError] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState("")
-  const [providerFilter, setProviderFilter] = useState<string | null>(null)
   // Set once the user opts to "Create anyway" past the duplicate warning.
   const [duplicateAcknowledged, setDuplicateAcknowledged] = useState(false)
 
@@ -90,13 +93,13 @@ export function CreateWorkspaceModal({ onClose }: Props) {
       if (!isCurrentAccount()) return
       setSources(fresh)
       setSourcesError(null)
-      // A refresh can revoke sources; a selection or filter that no longer exists
-      // would be unfixable because its row and chip are gone. Pruning changes the
-      // selected set, which invalidates a prior "create anyway" (see toggleSource).
+      // A refresh can revoke sources; a selection that no longer exists would be
+      // unfixable because its row is gone. Pruning changes the selected set, which
+      // invalidates a prior "create anyway" (see toggleSource). Facet values that
+      // vanish are dropped by useFacetedList.
       const freshIds = new Set(fresh.map((t) => t.tenant_uuid))
       setSelected((prev) => new Set([...prev].filter((id) => freshIds.has(id))))
       setDuplicateAcknowledged(false)
-      setProviderFilter((prev) => (fresh.some((t) => t.provider === prev) ? prev : null))
     } catch (err) {
       if (!isCurrentAccount()) return
       setRefreshError(err instanceof ApiError ? err.message : "Failed to refresh data sources")
@@ -110,26 +113,6 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   useEffect(() => {
     if (domainsStatus === "idle") void fetchDomains()
   }, [domainsStatus, fetchDomains])
-
-  const providerFilterGroups = useMemo((): FilterGroup[] => {
-    const counts = new Map<string, number>()
-    for (const t of sources) {
-      counts.set(t.provider, (counts.get(t.provider) ?? 0) + 1)
-    }
-    if (counts.size <= 1) return []
-    return [
-      {
-        name: "provider",
-        options: [...counts.entries()]
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([value, count]) => ({
-            value,
-            label: getProviderMeta(value).label,
-            count,
-          })),
-      },
-    ]
-  }, [sources])
 
   // A workspace is an exact duplicate when its set of tenant ids matches the
   // currently selected set, order-independent. Only meaningful for a non-empty
@@ -146,19 +129,29 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     )
   }, [domains, selected])
 
-  const normalizedSearch = search.trim().replace(/^#/, "").toLowerCase()
+  const normalizedSearch = normalizeTenantSearch(search)
+  const matchesSearch = useCallback(
+    (t: UserTenant) => tenantMatchesSearch(t, normalizedSearch),
+    [normalizedSearch],
+  )
   const sortedSources = useMemo(() => [...sources].sort(compareUserTenantsByName), [sources])
-  const filteredSources = sortedSources.filter((t) => {
-    if (providerFilter && t.provider !== providerFilter) return false
-    if (
-      normalizedSearch &&
-      !t.tenant_name.toLowerCase().includes(normalizedSearch) &&
-      !t.tenant_id.toLowerCase().includes(normalizedSearch)
-    ) {
-      return false
-    }
-    return true
+  const facetList = useFacetedList({
+    items: sortedSources,
+    facets: TENANT_FACETS,
+    storageKey: sourceFiltersStorageKey(userId),
+    predicate: matchesSearch,
   })
+  const filteredSources = facetList.filtered
+  // Filters only narrow the list; they never change the selection.
+  const hiddenSelectedCount = useMemo(() => {
+    const shown = new Set(filteredSources.map((t) => t.tenant_uuid))
+    return [...selected].filter((id) => !shown.has(id)).length
+  }, [filteredSources, selected])
+
+  function clearFilters() {
+    setSearch("")
+    facetList.clearFacets()
+  }
 
   function toggleSource(uuid: string) {
     // Changing the selection invalidates a prior "create anyway" decision: the
@@ -228,9 +221,16 @@ export function CreateWorkspaceModal({ onClose }: Props) {
               <div className="mb-1 flex items-center justify-between">
                 <Label>Data sources</Label>
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground">
+                  <span
+                    className="text-xs text-muted-foreground"
+                    data-testid="create-sources-selected"
+                  >
                     {selected.size > 0
-                      ? `${selected.size} selected`
+                      ? `${selected.size} selected${
+                          hiddenSelectedCount > 0
+                            ? ` · ${hiddenSelectedCount} hidden by filters`
+                            : ""
+                        }`
                       : "Required"}
                   </span>
                   <Button
@@ -299,23 +299,37 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                 </p>
               ) : (
                 <div className="space-y-3">
-                  <SearchFilterBar
+                  <FacetFilterBar
+                    testIdPrefix="create-sources-filter"
                     search={search}
                     onSearchChange={setSearch}
-                    placeholder="Search by name or opportunity ID…"
-                    filters={providerFilterGroups}
-                    activeFilters={{ provider: providerFilter }}
-                    onFilterChange={(_group, value) => setProviderFilter(value)}
-                    orientation="stacked"
+                    searchPlaceholder="Search by name or opportunity ID…"
+                    facets={facetList.facets}
+                    options={facetList.options}
+                    selection={facetList.selection}
+                    onFacetChange={facetList.setFacet}
+                    onClear={clearFilters}
+                    shownCount={filteredSources.length}
+                    totalCount={sources.length}
                   />
                   <div
                     className="max-h-56 space-y-1 overflow-y-auto rounded-md border p-1"
                     data-testid="create-sources-list"
                   >
                     {filteredSources.length === 0 ? (
-                      <p className="py-3 text-center text-sm text-muted-foreground">
-                        No data sources match your filters.
-                      </p>
+                      <div className="py-3 text-center text-sm text-muted-foreground">
+                        <p>No data sources match your filters.</p>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="mt-2"
+                          onClick={clearFilters}
+                          data-testid="create-sources-filter-empty-clear"
+                        >
+                          Clear filters
+                        </Button>
+                      </div>
                     ) : (
                       filteredSources.map((t) => {
                         const isSelected = selected.has(t.tenant_uuid)

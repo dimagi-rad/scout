@@ -23,6 +23,7 @@ vi.mock("@/store/store", () => {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  localStorage.clear()
   vi.mocked(getUserTenantsCached).mockResolvedValue([
     { id: "membership-a", tenant_uuid: "tenant-a", provider: "commcare", tenant_id: "a", tenant_name: "Alpha", last_selected_at: null },
     { id: "membership-b", tenant_uuid: "tenant-b", provider: "ocs", tenant_id: "b", tenant_name: "Beta", last_selected_at: null },
@@ -36,21 +37,119 @@ async function openModal() {
   const user = userEvent.setup()
   const onClose = vi.fn()
   render(<MemoryRouter><CreateWorkspaceModal onClose={onClose} /></MemoryRouter>)
-  await screen.findByTestId("create-source-tenant-a")
+  await screen.findByTestId("create-sources-list")
   await user.type(screen.getByLabelText("Name"), "Analysis")
   return { user, onClose }
 }
 
-it("filters across providers and All without creating a workspace", async () => {
+const F = "create-sources-filter"
+const STORAGE_KEY = "scout:source-filters:v1:user"
+
+function connect(id: string, name: string, attributes: Record<string, unknown>) {
+  return {
+    id: `membership-${id}`, tenant_uuid: `tenant-${id}`, provider: "commcare_connect",
+    tenant_id: id, tenant_name: name, last_selected_at: null, attributes,
+  }
+}
+
+const mixedSources = [
+  { id: "membership-a", tenant_uuid: "tenant-a", provider: "commcare", tenant_id: "a", tenant_name: "Alpha", last_selected_at: null, attributes: {} },
+  connect("c1", "Kenya Live", { is_active: true, is_test: false, organization: "dimagi", organization_name: "Dimagi" }),
+  connect("c2", "Kenya Old", { is_active: false, is_test: false, organization: "dimagi", organization_name: "Dimagi" }),
+  connect("c3", "Ghana Test", { is_active: true, is_test: true, organization: "acme", organization_name: "Acme" }),
+]
+
+function shown() {
+  return [...screen.getByTestId("create-sources-list").querySelectorAll("[data-testid^='create-source-']")]
+    .map((el) => el.getAttribute("data-testid")!.replace("create-source-tenant-", ""))
+}
+
+it("filters by provider through the facet popover without creating a workspace", async () => {
   const { user } = await openModal()
-  await user.click(screen.getByTestId("filter-provider-commcare"))
-  expect(screen.queryByTestId("create-source-tenant-b")).not.toBeInTheDocument()
-  await user.click(screen.getByTestId("filter-provider-ocs"))
-  expect(screen.queryByTestId("create-source-tenant-a")).not.toBeInTheDocument()
-  await user.click(screen.getByTestId("filter-provider-all"))
-  expect(screen.getByTestId("create-source-tenant-a")).toBeInTheDocument()
-  expect(screen.getByTestId("create-source-tenant-b")).toBeInTheDocument()
+  await user.click(screen.getByTestId(`${F}-facet-provider`))
+  await user.click(await screen.findByTestId(`${F}-facet-provider-option-commcare`))
+  expect(shown()).toEqual(["a"])
+  expect(screen.getByTestId(`${F}-facet-provider`)).toHaveTextContent("Provider: CommCare")
+  await user.click(screen.getByTestId(`${F}-facet-provider-option-ocs`))
+  expect(shown()).toEqual(["a", "b"])
+  expect(screen.getByTestId(`${F}-facet-provider`)).toHaveTextContent("Provider: 2")
+  await user.click(screen.getByTestId(`${F}-facet-provider-only-ocs`))
+  expect(shown()).toEqual(["b"])
+  expect(screen.getByTestId(`${F}-count`)).toHaveTextContent("Showing 1 of 2")
+  await user.click(screen.getByTestId(`${F}-clear`))
+  expect(shown()).toEqual(["a", "b"])
   expect(workspaceApi.create).not.toHaveBeenCalled()
+})
+
+it("does not offer Connect facets when no Connect source is present", async () => {
+  await openModal()
+  expect(screen.getByTestId(`${F}-facet-provider`)).toBeInTheDocument()
+  expect(screen.queryByTestId(`${F}-facet-status`)).toBeNull()
+})
+
+it("combines Connect facets with the search, never hiding CommCare rows", async () => {
+  vi.mocked(getUserTenantsCached).mockResolvedValue(mixedSources)
+  const { user } = await openModal()
+
+  await user.click(screen.getByTestId(`${F}-facet-status`))
+  await user.click(await screen.findByTestId(`${F}-facet-status-option-active`))
+  expect(shown()).toEqual(["a", "c3", "c1"])
+  // Counts reflect the other filters: with Status=Active, Dimagi has one row left.
+  await user.click(screen.getByTestId(`${F}-facet-organization`))
+  expect(await screen.findByTestId(`${F}-facet-organization-popover`)).toHaveTextContent(/Dimagi.*1/)
+
+  await user.type(screen.getByTestId("search-filter-input"), "kenya")
+  expect(shown()).toEqual(["c1"])
+  expect(screen.getByTestId(`${F}-count`)).toHaveTextContent("Showing 1 of 4")
+})
+
+it("keeps a selection that a filter hides, and says so", async () => {
+  vi.mocked(getUserTenantsCached).mockResolvedValue(mixedSources)
+  const { user, onClose } = await openModal()
+  await user.click(screen.getByTestId("create-source-tenant-c2"))
+  await user.click(screen.getByTestId("create-source-tenant-c1"))
+
+  await user.click(screen.getByTestId(`${F}-facet-status`))
+  await user.click(await screen.findByTestId(`${F}-facet-status-only-active`))
+
+  expect(shown()).not.toContain("c2")
+  expect(screen.getByTestId("create-sources-selected")).toHaveTextContent(
+    "2 selected · 1 hidden by filters",
+  )
+  await user.keyboard("{Escape}")
+  await user.click(screen.getByTestId("create-workspace-submit"))
+  await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+  expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", ["tenant-c2", "tenant-c1"])
+})
+
+it("restores persisted facets and offers Clear filters when nothing matches", async () => {
+  vi.mocked(getUserTenantsCached).mockResolvedValue(mixedSources)
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ type: ["test"], provider: ["commcare_connect"] }))
+  const { user } = await openModal()
+
+  expect(shown()).toEqual(["c3"])
+  expect(screen.getByTestId(`${F}-facet-type`)).toHaveTextContent("Type: Test")
+
+  await user.type(screen.getByTestId("search-filter-input"), "kenya")
+  expect(screen.getByTestId("create-sources-list")).toHaveTextContent("No data sources match")
+  await user.click(screen.getByTestId(`${F}-empty-clear`))
+
+  expect(shown()).toEqual(["a", "c3", "c1", "c2"])
+  expect(screen.getByTestId("search-filter-input")).toHaveValue("")
+  expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
+})
+
+it("drops a persisted facet value the refreshed list no longer has", async () => {
+  vi.mocked(getUserTenantsCached).mockResolvedValue(mixedSources)
+  vi.mocked(refreshUserTenants).mockResolvedValue(mixedSources.filter((t) => t.tenant_id !== "c3"))
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ organization: ["acme"] }))
+  const { user } = await openModal()
+  expect(shown()).toEqual(["a", "c3"])
+
+  await user.click(screen.getByTestId("create-sources-refresh"))
+
+  await waitFor(() => expect(shown()).toEqual(["a", "c1", "c2"]))
+  expect(screen.getByTestId(`${F}-facet-organization`)).toHaveTextContent(/^Org$/)
 })
 
 it("searches on Enter without creating a workspace", async () => {
