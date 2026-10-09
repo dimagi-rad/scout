@@ -149,10 +149,10 @@ async def _live_tables_in_schema(schema_name: str) -> set[str]:
     """Return the set of table names that actually exist in ``schema_name``.
 
     Used by ``pipeline_list_tables`` to reconcile the catalog with reality.
-    Returns an empty set on other query failures (treated as "nothing live"), so a
-    transient DB error surfaces as an empty list rather than phantom rows. A full
-    connection limit is raised as ``CapacityExhausted`` instead: an empty set would
-    tell the agent the tables are gone when the database merely refused us.
+    Query failures propagate (a full connection limit as ``CapacityExhausted``):
+    an empty set would drop every source table, so the semantic build reported
+    "No queryable datasets" and list_tables told the agent to re-materialize
+    when the database had merely failed to answer.
 
     Builds ``connection_params`` from ``MANAGED_DATABASE_URL`` the same way
     ``load_tenant_context``/``load_workspace_context`` do. Constructing the
@@ -185,12 +185,7 @@ async def _live_tables_in_schema(schema_name: str) -> set[str]:
         )
     except Exception as exc:
         reraise_if_capacity(exc)
-        logger.warning(
-            "Could not enumerate live tables in schema %s; catalog will be empty",
-            schema_name,
-            exc_info=True,
-        )
-        return set()
+        raise
     return {row[0] for row in (result.get("rows") or [])}
 
 

@@ -1,4 +1,4 @@
-"""A full DB connection limit must surface as "busy", never as an empty catalog (#757)."""
+"""A failed live-table probe must raise, never empty the catalog (#757: busy when full)."""
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -78,13 +78,31 @@ async def test_the_live_table_probe_raises_capacity_instead_of_returning_an_empt
 
 @pytest.mark.asyncio
 @override_settings(MANAGED_DATABASE_URL=MANAGED_URL)
-async def test_the_live_table_probe_keeps_treating_other_failures_as_nothing_live():
-    with patch.object(
-        metadata,
-        "_execute_async_parameterized",
-        AsyncMock(side_effect=psycopg.OperationalError("connection refused")),
+async def test_the_live_table_probe_raises_other_failures_instead_of_returning_an_empty_set():
+    with (
+        patch.object(
+            metadata,
+            "_execute_async_parameterized",
+            AsyncMock(side_effect=psycopg.OperationalError("connection refused")),
+        ),
+        pytest.raises(psycopg.OperationalError),
     ):
-        assert await _live_tables_in_schema("served") == set()
+        await _live_tables_in_schema("served")
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@override_settings(MANAGED_DATABASE_URL=MANAGED_URL)
+async def test_the_catalog_is_never_empty_when_listing_live_tables_failed(served_schema):
+    with (
+        patch.object(
+            metadata,
+            "_execute_async_parameterized",
+            AsyncMock(side_effect=psycopg.OperationalError("connection refused")),
+        ),
+        pytest.raises(psycopg.OperationalError),
+    ):
+        await pipeline_list_tables(served_schema, PIPELINE)
 
 
 @pytest.mark.asyncio
