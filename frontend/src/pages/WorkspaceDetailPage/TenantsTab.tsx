@@ -27,9 +27,9 @@ import { useFacetedList } from "@/lib/filters/useFacetedList"
 import {
   TENANT_FACETS,
   normalizeTenantSearch,
-  sourceFiltersStorageKey,
   tenantMatchesSearch,
 } from "@/lib/filters/tenantFacets"
+import { sourceFiltersStorageKey } from "@/lib/filters/sourceFilterStorage"
 
 type AvailableStatus = "idle" | "loading" | "ready" | "error"
 

@@ -3,29 +3,11 @@ import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { localIsoDate } from "@/lib/localDate"
 
 import type { FacetDef } from "./facets"
-import { clearStoredFacetSelections } from "./facetStorage"
 
 export const CONNECT_PROVIDER = "commcare_connect"
 export const UNKNOWN = "unknown"
 // A colon cannot occur in an org slug or a program id, so this never collides with one.
 export const NONE = ":none"
-
-export const SOURCE_FILTERS_STORAGE_PREFIX = "scout:source-filters:v1:"
-
-/** Facet selections are shared by the create-workspace and add-source pickers. */
-export function sourceFiltersStorageKey(userId: string | undefined): string | null {
-  return userId ? `${SOURCE_FILTERS_STORAGE_PREFIX}${userId}` : null
-}
-
-/** On logout or account switch, mirroring the composer drafts. */
-export function clearAllSourceFilters(): void {
-  clearStoredFacetSelections(SOURCE_FILTERS_STORAGE_PREFIX)
-}
-
-/** Selections another account left behind (e.g. a session that expired while closed). */
-export function clearOtherUsersSourceFilters(userId: string): void {
-  clearStoredFacetSelections(SOURCE_FILTERS_STORAGE_PREFIX, sourceFiltersStorageKey(userId))
-}
 
 function connectAttributes(t: UserTenant): Record<string, unknown> | undefined {
   if (t.provider !== CONNECT_PROVIDER) return undefined
@@ -46,10 +28,12 @@ function endDateHasPassed(value: unknown, today: string): boolean {
 }
 
 // getValue runs per row per facet on every keystroke; format the day once per minute.
-let cachedToday = { day: "", until: 0 }
+// Keyed by the minute, so a clock moved backwards (or a faked one in tests) is honoured.
+let cachedToday = { minute: Number.NaN, day: "" }
 function currentDay(): string {
   const now = Date.now()
-  if (now >= cachedToday.until) cachedToday = { day: localIsoDate(new Date(now)), until: now + 60_000 }
+  const minute = Math.floor(now / 60_000)
+  if (minute !== cachedToday.minute) cachedToday = { minute, day: localIsoDate(new Date(now)) }
   return cachedToday.day
 }
 

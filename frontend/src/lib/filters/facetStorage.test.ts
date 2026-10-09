@@ -1,5 +1,5 @@
 import { act, renderHook } from "@testing-library/react"
-import { beforeEach, describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   parseFacetSelection,
@@ -65,6 +65,27 @@ describe("usePersistentFacetSelection", () => {
   it("starts empty when storage is corrupt", () => {
     localStorage.setItem("scout:test:u1", "{broken")
     const { result } = renderHook(() => usePersistentFacetSelection("scout:test:u1", KEYS))
+    expect(result.current[0]).toEqual({})
+  })
+
+  it("follows the user's choice when storage rejects the write", () => {
+    const { result } = renderHook(() => usePersistentFacetSelection("scout:test:u1", KEYS))
+    const setItem = vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError")
+    })
+    act(() => result.current[1]({ status: ["active"] }))
+    setItem.mockRestore()
+    expect(result.current[0]).toEqual({ status: ["active"] })
+  })
+
+  it("does not resurface an in-memory selection after the key changes", () => {
+    const { result, rerender } = renderHook(
+      ({ storageKey }) => usePersistentFacetSelection(storageKey, KEYS),
+      { initialProps: { storageKey: null as string | null } },
+    )
+    act(() => result.current[1]({ status: ["active"] }))
+    rerender({ storageKey: "scout:test:u1" })
+    rerender({ storageKey: null })
     expect(result.current[0]).toEqual({})
   })
 

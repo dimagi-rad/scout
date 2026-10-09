@@ -19,11 +19,17 @@ export function useFacetedList<T>({
   facets,
   storageKey,
   predicate,
+  listIsComplete = false,
 }: {
   items: readonly T[]
   facets: readonly FacetDef<T>[]
   storageKey: string | null
   predicate: (item: T) => boolean
+  /**
+   * Whether `items` covers every value any picker sharing `storageKey` can show.
+   * Only then may writes drop stored values absent from it.
+   */
+  listIsComplete?: boolean
 }) {
   const knownKeys = useMemo(() => facets.map((f) => f.key), [facets])
   const [stored, setStored] = usePersistentFacetSelection(storageKey, knownKeys)
@@ -42,26 +48,32 @@ export function useFacetedList<T>({
     [items, visibleFacets, selection, predicate],
   )
 
-  // Stored values absent from this list (another picker's list may still have
-  // them) survive a toggle; `replace` ("Only", per-facet clear) drops them too.
+  // A partial list (the add-source panel lacks sources already in the workspace)
+  // keeps stored values it cannot see, so its writes never wipe what the other
+  // picker applies. `replace` ("Only") overwrites the facet outright.
+  const absentStored = useCallback(
+    (key: string) => {
+      if (listIsComplete) return []
+      const present = new Set((options[key] ?? []).map((o) => o.value))
+      return (stored[key] ?? []).filter((v) => !present.has(v))
+    },
+    [listIsComplete, options, stored],
+  )
   const setFacet = useCallback(
     (key: string, values: readonly string[], replace = false) => {
-      const present = new Set((options[key] ?? []).map((o) => o.value))
-      const elsewhere = replace ? [] : (stored[key] ?? []).filter((v) => !present.has(v))
-      setStored({ ...stored, [key]: [...values, ...elsewhere] })
+      setStored({ ...stored, [key]: [...values, ...(replace ? [] : absentStored(key))] })
     },
-    [stored, setStored, options],
+    [stored, setStored, absentStored],
   )
-  // Like setFacet, keeps values this list lacks and facets it does not offer, so
-  // clearing in the add-source panel does not wipe what the other picker applies.
   const clearFacets = useCallback(() => {
-    const next: Record<string, readonly string[]> = { ...stored }
-    for (const facet of visibleFacets) {
-      const present = new Set((options[facet.key] ?? []).map((o) => o.value))
-      next[facet.key] = (stored[facet.key] ?? []).filter((v) => !present.has(v))
+    if (listIsComplete) {
+      setStored({})
+      return
     }
+    const next: Record<string, readonly string[]> = { ...stored }
+    for (const facet of visibleFacets) next[facet.key] = absentStored(facet.key)
     setStored(next)
-  }, [stored, setStored, visibleFacets, options])
+  }, [listIsComplete, stored, setStored, visibleFacets, absentStored])
 
   return {
     facets: visibleFacets,

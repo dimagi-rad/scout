@@ -26,9 +26,9 @@ import { useFacetedList } from "@/lib/filters/useFacetedList"
 import {
   TENANT_FACETS,
   normalizeTenantSearch,
-  sourceFiltersStorageKey,
   tenantMatchesSearch,
 } from "@/lib/filters/tenantFacets"
+import { sourceFiltersStorageKey } from "@/lib/filters/sourceFilterStorage"
 
 interface Props {
   onClose: () => void
@@ -140,6 +140,8 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     facets: TENANT_FACETS,
     storageKey: sourceFiltersStorageKey(userId),
     predicate: matchesSearch,
+    // Every source the user has, so a stored value missing here is gone for good.
+    listIsComplete: true,
   })
   const filteredSources = facetList.filtered
   // Filters only narrow the list; they never change the selection.

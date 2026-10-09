@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { UserTenant } from "@/api/auth"
 
@@ -9,10 +9,10 @@ import {
   UNKNOWN,
   connectStatus,
   connectType,
-  sourceFiltersStorageKey,
   tenantMatchesSearch,
   normalizeTenantSearch,
 } from "./tenantFacets"
+import { sourceFiltersStorageKey } from "./sourceFilterStorage"
 
 function tenant(
   id: string,
@@ -59,6 +59,17 @@ describe("connectStatus", () => {
     ["garbage end_date", { end_date: "soon" }],
   ])("is Unknown with %s", (_label, attrs) => {
     expect(connectStatus(tenant("1", "commcare_connect", attrs), TODAY)).toBe(UNKNOWN)
+  })
+
+  afterEach(() => vi.useRealTimers())
+
+  it("follows the clock, even when it moves backwards", () => {
+    const t = tenant("1", "commcare_connect", { is_active: true, end_date: "2026-06-01" })
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 11, 1, 12))
+    expect(connectStatus(t)).toBe("inactive")
+    vi.setSystemTime(new Date(2026, 0, 1, 12))
+    expect(connectStatus(t)).toBe("active")
   })
 
   it("does not apply to other providers", () => {

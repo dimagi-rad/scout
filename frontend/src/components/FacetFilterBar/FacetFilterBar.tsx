@@ -10,9 +10,14 @@ import { cn } from "@/lib/utils"
 
 export const FACET_COLLAPSED_LIMIT = 12
 
-// Values are untrusted (org slugs, program ids); keep test ids kebab-case-safe.
+// Values are untrusted (org slugs, program names); keep test ids selector-safe.
+// A value that needed changing gets a hash of the original, so ids stay unique.
 function testIdValue(value: string): string {
-  return value.replace(/[^A-Za-z0-9_-]+/g, "") || "blank"
+  const safe = value.replace(/[^A-Za-z0-9_-]+/g, "")
+  if (safe === value) return value
+  let hash = 0
+  for (const ch of value) hash = (Math.imul(hash, 31) + ch.codePointAt(0)!) | 0
+  return `${safe || "value"}-${(hash >>> 0).toString(36)}`
 }
 
 interface FacetFilterBarProps<T> {
@@ -24,7 +29,7 @@ interface FacetFilterBarProps<T> {
   facets: readonly FacetDef<T>[]
   options: Readonly<Record<string, FacetOption[]>>
   selection: FacetSelection
-  /** `replace` marks "Only" and per-facet clear, which overwrite rather than toggle. */
+  /** `replace` marks "Only", which overwrites the facet rather than editing it. */
   onFacetChange: (key: string, values: string[], replace?: boolean) => void
   onClear: () => void
   shownCount: number
@@ -236,7 +241,7 @@ function FacetPopover<T>({
                   {/* "Only" takes the count's place on hover or keyboard focus; touch
                       screens have no hover, so there it always shows beside the count. */}
                   <span className="relative flex w-9 shrink-0 items-center justify-end gap-2 text-xs tabular-nums text-muted-foreground pointer-coarse:w-auto">
-                    <span className="group-hover:invisible group-has-[button:focus-visible]:invisible">
+                    <span className="group-hover:invisible group-has-[button:focus-visible]:invisible pointer-coarse:group-hover:visible">
                       {option.count}
                     </span>
                     <button
@@ -272,7 +277,7 @@ function FacetPopover<T>({
             {active && (
               <button
                 type="button"
-                onClick={() => onChange([], true)}
+                onClick={() => onChange([])}
                 className="text-xs text-muted-foreground hover:text-foreground hover:underline"
                 data-testid={`${testId}-reset`}
               >

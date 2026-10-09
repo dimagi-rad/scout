@@ -136,7 +136,12 @@ export function usePersistentFacetSelection(
   storageKey: string | null,
   knownKeys: readonly string[],
 ): [FacetSelection, (next: FacetSelection) => void] {
-  const [memory, setMemory] = useState<FacetSelection>(EMPTY)
+  // Scoped to the key it was made under, so it cannot resurface after a key change.
+  const [memory, setMemory] = useState<{ key: string | null; value: FacetSelection }>({
+    key: storageKey,
+    value: EMPTY,
+  })
+  if (memory.key !== storageKey) setMemory({ key: storageKey, value: EMPTY })
   const subscribeToKey = useCallback(
     (listener: () => void) => (storageKey ? subscribe(storageKey, listener) : () => {}),
     [storageKey],
@@ -148,7 +153,7 @@ export function usePersistentFacetSelection(
   const setSelection = useCallback(
     (next: FacetSelection) => {
       if (!storageKey) {
-        setMemory(next)
+        setMemory({ key: storageKey, value: next })
         return
       }
       writeFacetSelection(storageKey, next)
@@ -162,5 +167,6 @@ export function usePersistentFacetSelection(
     [storageKey, knownKeys],
   )
 
-  return [storageKey ? stored : memory, setSelection]
+  if (storageKey) return [stored, setSelection]
+  return [memory.key === storageKey ? memory.value : EMPTY, setSelection]
 }

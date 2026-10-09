@@ -8,7 +8,7 @@ import { createRecipeSlice, type RecipeSlice } from "./recipeSlice"
 import { createDomainSlice, type DomainSlice } from "./domainSlice"
 import type { AccountSessionScope } from "./accountSession"
 import { clearAllDrafts, clearOtherUsersDrafts } from "@/components/ChatPanel/draftStorage"
-import { clearAllSourceFilters, clearOtherUsersSourceFilters } from "@/lib/filters/tenantFacets"
+import { clearAllSourceFilters, clearOtherUsersSourceFilters } from "@/lib/filters/sourceFilterStorage"
 import { newLocalThreadId } from "./localThreads"
 
 export type AppStore = ArtifactSlice & AuthSlice & UiSlice & DatasetSlice & KnowledgeSlice & RecipeSlice & DomainSlice & AccountSessionScope

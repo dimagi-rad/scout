@@ -49,6 +49,41 @@ it("clears only what this list offers", () => {
   expect(stored()).toEqual({ org: ["acme"], gone: ["x"] })
 })
 
+it("lets a partial picker reset a facet without wiping the complete picker's values", () => {
+  localStorage.setItem(KEY, JSON.stringify({ org: ["acme", "foo"] }))
+  const all = [{ org: "acme" }, { org: "foo" }, { org: "bar" }]
+  const partial = [{ org: "foo" }, { org: "bar" }]
+  const complete = renderHook(() =>
+    useFacetedList({ items: all, facets, storageKey: KEY, predicate: always, listIsComplete: true }),
+  )
+  const panel = renderHook(() =>
+    useFacetedList({ items: partial, facets, storageKey: KEY, predicate: always }),
+  )
+  expect(panel.result.current.selection).toEqual({ org: ["foo"] })
+
+  act(() => panel.result.current.setFacet("org", []))
+
+  expect(complete.result.current.selection).toEqual({ org: ["acme"] })
+  expect(panel.result.current.selection).toEqual({})
+})
+
+it("drops values a complete list lacks, so revoked ones cannot linger", () => {
+  localStorage.setItem(KEY, JSON.stringify({ org: ["revoked", "foo"] }))
+  const items = [{ org: "foo" }, { org: "bar" }]
+  const { result } = renderHook(() =>
+    useFacetedList({ items, facets, storageKey: KEY, predicate: always, listIsComplete: true }),
+  )
+  act(() => result.current.setFacet("org", ["foo", "bar"]))
+  expect(stored()).toEqual({ org: ["foo", "bar"] })
+
+  act(() => {
+    localStorage.setItem(KEY, JSON.stringify({ org: ["revoked", "foo"] }))
+    window.dispatchEvent(new StorageEvent("storage", { key: KEY }))
+  })
+  act(() => result.current.clearFacets())
+  expect(localStorage.getItem(KEY)).toBeNull()
+})
+
 it("keeps two pickers on the same key in sync", () => {
   const items = [{ org: "dimagi" }, { org: "foo" }]
   const a = renderHook(() => useFacetedList({ items, facets, storageKey: KEY, predicate: always }))
