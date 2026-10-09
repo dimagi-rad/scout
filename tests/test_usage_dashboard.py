@@ -33,6 +33,13 @@ from apps.workspaces.models import (
 URL = "/api/telemetry/dashboard/"
 
 
+@pytest.fixture
+def fresh_cache():
+    cache.clear()
+    yield
+    cache.clear()
+
+
 def _grant(user):
     call_command("grant_usage_dashboard", user.email, stdout=StringIO())
     return User.objects.get(pk=user.pk)
@@ -71,7 +78,7 @@ class TestPermissionGate:
     def test_a_superuser_passes_without_a_grant(self, admin_user):
         assert _client_for(admin_user).get(URL).status_code == 200
 
-    def test_the_window_is_clamped(self, admin_user):
+    def test_the_window_snaps_to_an_offered_range(self, admin_user):
         client = _client_for(admin_user)
 
         assert client.get(URL, {"days": "9999"}).json()["window"]["days"] == 365
@@ -96,15 +103,13 @@ class TestMeFlag:
 
 
 @pytest.mark.django_db
-def test_the_dashboard_is_cached_per_window(admin_user):
-    cache.clear()
+def test_the_dashboard_is_cached_per_window(admin_user, fresh_cache):
     client = _client_for(admin_user)
     first = client.get(URL, {"days": "7"}).json()
     TelemetryEvent.objects.create(kind=EventKind.LOGIN, user_id=admin_user.id)
 
     assert client.get(URL, {"days": "7"}).json() == first
     assert client.get(URL, {"days": "30"}).json()["active_users"]["dau"] == 1
-    cache.clear()
 
 
 @pytest.mark.django_db
@@ -343,3 +348,33 @@ def test_login_reports_the_permission(user):
     )
 
     assert response.json()["can_view_usage_dashboard"] is True
+
+
+@pytest.mark.django_db
+def test_a_night_whose_sizing_failed_is_flagged_on_its_kept_figures():
+    today = timezone.now().date()
+    DailySnapshot.objects.bulk_create(
+        [
+            # An earlier run's total survives a later run whose sizing could not run.
+            DailySnapshot(day=today, metric=SnapshotMetric.SCHEMA_BYTES, value=7),
+            DailySnapshot(day=today, metric=SnapshotMetric.SCHEMAS_SKIPPED, value=2),
+        ]
+    )
+
+    sizes = build_dashboard(days=7)["schema_sizes"]
+
+    assert sizes["as_of"] == today.isoformat()
+    assert sizes["latest_skipped"] == {"day": today.isoformat(), "schemas": 2}
+
+
+@pytest.mark.django_db
+def test_a_clean_night_raises_no_skip_note():
+    today = timezone.now().date()
+    DailySnapshot.objects.bulk_create(
+        [
+            DailySnapshot(day=today, metric=SnapshotMetric.SCHEMA_BYTES, value=7),
+            DailySnapshot(day=today, metric=SnapshotMetric.SCHEMAS_SKIPPED, value=0),
+        ]
+    )
+
+    assert build_dashboard(days=7)["schema_sizes"]["latest_skipped"] is None

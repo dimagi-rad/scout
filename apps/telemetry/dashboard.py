@@ -22,7 +22,6 @@ from apps.telemetry.models import DailySnapshot, EventKind, Outcome, SnapshotMet
 from apps.users.models import Tenant
 from apps.workspaces.models import MaterializationRun, Workspace
 
-MAX_DAYS = 365
 DEFAULT_DAYS = 30
 TOP_N = 20
 
@@ -437,9 +436,10 @@ def _schema_sizes(start: datetime, days: list[date]) -> dict[str, Any]:
         else None
     )
     last_skip = (
-        # Nights since the one the panel shows: what it cannot account for.
+        # The night shown and any since: a sizing that could not run keeps an earlier
+        # run's figures for its day, so the shown night can itself carry a skip.
         DailySnapshot.objects.filter(
-            metric=SnapshotMetric.SCHEMAS_SKIPPED, day__gt=latest_day or date.min
+            metric=SnapshotMetric.SCHEMAS_SKIPPED, day__gte=latest_day or date.min
         )
         .order_by("-day")
         .values_list("day", "value")

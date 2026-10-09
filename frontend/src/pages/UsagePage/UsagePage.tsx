@@ -448,7 +448,7 @@ function Dashboard({ data }: { data: UsageDashboard }) {
           {data.schema_sizes.latest_skipped && (
             <p className="mt-2 text-xs text-muted-foreground" data-testid="usage-schema-skipped">
               {data.schema_sizes.latest_skipped.schemas} schema(s) could not be measured on{" "}
-              {data.schema_sizes.latest_skipped.day}; figures here are from the last complete night.
+              {data.schema_sizes.latest_skipped.day}; the figures here may not include them.
             </p>
           )}
           {data.schema_sizes.retained_bytes ? (
