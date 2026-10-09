@@ -32,8 +32,8 @@ from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import MAX_MESSAGE_LENGTH, SYSTEM_RESUME_MARKER
 from apps.chat.models import PendingRequest, Thread, ThreadJob
 from apps.workspaces.services.load_activity import (
-    aworkspace_build_pending,
-    workspace_build_pending,
+    aworkspace_own_build_pending,
+    workspace_own_build_pending,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,7 +175,7 @@ def _serialize_locked(pending: PendingRequest) -> dict:
         ThreadJob.objects.filter(id=pending.thread_job_id).values_list("state", flat=True).first()
     )
     thread = Thread.objects.get(id=pending.thread_id)
-    loading = pending.thread_job_id is None and workspace_build_pending(thread.workspace_id)
+    loading = pending.thread_job_id is None and workspace_own_build_pending(thread.workspace_id)
     return serialize(pending, thread, job_state, loading)
 
 
@@ -347,7 +347,7 @@ def _claim(thread_id, lease_token: uuid.UUID, thread_job_id) -> ClaimedRequest |
         if (
             thread_job_id is not None
             and pending.thread_job_id is None
-            and workspace_build_pending(Thread.objects.get(id=thread_id).workspace_id)
+            and workspace_own_build_pending(Thread.objects.get(id=thread_id).workspace_id)
         ):
             return None
         if pending.state == PendingRequest.State.CLAIMED and pending.claim_token != lease_token:
@@ -461,7 +461,7 @@ async def athread_pending_request(thread_id) -> dict | None:
     )
     if pending is None:
         return None
-    loading = pending.thread_job_id is None and await aworkspace_build_pending(
+    loading = pending.thread_job_id is None and await aworkspace_own_build_pending(
         pending.thread.workspace_id
     )
     return _serialize_loaded(pending, loading)
@@ -475,7 +475,7 @@ async def aworkspace_pending_requests(workspace, user) -> dict[str, dict]:
             thread__workspace=workspace, thread__user=user
         )
     ]
-    loading = any(p.thread_job_id is None for p in held) and await aworkspace_build_pending(
+    loading = any(p.thread_job_id is None for p in held) and await aworkspace_own_build_pending(
         workspace.id
     )
     return {str(pending.thread_id): _serialize_loaded(pending, loading) for pending in held}

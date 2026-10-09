@@ -82,7 +82,7 @@ async def aworkspace_load_progress(workspace: Workspace) -> list[dict]:
     active = [
         run
         async for run in active_runs_for_workspaces([workspace.id])
-        .filter(owned_run_q(workspace))
+        .filter(owned_run_q(workspace.id))
         .select_related("tenant_schema")
         .order_by("started_at")
     ]

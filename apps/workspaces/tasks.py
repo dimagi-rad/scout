@@ -178,16 +178,26 @@ async def expire_inactive_schemas(timestamp: int = 0) -> None:
 
 @app.task
 async def rebuild_workspace_view_schema(workspace_id: str, revive_retired: bool = False) -> dict:
-    """Build (or rebuild) the UNION ALL view schema for a multi-tenant workspace."""
-    return await publication.rebuild_workspace_view_schema(
-        workspace_id, revive_retired=revive_retired
-    )
+    """Build (or rebuild) the UNION ALL view schema for a multi-tenant workspace.
+
+    A held request waiting on it is flushed after."""
+    try:
+        return await publication.rebuild_workspace_view_schema(
+            workspace_id, revive_retired=revive_retired
+        )
+    finally:
+        await _defer_pending_flush(workspace_id)
 
 
 @app.task
 async def rebuild_workspace_semantic_model(workspace_id: str) -> dict:
-    """Rebuild the semantic model + Cube schema after workspace data changed shape."""
-    return await publication.rebuild_workspace_semantic_model_core(workspace_id)
+    """Rebuild the semantic model + Cube schema after workspace data changed shape.
+
+    A held request waiting on it is flushed after."""
+    try:
+        return await publication.rebuild_workspace_semantic_model_core(workspace_id)
+    finally:
+        await _defer_pending_flush(workspace_id)
 
 
 @app.task(pass_context=True)

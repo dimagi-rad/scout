@@ -32,6 +32,7 @@ from apps.chat.services.continuation import (
     REQUEST_STILL_WAITING_NOTE,
 )
 from apps.chat.turn_lease import atry_acquire_turn_lease
+from apps.semantic.models import CubeSchema, SemanticModel
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces import tasks
 from apps.workspaces.models import (
@@ -42,8 +43,17 @@ from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
+    WorkspaceViewSchema,
 )
 from apps.workspaces.services import load_activity
+from apps.workspaces.services.workspace_service import (
+    add_workspace_tenant,
+    remove_workspace_tenant,
+)
+from apps.workspaces.task_dispatch import (
+    adefer_materialize_workspace,
+    adefer_rebuild_workspace_view_schema,
+)
 from apps.workspaces.tasks import resume_thread_after_materialization
 from tests.agent_doubles import FakeAgent
 from tests.tenant_access import ausable_connection
@@ -636,7 +646,7 @@ class TestResume:
         agent = _resume_agent()
 
         with patch.object(
-            pending_requests, "workspace_build_pending", MagicMock(return_value=True)
+            pending_requests, "workspace_own_build_pending", MagicMock(return_value=True)
         ):
             await self._resume(tj, agent)
 
@@ -898,6 +908,227 @@ async def _hold_without_load(thread, text="visits?"):
     )
 
 
+async def _new_workspace_over_loaded_sources(slug):
+    """A two-source workspace whose sources another workspace already loaded."""
+    ws, tenant = await _workspace(slug)
+    other = await Tenant.objects.acreate(
+        external_id=f"t2-{slug}", provider="commcare", canonical_name=f"Other {slug}"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=other)
+    user, client = await _member(ws, tenant, f"chatter-{slug}@b.c")
+    await TenantMembership.objects.acreate(
+        user=user, tenant=other, connection=await ausable_connection(user, other.provider)
+    )
+    for source in (tenant, other):
+        await TenantSchema.objects.acreate(
+            tenant=source, schema_name=f"s_{source.external_id}", state=SchemaState.ACTIVE
+        )
+    return ws, user, client
+
+
+async def _ready_data_model(ws):
+    model = await SemanticModel.objects.acreate(
+        workspace=ws, name="Serving", status=SemanticModel.Status.ACTIVE
+    )
+    await CubeSchema.objects.acreate(
+        workspace=ws,
+        semantic_model=model,
+        filename="serving.yml",
+        content="cubes: []",
+        content_hash="x",
+        status=CubeSchema.Status.ACTIVE,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("queued_jobs", "checkpoint")
+class TestHoldForNewWorkspaceOverLoadedSources:
+    """Its sources serve, but it answers nothing until its own views are built."""
+
+    async def test_the_first_message_is_held_for_the_creation_load(self, agent_layer):
+        ws, user, client = await _new_workspace_over_loaded_sources("creation")
+        await adefer_materialize_workspace(
+            workspace_id=str(ws.id),
+            user_id=str(user.id),
+            load_intent=None,
+            only_unserved=True,
+            notify_thread=False,
+        )
+        thread_id = str(uuid.uuid4())
+
+        held = await _held_events(await _post(client, ws, thread_id, "visits?"))
+
+        assert agent_layer.inputs == []
+        assert held["thread_job_id"] is None
+        assert held["workspace_load_pending"] is True
+        assert await pending_requests.aflushable_thread_ids(ws.id) == [uuid.UUID(thread_id)]
+
+    async def test_a_message_after_the_load_is_held_for_the_view_build(self, agent_layer):
+        ws, _user, client = await _new_workspace_over_loaded_sources("view-build")
+        await adefer_rebuild_workspace_view_schema(workspace_id=str(ws.id))
+        thread_id = str(uuid.uuid4())
+
+        held = await _held_events(await _post(client, ws, thread_id, "visits?"))
+
+        assert agent_layer.inputs == []
+        assert held["workspace_load_pending"] is True
+        assert await pending_requests.aflushable_thread_ids(ws.id) == [uuid.UUID(thread_id)]
+
+    async def test_a_siblings_build_on_a_shared_source_is_not_one_to_wait_for(self, agent_layer):
+        ws, user, client = await _new_workspace_over_loaded_sources("sibling-build")
+        sibling = await Workspace.objects.acreate(name="W-sibling-build-2", created_by=user)
+        schema = await TenantSchema.objects.filter(tenant__workspace_tenants__workspace=ws).afirst()
+        await WorkspaceTenant.objects.acreate(workspace=sibling, tenant_id=schema.tenant_id)
+        await MaterializationRun.objects.acreate(
+            tenant_schema=schema,
+            pipeline="commcare_sync",
+            state=MaterializationRun.RunState.LOADING,
+            procrastinate_job_id=8787,
+        )
+        await adefer_rebuild_workspace_view_schema(workspace_id=str(sibling.id))
+        assert await load_activity.aworkspace_load_pending(ws.id)
+        thread_id = str(uuid.uuid4())
+
+        response = await _post(client, ws, thread_id, "visits?")
+        [chunk async for chunk in response.streaming_content]
+
+        assert len(agent_layer.inputs) == 1
+        assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+
+    async def test_the_held_message_is_sent_once_the_build_ends(self, agent_layer, checkpoint):
+        ws, _user, client = await _new_workspace_over_loaded_sources("build-ends")
+        job_id = await adefer_rebuild_workspace_view_schema(workspace_id=str(ws.id))
+        thread_id = str(uuid.uuid4())
+        await _held_events(await _post(client, ws, thread_id, "visits?"))
+        # A sibling refreshing a shared source does not keep it waiting.
+        schema = await TenantSchema.objects.filter(tenant__workspace_tenants__workspace=ws).afirst()
+        await MaterializationRun.objects.acreate(
+            tenant_schema=schema,
+            pipeline="commcare_sync",
+            state=MaterializationRun.RunState.LOADING,
+            procrastinate_job_id=8686,
+        )
+        await sync_to_async(_delete_jobs)([job_id])
+        agent = _flush_agent(checkpoint)
+
+        with (
+            patch(
+                "apps.chat.services.continuation.build_agent_for_resume",
+                AsyncMock(return_value=agent),
+            ),
+            patch("apps.chat.services.continuation.aschedule_thread_title", AsyncMock()),
+        ):
+            result = await tasks.flush_pending_requests(str(ws.id))
+
+        assert result == {"status": "flushed", "sent": 1}
+        assert agent.last_run.messages[-1].content == "visits?"
+        assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+
+    async def test_once_its_views_serve_it_is_answered(self, agent_layer):
+        ws, _user, client = await _new_workspace_over_loaded_sources("served")
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=ws, schema_name="v_served", state=SchemaState.ACTIVE
+        )
+        await _ready_data_model(ws)
+        await adefer_rebuild_workspace_view_schema(workspace_id=str(ws.id))
+        thread_id = str(uuid.uuid4())
+
+        response = await _post(client, ws, thread_id, "visits?")
+        [chunk async for chunk in response.streaming_content]
+
+        assert len(agent_layer.inputs) == 1
+        assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+
+
+async def _serving_workspace(slug):
+    """A workspace whose sources and own views serve, with its data model built."""
+    ws, user, client = await _new_workspace_over_loaded_sources(slug)
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=ws, schema_name=f"v_{slug}", state=SchemaState.ACTIVE
+    )
+    await _ready_data_model(ws)
+    return ws, user, client
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("queued_jobs", "checkpoint")
+class TestHoldWhileASourceChangeRebuildsViews:
+    """A serving workspace holds chat only while a source change takes its views offline."""
+
+    async def _serving_workspace_gains_a_source(self, slug, *, source_serves):
+        ws, user, client = await _serving_workspace(slug)
+        added = await Tenant.objects.acreate(
+            external_id=f"t3-{slug}", provider="commcare", canonical_name=f"Added {slug}"
+        )
+        await TenantMembership.objects.acreate(
+            user=user, tenant=added, connection=await ausable_connection(user, added.provider)
+        )
+        if source_serves:
+            await TenantSchema.objects.acreate(
+                tenant=added, schema_name=f"s_{added.external_id}", state=SchemaState.ACTIVE
+            )
+        await sync_to_async(add_workspace_tenant)(ws, added, actor_id=user.id)
+        return ws, client
+
+    async def test_adding_a_source_that_already_serves_holds_chat_for_the_rebuild(
+        self, agent_layer
+    ):
+        ws, client = await self._serving_workspace_gains_a_source("add-served", source_serves=True)
+        thread_id = str(uuid.uuid4())
+
+        held = await _held_events(await _post(client, ws, thread_id, "visits?"))
+
+        assert agent_layer.inputs == []
+        assert held["workspace_load_pending"] is True
+        assert await pending_requests.aflushable_thread_ids(ws.id) == [uuid.UUID(thread_id)]
+
+    async def test_adding_a_source_that_must_load_keeps_answering(self, agent_layer):
+        ws, client = await self._serving_workspace_gains_a_source(
+            "add-unserved", source_serves=False
+        )
+        thread_id = str(uuid.uuid4())
+
+        response = await _post(client, ws, thread_id, "visits?")
+        [chunk async for chunk in response.streaming_content]
+
+        assert len(agent_layer.inputs) == 1
+        assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+
+    async def test_removing_a_source_from_three_holds_chat_for_the_rebuild(self, agent_layer):
+        ws, _user, client = await _serving_workspace("remove-of-three")
+        third = await Tenant.objects.acreate(
+            external_id="t3-remove-of-three", provider="commcare", canonical_name="Third"
+        )
+        await TenantSchema.objects.acreate(
+            tenant=third, schema_name="s_t3_remove_of_three", state=SchemaState.ACTIVE
+        )
+        wt = await WorkspaceTenant.objects.acreate(workspace=ws, tenant=third)
+        await sync_to_async(remove_workspace_tenant)(ws, wt)
+        thread_id = str(uuid.uuid4())
+
+        held = await _held_events(await _post(client, ws, thread_id, "visits?"))
+
+        assert agent_layer.inputs == []
+        assert held["workspace_load_pending"] is True
+        assert await pending_requests.aflushable_thread_ids(ws.id) == [uuid.UUID(thread_id)]
+
+    async def test_dropping_to_one_source_keeps_answering(self, agent_layer):
+        ws, _user, client = await _serving_workspace("remove-to-one")
+        wt = await WorkspaceTenant.objects.filter(workspace=ws).afirst()
+        await sync_to_async(remove_workspace_tenant)(ws, wt)
+        thread_id = str(uuid.uuid4())
+
+        response = await _post(client, ws, thread_id, "visits?")
+        [chunk async for chunk in response.streaming_content]
+
+        view = await WorkspaceViewSchema.objects.aget(workspace=ws)
+        assert view.state == SchemaState.TEARDOWN
+        assert len(agent_layer.inputs) == 1
+        assert not await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+
+
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.usefixtures("queued_jobs", "checkpoint")
@@ -907,8 +1138,10 @@ class TestHoldForWorkspaceLoad:
         thread_id = str(uuid.uuid4())
 
         with (
-            patch("apps.chat.views.aworkspace_own_load_pending", AsyncMock(return_value=True)),
-            patch.object(pending_requests, "workspace_build_pending", MagicMock(return_value=True)),
+            patch("apps.chat.views.aworkspace_own_build_pending", AsyncMock(return_value=True)),
+            patch.object(
+                pending_requests, "workspace_own_build_pending", MagicMock(return_value=True)
+            ),
         ):
             held = await _held_events(await _post(client, ws, thread_id, "visits?"))
 
@@ -921,7 +1154,7 @@ class TestHoldForWorkspaceLoad:
         ws, _tenant, _user, client = await _loading_chat("ro-idle", role=WorkspaceRole.READ)
         thread_id = str(uuid.uuid4())
 
-        with patch("apps.chat.views.aworkspace_own_load_pending", AsyncMock(return_value=False)):
+        with patch("apps.chat.views.aworkspace_own_build_pending", AsyncMock(return_value=False)):
             response = await _post(client, ws, thread_id, "visits?")
             [chunk async for chunk in response.streaming_content]
 
@@ -948,7 +1181,7 @@ class TestFlush:
     async def _flush(self, ws, agent):
         with (
             patch(
-                "apps.chat.services.continuation.aworkspace_build_pending",
+                "apps.chat.services.continuation.aworkspace_own_build_pending",
                 AsyncMock(return_value=False),
             ),
             patch(
@@ -980,7 +1213,8 @@ class TestFlush:
         agent = _flush_agent(checkpoint)
 
         with patch(
-            "apps.chat.services.continuation.aworkspace_build_pending", AsyncMock(return_value=True)
+            "apps.chat.services.continuation.aworkspace_own_build_pending",
+            AsyncMock(return_value=True),
         ):
             result = await tasks.flush_pending_requests(str(ws.id))
 
@@ -1143,7 +1377,7 @@ class TestFlush:
         lease = await atry_acquire_turn_lease(thread.id)
 
         with patch.object(
-            pending_requests, "workspace_build_pending", MagicMock(return_value=True)
+            pending_requests, "workspace_own_build_pending", MagicMock(return_value=True)
         ):
             # Still waiting on another load of the workspace: not this resume's.
             assert (
@@ -1166,6 +1400,30 @@ async def test_queueing_a_flush_twice_is_quiet():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task", "build"),
+    [
+        (tasks.rebuild_workspace_view_schema, "rebuild_workspace_view_schema"),
+        (tasks.rebuild_workspace_semantic_model, "rebuild_workspace_semantic_model_core"),
+    ],
+)
+@pytest.mark.parametrize("fails", [False, True])
+async def test_a_rebuild_flushes_the_requests_waiting_on_it(task, build, fails):
+    side_effect = RuntimeError("boom") if fails else None
+    with (
+        patch.object(tasks.publication, build, AsyncMock(return_value={}, side_effect=side_effect)),
+        patch.object(tasks, "_defer_pending_flush", AsyncMock()) as flush,
+    ):
+        if fails:
+            with pytest.raises(RuntimeError):
+                await task("ws-1")
+        else:
+            await task("ws-1")
+
+    flush.assert_awaited_once_with("ws-1")
+
+
+@pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_a_sibling_workspaces_run_is_not_a_load_of_this_one():
     ws, tenant = await _workspace("sibling-run")
@@ -1178,17 +1436,17 @@ async def test_a_sibling_workspaces_run_is_not_a_load_of_this_one():
     )
 
     assert await load_activity.aworkspace_load_pending(ws.id)
-    assert not await load_activity.aworkspace_own_load_pending(ws)
+    assert not await load_activity.aworkspace_own_build_pending(ws.id)
 
     await TenantSchema.objects.filter(id=schema.id).aupdate(
         refresh_workspace_id=ws.id, state=SchemaState.PROVISIONING
     )
-    assert await load_activity.aworkspace_own_load_pending(ws)
+    assert await load_activity.aworkspace_own_build_pending(ws.id)
 
     await TenantSchema.objects.filter(id=schema.id).aupdate(
         refresh_workspace_id=None, load_workspace_id=ws.id
     )
-    assert await load_activity.aworkspace_own_load_pending(ws)
+    assert await load_activity.aworkspace_own_build_pending(ws.id)
 
 
 @pytest.mark.asyncio
