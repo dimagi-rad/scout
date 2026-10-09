@@ -42,9 +42,9 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
 ]
 
 function compareWorkspaces(sort: SortKey, recentIds: string[]) {
-  const recentRank = new Map(recentIds.map((id, i) => [id, i]))
+  const recentRank = sort === "recent" ? new Map(recentIds.map((id, i) => [id, i])) : null
   return (a: WorkspaceListItem, b: WorkspaceListItem): number => {
-    if (sort === "recent") {
+    if (recentRank) {
       // Recently used first, in recency order; the rest fall back to newest first.
       const ra = recentRank.get(a.id) ?? Infinity
       const rb = recentRank.get(b.id) ?? Infinity
@@ -196,7 +196,7 @@ export function WorkspacesPage() {
     provider: null,
   })
   const [sort, setSort] = useState<SortKey>("newest")
-  const [recentIds] = useState(getRecentWorkspaceIds)
+  const [recentIds, setRecentIds] = useState(getRecentWorkspaceIds)
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
 
   const isLoading = domainsStatus === "loading" || domainsStatus === "idle"
@@ -283,6 +283,7 @@ export function WorkspacesPage() {
   }
 
   function handleSortChange(value: SortKey) {
+    if (value === "recent") setRecentIds(getRecentWorkspaceIds())
     setSort(value)
     setVisibleCount(PAGE_SIZE)
   }
