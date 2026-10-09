@@ -544,7 +544,7 @@ class _RecyclingExecutor(ThreadPoolExecutor):
     """Closes each call's connection when done, as a request's end would.
 
     No request signal ever fires on these threads: left open, each would hold an
-    idle connection (prod and staging share one RDS), and one dropped by a failover
+    idle connection on the shared RDS instance, and one dropped by a failover
     would fail every later check that lands on it. The cost is a fresh connect per
     ORM hop, a few per verification, which runs every five minutes per user.
     """

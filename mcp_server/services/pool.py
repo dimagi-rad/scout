@@ -25,8 +25,8 @@ loops really do reach ``get_pool``: the ASGI/worker loop, plus the fresh loop
   ``asyncio.Runner`` and pytest-asyncio all run ``shutdown_asyncgens``), so
   per-call loops do not accumulate open connections;
 - live pools are capped process-wide (``_MAX_POOLS`` × ``_POOL_MAX_SIZE``
-  connections), because production and staging share one RDS instance with
-  tight ``max_connections``. At the cap, a new loop waits for a slot rather than
+  connections), because every service shares one RDS instance with tight
+  ``max_connections``. At the cap, a new loop waits for a slot rather than
   evicting a live loop's pool — eviction is what made two live loops thrash.
 
 Pools only learn their loop is finished from its shutdown. A loop that is

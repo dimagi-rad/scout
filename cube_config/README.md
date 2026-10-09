@@ -54,7 +54,7 @@ Worst case per Cube process: 16 tenant + 1 readiness (+1 transient readiness
 probe) + 3 catalog = 21 connections. The owner pool serves catalog reads only
 until the role pool takes over, and its connections close within 10 seconds of
 that one-time switch, so the transient ceiling is 24. Production runs one Cube
-process; the retired staging stack (#808) ran a second.
+process.
 
 ### Catalog role
 
@@ -65,8 +65,8 @@ startup, as tenant drivers do with their read-only roles. Semantic migration
 grants the `SELECT`, so it needs no new credential or deploy setting.
 
 Cube deploys before the API runs migrations, so on the first deploy with this
-change the grant is briefly missing. The role is cluster-wide and staging may
-have created it already, so Cube checks that the role can read this database's
+change the grant is briefly missing. The role is cluster-wide and another
+database on the instance may have created it already, so Cube checks that the role can read this database's
 `semantic_cubeschema`, not just that it exists. Until it can, Cube reads the
 catalog as the owner, as before, re-checking every 60 seconds (5 seconds after a
 failed check) and logging a warning. Once it can, every catalog read uses the

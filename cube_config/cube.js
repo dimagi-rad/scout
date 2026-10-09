@@ -8,7 +8,7 @@ const IDENTIFIER_RE = /^[a-z][a-z0-9_]*$/;
 const PUBLICATION_REVISION = Symbol('scoutPublicationRevision');
 const CATALOG_QUERY_TIMEOUT_MS = 5000;
 const DRIVER_STATEMENT_TIMEOUT_MS = 30000;
-// Prod and staging share one RDS instance that has already run out of
+// Every service shares one RDS instance that has already run out of
 // connections, so every pool here is capped and sheds idle connections quickly.
 // Cube's Postgres query queue runs two queries per orchestrator at a time.
 const DRIVER_POOL_MAX = 2;
@@ -161,8 +161,8 @@ let rolePool = null;
 let roleProbe = null;
 let nextRoleProbeAt = 0;
 
-// The role is cluster-wide but its SELECT grant is per database, and staging
-// shares the RDS instance, so check the grant in this database, not existence.
+// The role is cluster-wide but its SELECT grant is per database, so check the
+// grant in this database, not existence.
 const ROLE_READY_SQL = `
   SELECT coalesce(
     pg_has_role(current_user, to_regrole($1)::oid, 'MEMBER')
