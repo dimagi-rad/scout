@@ -53,6 +53,7 @@ from apps.workspaces.services.access_freshness import (
 from apps.workspaces.services.credential_coverage import CoverageRecovery, MissingTenant
 from apps.workspaces.services.data_operation import (
     LockOrderError,
+    TenantLocksExpanded,
     run_data_thread,
     tenant_data_lock,
     workspace_data_lock,
@@ -296,7 +297,12 @@ async def _source_added_since_lock(workspace_id, locked_tenant_ids) -> bool:
     """Whether a LockOrderError is the expected mid-load source add, not a lock-order bug."""
     if locked_tenant_ids is None:
         return False
-    current = {str(tenant_id) for tenant_id in await _workspace_tenant_ids(workspace_id)}
+    try:
+        current = {str(tenant_id) for tenant_id in await _workspace_tenant_ids(workspace_id)}
+    except Exception:
+        # Unverifiable: report the original failure as an error rather than lose it here.
+        logger.warning("Could not re-read sources for workspace %s", workspace_id, exc_info=True)
+        return False
     return bool(current - locked_tenant_ids)
 
 
@@ -745,7 +751,7 @@ async def materialize_workspace_core(
                     workspace_id,
                     exc,
                 )
-            elif isinstance(exc, LockOrderError) and await _source_added_since_lock(
+            elif isinstance(exc, TenantLocksExpanded) and await _source_added_since_lock(
                 workspace_id, locked_tenant_ids
             ):
                 logger.warning(

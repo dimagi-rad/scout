@@ -39,6 +39,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.data_operation import (
     LockOrderError,
+    TenantLocksExpanded,
     sync_tenant_data_lock,
     sync_workspace_data_lock,
 )
@@ -91,7 +92,7 @@ def _assert_publication_owned(workspace, tenant_ids=None):
     if owned is None or owned[0] != workspace.id:
         raise LockOrderError("View publication requires workspace and tenant ownership")
     if tenant_ids is not None and not set(tenant_ids) <= owned[1]:
-        raise LockOrderError("Workspace sources changed after acquiring tenant locks; retry")
+        raise TenantLocksExpanded("Workspace sources changed after acquiring tenant locks; retry")
 
 
 class ViewSchemaRetired(Exception):
