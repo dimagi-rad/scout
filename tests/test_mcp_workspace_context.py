@@ -4,7 +4,7 @@ import pytest
 from django.conf import settings
 from django.contrib.auth import get_user_model
 
-from apps.semantic.services import catalog
+from apps.semantic.services import catalog, custom_datasets
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     SchemaState,
@@ -123,5 +123,14 @@ async def test_semantic_catalog_build_does_not_touch_the_view_row():
     load = AsyncMock(side_effect=RuntimeError("stop"))
     with patch.object(catalog, "load_workspace_context", load), pytest.raises(RuntimeError):
         await catalog._load_physical_tables_async(MagicMock(id="ws-id"))
+
+    load.assert_awaited_once_with("ws-id", touch=False)
+
+
+def test_custom_dataset_probe_does_not_touch_the_view_row():
+    # Called from the catalog build's custom-dataset sync, in the same transaction.
+    load = AsyncMock(side_effect=RuntimeError("stop"))
+    with patch.object(custom_datasets, "load_workspace_context", load), pytest.raises(RuntimeError):
+        custom_datasets.infer_custom_dataset_columns(MagicMock(id="ws-id"), "SELECT 1")
 
     load.assert_awaited_once_with("ws-id", touch=False)
