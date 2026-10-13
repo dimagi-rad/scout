@@ -902,7 +902,7 @@ class TestMutationRaces:
         grant_tenant_access(target, t1)
 
         def add_source_under_lock():
-            Workspace.objects.select_for_update().get(pk=ws.pk)
+            member_coverage._lock(ws)
             WorkspaceTenant.objects.create(workspace=ws, tenant=t2)
 
         with row_locked(add_source_under_lock, release_after=LOCK_SAFETY_SECONDS) as held:
@@ -921,7 +921,7 @@ class TestMutationRaces:
         grant_tenant_access(target, t1)
 
         def admit_under_lock():
-            Workspace.objects.select_for_update().get(pk=ws.pk)
+            member_coverage._lock(ws)
             WorkspaceMembership.objects.create(workspace=ws, user=target, role=WorkspaceRole.READ)
 
         with (
@@ -935,7 +935,7 @@ class TestMutationRaces:
 
     def test_admission_does_not_wait_on_a_pending_foreign_key_check(self, user, t1):
         """SCOUT-DJANGO-43: the lock must coexist with the key-share every FK check
-        on the workspace takes, or a committing Cube refresh queues behind it."""
+        on the workspace takes, or a committing Cube refresh can wait on it."""
         ws = _workspace(user, t1)
         target = User.objects.create_user(email="racer@example.com", password="pass")
         grant_tenant_access(target, t1)
