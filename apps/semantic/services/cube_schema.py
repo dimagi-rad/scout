@@ -8,9 +8,10 @@ import time
 from contextlib import contextmanager, nullcontext
 from typing import Any
 
+import psycopg
 from asgiref.sync import async_to_sync
 from django.conf import settings
-from django.db import close_old_connections, connection, transaction
+from django.db import OperationalError, close_old_connections, connection, transaction
 from django.utils import timezone
 
 from apps.common.capacity import (
@@ -274,13 +275,23 @@ def _build_and_promote_refreshed_model(workspace, slot_wait_seconds: float) -> C
 
     try:
         try:
-            return _refresh_validate_and_promote(workspace, slot_wait_seconds=0)
-        except CubeValidatorBusyError:
-            # Validation runs inside the refresh transaction, where waiting would hold
-            # its row locks. Only under contention, wait outside it and redo the
-            # refresh while holding the slot.
-            with _validator_slot(slot_wait_seconds) as slot:
-                return _refresh_validate_and_promote(workspace, slot=slot)
+            return _refresh_and_promote(workspace, slot_wait_seconds)
+        except OperationalError as exc:
+            if not isinstance(exc.__cause__, psycopg.errors.DeadlockDetected):
+                raise
+            # The refresh writes many rows over a long transaction, so it is a
+            # likely deadlock victim (SCOUT-DJANGO-43); it rolled back whole. A
+            # workspace delete cascading into its catalog is one such cycle, and
+            # then there is nothing left to refresh.
+            if not type(workspace).objects.filter(pk=workspace.pk).exists():
+                raise CubeSchemaBuildError(
+                    "The workspace was deleted during its Cube schema refresh."
+                ) from exc
+            logger.warning(
+                "Cube schema refresh for workspace %s was a deadlock victim; retrying once",
+                workspace.id,
+            )
+            return _refresh_and_promote(workspace, slot_wait_seconds)
     except Exception as exc:
         # The atomic block rolled back the attempted catalog refresh, so record
         # the failure on the last-known-good model rather than the rolled-back
@@ -289,6 +300,17 @@ def _build_and_promote_refreshed_model(workspace, slot_wait_seconds: float) -> C
         if fallback_model is not None:
             _record_build_failure(workspace, fallback_model, exc)
         raise
+
+
+def _refresh_and_promote(workspace, slot_wait_seconds: float) -> CubeSchema:
+    try:
+        return _refresh_validate_and_promote(workspace, slot_wait_seconds=0)
+    except CubeValidatorBusyError:
+        # Validation runs inside the refresh transaction, where waiting would hold
+        # its row locks. Only under contention, wait outside it and redo the
+        # refresh while holding the slot.
+        with _validator_slot(slot_wait_seconds) as slot:
+            return _refresh_validate_and_promote(workspace, slot=slot)
 
 
 def _refresh_validate_and_promote(

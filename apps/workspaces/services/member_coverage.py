@@ -78,7 +78,10 @@ def requester_gaps(user, tenants) -> tuple[MissingTenant, ...]:
 
 
 def _lock(workspace) -> None:
-    Workspace.objects.select_for_update().only("pk").get(pk=workspace.pk)
+    # NO KEY: a plain FOR UPDATE also conflicts with the key-share every FK check on
+    # the workspace takes, so a committing Cube refresh could wait on it and join a
+    # lock cycle (SCOUT-DJANGO-43); as in apps/memory/workspace.py.
+    Workspace.objects.select_for_update(no_key=True).only("pk").get(pk=workspace.pk)
 
 
 def missing_for_user(user, workspace) -> tuple[MissingTenant, ...]:

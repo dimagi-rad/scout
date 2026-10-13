@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import psycopg
 import pytest
-from django.db import connection, connections
+from django.db import OperationalError, connection, connections
 
 from apps.common.errors import ExpectedStateError
 from apps.semantic.models import CubeSchema, SemanticDataset, SemanticField, SemanticModel
@@ -452,3 +452,117 @@ def test_refresh_that_never_gets_a_slot_keeps_serving(
     model.refresh_from_db()
     assert model.metadata["last_build"]["ok"] is False
     assert refreshed_model.refreshes == [True]
+
+
+def _deadlock():
+    try:
+        raise psycopg.errors.DeadlockDetected("deadlock detected")
+    except psycopg.Error as exc:
+        raise OperationalError("deadlock detected") from exc
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_chosen_as_deadlock_victim_is_retried_once(
+    workspace, model, refreshed_model, cube_http, monkeypatch
+):
+    """SCOUT-DJANGO-43: a deadlock rolls the refresh back whole, so redo it."""
+    real_ensure = cube_schema.ensure_semantic_model
+    calls = []
+
+    def deadlock_first(ws):
+        calls.append(ws)
+        if len(calls) == 1:
+            _deadlock()
+        return real_ensure(ws)
+
+    monkeypatch.setattr(cube_schema, "ensure_semantic_model", deadlock_first)
+
+    promoted = build_and_promote_cube_schema(workspace)
+
+    assert promoted.status == CubeSchema.Status.ACTIVE
+    assert len(calls) == 2
+    model.refresh_from_db()
+    assert model.metadata["last_build"]["ok"] is True
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_deadlocked_at_commit_is_retried(
+    workspace, model, refreshed_model, cube_http, monkeypatch
+):
+    """Where SCOUT-DJANGO-43 struck: the deferred FK checks at COMMIT."""
+    real_commit = connection.commit
+    commits = []
+
+    def deadlock_first_commit():
+        commits.append(connection.in_atomic_block)
+        if len(commits) == 1:
+            _deadlock()
+        real_commit()
+
+    monkeypatch.setattr(connection, "commit", deadlock_first_commit)
+
+    promoted = build_and_promote_cube_schema(workspace)
+
+    assert promoted.status == CubeSchema.Status.ACTIVE
+    assert len(commits) == 2
+    assert refreshed_model.refreshes == [True, True]
+    model.refresh_from_db()
+    assert model.metadata["last_build"]["ok"] is True
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_that_fails_other_than_by_deadlock_is_not_retried(
+    workspace, model, refreshed_model, cube_http, monkeypatch
+):
+    calls = []
+
+    def fail(ws):
+        calls.append(ws)
+        raise OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(cube_schema, "ensure_semantic_model", fail)
+
+    with pytest.raises(OperationalError):
+        build_and_promote_cube_schema(workspace)
+
+    assert len(calls) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_deadlocked_by_a_workspace_delete_gives_up_without_retrying(
+    workspace, refreshed_model, monkeypatch
+):
+    calls = []
+
+    def deleted_then_deadlocked(ws, slot_wait_seconds):
+        calls.append(ws)
+        type(ws).objects.filter(pk=ws.pk).delete()
+        _deadlock()
+
+    monkeypatch.setattr(cube_schema, "_refresh_and_promote", deleted_then_deadlocked)
+
+    with pytest.raises(CubeSchemaBuildError, match="deleted"):
+        build_and_promote_cube_schema(workspace)
+
+    assert len(calls) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_deadlocked_twice_fails_and_keeps_serving(
+    workspace, model, refreshed_model, monkeypatch
+):
+    calls = []
+
+    def deadlocked(ws, slot_wait_seconds):
+        calls.append(ws)
+        _deadlock()
+
+    monkeypatch.setattr(cube_schema, "_refresh_and_promote", deadlocked)
+
+    with pytest.raises(OperationalError):
+        build_and_promote_cube_schema(workspace)
+
+    assert len(calls) == 2
+    assert CubeSchema.objects.filter(semantic_model=model, status=CubeSchema.Status.ACTIVE).exists()
+    model.refresh_from_db()
+    assert model.metadata["last_build"]["ok"] is False
