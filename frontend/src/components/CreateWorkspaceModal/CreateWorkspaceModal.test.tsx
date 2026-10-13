@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router-dom"
 import { beforeEach, expect, it, vi } from "vitest"
@@ -262,4 +262,71 @@ it("shows the refreshed sources after the initial load failed", async () => {
 
   expect(await screen.findByTestId("create-source-tenant-a")).toBeInTheDocument()
   expect(screen.queryByTestId("create-sources-error")).toBeNull()
+})
+
+it("narrows to a pasted id list, names the ids it cannot find, and selects all shown", async () => {
+  vi.mocked(getUserTenantsCached).mockResolvedValue([
+    connect("523", "Nama Wellness", { is_active: false }),
+    connect("1234", "KMC GHI", { is_active: true }),
+    connect("1236", "KMC EHA", { is_active: true }),
+  ])
+  const { user, onClose } = await openModal()
+
+  await user.click(screen.getByTestId("search-filter-input"))
+  await user.paste("523, 1236, 759")
+  expect(shown()).toEqual(["1236", "523"])
+  expect(screen.getByTestId("create-sources-id-list-shown")).toHaveTextContent("2 of 3 IDs shown")
+  expect(screen.getByTestId("create-sources-id-list-not-found")).toHaveTextContent("1 not found: 759")
+
+  await user.click(screen.getByTestId("create-sources-select-shown"))
+  expect(screen.getByTestId("create-sources-selected")).toHaveTextContent("2 selected")
+  expect(screen.queryByTestId("create-sources-select-shown")).toBeNull()
+  await user.click(screen.getByTestId("create-workspace-submit"))
+  await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+  expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", ["tenant-1236", "tenant-523"])
+})
+
+it("reads a pasted column of ids, one per line, as a list and names a typo in it", async () => {
+  vi.mocked(getUserTenantsCached).mockResolvedValue([
+    connect("523", "Nama Wellness", { is_active: true }),
+    connect("1236", "KMC EHA", { is_active: true }),
+  ])
+  const { user } = await openModal()
+
+  await user.click(screen.getByTestId("search-filter-input"))
+  await user.paste("523\r\n1236\r\n67S\r\n")
+  expect(screen.getByTestId("search-filter-input")).toHaveValue("523, 1236, 67S")
+  expect(shown()).toEqual(["1236", "523"])
+  expect(screen.getByTestId("create-sources-id-list-shown")).toHaveTextContent("2 IDs shown")
+  expect(screen.getByTestId("create-sources-id-list-unrecognised")).toHaveTextContent("1 not an ID: 67S")
+
+  await user.paste("700\n701")
+  expect(screen.getByTestId("search-filter-input")).toHaveValue("523, 1236, 67S, 700, 701")
+})
+
+it("names pasted ids a remembered facet hides, and clears only the facets", async () => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ status: ["active"] }))
+  vi.mocked(getUserTenantsCached).mockResolvedValue([
+    connect("523", "Nama Wellness", { is_active: false }),
+    connect("1236", "KMC EHA", { is_active: true }),
+  ])
+  const { user } = await openModal()
+
+  await user.click(screen.getByTestId("search-filter-input"))
+  await user.paste("523, 1236")
+  expect(shown()).toEqual(["1236"])
+  expect(screen.getByTestId("create-sources-id-list-shown")).toHaveTextContent("1 of 2 IDs shown")
+  expect(screen.getByTestId("create-sources-id-list-hidden")).toHaveTextContent("1 hidden by filters: 523")
+  expect(screen.getByTestId("create-sources-select-shown")).toHaveTextContent("Select 1 shown")
+
+  // Screen readers hear every reason line, but not the buttons beside them.
+  const status = within(screen.getByTestId("create-sources-id-list")).getByRole("status")
+  expect(within(status).getByTestId("create-sources-id-list-hidden")).toBeInTheDocument()
+  expect(within(status).queryByTestId("create-sources-id-list-clear-facets")).toBeNull()
+  expect(within(status).queryByTestId("create-sources-select-shown")).toBeNull()
+
+  await user.click(screen.getByTestId("create-sources-id-list-clear-facets"))
+  expect(shown()).toEqual(["1236", "523"])
+  expect(screen.getByTestId("search-filter-input")).toHaveValue("523, 1236")
+  expect(screen.getByTestId("create-sources-id-list-shown")).toHaveTextContent("All 2 IDs shown")
 })

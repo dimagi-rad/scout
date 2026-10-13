@@ -22,6 +22,8 @@ import {
 import { Plus, RefreshCw } from "lucide-react"
 import { FacetFilterBar } from "@/components/FacetFilterBar/FacetFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
+import { IdListSummary } from "@/components/IdListSummary/IdListSummary"
+import { CONNECT_PROVIDER } from "@/lib/filters/tenantFacets"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
 import { useTenantFacetFilters } from "@/lib/filters/useTenantFacetFilters"
 
@@ -122,19 +124,44 @@ export function TenantsTab({
   }
 
   // Memoized so the facet memos can hit; otherwise every keystroke re-sorts.
-  const available = useMemo(() => {
-    const inWorkspaceIds = new Set(tenants.map((t) => t.tenant_id))
-    return userTenants
-      .filter((t) => !inWorkspaceIds.has(t.tenant_uuid))
-      .sort(compareUserTenantsByName)
-  }, [tenants, userTenants])
+  const inWorkspaceUuids = useMemo(() => new Set(tenants.map((t) => t.tenant_id)), [tenants])
+  const available = useMemo(
+    () =>
+      userTenants
+        .filter((t) => !inWorkspaceUuids.has(t.tenant_uuid))
+        .sort(compareUserTenantsByName),
+    [inWorkspaceUuids, userTenants],
+  )
 
   // Internal-UUID → external opportunity ID, for the connected list display.
   const externalIdByUuid = new Map(userTenants.map((t) => [t.tenant_uuid, t.tenant_id]))
 
   const sourceFilters = useTenantFacetFilters({ items: available, userId })
   const filteredAvailable = sourceFilters.filtered
-  const { setSearch } = sourceFilters
+  const { setSearch, idReport } = sourceFilters
+
+  // `available` leaves out connected sources, so a pasted id missing from it is
+  // either already here or not one of the user's sources at all.
+  const notFoundGroups = useMemo(() => {
+    if (!idReport) return []
+    const connected = new Set(
+      userTenants
+        .filter((t) => t.provider === CONNECT_PROVIDER && inWorkspaceUuids.has(t.tenant_uuid))
+        .map((t) => t.tenant_id),
+    )
+    return [
+      {
+        key: "connected",
+        label: "already in this workspace",
+        ids: idReport.notFound.filter((id) => connected.has(id)),
+      },
+      {
+        key: "not-found",
+        label: "not one of your Connect opportunities",
+        ids: idReport.notFound.filter((id) => !connected.has(id)),
+      },
+    ]
+  }, [idReport, userTenants, inWorkspaceUuids])
 
   // Facet selections persist across openings (see useFacetedList); the search does not.
   useEffect(() => {
@@ -304,6 +331,16 @@ export function TenantsTab({
             <>
               <div className="mb-3">
                 <FacetFilterBar testIdPrefix="available-sources-filter" {...sourceFilters.barProps} />
+                {idReport && (
+                  <div className="mt-2">
+                    <IdListSummary
+                      report={idReport}
+                      testIdPrefix="available-sources-id-list"
+                      notFoundGroups={notFoundGroups}
+                      onClearFacets={sourceFilters.clearFacets}
+                    />
+                  </div>
+                )}
               </div>
               {filteredAvailable.length === 0 ? (
                 <div

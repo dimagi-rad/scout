@@ -178,6 +178,31 @@ describe("available source filters", () => {
     expect(shownAvailable()).toEqual(["a", "c3", "c1", "c2"])
   })
 
+  it("says why each pasted id is missing: connected, hidden by a facet, or not yours", async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ status: ["active"] }))
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([
+      { id: "wt-10", tenant_id: "tenant-10", tenant_name: "Here", provider: "commcare_connect" },
+    ])
+    vi.mocked(getUserTenantsCached).mockResolvedValue([
+      connect("10", "Here", { is_active: true }),
+      connect("11", "Live", { is_active: true }),
+      connect("12", "Old", { is_active: false }),
+    ])
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+    await screen.findByTestId(`${F}-count`)
+
+    await userEvent.click(screen.getByTestId("search-filter-input"))
+    await userEvent.paste("10, 11, 12, 99")
+
+    expect(shownAvailable()).toEqual(["11"])
+    const L = "available-sources-id-list"
+    expect(screen.getByTestId(`${L}-shown`)).toHaveTextContent("1 of 4 IDs shown")
+    expect(screen.getByTestId(`${L}-hidden`)).toHaveTextContent("1 hidden by filters: 12")
+    expect(screen.getByTestId(`${L}-connected`)).toHaveTextContent("1 already in this workspace: 10")
+    expect(screen.getByTestId(`${L}-not-found`)).toHaveTextContent("1 not one of your Connect opportunities: 99")
+  })
+
   it("drops a persisted facet value the refreshed list no longer has", async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ organization: ["acme"] }))
     vi.mocked(refreshUserTenants).mockResolvedValue(userSources.filter((t) => t.tenant_id !== "c3"))

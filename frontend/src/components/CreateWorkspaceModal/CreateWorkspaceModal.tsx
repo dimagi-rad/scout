@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { AlertTriangle, Check, RefreshCw } from "lucide-react"
 import { FacetFilterBar } from "@/components/FacetFilterBar/FacetFilterBar"
+import { IdListSummary } from "@/components/IdListSummary/IdListSummary"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { workspacePath } from "@/lib/workspacePath"
 import { CONNECTIONS_PATH } from "@/lib/routes"
@@ -135,6 +136,10 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     const shown = new Set(filteredSources.map((t) => t.tenant_uuid))
     return [...selected].filter((id) => !shown.has(id)).length
   }, [filteredSources, selected])
+  const unselectedShown = useMemo(
+    () => filteredSources.filter((t) => !selected.has(t.tenant_uuid)),
+    [filteredSources, selected],
+  )
 
   function toggleSource(uuid: string) {
     // Changing the selection invalidates a prior "create anyway" decision: the
@@ -146,6 +151,12 @@ export function CreateWorkspaceModal({ onClose }: Props) {
       else next.add(uuid)
       return next
     })
+  }
+
+  // A pasted id list narrows the list to those sources; this ticks them all.
+  function selectAllShown() {
+    setDuplicateAcknowledged(false)
+    setSelected((prev) => new Set([...prev, ...unselectedShown.map((t) => t.tenant_uuid)]))
   }
 
   function goToExistingWorkspace() {
@@ -283,6 +294,26 @@ export function CreateWorkspaceModal({ onClose }: Props) {
               ) : (
                 <div className="space-y-3">
                   <FacetFilterBar testIdPrefix="create-sources-filter" {...sourceFilters.barProps} />
+                  {sourceFilters.idReport && (
+                    <IdListSummary
+                      report={sourceFilters.idReport}
+                      testIdPrefix="create-sources-id-list"
+                      onClearFacets={sourceFilters.clearFacets}
+                      action={
+                        unselectedShown.length > 0 && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={selectAllShown}
+                            data-testid="create-sources-select-shown"
+                          >
+                            Select {unselectedShown.length} shown
+                          </Button>
+                        )
+                      }
+                    />
+                  )}
                   <div
                     className="max-h-56 space-y-1 overflow-y-auto rounded-md border p-1"
                     data-testid="create-sources-list"
