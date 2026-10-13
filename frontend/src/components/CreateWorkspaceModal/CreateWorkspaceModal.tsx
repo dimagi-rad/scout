@@ -155,7 +155,6 @@ export function CreateWorkspaceModal({ onClose }: Props) {
 
   // A pasted id list narrows the list to those sources; this ticks them all.
   function selectAllShown() {
-    if (unselectedShown.length === 0) return
     setDuplicateAcknowledged(false)
     setSelected((prev) => new Set([...prev, ...unselectedShown.map((t) => t.tenant_uuid)]))
   }

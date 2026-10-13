@@ -38,7 +38,7 @@ export function IdListSummary({
     <div className="space-y-1 text-xs text-muted-foreground" data-testid={testIdPrefix}>
       <div className="flex items-center justify-between gap-2">
         <span data-testid={`${testIdPrefix}-shown`}>
-          {report.shown.length === total
+          {report.shown.length === total && report.unrecognised.length === 0
             ? `All ${total} IDs shown`
             : `${report.shown.length} of ${total} IDs shown`}
         </span>

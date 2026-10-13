@@ -154,18 +154,21 @@ const ID_TOKEN = /^\d+$/
 
 /**
  * A pasted list of opportunity ids ("523, 524, 675" or one per line, "#" optional),
- * or null when the query is ordinary search text. It takes two or more ids that
- * outnumber the other tokens, so a single number or a name like "KMC 2024 Kenya"
- * still searches as before, while a typo in a list is reported, not silently
- * turned into a name search.
+ * or null when the query is ordinary search text. It takes two or more ids, so a
+ * single number still searches as before. Only a comma- or semicolon-separated
+ * list may carry a non-id token (reported, so a typo is not silently turned into a
+ * name search); with spaces alone every token must be an id, so a name like
+ * "KMC 2024 2025" stays a name search.
  */
 export function parseTenantIdList(query: string): TenantIdList | null {
   const tokens = query
     .split(/[\s,;]+/)
-    .map((token) => token.replace(/^#/, ""))
+    .map((token) => token.replace(/^#+/, ""))
     .filter(Boolean)
   const numeric = tokens.filter((token) => ID_TOKEN.test(token))
-  if (numeric.length < 2 || numeric.length * 2 <= tokens.length) return null
+  if (numeric.length < 2) return null
+  const tolerant = /[,;]/.test(query) && numeric.length * 2 > tokens.length
+  if (numeric.length < tokens.length && !tolerant) return null
   // Connect ids are integers, so "0523" means 523.
   const ids = [...new Set(numeric.map((token) => token.replace(/^0+(?=\d)/, "")))]
   const unrecognised = [...new Set(tokens.filter((token) => !ID_TOKEN.test(token)))]

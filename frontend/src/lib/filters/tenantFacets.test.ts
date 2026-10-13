@@ -180,6 +180,10 @@ describe("a pasted list of ids", () => {
     ])
   })
 
+  it("strips any number of leading # from each id", () => {
+    expect(parseTenantIdList("##523, #524")?.ids).toEqual(["523", "524"])
+  })
+
   it("reads leading zeros as the same id", () => {
     expect(parseTenantIdList("0523, 0, 524")?.ids).toEqual(["523", "0", "524"])
   })
@@ -196,6 +200,8 @@ describe("a pasted list of ids", () => {
     expect(parseTenantIdList("kmc kenya")).toBeNull()
     expect(parseTenantIdList("523, kenya")).toBeNull()
     expect(parseTenantIdList("KMC 2024 2025 Kenya")).toBeNull()
+    expect(parseTenantIdList("KMC 2024 2025")).toBeNull()
+    expect(parseTenantIdList("Phase 2 2024")).toBeNull()
     expect(parseTenantIdList("")).toBeNull()
   })
 
