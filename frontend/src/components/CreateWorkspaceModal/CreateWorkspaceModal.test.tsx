@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router-dom"
 import { beforeEach, expect, it, vi } from "vitest"
@@ -318,6 +318,12 @@ it("names pasted ids a remembered facet hides, and clears only the facets", asyn
   expect(screen.getByTestId("create-sources-id-list-shown")).toHaveTextContent("1 of 2 IDs shown")
   expect(screen.getByTestId("create-sources-id-list-hidden")).toHaveTextContent("1 hidden by filters: 523")
   expect(screen.getByTestId("create-sources-select-shown")).toHaveTextContent("Select 1 shown")
+
+  // Screen readers hear every reason line, but not the buttons beside them.
+  const status = within(screen.getByTestId("create-sources-id-list")).getByRole("status")
+  expect(within(status).getByTestId("create-sources-id-list-hidden")).toBeInTheDocument()
+  expect(within(status).queryByTestId("create-sources-id-list-clear-facets")).toBeNull()
+  expect(within(status).queryByTestId("create-sources-select-shown")).toBeNull()
 
   await user.click(screen.getByTestId("create-sources-id-list-clear-facets"))
   expect(shown()).toEqual(["1236", "523"])

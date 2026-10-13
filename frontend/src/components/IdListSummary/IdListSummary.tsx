@@ -41,7 +41,7 @@ export function IdListSummary({
       data-testid={testIdPrefix}
     >
       {/* The live region holds text only: buttons inside one get re-announced as it updates. */}
-      <div role="status" className="min-w-0 space-y-1">
+      <div role="status" aria-atomic="false" className="min-w-0 space-y-1">
         <p data-testid={`${testIdPrefix}-shown`}>
           {report.shown.length < total
             ? `${report.shown.length} of ${total} IDs shown`
@@ -66,7 +66,8 @@ export function IdListSummary({
             onClick={onClearFacets}
             data-testid={`${testIdPrefix}-clear-facets`}
           >
-            Clear filters
+            {/* Not "Clear filters": the search bar has that, and it also drops the pasted list. */}
+            Show hidden
           </Button>
         )}
       </div>
