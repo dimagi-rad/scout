@@ -78,7 +78,9 @@ def requester_gaps(user, tenants) -> tuple[MissingTenant, ...]:
 
 
 def _lock(workspace) -> None:
-    Workspace.objects.select_for_update().only("pk").get(pk=workspace.pk)
+    # NO KEY: a waiting plain FOR UPDATE queues every FK key-share check on the
+    # workspace behind it; a Cube refresh committing then deadlocked (SCOUT-DJANGO-43).
+    Workspace.objects.select_for_update(no_key=True).only("pk").get(pk=workspace.pk)
 
 
 def missing_for_user(user, workspace) -> tuple[MissingTenant, ...]:

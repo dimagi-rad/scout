@@ -20,7 +20,7 @@ from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import async_to_sync, sync_to_async
 from django.contrib.auth import get_user_model
-from django.db import connection
+from django.db import connection, transaction
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -932,6 +932,29 @@ class TestMutationRaces:
             add_tenant_covered_by_members(ws, t2)
 
         assert not WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
+
+    def test_admission_does_not_wait_on_a_pending_foreign_key_check(self, user, t1):
+        """SCOUT-DJANGO-43: the lock must coexist with the key-share every FK check
+        on the workspace takes, or a committing Cube refresh queues behind it."""
+        ws = _workspace(user, t1)
+        target = User.objects.create_user(email="racer@example.com", password="pass")
+        grant_tenant_access(target, t1)
+
+        def key_share():
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT 1 FROM {Workspace._meta.db_table} WHERE id = %s FOR KEY SHARE",
+                    [ws.pk],
+                )
+
+        with row_locked(key_share, release_after=LOCK_SAFETY_SECONDS), transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.execute("SET LOCAL lock_timeout = '1s'")
+            _membership, created, _missing = admit_covered_member(
+                ws, target, role=WorkspaceRole.READ, invited_by=user
+            )
+
+        assert created
 
     def test_renewing_a_busy_targets_token_keeps_their_rotated_grant(
         self, client, user, httpx_mock, t1
