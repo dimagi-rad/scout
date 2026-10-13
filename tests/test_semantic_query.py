@@ -504,7 +504,7 @@ def test_ensure_semantic_model_syncs_valid_custom_dataset(monkeypatch, workspace
     monkeypatch.setattr(
         catalog_service,
         "infer_custom_dataset_columns",
-        lambda _workspace, _sql: [{"name": "username", "type": "text"}],
+        lambda _workspace, _sql, **_: [{"name": "username", "type": "text"}],
     )
     CustomDataset.objects.create(
         workspace=workspace,
