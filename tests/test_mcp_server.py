@@ -297,11 +297,14 @@ class TestExecuteQuery:
 
     @pytest.mark.asyncio
     @patch(POOLED_EXEC)
-    async def test_timeout_error(self, mock_exec, project_context):
+    async def test_timeout_error(self, mock_exec, project_context, caplog):
         mock_exec.side_effect = psycopg.errors.QueryCanceled()
-        result = await execute_query(project_context, "SELECT * FROM users")
+        with caplog.at_level(logging.WARNING, logger="mcp_server.services.query"):
+            result = await execute_query(project_context, "SELECT * FROM users")
         assert result["success"] is False
         assert result["error"]["code"] == QUERY_TIMEOUT
+        # The agent narrows a too-heavy query and retries (SCOUT-DJANGO-44); not a Sentry event.
+        assert [r.levelno for r in caplog.records] == [logging.WARNING]
 
     @pytest.mark.asyncio
     @patch(POOLED_EXEC)
