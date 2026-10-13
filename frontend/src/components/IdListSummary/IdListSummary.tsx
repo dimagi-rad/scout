@@ -29,28 +29,35 @@ export function IdListSummary({
   action?: ReactNode
 }) {
   const missing = [
+    { key: "hidden", label: "hidden by filters", ids: report.hiddenByFilters },
     ...notFoundGroups,
     { key: "unrecognised", label: "not an ID", ids: report.unrecognised },
   ].filter((group) => group.ids.length > 0)
   const total = report.ids.length
 
   return (
-    <div className="space-y-1 text-xs text-muted-foreground" data-testid={testIdPrefix}>
-      <div className="flex items-center justify-between gap-2">
-        {/* Only the count is live: the region updates per keystroke, and buttons in it would be re-announced. */}
-        <span role="status" data-testid={`${testIdPrefix}-shown`}>
+    <div
+      className="flex items-start justify-between gap-2 text-xs text-muted-foreground"
+      data-testid={testIdPrefix}
+    >
+      {/* The live region holds text only: buttons inside one get re-announced as it updates. */}
+      <div role="status" className="min-w-0 space-y-1">
+        <p data-testid={`${testIdPrefix}-shown`}>
           {report.shown.length < total
             ? `${report.shown.length} of ${total} IDs shown`
             : report.unrecognised.length > 0
               ? `${total} IDs shown`
               : `All ${total} IDs shown`}
-        </span>
-        {action}
+        </p>
+        {missing.map((group) => (
+          <p key={group.key} className="break-words" data-testid={`${testIdPrefix}-${group.key}`}>
+            {group.ids.length} {group.label}: {formatIdSample(group.ids)}
+          </p>
+        ))}
       </div>
-      {report.hiddenByFilters.length > 0 && (
-        <p data-testid={`${testIdPrefix}-hidden`}>
-          {report.hiddenByFilters.length} hidden by filters:{" "}
-          {formatIdSample(report.hiddenByFilters)}{" "}
+      <div className="flex shrink-0 flex-col items-end gap-1">
+        {action}
+        {report.hiddenByFilters.length > 0 && (
           <Button
             type="button"
             variant="link"
@@ -61,13 +68,8 @@ export function IdListSummary({
           >
             Clear filters
           </Button>
-        </p>
-      )}
-      {missing.map((group) => (
-        <p key={group.key} data-testid={`${testIdPrefix}-${group.key}`}>
-          {group.ids.length} {group.label}: {formatIdSample(group.ids)}
-        </p>
-      ))}
+        )}
+      </div>
     </div>
   )
 }
