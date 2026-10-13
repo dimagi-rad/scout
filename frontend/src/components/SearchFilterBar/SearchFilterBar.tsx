@@ -46,7 +46,12 @@ function joinPastedLines(e: ClipboardEvent<HTMLInputElement>, onChange: (value: 
   const start = input.selectionStart ?? input.value.length
   const end = input.selectionEnd ?? start
   const lines = text.split(/\r\n|\r|\n/).map((line) => line.trim()).filter(Boolean)
-  onChange(input.value.slice(0, start) + lines.join(", ") + input.value.slice(end))
+  const before = input.value.slice(0, start)
+  const after = input.value.slice(end)
+  // Separate from adjoining text too, or "1236" + a pasted "700" fuses to "1236700".
+  const lead = before && !/[\s,;]$/.test(before) ? ", " : ""
+  const trail = after && !/^[\s,;]/.test(after) ? ", " : ""
+  onChange(before + lead + lines.join(", ") + trail + after)
 }
 
 export function SearchFilterBar({

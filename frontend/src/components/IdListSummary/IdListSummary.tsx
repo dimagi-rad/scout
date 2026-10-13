@@ -35,13 +35,10 @@ export function IdListSummary({
   const total = report.ids.length
 
   return (
-    <div
-      role="status"
-      className="space-y-1 text-xs text-muted-foreground"
-      data-testid={testIdPrefix}
-    >
+    <div className="space-y-1 text-xs text-muted-foreground" data-testid={testIdPrefix}>
       <div className="flex items-center justify-between gap-2">
-        <span data-testid={`${testIdPrefix}-shown`}>
+        {/* Only the count is live: the region updates per keystroke, and buttons in it would be re-announced. */}
+        <span role="status" data-testid={`${testIdPrefix}-shown`}>
           {report.shown.length < total
             ? `${report.shown.length} of ${total} IDs shown`
             : report.unrecognised.length > 0

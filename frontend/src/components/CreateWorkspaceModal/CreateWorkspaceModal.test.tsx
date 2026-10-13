@@ -299,6 +299,9 @@ it("reads a pasted column of ids, one per line, as a list and names a typo in it
   expect(shown()).toEqual(["1236", "523"])
   expect(screen.getByTestId("create-sources-id-list-shown")).toHaveTextContent("2 IDs shown")
   expect(screen.getByTestId("create-sources-id-list-unrecognised")).toHaveTextContent("1 not an ID: 67S")
+
+  await user.paste("700\n701")
+  expect(screen.getByTestId("search-filter-input")).toHaveValue("523, 1236, 67S, 700, 701")
 })
 
 it("names pasted ids a remembered facet hides, and clears only the facets", async () => {
