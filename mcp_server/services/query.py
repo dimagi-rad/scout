@@ -38,6 +38,8 @@ from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
 
 logger = logging.getLogger(__name__)
 
+AGENT_RECOVERABLE_CODES = frozenset({VALIDATION_ERROR, QUERY_TIMEOUT})
+
 
 def _build_validator(ctx: QueryContext) -> SQLValidator:
     """Create a SQLValidator configured from the query context."""
@@ -131,9 +133,9 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
             await sync_to_async(report_capacity_exhausted)(capacity.resource, str(e), exc_info=e)
             return error_response(CAPACITY_EXHAUSTED, BUSY_MESSAGE)
         code, message = _classify_error(e)
-        # Invalid SQL is the agent's to fix and goes back to it as a retry; paging Sentry
-        # for each one only buries real database failures.
-        level = logging.WARNING if code == VALIDATION_ERROR else logging.ERROR
+        # Invalid or too-heavy SQL is the agent's to fix and goes back to it as a retry;
+        # paging Sentry for each one only buries real database failures.
+        level = logging.WARNING if code in AGENT_RECOVERABLE_CODES else logging.ERROR
         logger.log(level, "Query error for tenant %s: %s", ctx.tenant_id, message, exc_info=True)
         return error_response(code, message)
 
