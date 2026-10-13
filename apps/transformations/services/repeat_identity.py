@@ -6,18 +6,22 @@ generated SQL establishes provenance; a name or description never selects a sour
 
 from __future__ import annotations
 
+import logging
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 
 import sqlglot
+from django.db.models import Q
 from sqlglot import exp
 from sqlglot.errors import SqlglotError
 
-from apps.common.identifiers import fit_identifier
-from apps.transformations.models import TransformationAsset
+from apps.common.identifiers import PG_MAX_IDENTIFIER_BYTES, fit_identifier
+from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.staging_identity import RepeatModelMigrationRequired
 from mcp_server.event_time import event_time_sql
+
+logger = logging.getLogger(__name__)
 
 _REF = re.compile(r"\{\{\s*ref\('([a-z][a-z0-9_]*)'\)\s*\}\}")
 _NAME = re.compile(r"[a-z][a-z0-9_]*")
@@ -287,6 +291,15 @@ def _migration(name: str, reason: str) -> RepeatModelMigrationRequired:
     )
 
 
+def _pg_identity(name: str) -> str:
+    return name.encode()[:PG_MAX_IDENTIFIER_BYTES].decode(errors="ignore")
+
+
+def _shared_pg_identities(assets: list[TransformationAsset]) -> set[str]:
+    counts = Counter(_pg_identity(asset.name) for asset in assets)
+    return {name for name, count in counts.items() if count > 1}
+
+
 def preserve_repeat_names(
     assets: list[TransformationAsset],
     repeats: list[GeneratedRepeat],
@@ -349,18 +362,38 @@ def preserve_repeat_names(
             raise _migration(asset.name, "its name is now required by a non-repeat model")
         # A canonical source absent from the current plan is an ordinary orphan.
 
-    for names in owners.values():
+    shared = _shared_pg_identities(existing)
+    # Repeats that want a preserved truncation are rehashed below (it is in
+    # `legacy`); only another kind of model holding the name blocks it.
+    blocked = set(current) - repeat_names
+    preserved: dict[tuple[str, tuple[str, ...]], str] = {}
+    for identity, names in owners.items():
         if len(names) != 1:
             raise _migration(names[0], "multiple existing models own the same source")
         name = names[0]
-        if not _NAME.fullmatch(name) or len(name.encode()) > 63:
+        if not _NAME.fullmatch(name):
             raise _migration(name, "its existing name is not a supported PostgreSQL model identity")
-    reserved = set(current) | set(old)
+        if len(name.encode()) > PG_MAX_IDENTIFIER_BYTES:
+            # Generators before #235 stored uncapped names (SCOUT-DJANGO-45). PostgreSQL
+            # created the relation under the truncated name, so that is the identity
+            # consumers query; rename_legacy_repeats moves the row onto it in place.
+            name = _pg_identity(name)
+            if name in shared:
+                # Several models were built into this one relation, so it never had a
+                # stable identity; the source gets a fresh name and the row is swept.
+                continue
+            if name in blocked:
+                raise _migration(names[0], "its truncated PostgreSQL name is used by another model")
+        preserved[identity] = name
+    # An orphan's truncated relation is reserved too, or a new source could take
+    # it and rename_legacy_repeats would hand that source the orphan's row.
+    legacy = set(old) | shared | {_pg_identity(name) for name in old}
+    reserved = set(current) | set(preserved.values()) | legacy
     for identity, repeat in sorted(planned.items()):
-        if identity in owners:
-            repeat.asset.name = owners[identity][0]
+        if identity in preserved:
+            repeat.asset.name = preserved[identity]
             continue
-        if repeat.asset.name not in old:
+        if repeat.asset.name not in legacy:
             continue
         # Reserve removed names too: a different source must not inherit SQL
         # consumers merely because its preferred name became available today.
@@ -388,3 +421,60 @@ def preserve_repeat_names(
         if provider == "commcare" and _canonical_case(asset.sql_content):
             continue
         raise _migration(asset.name, "its source cannot be proven safe to remove")
+
+
+def rename_legacy_repeats(
+    tenant,
+    existing: list[TransformationAsset],
+    assets: list[TransformationAsset],
+    *,
+    provider: str,
+) -> None:
+    """Move overlong legacy repeat rows onto the identity the plan gave them.
+
+    A row whose truncated name was preserved is renamed in place, keeping its
+    primary key, ``replaces`` links and run history. A row that shared its
+    truncated relation with other models is left for the orphan sweep. Either
+    way, refuse when a custom model still depends on the long name. Call inside
+    the tenant-locked upsert transaction, before any writes.
+    """
+    planned = {asset.name: asset for asset in assets}
+    shared = _shared_pg_identities(existing)
+    renames, ambiguous = {}, []
+    for asset in existing:
+        if len(asset.name.encode()) <= PG_MAX_IDENTIFIER_BYTES:
+            continue
+        source = repeat_source(asset.sql_content, provider=provider)
+        if source is None:
+            continue
+        name = _pg_identity(asset.name)
+        if name in shared:
+            ambiguous.append(asset)
+        elif name in planned:
+            # Only a preserved identity moves; an orphan whose truncation merely
+            # matches another planned model must not hand it this row.
+            successor = repeat_source(planned[name].sql_content, provider=provider)
+            if successor is not None and successor.path == source.path:
+                renames[asset] = name
+    if not renames and not ambiguous:
+        return
+    custom = TransformationAsset.objects.exclude(scope=TransformationScope.SYSTEM).filter(
+        Q(tenant=tenant) | Q(workspace__workspace_tenants__tenant=tenant)
+    )
+    for asset in [*renames, *ambiguous]:
+        # Raw SQL against a renamed row still resolves through PostgreSQL's own
+        # truncation; an override by name or a dbt ref() of the long name would not.
+        ref = rf"ref\(\s*['\"]{re.escape(asset.name)}['\"]\s*\)"
+        dependents = Q(name=asset.name) | Q(sql_content__regex=ref)
+        if asset in ambiguous:
+            dependents |= Q(replaces=asset)
+        if custom.filter(dependents).exists():
+            raise _migration(asset.name, "a custom model depends on its overlong name")
+    for asset, name in renames.items():
+        TransformationAsset.objects.filter(pk=asset.pk).update(name=name)
+    logger.warning(
+        "Legacy overlong repeat models for tenant %s: renamed %s; swept ambiguous %s",
+        tenant.external_id,
+        ", ".join(sorted(f"{asset.name} -> {name}" for asset, name in renames.items())) or "-",
+        ", ".join(sorted(asset.name for asset in ambiguous)) or "-",
+    )

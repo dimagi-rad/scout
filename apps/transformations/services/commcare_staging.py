@@ -23,6 +23,7 @@ from apps.transformations.services.repeat_identity import (
     REPEAT_ELEMENT_COLUMN,
     GeneratedRepeat,
     preserve_repeat_names,
+    rename_legacy_repeats,
 )
 from apps.transformations.services.staging_identity import StagingModelMigrationRequired
 from apps.users.models import Tenant
@@ -657,6 +658,8 @@ def upsert_system_assets(tenant, tenant_metadata) -> dict:
                 f"{', '.join(sorted(existing))}. Review SQL/artifact references and replaces "
                 "links before rebuilding; no assets were changed."
             )
+
+    rename_legacy_repeats(tenant, existing_assets, assets, provider="commcare")
 
     created = 0
     updated = 0

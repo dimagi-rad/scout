@@ -663,3 +663,130 @@ def test_orm_concurrent_upserts_plan_against_the_previous_committed_identity(rep
     assert snapshots["second"][old[-1].id] == old[-1].name
     custom.refresh_from_db()
     assert custom.replaces_id == old[-1].id
+
+
+def overlong(asset):
+    # Generators before #235 stored uncapped names (SCOUT-DJANGO-45).
+    asset.name = f"{asset.name}_{'x' * 70}"
+    return asset.name, asset.name[:63]
+
+
+def test_overlong_legacy_owner_keeps_its_truncated_postgres_identity(repeat_tenant):
+    old = legacy_assets(repeat_tenant)
+    _, truncated = overlong(old[-1])
+    right_path = tuple(part for part in PATHS[-1].split("/") if part)
+    result = generate(repeat_tenant, metadata(repeat_tenant), old)
+    assert source_names(repeat_tenant, result)[right_path] == truncated
+    assert all(len(asset.name.encode()) <= 63 for asset in result)
+
+
+def shared_truncation_assets(tenant):
+    parent, *repeats = generate(tenant, metadata(tenant), [])
+    # Both names truncate to one relation, so PostgreSQL kept whichever built last.
+    for repeat, leaf in zip(repeats, ("left", "right"), strict=True):
+        repeat.name = f"stg_{'y' * 60}_{leaf}"
+    return [parent, *repeats], f"stg_{'y' * 59}"
+
+
+def test_overlong_owners_sharing_a_truncation_get_fresh_names(repeat_tenant):
+    old, shared = shared_truncation_assets(repeat_tenant)
+    result = generate(repeat_tenant, metadata(repeat_tenant), old)
+    names = set(source_names(repeat_tenant, result).values())
+    assert len(names) == 2
+    assert shared not in names
+    assert not names & {asset.name for asset in old}
+    assert all(len(asset.name.encode()) <= 63 for asset in result)
+
+
+@pytest.mark.django_db
+def test_orm_overlong_owners_sharing_a_truncation_are_swept(repeat_tenant):
+    repeat_tenant.save()
+    old, _ = shared_truncation_assets(repeat_tenant)
+    for asset in old:
+        asset.save()
+    result = upsert(repeat_tenant, metadata(repeat_tenant))
+    assert result["deleted"] == 2
+    assert not TransformationAsset.objects.filter(pk__in=[a.id for a in old[1:]]).exists()
+
+
+@pytest.mark.django_db
+def test_orm_ambiguous_overlong_owner_with_a_replaces_link_fails_before_any_write(
+    repeat_tenant, mocker
+):
+    repeat_tenant.save()
+    old, _ = shared_truncation_assets(repeat_tenant)
+    for asset in old:
+        asset.save()
+    TransformationAsset.objects.create(
+        tenant=repeat_tenant,
+        scope=TransformationScope.TENANT,
+        name="custom_repeat",
+        sql_content="SELECT 1",
+        replaces=old[-1],
+    )
+    writes = mocker.spy(TransformationAsset.objects, "update_or_create")
+    with pytest.raises(RepeatModelMigrationRequired, match="custom model depends"):
+        upsert(repeat_tenant, metadata(repeat_tenant))
+    writes.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_orm_overlong_owner_is_renamed_in_place(repeat_tenant):
+    old, custom = save_legacy_fixture(repeat_tenant)
+    long_name, truncated = overlong(old[-1])
+    old[-1].save()
+    custom.sql_content = f"SELECT * FROM {long_name}"
+    custom.save()
+    assert upsert(repeat_tenant, metadata(repeat_tenant))["deleted"] == 0
+    assert TransformationAsset.objects.get(pk=old[-1].id).name == truncated
+    custom.refresh_from_db()
+    assert custom.replaces_id == old[-1].id
+    again = upsert(repeat_tenant, metadata(repeat_tenant))
+    assert again["created"] == again["deleted"] == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("dependent", ["override", "ref"])
+def test_orm_overlong_owner_with_a_name_dependent_fails_before_any_write(
+    repeat_tenant, mocker, dependent
+):
+    old, custom = save_legacy_fixture(repeat_tenant)
+    long_name, _ = overlong(old[-1])
+    old[-1].save()
+    if dependent == "override":
+        custom.name = long_name
+    else:
+        custom.sql_content = f'SELECT * FROM {{{{ ref( "{long_name}" ) }}}}'
+    custom.save()
+    before = list(TransformationAsset.objects.values_list("id", "name", "sql_content"))
+    writes = mocker.spy(TransformationAsset.objects, "update_or_create")
+    with pytest.raises(RepeatModelMigrationRequired, match="custom model depends"):
+        upsert(repeat_tenant, metadata(repeat_tenant))
+    writes.assert_not_called()
+    assert list(TransformationAsset.objects.values_list("id", "name", "sql_content")) == before
+
+
+@pytest.mark.django_db
+def test_orm_overlong_owner_truncating_onto_a_kept_63_byte_model_is_swept(repeat_tenant):
+    repeat_tenant.save()
+    parent, left, right = generate(repeat_tenant, metadata(repeat_tenant), [])
+    left.name = f"stg_{'z' * 59}"
+    right.name = f"{left.name}_details"
+    for asset in (parent, left, right):
+        asset.save()
+    assert upsert(repeat_tenant, metadata(repeat_tenant))["deleted"] == 1
+    assert TransformationAsset.objects.get(pk=left.id).name == left.name
+    assert not TransformationAsset.objects.filter(pk=right.id).exists()
+
+
+def test_preserved_truncation_outranks_a_new_repeat_preferring_that_name(repeat_tenant):
+    old = legacy_assets(repeat_tenant)
+    parent = old[0].name
+    leaf = "q" * (63 - len(f"{parent}__repeat_"))
+    wanted = f"{parent}__repeat_{leaf}"
+    old[-1].name = f"{wanted}_legacy"
+    result = generate(repeat_tenant, metadata(repeat_tenant, (*PATHS, f"/data/{leaf}")), old)
+    names = source_names(repeat_tenant, result)
+    assert names[tuple(part for part in PATHS[-1].split("/") if part)] == wanted
+    assert names[("data", leaf)] != wanted
+    assert len(set(names.values())) == len(names)

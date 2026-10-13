@@ -27,7 +27,11 @@ from apps.transformations.services.commcare_staging import (
     repeat_child_columns,
     warn_folded,
 )
-from apps.transformations.services.repeat_identity import GeneratedRepeat, preserve_repeat_names
+from apps.transformations.services.repeat_identity import (
+    GeneratedRepeat,
+    preserve_repeat_names,
+    rename_legacy_repeats,
+)
 from apps.users.models import Tenant
 
 logger = logging.getLogger(__name__)
@@ -192,6 +196,8 @@ def upsert_connect_assets(tenant, tenant_metadata) -> dict:
     )
     form_definitions = (tenant_metadata.metadata or {}).get("form_definitions", {})
     assets = generate_connect_assets(form_definitions, tenant, existing_assets=existing_assets)
+
+    rename_legacy_repeats(tenant, existing_assets, assets, provider="commcare_connect")
 
     created = 0
     updated = 0
