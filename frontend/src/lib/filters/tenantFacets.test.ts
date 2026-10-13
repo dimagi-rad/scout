@@ -9,6 +9,7 @@ import {
   UNKNOWN,
   connectStatus,
   connectType,
+  formatIdSample,
   parseTenantIdList,
   tenantMatchesSearch,
   normalizeTenantSearch,
@@ -173,23 +174,47 @@ it("searches name or external id, ignoring a leading #", () => {
 })
 
 describe("a pasted list of ids", () => {
-  it("parses commas, spaces, semicolons, newlines and a leading # into unique ids", () => {
-    expect(parseTenantIdList("523, 524,675;874\n#938  523")).toEqual(["523", "524", "675", "874", "938"])
+  it("parses commas, spaces, semicolons, tabs, CRLF and a leading # into unique ids", () => {
+    expect(parseTenantIdList("523, 524,675;874\r\n#938\t 523,")?.ids).toEqual([
+      "523", "524", "675", "874", "938",
+    ])
   })
 
-  it("leaves a single id and any non-numeric query to the ordinary search", () => {
+  it("reads leading zeros as the same id", () => {
+    expect(parseTenantIdList("0523, 0, 524")?.ids).toEqual(["523", "0", "524"])
+  })
+
+  it("keeps a list with a typo a list, and reports the token it cannot read", () => {
+    expect(parseTenantIdList("523, 524, 67S")).toMatchObject({
+      ids: ["523", "524"],
+      unrecognised: ["67S"],
+    })
+  })
+
+  it("leaves a single id and mostly-text queries to the ordinary search", () => {
     expect(parseTenantIdList("523")).toBeNull()
     expect(parseTenantIdList("kmc kenya")).toBeNull()
     expect(parseTenantIdList("523, kenya")).toBeNull()
+    expect(parseTenantIdList("KMC 2024 2025 Kenya")).toBeNull()
     expect(parseTenantIdList("")).toBeNull()
   })
 
-  it("matches each listed id exactly, never as a prefix or a name", () => {
+  it("matches each listed Connect id exactly, never as a prefix, a name or another provider", () => {
     const list = normalizeTenantSearch("523, 1234")
     expect(tenantMatchesSearch(tenant("523", "commcare_connect", {}, "Nama Wellness"), list)).toBe(true)
     expect(tenantMatchesSearch(tenant("1234", "commcare_connect", {}, "GHI"), list)).toBe(true)
     expect(tenantMatchesSearch(tenant("5230", "commcare_connect", {}, "Other"), list)).toBe(false)
     expect(tenantMatchesSearch(tenant("99", "commcare_connect", {}, "Opp 523"), list)).toBe(false)
+    expect(tenantMatchesSearch(tenant("523", "ocs", {}, "Bot"), list)).toBe(false)
+  })
+
+  it("searches a single id with a trailing separator as that id", () => {
+    expect(tenantMatchesSearch(tenant("523", "commcare_connect"), normalizeTenantSearch("523,"))).toBe(true)
+  })
+
+  it("shortens a long id list", () => {
+    expect(formatIdSample(["1", "2", "3"], 2)).toBe("1, 2 and 1 more")
+    expect(formatIdSample(["1", "2"], 2)).toBe("1, 2")
   })
 })
 

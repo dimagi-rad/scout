@@ -138,29 +138,60 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
 
 /** The pickers' text search: name or external id, ignoring a leading "#". */
 export function normalizeTenantSearch(query: string): string {
-  return query.trim().replace(/^#/, "").toLowerCase()
+  // A trailing separator ("523,") is the start of a list, not part of an id.
+  return query.trim().replace(/^#/, "").replace(/[\s,;]+$/, "").toLowerCase()
 }
 
+export interface TenantIdList {
+  /** Canonical Connect opportunity ids, in the order pasted. */
+  ids: readonly string[]
+  idSet: ReadonlySet<string>
+  /** Tokens in the list that are not ids, e.g. a typo like "67S". */
+  unrecognised: readonly string[]
+}
+
+const ID_TOKEN = /^\d+$/
+
 /**
- * A pasted list of external ids — "523, 524, 675" or one per line, "#" optional —
- * or null when the query is anything else. Two or more numeric ids, so a single
- * number still searches as before (a prefix of an id or part of a name).
+ * A pasted list of opportunity ids ("523, 524, 675" or one per line, "#" optional),
+ * or null when the query is ordinary search text. It takes two or more ids that
+ * outnumber the other tokens, so a single number or a name like "KMC 2024 Kenya"
+ * still searches as before, while a typo in a list is reported, not silently
+ * turned into a name search.
  */
-export function parseTenantIdList(query: string): string[] | null {
+export function parseTenantIdList(query: string): TenantIdList | null {
   const tokens = query
     .split(/[\s,;]+/)
     .map((token) => token.replace(/^#/, ""))
     .filter(Boolean)
-  if (tokens.length < 2 || !tokens.every((token) => /^\d+$/.test(token))) return null
-  return [...new Set(tokens)]
+  const numeric = tokens.filter((token) => ID_TOKEN.test(token))
+  if (numeric.length < 2 || numeric.length * 2 <= tokens.length) return null
+  // Connect ids are integers, so "0523" means 523.
+  const ids = [...new Set(numeric.map((token) => token.replace(/^0+(?=\d)/, "")))]
+  const unrecognised = [...new Set(tokens.filter((token) => !ID_TOKEN.test(token)))]
+  return { ids, idSet: new Set(ids), unrecognised }
 }
 
-export function tenantMatchesSearch(t: UserTenant, normalized: string): boolean {
+/**
+ * `idList` is the parse of `normalized`; callers filtering many rows pass it
+ * pre-computed, since this runs per row on every keystroke.
+ */
+export function tenantMatchesSearch(
+  t: UserTenant,
+  normalized: string,
+  idList: TenantIdList | null = parseTenantIdList(normalized),
+): boolean {
   if (!normalized) return true
-  const ids = parseTenantIdList(normalized)
-  if (ids) return ids.includes(t.tenant_id)
+  // "Opportunity ID" is Connect's; another provider's all-digit id is not one.
+  if (idList) return t.provider === CONNECT_PROVIDER && idList.idSet.has(t.tenant_id)
   return (
     t.tenant_name.toLowerCase().includes(normalized) ||
     t.tenant_id.toLowerCase().includes(normalized)
   )
+}
+
+/** "523, 524, 675" — or the first `max` and "and N more" for a long paste. */
+export function formatIdSample(ids: readonly string[], max = 10): string {
+  if (ids.length <= max) return ids.join(", ")
+  return `${ids.slice(0, max).join(", ")} and ${ids.length - max} more`
 }
