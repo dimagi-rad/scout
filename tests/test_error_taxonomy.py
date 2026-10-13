@@ -215,8 +215,8 @@ class _Transport(BaseHTTPTransport):
 class TestBeforeSendTraceExport:
     """SCOUT-DJANGO-46: a Langfuse trace batch lost to a timeout is not an issue.
 
-    The records come from OTel's real export client, so a reworded message or
-    renamed logger fails here instead of silently turning the filter off.
+    The records come from OTel's real export client, so a reworded message fails
+    here instead of silently turning the filter off.
     """
 
     def _export_record(self, caplog, transport):
