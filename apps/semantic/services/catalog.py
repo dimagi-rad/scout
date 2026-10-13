@@ -237,7 +237,7 @@ def _infer_display_metadata(
 
 
 async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTable]]:
-    # Runs inside the Cube refresh transaction: its ORM calls route back to that thread.
+    # Can run inside the Cube refresh transaction, whose thread its ORM calls route back to.
     ctx = await load_workspace_context(str(workspace.id), touch=False)
     schema_name = ctx.schema_name
 
@@ -577,7 +577,7 @@ def _sync_custom_datasets(
                 custom.definition_sql,
                 allowed_tables=allowed_tables,
             )
-            columns = infer_custom_dataset_columns(workspace, compiled_sql)
+            columns = infer_custom_dataset_columns(workspace, compiled_sql, touch=False)
             if not columns:
                 raise CustomDatasetError("Custom dataset query did not return columns.")
         except CustomDatasetError as exc:

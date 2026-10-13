@@ -83,10 +83,14 @@ def _custom_dataset_tables(definition_sql: str):
     return statement, tables
 
 
-def infer_custom_dataset_columns(workspace, compiled_sql: str) -> list[dict[str, Any]]:
-    """Probe a compiled custom dataset query and return catalog-style columns."""
-    # A probe, not access; and the catalog build calls this inside its transaction.
-    ctx = async_to_sync(load_workspace_context)(str(workspace.id), touch=False)
+def infer_custom_dataset_columns(
+    workspace, compiled_sql: str, *, touch: bool = True
+) -> list[dict[str, Any]]:
+    """Probe a compiled custom dataset query and return catalog-style columns.
+
+    ``touch`` is forwarded to ``load_workspace_context``; see there.
+    """
+    ctx = async_to_sync(load_workspace_context)(str(workspace.id), touch=touch)
     try:
         with (
             psycopg.connect(**ctx.connection_params, autocommit=True) as conn,
