@@ -363,6 +363,9 @@ def preserve_repeat_names(
         # A canonical source absent from the current plan is an ordinary orphan.
 
     shared = _shared_pg_identities(existing)
+    # Repeats that want a preserved truncation are rehashed below (it is in
+    # `legacy`); only another kind of model holding the name blocks it.
+    blocked = set(current) - repeat_names
     preserved: dict[tuple[str, tuple[str, ...]], str] = {}
     for identity, names in owners.items():
         if len(names) != 1:
@@ -379,8 +382,7 @@ def preserve_repeat_names(
                 # Several models were built into this one relation, so it never had a
                 # stable identity; the source gets a fresh name and the row is swept.
                 continue
-            # Repeats wanting this name are rehashed below; only another kind of model blocks it.
-            if name in set(current) - repeat_names:
+            if name in blocked:
                 raise _migration(names[0], "its truncated PostgreSQL name is used by another model")
         preserved[identity] = name
     # An orphan's truncated relation is reserved too, or a new source could take

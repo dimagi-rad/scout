@@ -777,3 +777,16 @@ def test_orm_overlong_owner_truncating_onto_a_kept_63_byte_model_is_swept(repeat
     assert upsert(repeat_tenant, metadata(repeat_tenant))["deleted"] == 1
     assert TransformationAsset.objects.get(pk=left.id).name == left.name
     assert not TransformationAsset.objects.filter(pk=right.id).exists()
+
+
+def test_preserved_truncation_outranks_a_new_repeat_preferring_that_name(repeat_tenant):
+    old = legacy_assets(repeat_tenant)
+    parent = old[0].name
+    leaf = "q" * (63 - len(f"{parent}__repeat_"))
+    wanted = f"{parent}__repeat_{leaf}"
+    old[-1].name = f"{wanted}_legacy"
+    result = generate(repeat_tenant, metadata(repeat_tenant, (*PATHS, f"/data/{leaf}")), old)
+    names = source_names(repeat_tenant, result)
+    assert names[tuple(part for part in PATHS[-1].split("/") if part)] == wanted
+    assert names[("data", leaf)] != wanted
+    assert len(set(names.values())) == len(names)
