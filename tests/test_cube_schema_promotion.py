@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import psycopg
 import pytest
-from django.db import connection, connections
+from django.db import OperationalError, connection, connections
 
 from apps.common.errors import ExpectedStateError
 from apps.semantic.models import CubeSchema, SemanticDataset, SemanticField, SemanticModel
@@ -452,3 +452,52 @@ def test_refresh_that_never_gets_a_slot_keeps_serving(
     model.refresh_from_db()
     assert model.metadata["last_build"]["ok"] is False
     assert refreshed_model.refreshes == [True]
+
+
+def _deadlock():
+    try:
+        raise psycopg.errors.DeadlockDetected("deadlock detected")
+    except psycopg.Error as exc:
+        raise OperationalError("deadlock detected") from exc
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_chosen_as_deadlock_victim_is_retried_once(
+    workspace, model, refreshed_model, cube_http, monkeypatch
+):
+    """SCOUT-DJANGO-43: a deadlock rolls the refresh back whole, so redo it."""
+    real_ensure = cube_schema.ensure_semantic_model
+    calls = []
+
+    def deadlock_first(ws):
+        calls.append(ws)
+        if len(calls) == 1:
+            _deadlock()
+        return real_ensure(ws)
+
+    monkeypatch.setattr(cube_schema, "ensure_semantic_model", deadlock_first)
+
+    promoted = build_and_promote_cube_schema(workspace)
+
+    assert promoted.status == CubeSchema.Status.ACTIVE
+    assert len(calls) == 2
+    model.refresh_from_db()
+    assert model.metadata["last_build"]["ok"] is True
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_that_fails_other_than_by_deadlock_is_not_retried(
+    workspace, model, refreshed_model, cube_http, monkeypatch
+):
+    calls = []
+
+    def fail(ws):
+        calls.append(ws)
+        raise OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(cube_schema, "ensure_semantic_model", fail)
+
+    with pytest.raises(OperationalError):
+        build_and_promote_cube_schema(workspace)
+
+    assert len(calls) == 1
