@@ -16,6 +16,7 @@ lives in the repo, in review, next to the code that raises.
 
 from __future__ import annotations
 
+import urllib3
 from sentry_sdk.integrations.logging import ignore_logger
 
 from apps.common.errors import ExpectedStateError
@@ -28,6 +29,15 @@ from apps.common.errors import ExpectedStateError
 # handlers), but sentry-sdk patches ``Logger.callHandlers``, so every line became
 # an event anyway.
 _DBT_LOGGERS = ("stdout_log", "file_log")
+
+# Langfuse ships agent traces through the OTel HTTP exporter, which logs a failed
+# batch at ERROR without retrying a read timeout. One slow response from
+# cloud.langfuse.com is a dropped trace, not a Scout fault (SCOUT-DJANGO-46).
+# Only read timeouts are dropped: a bad URL, DNS/TLS failure, refused or
+# blackholed connection, or 401 also fails every later batch, so those keep
+# reporting.
+_OTEL_TRACE_EXPORTER_LOGGER = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
+_OTEL_EXPORT_FAILED = "Failed to export %s batch code: %s, reason: %s"
 
 
 def ignore_noisy_loggers():
@@ -43,6 +53,17 @@ def ignore_noisy_loggers():
         ignore_logger(name)
 
 
+def _is_trace_export_timeout(record):
+    args = record.args
+    return (
+        record.name == _OTEL_TRACE_EXPORTER_LOGGER
+        and record.msg == _OTEL_EXPORT_FAILED
+        and isinstance(args, tuple)
+        and len(args) == 3
+        and isinstance(args[2], urllib3.exceptions.ReadTimeoutError)
+    )
+
+
 def before_send(event, hint):
     """Drop events whose exception is a known operational state.
 
@@ -51,10 +72,14 @@ def before_send(event, hint):
     *while handling* an expected state is still a bug, and walking the chain
     would swallow it.
 
-    Events with no exception attached (a bare ``logger.error``) are always kept:
+    Events with no exception attached (a bare ``logger.error``) are kept:
     classification is a property of an exception type, and there is nothing to
-    classify here.
+    classify here. The one exception is a Langfuse trace export that timed out,
+    matched by its exact log record.
     """
+    record = hint.get("log_record")
+    if record is not None and _is_trace_export_timeout(record):
+        return None
     exc_info = hint.get("exc_info")
     if exc_info and isinstance(exc_info[1], ExpectedStateError):
         return None
