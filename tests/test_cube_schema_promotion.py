@@ -486,6 +486,31 @@ def test_refresh_chosen_as_deadlock_victim_is_retried_once(
 
 
 @pytest.mark.django_db(transaction=True)
+def test_refresh_deadlocked_at_commit_is_retried(
+    workspace, model, refreshed_model, cube_http, monkeypatch
+):
+    """Where SCOUT-DJANGO-43 struck: the deferred FK checks at COMMIT."""
+    real_commit = connection.commit
+    commits = []
+
+    def deadlock_first_commit():
+        commits.append(connection.in_atomic_block)
+        if len(commits) == 1:
+            _deadlock()
+        real_commit()
+
+    monkeypatch.setattr(connection, "commit", deadlock_first_commit)
+
+    promoted = build_and_promote_cube_schema(workspace)
+
+    assert promoted.status == CubeSchema.Status.ACTIVE
+    assert len(commits) == 2
+    assert refreshed_model.refreshes == [True, True]
+    model.refresh_from_db()
+    assert model.metadata["last_build"]["ok"] is True
+
+
+@pytest.mark.django_db(transaction=True)
 def test_refresh_that_fails_other_than_by_deadlock_is_not_retried(
     workspace, model, refreshed_model, cube_http, monkeypatch
 ):
@@ -501,3 +526,43 @@ def test_refresh_that_fails_other_than_by_deadlock_is_not_retried(
         build_and_promote_cube_schema(workspace)
 
     assert len(calls) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_deadlocked_by_a_workspace_delete_gives_up_without_retrying(
+    workspace, refreshed_model, monkeypatch
+):
+    calls = []
+
+    def deleted_then_deadlocked(ws, slot_wait_seconds):
+        calls.append(ws)
+        type(ws).objects.filter(pk=ws.pk).delete()
+        _deadlock()
+
+    monkeypatch.setattr(cube_schema, "_refresh_and_promote", deleted_then_deadlocked)
+
+    with pytest.raises(CubeSchemaBuildError, match="deleted"):
+        build_and_promote_cube_schema(workspace)
+
+    assert len(calls) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_deadlocked_twice_fails_and_keeps_serving(
+    workspace, model, refreshed_model, monkeypatch
+):
+    calls = []
+
+    def deadlocked(ws, slot_wait_seconds):
+        calls.append(ws)
+        _deadlock()
+
+    monkeypatch.setattr(cube_schema, "_refresh_and_promote", deadlocked)
+
+    with pytest.raises(OperationalError):
+        build_and_promote_cube_schema(workspace)
+
+    assert len(calls) == 2
+    assert CubeSchema.objects.filter(semantic_model=model, status=CubeSchema.Status.ACTIVE).exists()
+    model.refresh_from_db()
+    assert model.metadata["last_build"]["ok"] is False

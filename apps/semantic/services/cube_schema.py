@@ -280,7 +280,13 @@ def _build_and_promote_refreshed_model(workspace, slot_wait_seconds: float) -> C
             if not isinstance(exc.__cause__, psycopg.errors.DeadlockDetected):
                 raise
             # The refresh writes many rows over a long transaction, so it is a
-            # likely deadlock victim (SCOUT-DJANGO-43); it rolled back whole.
+            # likely deadlock victim (SCOUT-DJANGO-43); it rolled back whole. A
+            # workspace delete cascading into its catalog is one such cycle, and
+            # then there is nothing left to refresh.
+            if not type(workspace).objects.filter(pk=workspace.pk).exists():
+                raise CubeSchemaBuildError(
+                    "The workspace was deleted during its Cube schema refresh."
+                ) from exc
             logger.warning(
                 "Cube schema refresh for workspace %s was a deadlock victim; retrying once",
                 workspace.id,
