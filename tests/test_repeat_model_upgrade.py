@@ -764,3 +764,16 @@ def test_orm_overlong_owner_with_a_name_dependent_fails_before_any_write(
         upsert(repeat_tenant, metadata(repeat_tenant))
     writes.assert_not_called()
     assert list(TransformationAsset.objects.values_list("id", "name", "sql_content")) == before
+
+
+@pytest.mark.django_db
+def test_orm_overlong_owner_truncating_onto_a_kept_63_byte_model_is_swept(repeat_tenant):
+    repeat_tenant.save()
+    parent, left, right = generate(repeat_tenant, metadata(repeat_tenant), [])
+    left.name = f"stg_{'z' * 59}"
+    right.name = f"{left.name}_details"
+    for asset in (parent, left, right):
+        asset.save()
+    assert upsert(repeat_tenant, metadata(repeat_tenant))["deleted"] == 1
+    assert TransformationAsset.objects.get(pk=left.id).name == left.name
+    assert not TransformationAsset.objects.filter(pk=right.id).exists()

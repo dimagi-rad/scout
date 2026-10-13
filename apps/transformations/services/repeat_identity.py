@@ -379,16 +379,18 @@ def preserve_repeat_names(
                 # Several models were built into this one relation, so it never had a
                 # stable identity; the source gets a fresh name and the row is swept.
                 continue
-            others = set(current) - {planned[identity].asset.name}
-            if name in old or name in others or name in preserved.values():
+            if name in set(current) - {planned[identity].asset.name}:
                 raise _migration(names[0], "its truncated PostgreSQL name is used by another model")
         preserved[identity] = name
-    reserved = set(current) | set(old) | set(preserved.values()) | shared
+    # An orphan's truncated relation is reserved too, or a new source could take
+    # it and rename_legacy_repeats would hand that source the orphan's row.
+    legacy = set(old) | shared | {_pg_identity(name) for name in old}
+    reserved = set(current) | set(preserved.values()) | legacy
     for identity, repeat in sorted(planned.items()):
         if identity in preserved:
             repeat.asset.name = preserved[identity]
             continue
-        if repeat.asset.name not in old and repeat.asset.name not in shared:
+        if repeat.asset.name not in legacy:
             continue
         # Reserve removed names too: a different source must not inherit SQL
         # consumers merely because its preferred name became available today.
@@ -433,28 +435,33 @@ def rename_legacy_repeats(
     way, refuse when a custom model still depends on the long name. Call inside
     the tenant-locked upsert transaction, before any writes.
     """
-    final_names = {asset.name for asset in assets}
+    planned = {asset.name: asset for asset in assets}
     shared = _shared_pg_identities(existing)
     renames, ambiguous = {}, []
     for asset in existing:
         if len(asset.name.encode()) <= PG_MAX_IDENTIFIER_BYTES:
             continue
-        if repeat_source(asset.sql_content, provider=provider) is None:
+        source = repeat_source(asset.sql_content, provider=provider)
+        if source is None:
             continue
         name = _pg_identity(asset.name)
-        if name in final_names:
-            renames[asset] = name
-        elif name in shared:
+        if name in shared:
             ambiguous.append(asset)
+        elif name in planned:
+            # Only a preserved identity moves; an orphan whose truncation merely
+            # matches another planned model must not hand it this row.
+            successor = repeat_source(planned[name].sql_content, provider=provider)
+            if successor is not None and successor.path == source.path:
+                renames[asset] = name
     if not renames and not ambiguous:
         return
     custom = TransformationAsset.objects.exclude(scope=TransformationScope.SYSTEM).filter(
         Q(tenant=tenant) | Q(workspace__workspace_tenants__tenant=tenant)
     )
     for asset in [*renames, *ambiguous]:
-        # Raw SQL keeps resolving through PostgreSQL's own truncation; an override
-        # by name or a dbt ref() of the long name would silently detach.
-        ref = rf"ref\(\s*['\"]{asset.name}['\"]\s*\)"
+        # Raw SQL against a renamed row still resolves through PostgreSQL's own
+        # truncation; an override by name or a dbt ref() of the long name would not.
+        ref = rf"ref\(\s*['\"]{re.escape(asset.name)}['\"]\s*\)"
         dependents = Q(name=asset.name) | Q(sql_content__regex=ref)
         if asset in ambiguous:
             dependents |= Q(replaces=asset)
@@ -463,8 +470,7 @@ def rename_legacy_repeats(
     for asset, name in renames.items():
         TransformationAsset.objects.filter(pk=asset.pk).update(name=name)
     logger.warning(
-        "Renamed overlong legacy repeat models for tenant %s (old -> new): %s; "
-        "swept ambiguous ones: %s",
+        "Legacy overlong repeat models for tenant %s: renamed %s; swept ambiguous %s",
         tenant.external_id,
         ", ".join(sorted(f"{asset.name} -> {name}" for asset, name in renames.items())) or "-",
         ", ".join(sorted(asset.name for asset in ambiguous)) or "-",
