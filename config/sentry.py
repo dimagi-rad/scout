@@ -16,7 +16,6 @@ lives in the repo, in review, next to the code that raises.
 
 from __future__ import annotations
 
-import requests
 import urllib3
 from sentry_sdk.integrations.logging import ignore_logger
 
@@ -34,12 +33,11 @@ _DBT_LOGGERS = ("stdout_log", "file_log")
 # Langfuse ships agent traces through the OTel HTTP exporter, which logs a failed
 # batch at ERROR without retrying a read timeout. One slow response from
 # cloud.langfuse.com is a dropped trace, not a Scout fault (SCOUT-DJANGO-46).
-# Only timeouts are dropped: a bad URL, DNS/TLS failure, refused connection or
-# 401 also fails every later batch, so those keep reporting. urllib3's and
-# requests' timeouts don't subclass the builtin TimeoutError.
+# Only read timeouts are dropped: a bad URL, DNS/TLS failure, refused or
+# blackholed connection, or 401 also fails every later batch, so those keep
+# reporting.
 _OTEL_TRACE_EXPORTER_LOGGER = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
 _OTEL_EXPORT_FAILED = "Failed to export %s batch code: %s, reason: %s"
-_TIMEOUTS = (urllib3.exceptions.TimeoutError, requests.exceptions.Timeout, TimeoutError)
 
 
 def ignore_noisy_loggers():
@@ -56,10 +54,13 @@ def ignore_noisy_loggers():
 
 
 def _is_trace_export_timeout(record):
+    args = record.args
     return (
         record.name == _OTEL_TRACE_EXPORTER_LOGGER
         and record.msg == _OTEL_EXPORT_FAILED
-        and isinstance(record.args[2], _TIMEOUTS)
+        and isinstance(args, tuple)
+        and len(args) == 3
+        and isinstance(args[2], urllib3.exceptions.ReadTimeoutError)
     )
 
 

@@ -7,7 +7,6 @@ directions — what gets dropped AND what must keep coming through.
 import logging
 
 import pytest
-import requests
 import urllib3
 from opentelemetry.exporter.http.transport._base import BaseHTTPResult, BaseHTTPTransport
 from opentelemetry.exporter.otlp.common.http import _OTLPHTTPClient
@@ -215,8 +214,8 @@ class _Transport(BaseHTTPTransport):
 class TestBeforeSendTraceExport:
     """SCOUT-DJANGO-46: a Langfuse trace batch lost to a timeout is not an issue.
 
-    The records come from OTel's real export client, so a reworded message fails
-    here instead of silently turning the filter off.
+    The records come from OTel's real export client and logger, so a reworded
+    message or renamed logger fails here instead of silently turning the filter off.
     """
 
     def _export_record(self, caplog, transport):
@@ -225,9 +224,10 @@ class TestBeforeSendTraceExport:
             "https://cloud.langfuse.com/api/public/otel/v1/traces",
             "spans",
             timeout=0.01,
-            logger=logging.getLogger(trace_exporter.__name__),
+            # The logger OTLPSpanExporter hands its client, so a rename shows up here.
+            logger=trace_exporter._logger,
         )
-        with caplog.at_level(logging.ERROR, logger=trace_exporter.__name__):
+        with caplog.at_level(logging.ERROR, logger=trace_exporter._logger.name):
             client.export(b"batch")
         [record] = [r for r in caplog.records if r.levelno == logging.ERROR]
         return record
@@ -236,16 +236,19 @@ class TestBeforeSendTraceExport:
         event = {"event": 1}
         return before_send(event, {"log_record": record}), event
 
-    @pytest.mark.parametrize(
-        "timeout",
-        [
-            urllib3.exceptions.ReadTimeoutError(None, "/v1/traces", "Read timed out."),
-            requests.exceptions.ReadTimeout("Read timed out."),
-        ],
-    )
-    def test_drops_a_timeout(self, caplog, timeout):
+    def test_drops_a_read_timeout(self, caplog):
+        timeout = urllib3.exceptions.ReadTimeoutError(None, "/v1/traces", "Read timed out.")
         record = self._export_record(caplog, _Transport(_Result(error=timeout)))
         assert self._send(record)[0] is None
+
+    def test_keeps_a_connect_timeout(self, caplog):
+        """A blackholed host never connects — every later batch fails the same way."""
+        timeout = urllib3.exceptions.ConnectTimeoutError(None, "/v1/traces", "timed out")
+        transport = _Transport(
+            _Result(error=timeout), connection_errors=(urllib3.exceptions.ConnectTimeoutError,)
+        )
+        sent, event = self._send(self._export_record(caplog, transport))
+        assert sent is event
 
     def test_keeps_a_rejected_batch(self, caplog):
         """A 401 means bad Langfuse keys — every trace after it is lost too."""
@@ -274,7 +277,7 @@ class TestBeforeSendTraceExport:
             __file__,
             0,
             "Failed to export %s batch code: %s, reason: %s",
-            ("spans", None, TimeoutError()),
+            ("spans", None, urllib3.exceptions.ReadTimeoutError(None, "/v1/traces", "x")),
             None,
         )
         sent, event = self._send(record)
