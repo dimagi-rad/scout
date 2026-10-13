@@ -16,6 +16,8 @@ lives in the repo, in review, next to the code that raises.
 
 from __future__ import annotations
 
+import requests
+import urllib3
 from sentry_sdk.integrations.logging import ignore_logger
 
 from apps.common.errors import ExpectedStateError
@@ -29,15 +31,15 @@ from apps.common.errors import ExpectedStateError
 # an event anyway.
 _DBT_LOGGERS = ("stdout_log", "file_log")
 
-# Langfuse ships agent traces through the OTel HTTP exporter, which logs a
-# failed batch at ERROR. A batch lost to a network blip (``code: None``) or to
-# exhausted retries on 429/5xx is a dropped trace, not a Scout fault
-# (SCOUT-DJANGO-46: a read timeout to cloud.langfuse.com). A batch rejected with
-# a status code — 401 from bad Langfuse keys — still reports: that one is
-# config, and every trace after it is lost too.
-_OTEL_EXPORTER_LOGGER = "opentelemetry.exporter"
-_OTEL_RETRIES_EXHAUSTED = "Failed to export %s batch due to timeout, max retries or shutdown."
+# Langfuse ships agent traces through the OTel HTTP exporter, which logs a failed
+# batch at ERROR without retrying a read timeout. One slow response from
+# cloud.langfuse.com is a dropped trace, not a Scout fault (SCOUT-DJANGO-46).
+# Only timeouts are dropped: a bad URL, DNS/TLS failure, refused connection or
+# 401 also fails every later batch, so those keep reporting. urllib3's and
+# requests' timeouts don't subclass the builtin TimeoutError.
+_OTEL_TRACE_EXPORTER_LOGGER = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
 _OTEL_EXPORT_FAILED = "Failed to export %s batch code: %s, reason: %s"
+_TIMEOUTS = (urllib3.exceptions.TimeoutError, requests.exceptions.Timeout, TimeoutError)
 
 
 def ignore_noisy_loggers():
@@ -53,12 +55,12 @@ def ignore_noisy_loggers():
         ignore_logger(name)
 
 
-def _is_transient_trace_export_failure(record):
-    if not record.name.startswith(_OTEL_EXPORTER_LOGGER):
-        return False
-    if record.msg == _OTEL_RETRIES_EXHAUSTED:
-        return True
-    return record.msg == _OTEL_EXPORT_FAILED and record.args[1] is None
+def _is_trace_export_timeout(record):
+    return (
+        record.name == _OTEL_TRACE_EXPORTER_LOGGER
+        and record.msg == _OTEL_EXPORT_FAILED
+        and isinstance(record.args[2], _TIMEOUTS)
+    )
 
 
 def before_send(event, hint):
@@ -71,11 +73,11 @@ def before_send(event, hint):
 
     Events with no exception attached (a bare ``logger.error``) are kept:
     classification is a property of an exception type, and there is nothing to
-    classify here. The one exception is a transient trace-export failure,
+    classify here. The one exception is a Langfuse trace export that timed out,
     matched by its exact log record.
     """
     record = hint.get("log_record")
-    if record is not None and _is_transient_trace_export_failure(record):
+    if record is not None and _is_trace_export_timeout(record):
         return None
     exc_info = hint.get("exc_info")
     if exc_info and isinstance(exc_info[1], ExpectedStateError):

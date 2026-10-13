@@ -7,6 +7,11 @@ directions — what gets dropped AND what must keep coming through.
 import logging
 
 import pytest
+import requests
+import urllib3
+from opentelemetry.exporter.http.transport._base import BaseHTTPResult, BaseHTTPTransport
+from opentelemetry.exporter.otlp.common.http import _OTLPHTTPClient
+from opentelemetry.exporter.otlp.proto.http import trace_exporter
 
 from apps.common.errors import (
     CommCareAccessDeniedError,
@@ -184,46 +189,93 @@ class TestAuthErrorAxes:
         assert ConnectAccessDeniedError("x").provider == "commcare_connect"
 
 
+class _Result(BaseHTTPResult):
+    def content(self):
+        return b""
+
+    def headers(self):
+        return {}
+
+
+class _Transport(BaseHTTPTransport):
+    def __init__(self, result, connection_errors=()):
+        self._result = result
+        self._connection_errors = connection_errors
+
+    def request(self, *args, **kwargs):
+        return self._result
+
+    def close(self):
+        pass
+
+    def is_connection_error(self, exception):
+        return isinstance(exception, self._connection_errors)
+
+
 class TestBeforeSendTraceExport:
-    """SCOUT-DJANGO-46: a Langfuse trace batch lost to the network is not an issue."""
+    """SCOUT-DJANGO-46: a Langfuse trace batch lost to a timeout is not an issue.
 
-    LOGGER = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
+    The records come from OTel's real export client, so a reworded message or
+    renamed logger fails here instead of silently turning the filter off.
+    """
 
-    def _hint(self, msg, args, name=LOGGER):
-        record = logging.LogRecord(name, logging.ERROR, __file__, 0, msg, args, None)
-        return {"log_record": record}
-
-    def test_drops_a_network_failure(self):
-        hint = self._hint(
-            "Failed to export %s batch code: %s, reason: %s",
-            ("spans", None, "Read timed out. (read timeout=0)"),
+    def _export_record(self, caplog, transport):
+        client = _OTLPHTTPClient(
+            transport,
+            "https://cloud.langfuse.com/api/public/otel/v1/traces",
+            "spans",
+            timeout=0.01,
+            logger=logging.getLogger(trace_exporter.__name__),
         )
-        assert before_send({"event": 1}, hint) is None
+        with caplog.at_level(logging.ERROR, logger=trace_exporter.__name__):
+            client.export(b"batch")
+        [record] = [r for r in caplog.records if r.levelno == logging.ERROR]
+        return record
 
-    def test_drops_exhausted_retries(self):
-        hint = self._hint(
-            "Failed to export %s batch due to timeout, max retries or shutdown.", ("spans",)
-        )
-        assert before_send({"event": 1}, hint) is None
+    def _send(self, record):
+        event = {"event": 1}
+        return before_send(event, {"log_record": record}), event
 
-    def test_keeps_a_rejected_batch(self):
+    @pytest.mark.parametrize(
+        "timeout",
+        [
+            urllib3.exceptions.ReadTimeoutError(None, "/v1/traces", "Read timed out."),
+            requests.exceptions.ReadTimeout("Read timed out."),
+        ],
+    )
+    def test_drops_a_timeout(self, caplog, timeout):
+        record = self._export_record(caplog, _Transport(_Result(error=timeout)))
+        assert self._send(record)[0] is None
+
+    def test_keeps_a_rejected_batch(self, caplog):
         """A 401 means bad Langfuse keys — every trace after it is lost too."""
-        event = {"event": 1}
-        hint = self._hint(
-            "Failed to export %s batch code: %s, reason: %s", ("spans", 401, "Unauthorized")
-        )
-        assert before_send(event, hint) is event
+        transport = _Transport(_Result(status_code=401, reason="Unauthorized"))
+        sent, event = self._send(self._export_record(caplog, transport))
+        assert sent is event
 
-    def test_keeps_other_exporter_errors(self):
-        event = {"event": 1}
-        hint = self._hint("Failed to encode span batch: %s", ("boom",))
-        assert before_send(event, hint) is event
+    def test_keeps_a_refused_connection(self, caplog):
+        """Wrong host, DNS or TLS failure: retried, then reported."""
+        refused = urllib3.exceptions.MaxRetryError(None, "/v1/traces", "Connection refused")
+        transport = _Transport(
+            _Result(error=refused), connection_errors=(urllib3.exceptions.MaxRetryError,)
+        )
+        sent, event = self._send(self._export_record(caplog, transport))
+        assert sent is event
+
+    def test_keeps_a_malformed_endpoint(self, caplog):
+        transport = _Transport(_Result(error=urllib3.exceptions.URLSchemeUnknown("htp")))
+        sent, event = self._send(self._export_record(caplog, transport))
+        assert sent is event
 
     def test_keeps_the_same_message_from_other_loggers(self):
-        event = {"event": 1}
-        hint = self._hint(
-            "Failed to export %s batch due to timeout, max retries or shutdown.",
-            ("spans",),
-            name="apps.agents.graph",
+        record = logging.LogRecord(
+            "apps.agents.graph",
+            logging.ERROR,
+            __file__,
+            0,
+            "Failed to export %s batch code: %s, reason: %s",
+            ("spans", None, TimeoutError()),
+            None,
         )
-        assert before_send(event, hint) is event
+        sent, event = self._send(record)
+        assert sent is event
