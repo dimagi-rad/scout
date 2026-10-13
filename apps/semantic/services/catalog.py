@@ -237,7 +237,8 @@ def _infer_display_metadata(
 
 
 async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTable]]:
-    ctx = await load_workspace_context(str(workspace.id))
+    # Runs inside the Cube refresh transaction: its ORM calls route back to that thread.
+    ctx = await load_workspace_context(str(workspace.id), touch=False)
     schema_name = ctx.schema_name
 
     view_schema = await WorkspaceViewSchema.objects.filter(

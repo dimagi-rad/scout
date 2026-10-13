@@ -4,6 +4,7 @@ import pytest
 from django.conf import settings
 from django.contrib.auth import get_user_model
 
+from apps.semantic.services import catalog
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     SchemaState,
@@ -36,7 +37,7 @@ async def test_load_workspace_context_single_tenant_delegates_to_tenant_context(
 
     # provider is threaded through so a cross-provider duplicate external_id
     # resolves unambiguously (arch #235).
-    mock_ltc.assert_called_once_with("ctx-domain", "commcare", "")
+    mock_ltc.assert_called_once_with("ctx-domain", "commcare", "", touch=True)
     assert result.schema_name == "ctx_domain"
 
 
@@ -91,3 +92,36 @@ async def test_load_workspace_context_multi_tenant_raises_if_no_active_view_sche
 
     with pytest.raises(ValueError, match="No active data schema for workspace"):
         await load_workspace_context(str(ws.id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db
+async def test_load_workspace_context_without_touch_leaves_the_view_row_unwritten():
+    User = get_user_model()
+    user = await User.objects.acreate_user(email="ctx4@example.com", password="pass")
+    t1 = await Tenant.objects.acreate(provider="commcare", external_id="ctx-nt-1")
+    t2 = await Tenant.objects.acreate(provider="commcare", external_id="ctx-nt-2")
+    ws = await Workspace.objects.acreate(name="NoTouch WS", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t1)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t2)
+    vs = await WorkspaceViewSchema.objects.acreate(
+        workspace=ws, schema_name="ws_notouch", state=SchemaState.ACTIVE
+    )
+
+    with patch.object(settings, "MANAGED_DATABASE_URL", "postgresql://test/db"):
+        with patch("mcp_server.context._parse_db_url", return_value={}):
+            await load_workspace_context(str(ws.id), touch=False)
+
+    await vs.arefresh_from_db()
+    assert vs.last_accessed_at is None
+
+
+@pytest.mark.asyncio
+async def test_semantic_catalog_build_does_not_touch_the_view_row():
+    # The build runs inside the Cube refresh transaction; a touch there holds the
+    # view row against an add-source request that holds the workspace (SCOUT-DJANGO-42).
+    load = AsyncMock(side_effect=RuntimeError("stop"))
+    with patch.object(catalog, "load_workspace_context", load), pytest.raises(RuntimeError):
+        await catalog._load_physical_tables_async(MagicMock(id="ws-id"))
+
+    load.assert_awaited_once_with("ws-id", touch=False)

@@ -49,7 +49,9 @@ class TenantContext:
     max_query_timeout_seconds: int = 30
 
 
-async def load_tenant_context(tenant_id: str, provider: str, server: str = "") -> QueryContext:
+async def load_tenant_context(
+    tenant_id: str, provider: str, server: str = "", *, touch: bool = True
+) -> QueryContext:
     """Load a QueryContext for a tenant from the managed database.
 
     Uses ``(provider, server, external_id)`` — the tenant's full identity — to find the
@@ -57,7 +59,7 @@ async def load_tenant_context(tenant_id: str, provider: str, server: str = "") -
     tenant's schema. ``provider`` is required (arch #235): external_id alone is
     ambiguous, since a Connect opp and an OCS experiment can share an id and
     would otherwise resolve to an arbitrary one of the two schemas.
-    Resets the schema's inactivity TTL via touch().
+    Resets the schema's inactivity TTL via touch() unless ``touch`` is False.
 
     Raises ValueError if the tenant schema is not found or not active.
     """
@@ -71,7 +73,8 @@ async def load_tenant_context(tenant_id: str, provider: str, server: str = "") -
     if ts is None:
         raise DataNotLoaded(f"No active data schema for tenant '{tenant_id}'.")
 
-    await ts.atouch()
+    if touch:
+        await ts.atouch()
 
     url = settings.MANAGED_DATABASE_URL
     if not url:
@@ -88,7 +91,7 @@ async def load_tenant_context(tenant_id: str, provider: str, server: str = "") -
     )
 
 
-async def load_workspace_context(workspace_id: str) -> QueryContext:
+async def load_workspace_context(workspace_id: str, *, touch: bool = True) -> QueryContext:
     """Load a QueryContext for a workspace, routing correctly for multi-tenant.
 
     - Single-tenant workspace (1 tenant): delegates to load_tenant_context(external_id, provider).
@@ -100,6 +103,11 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
     rows are marked TEARDOWN and their physical schemas dropped when the
     tenant count falls to <=1 (see
     ``apps.workspaces.services.workspace_service.remove_workspace_tenant``).
+
+    ``touch=False`` skips the TTL reset, for callers inside a transaction: the
+    touch is an UPDATE whose row lock lasts until commit, and adding a source
+    locks the workspace before this row, so the commit's FK check on the
+    workspace deadlocks against it (SCOUT-DJANGO-42).
 
     Raises ValueError if the workspace has no tenants, or if multi-tenant and
     no active WorkspaceViewSchema exists.
@@ -116,7 +124,9 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
 
     if tenant_count == 1:
         tenant = await workspace.tenants.afirst()
-        return await load_tenant_context(tenant.external_id, tenant.provider, tenant.server)
+        return await load_tenant_context(
+            tenant.external_id, tenant.provider, tenant.server, touch=touch
+        )
 
     try:
         vs = await WorkspaceViewSchema.objects.aget(
@@ -126,7 +136,8 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
     except WorkspaceViewSchema.DoesNotExist:
         raise DataNotLoaded(f"No active data schema for workspace '{workspace_id}'.") from None
 
-    await vs.atouch()
+    if touch:
+        await vs.atouch()
 
     url = settings.MANAGED_DATABASE_URL
     if not url:
