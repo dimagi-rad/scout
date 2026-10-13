@@ -157,7 +157,7 @@ export function TenantsTab({
       },
       {
         key: "not-found",
-        label: "not one of your sources",
+        label: "not one of your Connect opportunities",
         ids: idReport.notFound.filter((id) => !connected.has(id)),
       },
     ]

@@ -86,6 +86,7 @@ export function useTenantFacetFilters({
       search,
       onSearchChange: setSearch,
       searchPlaceholder: "Search by name or opportunity ID…",
+      pasteLinesAsList: true,
       facets: list.facets,
       options: list.options,
       selection: list.selection,

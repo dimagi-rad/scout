@@ -1,3 +1,4 @@
+import type { ClipboardEvent } from "react"
 import { Search } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -29,6 +30,23 @@ interface SearchFilterBarProps {
    *   so the row layout would cramp the search box.
    */
   orientation?: "responsive" | "stacked"
+  /**
+   * Join the lines of a multi-line paste with ", ". A single-line input drops or
+   * spaces out newlines depending on the browser, so a pasted column would
+   * otherwise reach the search as "523524" in some.
+   */
+  pasteLinesAsList?: boolean
+}
+
+function joinPastedLines(e: ClipboardEvent<HTMLInputElement>, onChange: (value: string) => void) {
+  const text = e.clipboardData.getData("text")
+  if (!/[\r\n]/.test(text)) return
+  e.preventDefault()
+  const input = e.currentTarget
+  const start = input.selectionStart ?? input.value.length
+  const end = input.selectionEnd ?? start
+  const lines = text.split(/\r\n|\r|\n/).map((line) => line.trim()).filter(Boolean)
+  onChange(input.value.slice(0, start) + lines.join(", ") + input.value.slice(end))
 }
 
 export function SearchFilterBar({
@@ -39,6 +57,7 @@ export function SearchFilterBar({
   activeFilters,
   onFilterChange,
   orientation = "responsive",
+  pasteLinesAsList = false,
 }: SearchFilterBarProps) {
   const stacked = orientation === "stacked"
   return (
@@ -55,6 +74,7 @@ export function SearchFilterBar({
           placeholder={placeholder}
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
+          onPaste={pasteLinesAsList ? (e) => joinPastedLines(e, onSearchChange) : undefined}
           onKeyDown={(e) => {
             // Live filtering must not submit a surrounding form; leave IME confirmation alone.
             if (e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) {

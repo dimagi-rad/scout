@@ -35,12 +35,18 @@ export function IdListSummary({
   const total = report.ids.length
 
   return (
-    <div className="space-y-1 text-xs text-muted-foreground" data-testid={testIdPrefix}>
+    <div
+      role="status"
+      className="space-y-1 text-xs text-muted-foreground"
+      data-testid={testIdPrefix}
+    >
       <div className="flex items-center justify-between gap-2">
         <span data-testid={`${testIdPrefix}-shown`}>
-          {report.shown.length === total && report.unrecognised.length === 0
-            ? `All ${total} IDs shown`
-            : `${report.shown.length} of ${total} IDs shown`}
+          {report.shown.length < total
+            ? `${report.shown.length} of ${total} IDs shown`
+            : report.unrecognised.length > 0
+              ? `${total} IDs shown`
+              : `All ${total} IDs shown`}
         </span>
         {action}
       </div>

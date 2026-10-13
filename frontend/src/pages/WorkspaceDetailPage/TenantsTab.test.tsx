@@ -200,7 +200,7 @@ describe("available source filters", () => {
     expect(screen.getByTestId(`${L}-shown`)).toHaveTextContent("1 of 4 IDs shown")
     expect(screen.getByTestId(`${L}-hidden`)).toHaveTextContent("1 hidden by filters: 12")
     expect(screen.getByTestId(`${L}-connected`)).toHaveTextContent("1 already in this workspace: 10")
-    expect(screen.getByTestId(`${L}-not-found`)).toHaveTextContent("1 not one of your sources: 99")
+    expect(screen.getByTestId(`${L}-not-found`)).toHaveTextContent("1 not one of your Connect opportunities: 99")
   })
 
   it("drops a persisted facet value the refreshed list no longer has", async () => {

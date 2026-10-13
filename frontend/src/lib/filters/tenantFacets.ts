@@ -139,7 +139,7 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
 /** The pickers' text search: name or external id, ignoring a leading "#". */
 export function normalizeTenantSearch(query: string): string {
   // A trailing separator ("523,") is the start of a list, not part of an id.
-  return query.trim().replace(/^#/, "").replace(/[\s,;]+$/, "").toLowerCase()
+  return query.trim().replace(/^#+/, "").replace(/[\s,;]+$/, "").toLowerCase()
 }
 
 export interface TenantIdList {

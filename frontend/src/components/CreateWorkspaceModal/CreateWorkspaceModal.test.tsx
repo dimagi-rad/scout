@@ -286,6 +286,21 @@ it("narrows to a pasted id list, names the ids it cannot find, and selects all s
   expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", ["tenant-1236", "tenant-523"])
 })
 
+it("reads a pasted column of ids, one per line, as a list and names a typo in it", async () => {
+  vi.mocked(getUserTenantsCached).mockResolvedValue([
+    connect("523", "Nama Wellness", { is_active: true }),
+    connect("1236", "KMC EHA", { is_active: true }),
+  ])
+  const { user } = await openModal()
+
+  await user.click(screen.getByTestId("search-filter-input"))
+  await user.paste("523\r\n1236\r\n67S\r\n")
+  expect(screen.getByTestId("search-filter-input")).toHaveValue("523, 1236, 67S")
+  expect(shown()).toEqual(["1236", "523"])
+  expect(screen.getByTestId("create-sources-id-list-shown")).toHaveTextContent("2 IDs shown")
+  expect(screen.getByTestId("create-sources-id-list-unrecognised")).toHaveTextContent("1 not an ID: 67S")
+})
+
 it("names pasted ids a remembered facet hides, and clears only the facets", async () => {
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ status: ["active"] }))
   vi.mocked(getUserTenantsCached).mockResolvedValue([

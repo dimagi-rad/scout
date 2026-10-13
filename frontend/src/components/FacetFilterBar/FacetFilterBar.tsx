@@ -22,6 +22,8 @@ interface FacetFilterBarProps<T> {
   search: string
   onSearchChange: (value: string) => void
   searchPlaceholder?: string
+  /** See SearchFilterBar. */
+  pasteLinesAsList?: boolean
   facets: readonly FacetDef<T>[]
   options: Readonly<Record<string, FacetOption[]>>
   selection: FacetSelection
@@ -37,6 +39,7 @@ export function FacetFilterBar<T>({
   search,
   onSearchChange,
   searchPlaceholder,
+  pasteLinesAsList,
   facets,
   options,
   selection,
@@ -67,6 +70,7 @@ export function FacetFilterBar<T>({
         search={search}
         onSearchChange={onSearchChange}
         placeholder={searchPlaceholder}
+        pasteLinesAsList={pasteLinesAsList}
         filters={[]}
         activeFilters={{}}
         onFilterChange={() => {}}
