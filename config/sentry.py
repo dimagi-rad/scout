@@ -29,6 +29,16 @@ from apps.common.errors import ExpectedStateError
 # an event anyway.
 _DBT_LOGGERS = ("stdout_log", "file_log")
 
+# Langfuse ships agent traces through the OTel HTTP exporter, which logs a
+# failed batch at ERROR. A batch lost to a network blip (``code: None``) or to
+# exhausted retries on 429/5xx is a dropped trace, not a Scout fault
+# (SCOUT-DJANGO-46: a read timeout to cloud.langfuse.com). A batch rejected with
+# a status code — 401 from bad Langfuse keys — still reports: that one is
+# config, and every trace after it is lost too.
+_OTEL_EXPORTER_LOGGER = "opentelemetry.exporter"
+_OTEL_RETRIES_EXHAUSTED = "Failed to export %s batch due to timeout, max retries or shutdown."
+_OTEL_EXPORT_FAILED = "Failed to export %s batch code: %s, reason: %s"
+
 
 def ignore_noisy_loggers():
     """Silence third-party loggers that only restate a failure Scout already reports.
@@ -43,6 +53,14 @@ def ignore_noisy_loggers():
         ignore_logger(name)
 
 
+def _is_transient_trace_export_failure(record):
+    if not record.name.startswith(_OTEL_EXPORTER_LOGGER):
+        return False
+    if record.msg == _OTEL_RETRIES_EXHAUSTED:
+        return True
+    return record.msg == _OTEL_EXPORT_FAILED and record.args[1] is None
+
+
 def before_send(event, hint):
     """Drop events whose exception is a known operational state.
 
@@ -51,10 +69,14 @@ def before_send(event, hint):
     *while handling* an expected state is still a bug, and walking the chain
     would swallow it.
 
-    Events with no exception attached (a bare ``logger.error``) are always kept:
+    Events with no exception attached (a bare ``logger.error``) are kept:
     classification is a property of an exception type, and there is nothing to
-    classify here.
+    classify here. The one exception is a transient trace-export failure,
+    matched by its exact log record.
     """
+    record = hint.get("log_record")
+    if record is not None and _is_transient_trace_export_failure(record):
+        return None
     exc_info = hint.get("exc_info")
     if exc_info and isinstance(exc_info[1], ExpectedStateError):
         return None

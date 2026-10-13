@@ -4,6 +4,8 @@
 directions — what gets dropped AND what must keep coming through.
 """
 
+import logging
+
 import pytest
 
 from apps.common.errors import (
@@ -180,3 +182,48 @@ class TestAuthErrorAxes:
         assert OCSAccessDeniedError("x").provider == "ocs"
         assert CommCareTokenExpiredError("x").provider == "commcare"
         assert ConnectAccessDeniedError("x").provider == "commcare_connect"
+
+
+class TestBeforeSendTraceExport:
+    """SCOUT-DJANGO-46: a Langfuse trace batch lost to the network is not an issue."""
+
+    LOGGER = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
+
+    def _hint(self, msg, args, name=LOGGER):
+        record = logging.LogRecord(name, logging.ERROR, __file__, 0, msg, args, None)
+        return {"log_record": record}
+
+    def test_drops_a_network_failure(self):
+        hint = self._hint(
+            "Failed to export %s batch code: %s, reason: %s",
+            ("spans", None, "Read timed out. (read timeout=0)"),
+        )
+        assert before_send({"event": 1}, hint) is None
+
+    def test_drops_exhausted_retries(self):
+        hint = self._hint(
+            "Failed to export %s batch due to timeout, max retries or shutdown.", ("spans",)
+        )
+        assert before_send({"event": 1}, hint) is None
+
+    def test_keeps_a_rejected_batch(self):
+        """A 401 means bad Langfuse keys — every trace after it is lost too."""
+        event = {"event": 1}
+        hint = self._hint(
+            "Failed to export %s batch code: %s, reason: %s", ("spans", 401, "Unauthorized")
+        )
+        assert before_send(event, hint) is event
+
+    def test_keeps_other_exporter_errors(self):
+        event = {"event": 1}
+        hint = self._hint("Failed to encode span batch: %s", ("boom",))
+        assert before_send(event, hint) is event
+
+    def test_keeps_the_same_message_from_other_loggers(self):
+        event = {"event": 1}
+        hint = self._hint(
+            "Failed to export %s batch due to timeout, max retries or shutdown.",
+            ("spans",),
+            name="apps.agents.graph",
+        )
+        assert before_send(event, hint) is event
