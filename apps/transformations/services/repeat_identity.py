@@ -379,7 +379,8 @@ def preserve_repeat_names(
                 # Several models were built into this one relation, so it never had a
                 # stable identity; the source gets a fresh name and the row is swept.
                 continue
-            if name in set(current) - {planned[identity].asset.name}:
+            # Repeats wanting this name are rehashed below; only another kind of model blocks it.
+            if name in set(current) - repeat_names:
                 raise _migration(names[0], "its truncated PostgreSQL name is used by another model")
         preserved[identity] = name
     # An orphan's truncated relation is reserved too, or a new source could take
