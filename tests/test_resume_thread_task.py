@@ -893,10 +893,10 @@ async def test_resume_cas_rejects_already_running_threadjob():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_resume_recursion_limit_is_lowered_from_default():
-    """Regression pin for issue #190: the resume path's recursion_limit must
-    be lower than the chat default (50) so a panic-looping agent gets cut
-    off before it can run 18+ tool calls."""
+async def test_resume_recursion_limit_reads_the_setting():
+    """The resume answers the user's original request, so ops tune its budget via
+    AGENT_RESUME_RECURSION_LIMIT. Panic loops (#190) end at the escalation
+    circuit breaker, not at this limit."""
     user = await User.objects.acreate_user(email="rl@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W-rl", created_by=user)
     tenant = await Tenant.objects.acreate(
@@ -928,11 +928,7 @@ async def test_resume_recursion_limit_is_lowered_from_default():
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
     config = mock_agent.last_run.config
-    # Must read from the AGENT_RESUME_RECURSION_LIMIT setting (so ops can
-    # tune it without code change) and must be lower than the chat default
-    # of 50.
     assert config["recursion_limit"] == dj_settings.AGENT_RESUME_RECURSION_LIMIT
-    assert config["recursion_limit"] < 50
 
 
 # ---------------------------------------------------------------------------
