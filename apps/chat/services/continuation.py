@@ -13,6 +13,7 @@ import sentry_sdk
 from django.conf import settings
 from django.utils import timezone
 from langchain_core.messages import HumanMessage
+from langgraph.errors import GraphRecursionError
 from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.agents.llm_request import LLM_TIMEOUT_ERRORS
@@ -60,6 +61,10 @@ RESUME_TIMEOUT_MESSAGE = (
     "Please re-ask your question."
 )
 RESUME_EXCEPTION_MESSAGE = "Sorry, something went wrong while preparing your answer. Please retry."
+RESUME_STEP_LIMIT_MESSAGE = (
+    "I ran out of steps before finishing this answer. "
+    "Ask me to continue and I'll carry on from where I stopped."
+)
 
 
 class _ModelRequestTimeout(TimeoutError):
@@ -626,24 +631,38 @@ async def _resume_claimed_job(
             failure_phase=ThreadJob.FailurePhase.RESUME,
         )
         return {"status": "agent_timeout"}
-    except Exception:
+    except Exception as exc:
         elapsed = time.monotonic() - start
-        logger.exception(
-            "resume: agent build or invoke failed for thread_job %s after %.2fs",
-            thread_job_id,
-            elapsed,
-        )
+        if isinstance(exc, GraphRecursionError):
+            # A long analysis, not a bug: the work so far is checkpointed and the
+            # user can ask to continue, so keep it out of ERROR-level Sentry.
+            logger.warning(
+                "resume: agent hit the recursion limit (%d) for thread_job %s after %.2fs",
+                settings.AGENT_RESUME_RECURSION_LIMIT,
+                thread_job_id,
+                elapsed,
+            )
+            notice = RESUME_STEP_LIMIT_MESSAGE
+            error_summary = "The agent ran out of steps before finishing its answer."
+        else:
+            logger.exception(
+                "resume: agent build or invoke failed for thread_job %s after %.2fs",
+                thread_job_id,
+                elapsed,
+            )
+            notice = RESUME_EXCEPTION_MESSAGE
+            error_summary = "The agent failed to respond after materialization. Please retry."
         sentry_sdk.add_breadcrumb(
             category="resume",
             message="ainvoke_exception",
             data={"thread_job_id": str(tj.id), "elapsed_s": elapsed},
         )
-        await persist_synthetic_failure_message(tj, RESUME_EXCEPTION_MESSAGE, holds_turn_lease=True)
+        await persist_synthetic_failure_message(tj, notice, holds_turn_lease=True)
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
             failure_phase=ThreadJob.FailurePhase.RESUME,
-            error_summary=("The agent failed to respond after materialization. Please retry."),
+            error_summary=error_summary,
         )
         return {"status": "agent_failed"}
     finally:
@@ -972,6 +991,15 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
             exc_info=exc.__cause__,
         )
         return False
+    except GraphRecursionError:
+        logger.warning(
+            "flush: agent hit the recursion limit (%d) for the held request of thread %s",
+            settings.AGENT_RESUME_RECURSION_LIMIT,
+            thread.id,
+        )
+        # Answered, in that the user can continue from it; "ask again" would redo the work.
+        await persist_synthetic_thread_message(thread, RESUME_STEP_LIMIT_MESSAGE)
+        return True
     except Exception:
         # Settled after: unsent, it waits again (its one flush spent) for the user to send.
         logger.exception("flush: agent failed for the held request of thread %s", thread.id)
