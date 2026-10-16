@@ -13,12 +13,13 @@ import sentry_sdk
 from django.conf import settings
 from django.utils import timezone
 from langchain_core.messages import HumanMessage
+from langgraph.errors import GraphRecursionError
 from procrastinate.exceptions import AlreadyEnqueued
 
 from apps.agents.llm_request import LLM_TIMEOUT_ERRORS
 from apps.agents.tracing import get_langfuse_callback
 from apps.chat import pending_requests, resume_stream
-from apps.chat.constants import SYSTEM_RESUME_MARKER
+from apps.chat.constants import STEP_LIMIT_NOTICE, SYSTEM_RESUME_MARKER
 from apps.chat.models import PendingRequest, Thread, ThreadJob
 from apps.chat.services.agent_execution import (
     append_synthetic_message,
@@ -580,6 +581,8 @@ async def _resume_claimed_job(
             status=status,
         ) as langfuse_span:
             # Streamed, so a chat open on the thread shows the answer as it is written.
+            result = None
+            step_limited = False
             try:
                 async with telemetry.recording():
                     result = await asyncio.wait_for(
@@ -590,10 +593,27 @@ async def _resume_claimed_job(
                 # Converted only here: the agent build above does its own I/O (the
                 # MCP tool list), and a stall there is not a slow answer.
                 raise _ModelRequestTimeout("model request timed out") from exc
+            except GraphRecursionError:
+                # A long analysis, not a bug: the work so far is checkpointed and the
+                # user can ask to continue, so it ends like a finished resume (no
+                # failure card offering a reload) and stays out of ERROR-level Sentry.
+                logger.warning(
+                    "resume: agent hit the recursion limit (%d) for thread_job %s after %.2fs",
+                    settings.AGENT_RESUME_RECURSION_LIMIT,
+                    thread_job_id,
+                    time.monotonic() - start,
+                )
+                if not await persist_synthetic_failure_message(
+                    tj, STEP_LIMIT_NOTICE, holds_turn_lease=True
+                ):
+                    # Nothing told the user; fail the job so its error card does.
+                    raise
+                step_limited = True
             if langfuse_span is not None:
                 # The resume already succeeded; a tracing error must not mark it agent_failed.
                 try:
-                    langfuse_span.update(output=final_message_content(result))
+                    output = STEP_LIMIT_NOTICE if step_limited else final_message_content(result)
+                    langfuse_span.update(output=output)
                 except Exception:
                     logger.warning("resume: failed to record Langfuse output", exc_info=True)
     except TimeoutError as exc:
@@ -972,6 +992,14 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
             exc_info=exc.__cause__,
         )
         return False
+    except GraphRecursionError:
+        logger.warning(
+            "flush: agent hit the recursion limit (%d) for the held request of thread %s",
+            settings.AGENT_RESUME_RECURSION_LIMIT,
+            thread.id,
+        )
+        # Answered, in that the user can continue from it; "ask again" would redo the work.
+        return await persist_synthetic_thread_message(thread, STEP_LIMIT_NOTICE)
     except Exception:
         # Settled after: unsent, it waits again (its one flush spent) for the user to send.
         logger.exception("flush: agent failed for the held request of thread %s", thread.id)
@@ -988,7 +1016,7 @@ SYNTHETIC_MESSAGE_TIMEOUT_SECONDS = 120
 
 async def persist_synthetic_failure_message(
     thread_job, text: str, *, holds_turn_lease: bool = False
-) -> None:
+) -> bool:
     """Append a plain-text AIMessage to the LangGraph checkpointer for
     ``thread_job.thread`` so the chat UI shows a user-visible explanation when
     the agent never produced one. Tool calls the turn left open are answered
@@ -1000,17 +1028,19 @@ async def persist_synthetic_failure_message(
     aupdate_state requires a compiled graph carrying the AgentState schema and
     the same checkpointer as a normal turn.
 
-    Failures here are logged but never re-raised — the caller has already
-    decided this is a terminal failure and a synthetic message is a UX nicety,
-    not a correctness invariant. For the same reason it is skipped, not
-    waited for, while another run holds the thread's turn lease: the ThreadJob's
-    error card still reports the failure.
+    Failures here are logged but never re-raised; the ThreadJob's error card
+    still reports a failed turn. For the same reason it is skipped, not waited
+    for, while another run holds the thread's turn lease.
+
+    Returns whether the message was written. False also covers that busy skip,
+    so a caller that depends on the write (the step-limit notice) must hold the
+    lease.
     """
     try:
         if holds_turn_lease:
             async with asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
                 await append_synthetic_message(thread_job.thread, text)
-            return
+            return True
         lease = await atry_acquire_turn_lease(thread_job.thread_id)
         if lease is None:
             logger.info(
@@ -1018,24 +1048,28 @@ async def persist_synthetic_failure_message(
                 thread_job.thread_id,
                 thread_job.id,
             )
-            return
+            return False
         async with lease.held(), asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
             await append_synthetic_message(thread_job.thread, text)
+        return True
     except Exception:
         logger.warning(
             "resume: failed to persist synthetic failure message for tj=%s",
             thread_job.id,
             exc_info=True,
         )
+        return False
 
 
-async def persist_synthetic_thread_message(thread, text: str) -> None:
+async def persist_synthetic_thread_message(thread, text: str) -> bool:
     """``persist_synthetic_failure_message`` for a caller holding ``thread``'s turn
     lease with no ThreadJob, such as the held-request flush. Never raises."""
     try:
         async with asyncio.timeout(SYNTHETIC_MESSAGE_TIMEOUT_SECONDS):
             await append_synthetic_message(thread, text)
+        return True
     except Exception:
         logger.warning(
             "Could not persist a synthetic message on thread %s", thread.id, exc_info=True
         )
+        return False

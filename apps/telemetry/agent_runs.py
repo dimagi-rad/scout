@@ -18,6 +18,7 @@ from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import ToolMessage
+from langgraph.errors import GraphRecursionError
 
 from apps.telemetry import recorder
 from apps.telemetry.models import EventKind, Outcome, TelemetryEvent
@@ -285,6 +286,10 @@ class AgentRunTelemetry(BaseCallbackHandler):
         except asyncio.CancelledError:
             self.outcome = Outcome.FAILED
             self.attrs["cancelled"] = True
+            raise
+        except GraphRecursionError:
+            self.outcome = Outcome.FAILED
+            self.attrs["step_limit"] = True
             raise
         except Exception:
             self.outcome = Outcome.FAILED

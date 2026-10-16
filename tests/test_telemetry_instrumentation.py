@@ -17,6 +17,7 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 from langchain_core.tools import tool
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -390,6 +391,7 @@ async def test_a_background_run_records_its_outcome():
         (Outcome.COMPLETED, None),
         (Outcome.FAILED, RuntimeError("boom")),
         (Outcome.FAILED, asyncio.CancelledError()),
+        (Outcome.FAILED, GraphRecursionError("out of steps")),
     ):
         telemetry = AgentRunTelemetry(EventKind.CHAT_TURN, name="flush")
         with contextlib.suppress(RuntimeError, asyncio.CancelledError):
@@ -399,8 +401,9 @@ async def test_a_background_run_records_its_outcome():
         assert telemetry.outcome == outcome
 
     turns = await _events(EventKind.CHAT_TURN)
-    assert [e.outcome for e in turns] == [Outcome.COMPLETED, Outcome.FAILED, Outcome.FAILED]
-    assert [e.attrs.get("cancelled") for e in turns] == [None, None, True]
+    assert [e.outcome for e in turns] == [Outcome.COMPLETED] + [Outcome.FAILED] * 3
+    assert [e.attrs.get("cancelled") for e in turns] == [None, None, True, None]
+    assert [e.attrs.get("step_limit") for e in turns] == [None, None, None, True]
 
 
 @pytest.mark.asyncio

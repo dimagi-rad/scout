@@ -448,8 +448,10 @@ EMBED_ALLOWED_ORIGINS = env.list("EMBED_ALLOWED_ORIGINS", default=[])
 
 SCHEMA_TTL_HOURS = 24  # schemas inactive longer than this are expired
 
-# Agent recursion limit for the post-materialization resume path. A healthy
-# resume is 2-5 tool calls; 20 leaves headroom for follow-up exploration
-# without giving a panic-looping agent runway for ~25 cycles. The user-facing
-# chat path keeps its own (higher) limit.
-AGENT_RESUME_RECURSION_LIMIT = env.int("AGENT_RESUME_RECURSION_LIMIT", default=20)
+# Agent recursion limit for the background turns: the post-materialization resume
+# and the held-request flush. They answer the user's request, so they get the
+# chat path's budget of 50; the previous 20 (10 tool calls) cut off real analyses
+# (SCOUT-DJANGO-47). Panic loops (#190) get the chat path's guards: the prompt
+# rule and the error-streak breaker in agents/graph/run_policy.py, which only
+# catches all-error streaks.
+AGENT_RESUME_RECURSION_LIMIT = env.int("AGENT_RESUME_RECURSION_LIMIT", default=50)

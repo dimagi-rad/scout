@@ -27,9 +27,10 @@ START
 
 There is no dedicated retry node. A failed tool returns an error envelope, and the
 model reads it on its next pass through `agent`. The caller's `recursion_limit`
-caps the loop. It is 50 for chat and recipe runs, and
-`AGENT_RESUME_RECURSION_LIMIT` (default 20) for the turn that resumes a chat
-after materialization.
+caps the loop at 50 for chat and recipe runs. The background turns, the resume
+after materialization and the held-request flush, use
+`AGENT_RESUME_RECURSION_LIMIT` (default 50). A background turn that reaches it
+ends with a notice asking the user to continue.
 
 Key characteristics:
 
