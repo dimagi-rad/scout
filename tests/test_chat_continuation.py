@@ -11,6 +11,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.test import override_settings
@@ -21,7 +22,7 @@ from langgraph.graph import END, START, StateGraph
 from apps.agents.graph.base import AGENT_NODE
 from apps.agents.graph.state import AgentState
 from apps.chat import pending_requests
-from apps.chat.constants import SYSTEM_RESUME_MARKER
+from apps.chat.constants import STEP_LIMIT_NOTICE, SYSTEM_RESUME_MARKER
 from apps.chat.helpers import repair_dangling_tool_calls
 from apps.chat.models import PendingRequest, Thread, ThreadJob
 from apps.chat.resume_stream import aread_after
@@ -30,7 +31,6 @@ from apps.chat.services.continuation import (
     FLUSH_NOTE,
     HELD_REQUEST_NOTE,
     RESUME_EXCEPTION_MESSAGE,
-    RESUME_STEP_LIMIT_MESSAGE,
     RESUME_TIMEOUT_MESSAGE,
 )
 from apps.chat.stream import INTERRUPTED_TOOL_RESULT, langgraph_to_ui_stream
@@ -108,15 +108,12 @@ class ToolCallingAgent(FakeAgent):
         return graph.compile(checkpointer=self.checkpointer)
 
 
-class LoopingAgent(ToolCallingAgent):
+class LoopingAgent(FakeAgent):
     """Calls a tool on every agent step, so only the recursion limit ends the turn."""
-
-    def __init__(self):
-        super().__init__(_noop)
 
     def _compile(self):
         async def call_tool(state: AgentState) -> dict:
-            call = {**self.TOOL_CALL, "id": f"tc-loop-{len(state['messages'])}"}
+            call = {**ToolCallingAgent.TOOL_CALL, "id": f"tc-loop-{len(state['messages'])}"}
             return {"messages": [AIMessage(content="", tool_calls=[call])]}
 
         async def run_tool(state: AgentState) -> dict:
@@ -132,10 +129,6 @@ class LoopingAgent(ToolCallingAgent):
         )
         graph.add_edge("tools", AGENT_NODE)
         return graph.compile(checkpointer=self.checkpointer)
-
-
-async def _noop():
-    pass
 
 
 async def _stall():
@@ -241,11 +234,14 @@ class TestResume:
         with caplog.at_level(logging.WARNING, logger="apps.chat.services.continuation"):
             result = await _resume(agent, tj)
 
-        assert result == {"status": "agent_failed"}
+        # The load succeeded, so no failure card offers to redo it.
+        assert result == {"status": "resumed", "terminal_state": ThreadJob.State.COMPLETED}
         await tj.arefresh_from_db()
-        assert tj.state == ThreadJob.State.FAILED
-        assert "ran out of steps" in tj.error_summary
-        assert (await agent.thread_messages(thread.id))[-1].content == RESUME_STEP_LIMIT_MESSAGE
+        assert tj.state == ThreadJob.State.COMPLETED
+        assert tj.error_summary == ""
+        assert (await agent.thread_messages(thread.id))[-1].content == STEP_LIMIT_NOTICE
+        await thread.arefresh_from_db()
+        assert thread.updated_at > tj.created_at
         resume_logs = [r for r in caplog.records if r.name == "apps.chat.services.continuation"]
         assert any("recursion limit" in r.getMessage() for r in resume_logs)
         assert all(r.levelno < logging.ERROR for r in resume_logs)
@@ -253,6 +249,21 @@ class TestResume:
         assert await repair_dangling_tool_calls(agent, config) == []
         assert (await agent.aget_state(config)).next == ()
         assert await _thread_is_free(thread)
+
+    @override_settings(AGENT_RESUME_RECURSION_LIMIT=6)
+    async def test_a_turn_out_of_steps_that_cannot_say_so_fails_the_job(self):
+        _ws, _thread, tj = await _resumable("cont-steps-unsaid", 930009)
+
+        with patch(
+            "apps.chat.services.continuation.append_synthetic_message",
+            AsyncMock(side_effect=RuntimeError("checkpointer down")),
+        ):
+            result = await _resume(LoopingAgent(), tj)
+
+        assert result == {"status": "agent_failed"}
+        await tj.arefresh_from_db()
+        assert tj.state == ThreadJob.State.FAILED
+        assert tj.error_summary
 
     async def test_a_failed_turn_fails_the_job_with_a_message(self):
         _ws, thread, tj = await _resumable("cont-fail", 930004)
@@ -369,22 +380,47 @@ class TestFlush:
         assert not await PendingRequest.objects.filter(thread=thread).aexists()
 
     @override_settings(AGENT_RESUME_RECURSION_LIMIT=6)
-    async def test_a_reply_out_of_steps_asks_the_user_to_continue(self):
+    async def test_a_reply_out_of_steps_asks_the_user_to_continue(self, caplog):
         ws, _user, _client, thread = await _thread("cont-flush-steps")
         await _hold_without_load(thread, "visits?")
         agent = LoopingAgent()
 
-        with serving(agent):
+        with (
+            serving(agent),
+            caplog.at_level(logging.WARNING, logger="apps.chat.services.continuation"),
+        ):
             result = await flush_pending_requests(str(ws.id))
 
         assert result == {"status": "flushed", "sent": 1}
         messages = await agent.thread_messages(thread.id)
         assert messages[1].content == "visits?"
-        assert messages[-1].content == RESUME_STEP_LIMIT_MESSAGE
+        assert messages[-1].content == STEP_LIMIT_NOTICE
         assert FLUSH_FAILED_MESSAGE not in [m.content for m in messages]
+        flush_logs = [r for r in caplog.records if r.name == "apps.chat.services.continuation"]
+        assert any("recursion limit" in r.getMessage() for r in flush_logs)
+        assert all(r.levelno < logging.ERROR for r in flush_logs)
         config = {"configurable": {"thread_id": str(thread.id)}}
         assert (await agent.aget_state(config)).next == ()
         assert await _thread_is_free(thread)
+
+    @override_settings(AGENT_RESUME_RECURSION_LIMIT=6)
+    async def test_a_reply_out_of_steps_that_cannot_say_so_falls_back_to_ask_again(self):
+        ws, _user, _client, thread = await _thread("cont-flush-steps-unsaid")
+        await _hold_without_load(thread, "visits?")
+        written = []
+
+        async def notice_fails(_thread, text):
+            if text == STEP_LIMIT_NOTICE:
+                raise RuntimeError("checkpointer down")
+            written.append(text)
+
+        with (
+            serving(LoopingAgent()),
+            patch("apps.chat.services.continuation.append_synthetic_message", notice_fails),
+        ):
+            await flush_pending_requests(str(ws.id))
+
+        assert written == [FLUSH_FAILED_MESSAGE]
 
 
 async def test_the_same_double_drives_a_live_turn():
