@@ -702,6 +702,8 @@ class TestRunPipeline:
         # A served PARTIAL run keeps the date range of a table it completed.
         assert sources["visits"]["date_range"]["column"] == "visit_date"
         assert "date_range" not in sources["completed_works"]
+        saved = mock_run_cls.objects.filter.return_value.update.call_args.kwargs["result"]
+        assert saved["sources"]["visits"]["date_range"]["column"] == "visit_date"
         # 4th source we never reached is recorded as skipped, not completed.
         assert "rows" in sources["completed_works"]
         assert sources["completed_works"]["rows"] == 0

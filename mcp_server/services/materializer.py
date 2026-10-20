@@ -1348,15 +1348,16 @@ def _add_partial_date_ranges(
     """A PARTIAL run can be served, so its completed tables get ranges too.
 
     After the run is stamped, so the scan never holds it non-terminal; the write
-    is conditional so a later state change (a reconcile) is not overwritten.
+    is conditional so a run a teardown or promotion marked STALE meanwhile keeps
+    that. Never raises: it runs inside the load's failure handler.
     """
     if run.state != MaterializationRun.RunState.PARTIAL:
         return
-    _record_date_ranges(schema_name, pipeline, sources, source_results)
     try:
+        _record_date_ranges(schema_name, pipeline, sources, source_results)
         MaterializationRun.objects.filter(
             id=run.id, state=MaterializationRun.RunState.PARTIAL
-        ).update(result={**run.result, "sources": source_results})
+        ).update(result=run.result)
     except Exception:
         logger.warning("Could not save date ranges for run %s", run.id, exc_info=True)
 
