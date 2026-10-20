@@ -117,15 +117,17 @@ export function ChatComposer({
             >
               <Quote className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
               <span className="line-clamp-2 flex-1 whitespace-pre-wrap">{quote}</span>
-              <button
-                type="button"
-                onClick={() => onRemoveQuote?.(i)}
-                aria-label="Remove quote"
-                className="shrink-0 rounded hover:text-foreground"
-                data-testid="composer-quote-remove"
-              >
-                <X className="h-3 w-3" aria-hidden="true" />
-              </button>
+              {onRemoveQuote && (
+                <button
+                  type="button"
+                  onClick={() => onRemoveQuote(i)}
+                  aria-label={`Remove quote: ${quote.slice(0, 40)}`}
+                  className="shrink-0 rounded hover:text-foreground"
+                  data-testid="composer-quote-remove"
+                >
+                  <X className="h-3 w-3" aria-hidden="true" />
+                </button>
+              )}
             </li>
           ))}
         </ul>

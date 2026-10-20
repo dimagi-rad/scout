@@ -70,11 +70,13 @@ function selectText(node: Node, start: number, end: number) {
 }
 
 const originalRect = Range.prototype.getBoundingClientRect
+const originalElementRect = Element.prototype.getBoundingClientRect
 
 beforeEach(() => {
   sessionStorage.clear()
   localStorage.clear()
   Range.prototype.getBoundingClientRect = () => new DOMRect(100, 200, 80, 16)
+  Element.prototype.getBoundingClientRect = () => new DOMRect(0, 0, 1000, 1000)
   // Its own update: a workspace change starts a new chat, which the next update replaces.
   useAppStore.setState({ activeDomainId: WS })
   useAppStore.setState({
@@ -89,6 +91,7 @@ beforeEach(() => {
 
 afterEach(() => {
   Range.prototype.getBoundingClientRect = originalRect
+  Element.prototype.getBoundingClientRect = originalElementRect
   window.getSelection()?.removeAllRanges()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()

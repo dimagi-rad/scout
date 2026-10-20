@@ -31,13 +31,16 @@ function select(node: Node, start: number, endNode: Node, end: number) {
 }
 
 const originalRect = Range.prototype.getBoundingClientRect
+const originalElementRect = Element.prototype.getBoundingClientRect
 
 describe("QuoteSelectionAction", () => {
   beforeEach(() => {
     Range.prototype.getBoundingClientRect = () => new DOMRect(100, 200, 80, 16)
+    Element.prototype.getBoundingClientRect = () => new DOMRect(0, 0, 1000, 1000)
   })
   afterEach(() => {
     Range.prototype.getBoundingClientRect = originalRect
+    Element.prototype.getBoundingClientRect = originalElementRect
     window.getSelection()?.removeAllRanges()
   })
 

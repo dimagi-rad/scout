@@ -15,6 +15,7 @@ interface Anchor {
 }
 
 const BUTTON_OFFSET_PX = 36
+const BUTTON_HALF_WIDTH_PX = 40
 
 function quotableRoot(node: Node | null): Element | null {
   const el = node instanceof Element ? node : node?.parentElement
@@ -30,9 +31,13 @@ function readSelection(container: HTMLElement | null): Anchor | null {
   const root = quotableRoot(selection.anchorNode)
   if (!root || root !== quotableRoot(selection.focusNode) || !container.contains(root)) return null
   const rect = selection.getRangeAt(0).getBoundingClientRect()
+  const visible = container.getBoundingClientRect()
+  // Scrolled out of the transcript: don't pin the button over the header or composer.
+  if (rect.bottom < visible.top || rect.top > visible.bottom) return null
+  const center = rect.left + rect.width / 2
   return {
-    top: Math.max(8, rect.top - BUTTON_OFFSET_PX),
-    left: rect.left + rect.width / 2,
+    top: Math.max(visible.top + 4, rect.top - BUTTON_OFFSET_PX),
+    left: Math.min(Math.max(center, visible.left + BUTTON_HALF_WIDTH_PX), visible.right - BUTTON_HALF_WIDTH_PX),
     text,
   }
 }
@@ -44,9 +49,17 @@ export function QuoteSelectionAction({ containerRef, onQuote }: QuoteSelectionAc
   useEffect(() => {
     const container = containerRef.current
     // Shown only once the selection settles, so it doesn't chase a drag.
-    const show = () => setAnchor(readSelection(containerRef.current))
+    const show = (event: Event) => {
+      if (event instanceof KeyboardEvent && event.key === "Escape") {
+        setAnchor(null)
+        return
+      }
+      setAnchor(readSelection(containerRef.current))
+    }
+    // selectionchange fires on every step of a drag, so this skips readSelection's layout reads.
     const hideIfCleared = () => {
-      if (!readSelection(containerRef.current)) setAnchor(null)
+      const selection = window.getSelection()
+      if (!selection || selection.isCollapsed) setAnchor(null)
     }
     const reposition = () => setAnchor((current) => (current ? readSelection(containerRef.current) : null))
     document.addEventListener("mouseup", show)

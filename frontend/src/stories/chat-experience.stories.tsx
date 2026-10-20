@@ -195,7 +195,8 @@ export const TranscriptWithToolsAndPrompt: Story = {
         <div ref={transcriptRef} className="flex-1 overflow-y-auto p-5">
           <QuoteSelectionAction
             containerRef={transcriptRef}
-            onQuote={(text) => setQuotes((current) => [...current, text])}
+            onQuote={(text) =>
+              setQuotes((current) => (current.includes(text) ? current : [...current, text]))}
           />
           <div className="mx-auto max-w-4xl space-y-5">
             {messages.map((message, index) => (
