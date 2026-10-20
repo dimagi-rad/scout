@@ -465,6 +465,8 @@ describe("large Connect workspaces", () => {
     expect(await screen.findByTestId("workspace-connect-size-notice")).toHaveTextContent(
       "This workspace has 26 CommCare Connect opportunities",
     )
+    // Only a manager can split it.
+    expect(screen.getByTestId("workspace-connect-size-notice")).not.toHaveTextContent("or fewer")
   })
 
   it("says nothing at the limit", async () => {

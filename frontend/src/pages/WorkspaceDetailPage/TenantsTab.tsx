@@ -513,7 +513,10 @@ export function TenantsTab({
                 {bulkAddOffered && connectedConnectCount <= CONNECT_QUICK_CHECK_LIMIT && (
                   <ConnectSizeNotice
                     count={connectCountAfterBulk}
-                    lead={`Adding all ${filteredAvailable.length} shown would give this workspace`}
+                    lead={`Adding ${
+                      filteredAvailable.length === 1 ? "the 1" : `all ${filteredAvailable.length}`
+                    } shown would give this workspace`}
+                    canSplit
                     testId="add-sources-connect-size-notice"
                     className="mt-2"
                   />
@@ -589,6 +592,7 @@ export function TenantsTab({
       <ConnectSizeNotice
         count={connectedConnectCount}
         lead="This workspace has"
+        canSplit={isManager}
         testId="workspace-connect-size-notice"
         className="mb-3"
       />

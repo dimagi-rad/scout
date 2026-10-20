@@ -400,6 +400,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
             <ConnectSizeNotice
               count={selectedConnectCount}
               lead="This workspace would have"
+              canSplit
               testId="create-workspace-connect-size-notice"
             />
 
