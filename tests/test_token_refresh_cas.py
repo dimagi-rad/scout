@@ -1099,6 +1099,35 @@ def test_a_stored_token_for_a_moved_identity_is_not_adopted(oauth_identity, user
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored_expired", [False, True])
+async def test_async_refresh_refused_for_a_spent_grant_takes_the_stored_token(
+    oauth_identity, httpx_mock, stored_expired
+):
+    """The launcher's refresh can overlap a sibling's mid-load one (#927)."""
+    token, connection = oauth_identity
+    await SocialToken.objects.filter(pk=token.pk).aupdate(
+        token="stored-access",
+        token_secret="stored-refresh",
+        expires_at=timezone.now() + timedelta(minutes=-1 if stored_expired else 15),
+    )
+    httpx_mock.add_response(url=URL, status_code=400, json=_SPENT["json"])
+    if stored_expired:
+        httpx_mock.add_response(url=URL, json=_ROTATED)
+
+    result = await refresh_oauth_token_result(token, URL)
+
+    expected = "new-access" if stored_expired else "stored-access"
+    assert result.snapshot.access_token == expected
+    posted = [request.content.decode() for request in httpx_mock.get_requests()]
+    assert "refresh_token=old-refresh" in posted[0]
+    if stored_expired:
+        assert "refresh_token=stored-refresh" in posted[1]
+    await connection.arefresh_from_db()
+    assert connection.oauth_refresh_failure_fingerprint == ""
+
+
+@pytest.mark.django_db(transaction=True)
 def test_waiting_for_another_refresh_honours_the_callers_deadline(oauth_identity):
     token, _ = oauth_identity
     lock = token_refresh._sync_refresh_lock(token.pk)

@@ -1015,6 +1015,28 @@ async def refresh_oauth_token_result(
             )
             response.raise_for_status()
     except httpx.HTTPStatusError as e:
+        if _is_invalid_grant(e.response):
+            # A concurrent refresh may have spent this copy's grant first (#927).
+            adopted, advanced = await sync_to_async(_adopt_rotated_token)(
+                social_token,
+                preflight,
+                deadline=_phase_deadline(None, db_timeout, clock),
+                clock=clock,
+            )
+            if adopted is not None:
+                logger.info("Adopted a concurrently refreshed OAuth token")
+                return adopted
+            if advanced:
+                # The copy now holds the stored, live grant; it cannot advance again.
+                return await refresh_oauth_token_result(
+                    social_token,
+                    token_url,
+                    request_timeout=request_timeout,
+                    db_timeout=db_timeout,
+                    deadline=deadline,
+                    clock=clock,
+                    record_failure=record_failure,
+                )
         # Keep provider response bodies out of logs.
         status = e.response.status_code
         verdict = classify_http_failure(
