@@ -121,6 +121,25 @@ def test_short_reply_keeps_the_question_it_answers():
     pruned = prune_messages(history)
 
     assert _texts(pruned) == [KK_QUESTION, "yes", marker.content]
+    assert history[1] in pruned
+    _assert_tool_pairs_intact(pruned)
+
+
+def test_an_earlier_turns_wide_round_still_ages_out():
+    history = [
+        HumanMessage(content="earlier"),
+        *_parallel_tool_rounds(1, calls_per_round=25),
+        AIMessage(content="Done."),
+        HumanMessage(content="next"),
+        *_parallel_tool_rounds(1, calls_per_round=3),
+    ]
+
+    pruned = prune_messages(history)
+
+    assert len(pruned) <= DEFAULT_MAX_MESSAGES
+    assert not any(
+        isinstance(m, ToolMessage) and m.tool_call_id.startswith("t0-1") for m in pruned[:-3]
+    )
     _assert_tool_pairs_intact(pruned)
 
 
