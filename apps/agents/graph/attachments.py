@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import html
 import re
+import uuid
 from dataclasses import dataclass
 
 import anthropic
@@ -132,7 +133,7 @@ class AttachmentLoader:
 
     async def aload(self, ids: list[str]) -> dict[str, LoadedAttachment | None]:
         missing = [i for i in dict.fromkeys(ids) if i not in self._cache]
-        if missing and self.thread_id:
+        if missing and _is_uuid(self.thread_id):
             async for row in ChatAttachment.objects.filter(
                 id__in=missing, thread_id=self.thread_id
             ).select_related("blob"):
@@ -140,6 +141,17 @@ class AttachmentLoader:
         for attachment_id in missing:
             self._cache.setdefault(attachment_id, None)
         return {i: self._cache[i] for i in ids}
+
+
+def _is_uuid(value) -> bool:
+    # A conversation id that is not a UUID owns no attachments; querying would raise.
+    if value is None:
+        return False
+    try:
+        uuid.UUID(str(value))
+    except ValueError:
+        return False
+    return True
 
 
 def safe_filename(filename: str | None) -> str:
