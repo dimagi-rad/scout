@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import base64
 import html
-import logging
 import re
 from dataclasses import dataclass
 
@@ -18,13 +17,11 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from apps.chat.attachments import message_attachments
 from apps.chat.models import ChatAttachment
 
-logger = logging.getLogger(__name__)
-
 INLINE_TEXT_MAX_CHARS = 100_000
 TRUNCATED_TEXT_CHARS = 20_000
 # Per model request, newest attachments first. Anthropic caps a request at 32 MB,
 # and base64 adds a third to every image.
-TEXT_BUDGET_CHARS = 300_000
+TEXT_BUDGET_CHARS = 200_000
 IMAGE_BUDGET_BYTES = 15 * 1024 * 1024
 MAX_IMAGES_PER_REQUEST = 20
 
@@ -59,7 +56,7 @@ class AttachmentLoader:
         self.thread_id = thread_id
         self._cache: dict[str, LoadedAttachment | None] = {}
 
-    async def aload(self, ids) -> dict[str, LoadedAttachment | None]:
+    async def aload(self, ids: list[str]) -> dict[str, LoadedAttachment | None]:
         missing = [i for i in dict.fromkeys(ids) if i not in self._cache]
         if missing and self.thread_id:
             async for row in ChatAttachment.objects.filter(
@@ -71,22 +68,32 @@ class AttachmentLoader:
         return {i: self._cache[i] for i in ids}
 
 
+def safe_filename(filename: str | None) -> str:
+    """A user-chosen filename as it may appear in model-facing framing.
+
+    Escaped and without brackets, so a name cannot pose as the notes
+    around it.
+    """
+    name = (filename or "attachment").replace("[", "(").replace("]", ")")
+    return html.escape(name, quote=True)
+
+
 def _label(entry: dict) -> str:
-    return f"{entry.get('filename') or 'attachment'} (id {entry['id']})"
+    return f'"{safe_filename(entry.get("filename"))}" (id {entry["id"]})'
 
 
 def _text_block(text: str) -> dict:
     return {"type": "text", "text": text}
 
 
-_CLOSING_TAG = re.compile(r"</(attachment)", re.IGNORECASE)
+_ATTACHMENT_TAG = re.compile(r"<(/?)(attachment)", re.IGNORECASE)
 
 
-def _wrap(attachment: LoadedAttachment, body: str, total_chars: int) -> str:
-    filename = html.escape(attachment.filename, quote=True)
-    # The tags mark where user-supplied content ends; a closing tag inside the file
-    # must not end it early and pass what follows off as framing.
-    body = _CLOSING_TAG.sub(r"<\\/\1", body)
+def wrap_attachment(attachment: LoadedAttachment, body: str, total_chars: int) -> str:
+    filename = safe_filename(attachment.filename)
+    # The tags mark where user-supplied content ends; a tag inside the file must not
+    # end it early or open a second one under another name.
+    body = _ATTACHMENT_TAG.sub(r"<\\\1\2", body)
     return (
         f'<attachment filename="{filename}" id="{attachment.id}" '
         f'media_type="{attachment.media_type}" chars="{total_chars}">\n{body}\n</attachment>'
@@ -116,8 +123,9 @@ def _text_omitted(entry: dict) -> dict:
 
 
 async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budget) -> dict:
-    # Budgets are checked against the stored metadata first, so an attachment that
-    # will not be shown is never loaded into memory.
+    # Checked against the stored metadata first, so an image over budget or a text
+    # file past the text budget is never loaded. A text file within it is loaded
+    # whole, even when only its head is shown.
     is_image = str(entry.get("media_type", "")).startswith("image/")
     known_size = entry.get("size") if isinstance(entry.get("size"), int) else 0
     if is_image and (budget.images <= 0 or known_size > budget.image_bytes):
@@ -147,11 +155,11 @@ async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budg
     total = len(text)
     if total <= INLINE_TEXT_MAX_CHARS and total <= budget.text_chars:
         budget.text_chars -= total
-        return _text_block(_wrap(attachment, text, total))
+        return _text_block(wrap_attachment(attachment, text, total))
     shown = min(TRUNCATED_TEXT_CHARS, budget.text_chars)
     budget.text_chars -= shown
     note = f"[Showing the first {shown:,} of {total:,} characters; the rest is not shown.]"
-    return _text_block(_wrap(attachment, f"{text[:shown]}\n{note}", total))
+    return _text_block(wrap_attachment(attachment, f"{text[:shown]}\n{note}", total))
 
 
 async def aexpand_attachments(
