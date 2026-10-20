@@ -130,7 +130,7 @@ it("cannot create from a preselection before the user's sources load", async () 
   expect(screen.getByTestId("create-workspace-submit")).toBeDisabled()
 })
 
-it("mentions the Program filter only when Connect sources are listed", async () => {
+it("omits the Program filter without Connect sources", async () => {
   await openModal()
   expect(screen.queryByText(/Program filter/)).toBeNull()
 })
