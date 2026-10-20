@@ -157,8 +157,7 @@ describe("available source filters", () => {
     expect(shownAvailable()).toEqual(["c1"])
     expect(screen.getByTestId(`${F}-count`)).toHaveTextContent("Showing 1 of 4")
 
-    await userEvent.keyboard("{Escape}")
-    await userEvent.click(screen.getByTestId("add-tenant-btn"))
+    await userEvent.click(screen.getByTestId("add-tenant-close"))
     await userEvent.click(screen.getByTestId("add-tenant-btn"))
 
     expect(screen.getByTestId("search-filter-input")).toHaveValue("")
@@ -212,5 +211,100 @@ describe("available source filters", () => {
     await userEvent.click(screen.getByTestId("refresh-available-sources"))
 
     await waitFor(() => expect(shownAvailable()).toEqual(["a", "c1", "c2"]))
+  })
+})
+
+describe("closing the add panel", () => {
+  beforeEach(() => localStorage.clear())
+
+  it("closes from its Close button and hands focus back to the add button", async () => {
+    await openAddPanel()
+
+    await userEvent.click(screen.getByTestId("add-tenant-close"))
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+    expect(screen.getByTestId("add-tenant-btn")).toHaveFocus()
+  })
+
+  it("closes on Escape", async () => {
+    await openAddPanel()
+    await userEvent.click(screen.getByTestId("search-filter-input"))
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+    expect(screen.getByTestId("add-tenant-btn")).toHaveFocus()
+  })
+
+  it("clears a typed search on the first Escape and closes on the second", async () => {
+    await openAddPanel()
+    await userEvent.type(screen.getByTestId("search-filter-input"), "kenya")
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.getByTestId("search-filter-input")).toHaveValue("")
+    expect(screen.getByTestId("add-tenant-panel")).toBeInTheDocument()
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+  })
+
+  it("ignores Escape pressed with focus elsewhere on the page", async () => {
+    vi.mocked(getUserTenantsCached).mockResolvedValue(userSources)
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([alpha, bravo])
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+    await screen.findByTestId("add-tenant-panel")
+    await userEvent.click(screen.getByTestId("remove-tenant-wt-a"))
+    screen.getByTestId("confirm-remove-tenant-wt-a").focus()
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.getByTestId("add-tenant-panel")).toBeInTheDocument()
+  })
+
+  it("closes from the toggle button too", async () => {
+    await openAddPanel()
+
+    await userEvent.click(screen.getByTestId("add-tenant-btn"))
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+    expect(screen.getByTestId("add-tenant-btn")).toHaveAttribute("aria-expanded", "false")
+  })
+
+  it("lets Escape close an open facet menu without closing the panel", async () => {
+    await openAddPanel()
+    await userEvent.click(screen.getByTestId(`${F}-facet-status`))
+    expect(await screen.findByTestId(`${F}-facet-status-option-active`)).toBeInTheDocument()
+
+    await userEvent.keyboard("{Escape}")
+
+    await waitFor(() =>
+      expect(screen.queryByTestId(`${F}-facet-status-option-active`)).not.toBeInTheDocument(),
+    )
+    expect(screen.getByTestId("add-tenant-panel")).toBeInTheDocument()
+  })
+
+  it("closes on Escape when opened from the empty-state button, returning focus there", async () => {
+    vi.mocked(getUserTenantsCached).mockResolvedValue(userSources)
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-empty-btn"))
+    await screen.findByTestId("add-tenant-panel")
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+    expect(screen.getByTestId("add-tenant-empty-btn")).toHaveFocus()
+  })
+
+  it("closes on Escape after a click on the panel's plain text", async () => {
+    await openAddPanel()
+    screen.getByTestId("tenants-tab").focus()
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
   })
 })
