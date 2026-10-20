@@ -279,6 +279,8 @@ class ChatAttachment(models.Model):
     # Set once a message carrying it is accepted, by any request; a refused request
     # unbinds only attachments no accepted message carries.
     sent_at = models.DateTimeField(null=True, blank=True)
+    # The model API refused this image; later requests carry a note instead of it.
+    rejected_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [

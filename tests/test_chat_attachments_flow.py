@@ -50,12 +50,12 @@ def _entry(attachment):
     }
 
 
-def _image_rejection():
+def _image_rejection(
+    message="messages.0.content.0.image.source.base64: does not appear to be a valid png image",
+):
     request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
     return anthropic.BadRequestError(
-        "messages.0.content.0.image.source.base64: does not appear to be a valid png image",
-        response=httpx.Response(400, request=request),
-        body=None,
+        message, response=httpx.Response(400, request=request), body=None
     )
 
 
@@ -222,3 +222,66 @@ async def test_a_held_message_keeps_its_attachments_bound_and_sent(user, workspa
     await attachment.arefresh_from_db()
     assert str(attachment.thread_id) == thread_id
     assert attachment.sent_at is not None
+
+
+def _note(attachment):
+    return {
+        "type": "text",
+        "text": f'[Image "shot.png" (id {attachment.id}) could not be processed.]',
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_only_the_image_the_api_named_is_stubbed_and_remembered(user, workspace):
+    thread = await Thread.objects.acreate(user=user, workspace=workspace)
+    good = await _attachment(user, workspace, thread, content=images.png(5, 5))
+    bad = await _attachment(user, workspace, thread, content=images.png(6, 6))
+    message = HumanMessage(
+        content="compare",
+        additional_kwargs={SCOUT_ATTACHMENTS_KWARG: [_entry(good), _entry(bad)]},
+    )
+    rejection = _image_rejection(
+        "messages.0.content.1.image.source.base64: does not appear to be a valid png image"
+    )
+
+    calls, _messages = await _run_agent(
+        thread, message, side_effect=[rejection, AIMessage(content="one of them")]
+    )
+
+    _first, second = calls
+    kept, stubbed, _text = _blocks(second)
+    assert kept["type"] == "image"
+    assert stubbed == _note(bad)
+    await good.arefresh_from_db()
+    await bad.arefresh_from_db()
+    assert good.rejected_at is None
+    assert bad.rejected_at is not None
+
+    # A later turn builds a new loader, and stubs it up front without a failing call.
+    calls, _messages = await _run_agent(thread, message, side_effect=[AIMessage(content="ok")])
+    [call] = calls
+    kept, stubbed, _text = _blocks(call)
+    assert kept["type"] == "image"
+    assert stubbed == _note(bad)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_unmappable_image_rejection_stubs_every_image(user, workspace):
+    thread = await Thread.objects.acreate(user=user, workspace=workspace)
+    first = await _attachment(user, workspace, thread, content=images.png(5, 5))
+    second = await _attachment(user, workspace, thread, content=images.png(6, 6))
+    message = HumanMessage(
+        content="compare",
+        additional_kwargs={SCOUT_ATTACHMENTS_KWARG: [_entry(first), _entry(second)]},
+    )
+
+    calls, _messages = await _run_agent(
+        thread,
+        message,
+        side_effect=[_image_rejection("Could not process image"), AIMessage(content="ok")],
+    )
+
+    stub_a, stub_b, _text = _blocks(calls[1])
+    assert (stub_a, stub_b) == (_note(first), _note(second))

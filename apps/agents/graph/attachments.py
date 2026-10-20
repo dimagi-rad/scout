@@ -13,7 +13,14 @@ import re
 from dataclasses import dataclass
 
 import anthropic
+from django.utils import timezone
 from langchain_core.messages import BaseMessage, HumanMessage
+
+try:
+    # Private, so guarded: without it a rejection stubs every image in the request.
+    from langchain_anthropic.chat_models import _format_messages
+except ImportError:  # pragma: no cover
+    _format_messages = None
 
 from apps.chat.attachments import message_attachments
 from apps.chat.models import ChatAttachment
@@ -35,6 +42,7 @@ class LoadedAttachment:
     id: str
     filename: str
     media_type: str
+    rejected: bool = False
     # Exactly one is set: an image's bytes, or a text file's decoded text.
     image: bytes | None = None
     text: str | None = None
@@ -42,7 +50,12 @@ class LoadedAttachment:
 
 def _loaded(row: ChatAttachment) -> LoadedAttachment:
     content = bytes(row.blob.content)
-    common = {"id": str(row.id), "filename": row.filename, "media_type": row.media_type}
+    common = {
+        "id": str(row.id),
+        "filename": row.filename,
+        "media_type": row.media_type,
+        "rejected": row.rejected_at is not None,
+    }
     if row.media_type.startswith("image/"):
         return LoadedAttachment(**common, image=content)
     # Validated as UTF-8 on upload; replace rather than fail a turn over a bad byte.
@@ -64,12 +77,33 @@ class AttachmentLoader:
         self.rejected_images: set[str] = set()
         self.sent_images: set[str] = set()
 
-    def reject_sent_images(self) -> bool:
-        """Mark every image the latest request carried as unusable; False if none."""
-        if not self.sent_images:
+    async def areject_images(self, exc: BaseException, messages: list) -> bool:
+        """Mark the image the API refused as unusable, here and for later turns.
+
+        The error names the block (``messages.N.content.M.image…``); when that cannot
+        be mapped to an attachment, every image the request carried is marked.
+        False when the request carried no image to blame.
+        """
+        ids = self._named_image(exc, messages) or set(self.sent_images)
+        if not ids:
             return False
-        self.rejected_images |= self.sent_images
+        self.rejected_images |= ids
+        await ChatAttachment.objects.filter(id__in=list(ids)).aupdate(rejected_at=timezone.now())
         return True
+
+    def _named_image(self, exc: BaseException, messages: list) -> set[str]:
+        match = _IMAGE_BLOCK_PATH.search(str(exc))
+        if match is None or _format_messages is None:
+            return set()
+        try:
+            # The index counts the API's messages, after langchain merges and drops
+            # the system message, so resolve it the same way it formats them.
+            _system, formatted = _format_messages(messages)
+            block = formatted[int(match.group(1))]["content"][int(match.group(2))]
+            data = block["source"]["data"]
+        except (IndexError, KeyError, TypeError, ValueError):
+            return set()
+        return {i for i in self.sent_images if self._base64.get(i) == data}
 
     def base64_of(self, attachment: LoadedAttachment) -> str:
         """The image's base64, encoded once per run rather than on every model call."""
@@ -166,6 +200,8 @@ async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budg
             return _image_omitted(entry)
         budget.images -= 1
         budget.image_bytes -= size
+        if attachment.rejected:
+            return _text_block(f"[Image {_label(entry)} could not be processed.]")
         loader.sent_images.add(attachment.id)
         return {
             "type": "image",
@@ -217,6 +253,9 @@ async def aexpand_attachments(
             blocks.append(_text_block(message.content))
         expanded[index] = message.model_copy(update={"content": blocks, "additional_kwargs": {}})
     return expanded
+
+
+_IMAGE_BLOCK_PATH = re.compile(r"messages\.(\d+)\.content\.(\d+)\.image")
 
 
 def is_image_rejection(exc: BaseException) -> bool:

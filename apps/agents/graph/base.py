@@ -238,9 +238,11 @@ async def build_agent_graph(
         except Exception as exc:
             # The checkpoint keeps the attachment, so without this one image the API
             # cannot read would fail every turn while its message is in the window.
-            if not is_image_rejection(exc) or not attachment_loader.reject_sent_images():
+            if not is_image_rejection(exc) or not await attachment_loader.areject_images(
+                exc, messages
+            ):
                 raise
-            logger.warning("agent_node: the API refused an image; retrying without images")
+            logger.warning("agent_node: the API refused an image; retrying without it")
             messages = [system_message, *await aexpand_attachments(repaired, attachment_loader)]
             response = await llm_with_tools.ainvoke(messages, cache_control=PROMPT_CACHE_CONTROL)
         return {"messages": [response]}
