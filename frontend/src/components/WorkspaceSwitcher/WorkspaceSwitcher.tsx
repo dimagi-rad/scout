@@ -538,7 +538,9 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
           </PopoverTrigger>
         )}
         <PopoverContent
-          className="w-[22rem] p-0"
+          // Capped at the room Radix reports so the footer (Combine, Manage) stays reachable on
+          // short windows; the scrolling lists give up height first.
+          className="flex max-h-[var(--radix-popover-content-available-height)] w-[22rem] flex-col p-0"
           align={variant === "topbar" ? "end" : "start"}
           onKeyDown={onKeyDown}
           onEscapeKeyDown={(e) => {
@@ -624,7 +626,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
 
           <div
             ref={scrollRef}
-            className="overflow-y-auto p-1"
+            className="min-h-0 overflow-y-auto p-1"
             style={{ maxHeight: LIST_MAX_HEIGHT }}
             data-testid="workspace-list"
           >

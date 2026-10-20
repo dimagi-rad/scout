@@ -68,7 +68,7 @@ export function CombineSourcesPanel({ basket, setBasket, onBack, onCombine }: Pr
   }
 
   return (
-    <div data-testid="workspace-combine-panel">
+    <div className="flex min-h-0 flex-col" data-testid="workspace-combine-panel">
       <div className="flex items-center gap-1 border-b px-1 py-1">
         <button
           type="button"
@@ -125,7 +125,7 @@ export function CombineSourcesPanel({ basket, setBasket, onBack, onCombine }: Pr
         </div>
       )}
 
-      <div className="max-h-60 overflow-y-auto p-1" data-testid="workspace-basket-results">
+      <div className="max-h-60 min-h-0 overflow-y-auto p-1" data-testid="workspace-basket-results">
         {loadError ? (
           <p className="px-2 py-4 text-center text-sm text-destructive">
             Couldn't load your data sources. Go back and try again.
