@@ -43,7 +43,7 @@ def load_production_with_env(monkeypatch):
 
 @pytest.fixture
 def no_recorded_refusal(monkeypatch):
-    monkeypatch.setattr(RefusalRecordingConnection, "last_connect_error", None)
+    monkeypatch.setattr(RefusalRecordingConnection, "last_connect_failure", None)
 
 
 @pytest.fixture
@@ -142,8 +142,8 @@ def test_a_full_pool_is_busy_not_an_outage(make_pooled_wrapper):
     assert classify_capacity_error(raised.value).resource == CapacityResource.DATABASE
 
 
-def _timeout_after(last_connect_error, make_pooled_wrapper, monkeypatch):
-    monkeypatch.setattr(RefusalRecordingConnection, "last_connect_error", last_connect_error)
+def _timeout_after(last_connect_failure, make_pooled_wrapper, monkeypatch):
+    monkeypatch.setattr(RefusalRecordingConnection, "last_connect_failure", last_connect_failure)
     wrapper = make_pooled_wrapper(max_size=4)
     with (
         patch.object(
@@ -155,14 +155,17 @@ def _timeout_after(last_connect_error, make_pooled_wrapper, monkeypatch):
     return raised.value
 
 
-def test_a_timeout_after_a_slot_refusal_is_busy(make_pooled_wrapper, monkeypatch):
-    refusal = psycopg.OperationalError("FATAL:  sorry, too many clients already")
+@pytest.mark.parametrize(
+    "refusal",
+    [(None, "connection failed: FATAL:  sorry, too many clients already"), ("53300", "")],
+)
+def test_a_timeout_after_a_slot_refusal_is_busy(refusal, make_pooled_wrapper, monkeypatch):
     raised = _timeout_after(refusal, make_pooled_wrapper, monkeypatch)
     assert isinstance(raised, DjangoPoolExhausted)
 
 
 def test_a_timeout_on_an_unreachable_database_stays_an_outage(make_pooled_wrapper, monkeypatch):
-    down = psycopg.OperationalError("connection refused")
+    down = (None, "connection failed: Connection refused")
     raised = _timeout_after(down, make_pooled_wrapper, monkeypatch)
     assert not isinstance(raised, DjangoPoolExhausted)
     assert classify_capacity_error(raised) is None
@@ -173,7 +176,7 @@ def test_the_pool_connection_records_its_last_connect_outcome(no_recorded_refusa
     params = connection.get_connection_params()
     with pytest.raises(psycopg.OperationalError):
         RefusalRecordingConnection.connect(**{**params, "port": 1, "connect_timeout": 2})
-    assert RefusalRecordingConnection.last_connect_error is not None
+    assert RefusalRecordingConnection.last_connect_failure is not None
 
     RefusalRecordingConnection.connect(**params).close()
-    assert RefusalRecordingConnection.last_connect_error is None
+    assert RefusalRecordingConnection.last_connect_failure is None

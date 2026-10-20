@@ -27,16 +27,20 @@ class RefusalRecordingConnection(psycopg.Connection):
     tell "the server is full" from "the database is down".
     """
 
-    last_connect_error: BaseException | None = None
+    # (sqlstate, message), not the exception: its traceback holds the connect kwargs.
+    last_connect_failure: tuple[str | None, str] | None = None
 
     @classmethod
     def connect(cls, *args, **kwargs):
         try:
             conn = super().connect(*args, **kwargs)
         except BaseException as exc:
-            RefusalRecordingConnection.last_connect_error = exc
+            RefusalRecordingConnection.last_connect_failure = (
+                getattr(exc, "sqlstate", None),
+                str(exc),
+            )
             raise
-        RefusalRecordingConnection.last_connect_error = None
+        RefusalRecordingConnection.last_connect_failure = None
         return conn
 
 

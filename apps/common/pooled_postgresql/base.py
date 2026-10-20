@@ -9,7 +9,11 @@ checkpointer: full pool or a refused connect is capacity, anything else is not.
 from django.db.backends.postgresql.base import DatabaseWrapper as PostgresDatabaseWrapper
 from psycopg_pool import PoolTimeout
 
-from apps.common.capacity import CapacityResource, classify_capacity_error
+from apps.common.capacity import (
+    TOO_MANY_CONNECTIONS_SQLSTATE,
+    CapacityResource,
+    is_capacity_message,
+)
 from apps.common.db_pool import RefusalRecordingConnection
 
 
@@ -31,5 +35,8 @@ class DatabaseWrapper(PostgresDatabaseWrapper):
     def _pool_is_busy(self) -> bool:
         if self.pool.get_stats().get("pool_size", 0) >= self.pool.max_size:
             return True
-        refusal = RefusalRecordingConnection.last_connect_error
-        return refusal is not None and classify_capacity_error(refusal) is not None
+        failure = RefusalRecordingConnection.last_connect_failure
+        if failure is None:
+            return False
+        sqlstate, message = failure
+        return sqlstate == TOO_MANY_CONNECTIONS_SQLSTATE or is_capacity_message(message)

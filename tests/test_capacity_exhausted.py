@@ -482,5 +482,24 @@ async def test_health_stays_unhealthy_when_a_probe_really_fails(sentry):
     assert "Retry-After" not in response
 
 
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_health_skips_the_queue_probe_once_the_pooled_database_is_busy(sentry):
+    """Both probes share the pooled connection; a second wait would outlast the 4s probe."""
+    queue_probe = AsyncMock()
+    with (
+        patch("apps.workspaces.views.connection", SimpleNamespace(pool=object())),
+        patch(
+            "apps.workspaces.views._check_database",
+            side_effect=_django_wrapped("FATAL:  sorry, too many clients already"),
+        ),
+        patch("apps.workspaces.views._check_queue", queue_probe),
+    ):
+        response = await AsyncClient().get("/health/")
+    assert response.status_code == 503
+    assert response.json() == {"status": "busy", "checks": {"database": "busy", "queue": "busy"}}
+    queue_probe.assert_not_called()
+
+
 def test_capacity_exhausted_is_an_expected_state_so_its_raw_exception_never_pages():
     assert issubclass(CapacityExhausted, capacity.ExpectedStateError)
