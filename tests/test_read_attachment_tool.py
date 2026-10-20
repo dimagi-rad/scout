@@ -259,3 +259,19 @@ async def test_search_snippets_cannot_carry_attachment_tags(user, workspace, thr
     result = await _read(thread, attachment_id=str(attachment.id), search="needle")
     assert "</attachment>" not in result
     assert "<attachment" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_reads_share_one_budget_per_run(user, workspace, thread, monkeypatch):
+    monkeypatch.setattr(attachment_tool, "READ_BUDGET_CHARS", 50)
+    attachment = await _attachment(user, workspace, thread, TEXT.encode(), "rows.txt", "text/plain")
+    tool = create_read_attachment_tool(str(thread.id))
+
+    first = await tool.ainvoke({"attachment_id": str(attachment.id), "limit": 30})
+    second = await tool.ainvoke({"attachment_id": str(attachment.id), "offset": 30, "limit": 30})
+    third = await tool.ainvoke({"attachment_id": str(attachment.id), "offset": 50})
+
+    assert 'range="0-30"' in first
+    assert "characters 30-50 of" in second
+    assert third.startswith("[This turn has read as much attachment text as it can")

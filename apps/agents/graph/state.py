@@ -98,7 +98,7 @@ def _describe_attachment(entry: dict) -> str:
 
 
 def dropped_attachments_note(
-    dropped: list[BaseMessage], still_shown: set[str] = frozenset()
+    dropped: list[BaseMessage], still_shown: frozenset[str] | set[str] = frozenset()
 ) -> HumanMessage | None:
     """A note naming the attachments of messages pruned from the window, or None.
 

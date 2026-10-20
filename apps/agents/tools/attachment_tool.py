@@ -23,6 +23,9 @@ DEFAULT_LIMIT = 20_000
 # Characters, not bytes: compact_tool_results shapes MCP tool output only, so this
 # cap is what bounds a result (a non-ASCII file can exceed 50 KB of UTF-8).
 MAX_LIMIT = 50_000
+# Per run, across calls: each result is replayed with the window and stored in the
+# checkpoint, so paging a whole 2 MB file through would bloat both.
+READ_BUDGET_CHARS = 150_000
 MAX_SEARCH_MATCHES = 50
 # Characters shown either side of each match.
 SEARCH_CONTEXT_CHARS = 120
@@ -64,6 +67,7 @@ def create_read_attachment_tool(conversation_id: str):
     """Bind the tool to the thread, so it reads only attachments sent in this chat."""
     # One per run, like the graph's: paging a file must not reload it on every call.
     loader = AttachmentLoader(conversation_id)
+    budget = {"chars": READ_BUDGET_CHARS}
 
     @tool(READ_ATTACHMENT_TOOL_NAME)
     async def read_attachment(
@@ -101,13 +105,21 @@ def create_read_attachment_tool(conversation_id: str):
             return f"[{name}, {len(text):,} characters]\n" + _search(text, search, offset)
         if offset >= len(text):
             return f"[{name} has {len(text):,} characters; offset {offset:,} is past the end.]"
-        end = min(len(text), offset + min(max(1, int(limit)), MAX_LIMIT))
+        if budget["chars"] <= 0:
+            return (
+                "[This turn has read as much attachment text as it can. Answer from what "
+                "you have read, or search for the part you need.]"
+            )
+        window = min(max(1, int(limit)), MAX_LIMIT, budget["chars"])
+        end = min(len(text), offset + window)
+        budget["chars"] -= end - offset
         header = f"[{name}: characters {offset:,}-{end:,} of {len(text):,}]"
         footer = (
             f"\n[More remains: call read_attachment again with offset={end}.]"
             if end < len(text)
             else ""
         )
-        return f"{header}\n{wrap_attachment(attachment, text[offset:end], len(text))}{footer}"
+        body = wrap_attachment(attachment, text[offset:end], len(text), start=offset)
+        return f"{header}\n{body}{footer}"
 
     return read_attachment

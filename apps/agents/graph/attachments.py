@@ -180,14 +180,19 @@ def neutralise_tags(text: str) -> str:
     return _ATTACHMENT_TAG.sub(r"<\\\1\2", text)
 
 
-def wrap_attachment(attachment: LoadedAttachment, body: str, total_chars: int) -> str:
+def wrap_attachment(
+    attachment: LoadedAttachment, body: str, total_chars: int, *, start: int = 0
+) -> str:
+    """``body`` (characters ``start`` on of a ``total_chars`` file) inside the tags."""
     filename = safe_filename(attachment.filename)
     # The tags mark where user-supplied content ends; a tag inside the file must not
     # end it early or open a second one under another name.
+    shown = f'range="{start}-{start + len(body)}" ' if start or len(body) < total_chars else ""
     body = neutralise_tags(body)
     return (
         f'<attachment filename="{filename}" id="{attachment.id}" '
-        f'media_type="{attachment.media_type}" chars="{total_chars}">\n{body}\n</attachment>'
+        f'media_type="{attachment.media_type}" chars="{total_chars}" {shown}'.rstrip()
+        + f">\n{body}\n</attachment>"
     )
 
 
