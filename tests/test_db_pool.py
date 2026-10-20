@@ -2,6 +2,7 @@
 
 import importlib
 import sys
+import time
 from unittest.mock import patch
 
 import psycopg
@@ -18,7 +19,11 @@ from apps.common.db_pool import (
     pooled_database,
     reset_pooled_connection,
 )
-from apps.common.pooled_postgresql.base import DatabaseWrapper, DjangoPoolExhausted
+from apps.common.pooled_postgresql.base import (
+    CONNECT_FAILURE_FRESH_SECONDS,
+    DatabaseWrapper,
+    DjangoPoolExhausted,
+)
 from tests.production_settings import PRODUCTION_SETTINGS
 
 BASE_SETTINGS = "config.settings.base"
@@ -155,9 +160,15 @@ def _timeout_after(last_connect_failure, make_pooled_wrapper, monkeypatch, *, po
     return raised.value
 
 
+def _failed(sqlstate, message, *, seconds_ago=0.0):
+    return (time.monotonic() - seconds_ago, sqlstate, message)
+
+
+TOO_MANY_CLIENTS = "connection failed: FATAL:  sorry, too many clients already"
+
+
 @pytest.mark.parametrize(
-    "refusal",
-    [(None, "connection failed: FATAL:  sorry, too many clients already"), ("53300", "")],
+    "refusal", [_failed(None, TOO_MANY_CLIENTS), _failed("53300", "")], ids=["text", "sqlstate"]
 )
 def test_a_timeout_after_a_slot_refusal_is_busy(refusal, make_pooled_wrapper, monkeypatch):
     raised = _timeout_after(refusal, make_pooled_wrapper, monkeypatch)
@@ -165,23 +176,30 @@ def test_a_timeout_after_a_slot_refusal_is_busy(refusal, make_pooled_wrapper, mo
 
 
 @pytest.mark.django_db(transaction=True)
-def test_a_served_checkout_retires_an_old_refusal(make_pooled_wrapper, monkeypatch):
-    refusal = (None, "connection failed: FATAL:  sorry, too many clients already")
+def test_a_served_checkout_keeps_a_live_refusal(make_pooled_wrapper, monkeypatch):
+    """Other waiters still time out on the refusal while some traffic is served."""
     wrapper = make_pooled_wrapper()
     wrapper.connect()
     wrapper.close()
+    refusal = _failed(None, TOO_MANY_CLIENTS)
     monkeypatch.setattr(RefusalRecordingConnection, "last_connect_failure", refusal)
 
     wrapper.connect()
 
-    assert RefusalRecordingConnection.last_connect_failure is None
+    assert RefusalRecordingConnection.last_connect_failure == refusal
+
+
+def test_a_stale_refusal_no_longer_decides(make_pooled_wrapper, monkeypatch):
+    stale = _failed(None, TOO_MANY_CLIENTS, seconds_ago=CONNECT_FAILURE_FRESH_SECONDS + 1)
+    raised = _timeout_after(stale, make_pooled_wrapper, monkeypatch, pool_size=1)
+    assert not isinstance(raised, DjangoPoolExhausted)
 
 
 @pytest.mark.parametrize("pool_size", [1, 4], ids=["growing", "grown_to_max"])
 def test_a_timeout_on_an_unreachable_database_stays_an_outage(
     pool_size, make_pooled_wrapper, monkeypatch
 ):
-    down = (None, "connection failed: Connection refused")
+    down = _failed(None, "connection failed: Connection refused")
     raised = _timeout_after(down, make_pooled_wrapper, monkeypatch, pool_size=pool_size)
     assert not isinstance(raised, DjangoPoolExhausted)
     assert classify_capacity_error(raised) is None

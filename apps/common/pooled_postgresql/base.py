@@ -2,9 +2,12 @@
 
 Django raises the pool's bare ``PoolTimeout``, which ``apps.common.capacity`` cannot
 tell from an outage, so a full pool would 500 and fail the health probe instead of
-answering "busy" (#934). Same rule as ``apps.common.capacity_pool`` for the
-checkpointer: full pool or a refused connect is capacity, anything else is not.
+answering "busy" (#934). A recent connect failure decides: a refusal for lack of
+slots is capacity, anything else an outage. Without one, a full pool is capacity.
+``apps.common.capacity_pool`` (the checkpointer) still lets a full pool win.
 """
+
+import time
 
 from django.db.backends.postgresql.base import DatabaseWrapper as PostgresDatabaseWrapper
 from psycopg_pool import PoolTimeout
@@ -16,6 +19,10 @@ from apps.common.capacity import (
 )
 from apps.common.db_pool import RefusalRecordingConnection
 
+# Outlasts the pool's reconnect backoff during a sustained refusal, so a live one
+# never ages out mid-incident; an hours-old one can't mislabel a later outage.
+CONNECT_FAILURE_FRESH_SECONDS = 60.0
+
 
 class DjangoPoolExhausted(PoolTimeout):
     """No Django connection came free, or the server refused new ones, within the timeout."""
@@ -26,21 +33,19 @@ class DjangoPoolExhausted(PoolTimeout):
 class DatabaseWrapper(PostgresDatabaseWrapper):
     def get_new_connection(self, conn_params):
         try:
-            conn = super().get_new_connection(conn_params)
+            return super().get_new_connection(conn_params)
         except PoolTimeout as exc:
             if self._pool_is_busy():
                 raise DjangoPoolExhausted(str(exc)) from exc
             raise
-        # A served checkout retires an old refusal, or a later outage would read as busy.
-        RefusalRecordingConnection.last_connect_failure = None
-        return conn
 
     def _pool_is_busy(self) -> bool:
-        # A recorded connect failure decides first: pool_size counts connections
+        # A recent connect failure decides first: pool_size counts connections
         # created, not healthy ones, so a pool that grew under load reads as full
-        # through an outage. Served checkouts clear it, so real busy never vetoes.
+        # through an outage.
         failure = RefusalRecordingConnection.last_connect_failure
         if failure is not None:
-            sqlstate, message = failure
-            return sqlstate == TOO_MANY_CONNECTIONS_SQLSTATE or is_capacity_message(message)
+            failed_at, sqlstate, message = failure
+            if time.monotonic() - failed_at <= CONNECT_FAILURE_FRESH_SECONDS:
+                return sqlstate == TOO_MANY_CONNECTIONS_SQLSTATE or is_capacity_message(message)
         return self.pool.get_stats().get("pool_size", 0) >= self.pool.max_size

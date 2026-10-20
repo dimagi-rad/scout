@@ -10,6 +10,7 @@ Settings imports this module, so it must not import Django's ORM-facing apps; th
 capacity tagging lives in the ``apps.common.pooled_postgresql`` backend.
 """
 
+import time
 from typing import Any
 
 import psycopg
@@ -27,8 +28,9 @@ class RefusalRecordingConnection(psycopg.Connection):
     tell "the server is full" from "the database is down".
     """
 
-    # (sqlstate, message), not the exception: its traceback holds the connect kwargs.
-    last_connect_failure: tuple[str | None, str] | None = None
+    # (monotonic time, sqlstate, message), not the exception: its traceback holds the
+    # connect kwargs.
+    last_connect_failure: tuple[float, str | None, str] | None = None
 
     @classmethod
     def connect(cls, *args, **kwargs):
@@ -36,6 +38,7 @@ class RefusalRecordingConnection(psycopg.Connection):
             conn = super().connect(*args, **kwargs)
         except Exception as exc:
             RefusalRecordingConnection.last_connect_failure = (
+                time.monotonic(),
                 getattr(exc, "sqlstate", None),
                 str(exc),
             )
