@@ -130,9 +130,9 @@ def test_a_returned_connection_comes_back_as_a_fresh_session(make_pooled_wrapper
 
 @pytest.mark.django_db(transaction=True)
 def test_a_full_pool_is_busy_not_an_outage(make_pooled_wrapper):
-    holder = make_pooled_wrapper(max_size=1, timeout=0.2)
+    holder = make_pooled_wrapper(max_size=1, timeout=1.0)
     holder.connect()
-    waiter = make_pooled_wrapper(max_size=1, timeout=0.2)
+    waiter = make_pooled_wrapper(max_size=1, timeout=1.0)
 
     with pytest.raises(OperationalError) as raised:
         waiter.ensure_connection()

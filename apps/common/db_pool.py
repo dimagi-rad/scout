@@ -34,7 +34,7 @@ class RefusalRecordingConnection(psycopg.Connection):
     def connect(cls, *args, **kwargs):
         try:
             conn = super().connect(*args, **kwargs)
-        except BaseException as exc:
+        except Exception as exc:
             RefusalRecordingConnection.last_connect_failure = (
                 getattr(exc, "sqlstate", None),
                 str(exc),

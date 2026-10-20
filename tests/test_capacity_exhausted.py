@@ -30,6 +30,7 @@ from apps.common.capacity import (
     classify_capacity_error,
     report_capacity_exhausted,
 )
+from apps.common.pooled_postgresql.base import DjangoPoolExhausted
 from apps.semantic.services import query
 from apps.semantic.services.cube_client import CubeConnectionError, CubeServiceUnavailable
 from apps.users.models import Tenant, TenantMembership
@@ -482,22 +483,44 @@ async def test_health_stays_unhealthy_when_a_probe_really_fails(sentry):
     assert "Retry-After" not in response
 
 
+def _django_wrapped_pool_timeout(timeout: PoolTimeout) -> OperationalError:
+    try:
+        try:
+            raise timeout
+        except PoolTimeout as inner:
+            raise OperationalError(str(inner)) from inner
+    except OperationalError as outer:
+        return outer
+
+
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_health_skips_the_queue_probe_once_the_pooled_database_is_busy(sentry):
+@pytest.mark.parametrize(
+    ("checkout_error", "status", "database"),
+    [
+        (DjangoPoolExhausted("couldn't get a connection"), "busy", "busy"),
+        (PoolTimeout("couldn't get a connection"), "unhealthy", "error"),
+    ],
+    ids=["busy", "outage"],
+)
+async def test_health_skips_the_queue_probe_after_a_pool_checkout_timeout(
+    sentry, checkout_error, status, database
+):
     """Both probes share the pooled connection; a second wait would outlast the 4s probe."""
     queue_probe = AsyncMock()
     with (
-        patch("apps.workspaces.views.connection", SimpleNamespace(pool=object())),
         patch(
             "apps.workspaces.views._check_database",
-            side_effect=_django_wrapped("FATAL:  sorry, too many clients already"),
+            side_effect=_django_wrapped_pool_timeout(checkout_error),
         ),
         patch("apps.workspaces.views._check_queue", queue_probe),
     ):
         response = await AsyncClient().get("/health/")
     assert response.status_code == 503
-    assert response.json() == {"status": "busy", "checks": {"database": "busy", "queue": "skipped"}}
+    assert response.json() == {
+        "status": status,
+        "checks": {"database": database, "queue": "skipped"},
+    }
     queue_probe.assert_not_called()
 
 
