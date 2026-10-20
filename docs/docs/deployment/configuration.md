@@ -125,6 +125,16 @@ The development settings always print email to the console. Elsewhere the base s
 | `AWS_SES_ACCESS_KEY_ID`, `AWS_SES_SECRET_ACCESS_KEY` | (empty) | Explicit SES credentials. When unset, boto3's default credential chain is used. |
 | `DEFAULT_FROM_EMAIL` | `Scout <noreply@scout.dimagi.com>` | Sender address. |
 
+### Storage headroom
+
+Every 15 minutes the worker checks free space on the host filesystem and sends a Sentry warning or error when it runs low. Without `SENTRY_DSN` it only logs the readings at INFO. It sends the error on whichever threshold free space crosses first: the percentage or the GiB floor. The same applies to the warning. In the Kamal deployment the worker receives only the variables listed in `config/deploy-worker.yml`, so add these under `env.clear` there to change them.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STORAGE_DISK_PATH` | `/` | Path whose filesystem the worker's 15-minute storage check reads. In a container, `/` reports the filesystem that holds Docker's data root. |
+| `STORAGE_DISK_WARNING_FREE_PERCENT`, `STORAGE_DISK_WARNING_FREE_GIB` | `20`, `16` | The storage check sends a Sentry warning when free space is below either one. |
+| `STORAGE_DISK_CRITICAL_FREE_PERCENT`, `STORAGE_DISK_CRITICAL_FREE_GIB` | `10`, `8` | The storage check sends a Sentry error when free space is below either one. The GiB defaults match the deploy workflow's disk guard (`HOST_MIN_FREE_GB`). |
+
 ### Error monitoring (Sentry)
 
 Sentry is off by default. Setting `SENTRY_DSN` activates it for the API, Procrastinate worker, and MCP server (they all load Django settings). For the frontend, source maps can optionally be uploaded at build time so minified stack traces resolve back to TypeScript source.
