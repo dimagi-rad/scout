@@ -54,7 +54,7 @@ The agent maintains state across conversation turns:
 
 The state carries no role. Tools that write re-check the user's workspace role each time they run.
 
-Message history is automatically pruned to about the last 20 messages plus system messages. The request the current turn answers is always kept, even when it is older than the window: the latest run of user messages (including a resume marker), the user's last two own messages, and the assistant text each of those answers. Tool results whose AI message was pruned are dropped, except when one tool round is wider than the window, in which case the window grows to keep that round whole.
+Message history is automatically pruned to about the last 20 messages plus system messages. The request the current turn answers is kept even when it is older than the window: the latest run of user messages (including a resume marker), the user's last two own messages, and the assistant text each of those answers. Tool results whose AI message was pruned are dropped, except when one tool round is wider than the window, in which case the window grows to keep that round whole and drops the pinned resume markers and assistant text first (the user's own messages always stay).
 
 ## Roles and run modes
 
@@ -86,8 +86,9 @@ this in the tool, and the MCP server does it for MCP materialization. The
 `artifact_manager` and `canvas_manager` subagents rely on the checks in the
 tools they call.
 
-The prompt follows the same split. `select_base_system_prompt` picks one of three
-base prompts:
+The prompt follows the same split. `select_base_system_prompt` picks one of four
+base prompts, because role and run mode compose: read-only chat, read-only
+headless, chat and headless.
 
 - **Read-only**: never offers a rebuild. It refers repairs to a workspace member
   with write access, and says a generic query error doesn't prove data is missing.
@@ -97,6 +98,10 @@ base prompts:
 - **Headless**: when `recovery_action` is `materialization`, it calls the
   blocking `run_materialization` at most once per run and continues in the same
   run.
+
+Both headless variants (recipes, which a read-only member can also run) state a
+default and finish where a chat would ask the user about a missing source or an
+unsettled assumption.
 
 The artifact, data-availability and canvas sections also have read-only
 variants.
@@ -289,7 +294,7 @@ The system prompt is assembled from multiple sources at runtime:
 
 ### 1. Base system prompt
 
-Core agent behavior, in a read-only, chat or headless variant (see [Roles and run modes](#roles-and-run-modes)):
+Core agent behavior, in one of four role and run-mode variants (see [Roles and run modes](#roles-and-run-modes)):
 
 - **Core principles**: Precision over speed, data-driven responses, explain reasoning, acknowledge uncertainty
 - **Response format**: Markdown tables for small results, summaries for large results
