@@ -134,7 +134,7 @@ describe("delayed account-owned navigation", () => {
     fireEvent.click(await screen.findByTestId("create-source-tenant-a"))
     fireEvent.submit(input.closest("form")!)
 
-    await waitFor(() => expect(router.state.location.pathname).toBe("/workspaces/created-a/created-a"))
+    await waitFor(() => expect(router.state.location.pathname).toBe("/workspaces/created-a/created-a/chat"))
     expect(useAppStore.getState().activeDomainId).toBe("created-a")
     expect(onClose).toHaveBeenCalledOnce()
   })
