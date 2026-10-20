@@ -75,6 +75,14 @@ env:
     # all three services evaluate access, so change it in all three files together;
     # "False" rolls back.
     UPSTREAM_ACCESS_FRESHNESS_ENFORCED: "True"
+    # Django connection pool per uvicorn worker (#934): 4 x 10 caps the API's ORM
+    # connections, which were unbounded, against the RDS max_connections it shares
+    # with the checkpointer pools, worker, MCP and Cube. A chat turn holds one
+    # slot for its whole stream, so keep this above concurrent turns per worker.
+    # Web only: the worker and MCP keep connections on executor threads.
+    DJANGO_DB_POOL_MAX_SIZE: "10"
+    DJANGO_DB_POOL_MIN_SIZE: "2"
+    DJANGO_DB_POOL_TIMEOUT_S: "10"
   secret:
     - DATABASE_URL
     - MANAGED_DATABASE_URL
