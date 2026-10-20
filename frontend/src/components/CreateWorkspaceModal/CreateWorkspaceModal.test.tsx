@@ -395,3 +395,29 @@ it("does not offer to select the whole unfiltered list", async () => {
   await openModal()
   expect(screen.queryByTestId("create-sources-select-shown")).toBeNull()
 })
+
+it("warns, without blocking, when the pick has more Connect opportunities than the quick check covers", async () => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ program: ["7"] }))
+  vi.mocked(getUserTenantsCached).mockResolvedValue([
+    ...Array.from({ length: 26 }, (_, i) =>
+      connect(`${100 + i}`, `Opp ${100 + i}`, { program: "7", program_name: "Malaria" })),
+    connect("900", "Other", { program: "8", program_name: "Nutrition" }),
+  ])
+  const { user, onClose } = await openModal()
+
+  await user.click(screen.getByTestId("create-source-tenant-100"))
+  expect(screen.queryByTestId("create-workspace-connect-size-notice")).toBeNull()
+
+  await user.click(screen.getByTestId("create-sources-select-shown"))
+  expect(screen.getByTestId("create-workspace-connect-size-notice")).toHaveTextContent(
+    "This workspace would have 26 CommCare Connect opportunities",
+  )
+
+  await user.click(screen.getByTestId("create-source-tenant-125"))
+  expect(screen.queryByTestId("create-workspace-connect-size-notice")).toBeNull()
+  await user.click(screen.getByTestId("create-source-tenant-125"))
+
+  await user.click(screen.getByTestId("create-workspace-submit"))
+  await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+  expect(vi.mocked(workspaceApi.create).mock.calls[0][1]).toHaveLength(26)
+})

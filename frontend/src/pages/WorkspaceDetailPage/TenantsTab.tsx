@@ -26,6 +26,8 @@ import { IdListSummary } from "@/components/IdListSummary/IdListSummary"
 import { CONNECT_PROVIDER } from "@/lib/filters/tenantFacets"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
 import { useTenantFacetFilters } from "@/lib/filters/useTenantFacetFilters"
+import { CONNECT_QUICK_CHECK_LIMIT, countConnectSources } from "@/lib/connectAccessCheck"
+import { ConnectSizeNotice } from "@/components/ConnectSizeNotice"
 
 type AvailableStatus = "idle" | "loading" | "ready" | "error"
 
@@ -367,9 +369,12 @@ export function TenantsTab({
     }
   }
 
+  const connectedConnectCount = countConnectSources(tenants)
   const bulkAddOffered =
     filteredAvailable.length > 0
     && (idReport !== null || filteredAvailable.length < available.length)
+  const connectCountAfterBulk =
+    connectedConnectCount + (bulkAddOffered ? countConnectSources(filteredAvailable) : 0)
 
   const canShowAddButton = isManager && (availableStatus !== "ready" || available.length > 0)
 
@@ -505,6 +510,14 @@ export function TenantsTab({
                     )
                   }
                 />
+                {bulkAddOffered && connectedConnectCount <= CONNECT_QUICK_CHECK_LIMIT && (
+                  <ConnectSizeNotice
+                    count={connectCountAfterBulk}
+                    lead={`Adding all ${filteredAvailable.length} shown would give this workspace`}
+                    testId="add-sources-connect-size-notice"
+                    className="mt-2"
+                  />
+                )}
                 {idReport && (
                   <div className="mt-2">
                     <IdListSummary
@@ -572,6 +585,13 @@ export function TenantsTab({
           )}
         </div>
       )}
+
+      <ConnectSizeNotice
+        count={connectedConnectCount}
+        lead="This workspace has"
+        testId="workspace-connect-size-notice"
+        className="mb-3"
+      />
 
       {bulkNotice && !mutationError && (
         <p className="mb-3 text-sm text-muted-foreground" role="status" data-testid="bulk-add-notice">
