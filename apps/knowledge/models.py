@@ -114,16 +114,21 @@ class KnowledgeEntry(models.Model):
     title = models.CharField(max_length=255)
     content = models.TextField(help_text="Markdown content for this knowledge entry.")
     tags = models.JSONField(default=list, blank=True)
-    kind = models.CharField(max_length=16, choices=Kind.choices, default=Kind.NOTE)
+    # db_default too, so code from before this column can still insert during a deploy.
+    kind = models.CharField(
+        max_length=16, choices=Kind.choices, default=Kind.NOTE, db_default=Kind.NOTE
+    )
     description = models.CharField(
         max_length=500,
         blank=True,
+        db_default="",
         help_text="One-line summary of a reference document, listed in the agent's prompt.",
     )
     source_format = models.CharField(
         max_length=8,
         choices=SourceFormat.choices,
         blank=True,
+        db_default="",
         help_text="Format of an uploaded reference document; blank for typed entries.",
     )
 

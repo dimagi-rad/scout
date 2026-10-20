@@ -14,6 +14,7 @@ class Migration(migrations.Migration):
             name="description",
             field=models.CharField(
                 blank=True,
+                db_default="",
                 help_text="One-line summary of a reference document, listed in the agent's prompt.",
                 max_length=500,
             ),
@@ -23,6 +24,7 @@ class Migration(migrations.Migration):
             name="kind",
             field=models.CharField(
                 choices=[("note", "Note"), ("reference", "Reference document")],
+                db_default="note",
                 default="note",
                 max_length=16,
             ),
@@ -39,6 +41,7 @@ class Migration(migrations.Migration):
                     ("md", "Markdown"),
                     ("txt", "Plain text"),
                 ],
+                db_default="",
                 help_text="Format of an uploaded reference document; blank for typed entries.",
                 max_length=8,
             ),
