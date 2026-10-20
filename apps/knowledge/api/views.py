@@ -2,6 +2,7 @@
 
 import io
 import logging
+import uuid
 import zipfile
 
 import yaml
@@ -381,7 +382,7 @@ class KnowledgeImportView(APIView):
         # re-import updates in place (idempotent) while N duplicate titles map to
         # N entries instead of collapsing onto one (arch #262, finding 05#8).
         available_by_title: dict[str, list] = {}
-        reference_pks: set = set()
+        reference_pks: set[uuid.UUID] = set()
         for pk, title, kind in KnowledgeEntry.objects.filter(workspace=workspace).values_list(
             "id", "title", "kind"
         ):
@@ -429,13 +430,15 @@ class KnowledgeImportView(APIView):
                         skipped += 1
                         continue
 
-                    pool = available_by_title.get(title)
-                    if (
+                    pool = available_by_title.get(title) or []
+                    # A note (or a pre-#913 export) may update a same-titled note, but must
+                    # never replace a reference document's body.
+                    usable = (
                         pool
-                        and pool[0] in reference_pks
-                        and fields["kind"] != KnowledgeEntry.Kind.REFERENCE
-                    ):
-                        # A note (or a pre-#913 export) must not replace a document's body.
+                        if fields["kind"] == KnowledgeEntry.Kind.REFERENCE
+                        else [pk for pk in pool if pk not in reference_pks]
+                    )
+                    if pool and not usable:
                         errors.append(
                             {
                                 "file": name,
@@ -446,8 +449,9 @@ class KnowledgeImportView(APIView):
                             }
                         )
                         continue
-                    if pool:
-                        pk = pool.pop(0)
+                    if usable:
+                        pk = usable[0]
+                        pool.remove(pk)
                         KnowledgeEntry.objects.filter(pk=pk).update(**fields)
                         updated += 1
                     else:

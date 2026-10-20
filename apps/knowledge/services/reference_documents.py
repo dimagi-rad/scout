@@ -468,7 +468,7 @@ def search_document(
     shown = sum(covered[: len(kept)])
     if clipped:
         result["note"] = (
-            f"The first of {total} matches was cut to fit the limit. Add words to narrow "
+            f"The first match (of {total}) was cut to fit the limit. Add words to narrow "
             "the search, raise limit, or page through the document with offset instead."
         )
     elif shown < total:
