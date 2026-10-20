@@ -348,8 +348,11 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
       const ids = getRecentWorkspaceIds()
       setRecentIds(ids)
       // Small accounts have no segment pills to reach All, so they open on everything.
+      // Until the list arrives the account size is unknown; recents alone decide then.
       const hasSuggestions =
-        showSegments && (ids.length > 0 || accessible.some((d) => !d.is_auto_created))
+        domains.length === 0
+          ? ids.length > 0
+          : showSegments && (ids.length > 0 || accessible.some((d) => !d.is_auto_created))
       setSegment(hasSuggestions ? "recent" : "all")
       setCombining(false)
       resetView()
@@ -409,12 +412,13 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     if (combining) return
     // Enter on a footer button or pill must do that control's own thing, not switch workspace.
     if (e.key === "Enter" && e.target !== searchRef.current) return
-    if (e.key === "ArrowDown") {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault()
-      setHighlight((h) => Math.min(h + 1, shown.length - 1))
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault()
-      setHighlight((h) => Math.max(h - 1, 0))
+      // The search box drives the list, so the Enter that follows acts on the highlight.
+      searchRef.current?.focus()
+      setHighlight((h) =>
+        e.key === "ArrowDown" ? Math.min(h + 1, shown.length - 1) : Math.max(h - 1, 0),
+      )
     } else if (e.key === "Enter") {
       e.preventDefault()
       const ws = shown[highlight] ?? shown[0]

@@ -319,12 +319,13 @@ describe("combining sources", () => {
     expect(useAppStore.getState().activeDomainId).toBe(before)
   })
 
-  it("still arrows through the list after a pill takes focus", () => {
+  it("still arrows through the list after a footer button takes focus", () => {
     const ws = [workspace({ id: "a", display_name: "A" }), workspace({ id: "b", display_name: "B" })]
     openSwitcher(ws)
     const toggle = screen.getByTestId("workspace-combine-toggle")
 
     fireEvent.keyDown(toggle, { key: "ArrowDown" })
+    expect(screen.getByTestId("workspace-search")).toHaveFocus()
     fireEvent.keyDown(screen.getByTestId("workspace-search"), { key: "Enter" })
 
     expect(useAppStore.getState().activeDomainId).toBe("b")
