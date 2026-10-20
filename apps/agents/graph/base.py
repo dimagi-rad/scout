@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from apps.agents.graph.attachments import AttachmentLoader, aexpand_attachments
 from apps.agents.graph.prompt_context import (
     PROMPT_CACHE_CONTROL,
     _build_cached_system_message,
@@ -173,6 +174,9 @@ async def build_agent_graph(
 
     base_tool_node = ToolNode(tools)
     tool_node = _make_injecting_tool_node(base_tool_node, injections)
+    # Per run: the graph is built per turn, and each tool loop iteration re-sends
+    # the same attachments.
+    attachment_loader = AttachmentLoader(conversation_id)
 
     async def agent_node(state: AgentState) -> dict[str, Any]:
         """Prepend the system prompt and invoke the LLM.
@@ -221,7 +225,7 @@ async def build_agent_graph(
 
         messages = [
             _build_cached_system_message(stable_prompt, volatile_prompt, personal_memory),
-            *repaired,
+            *await aexpand_attachments(repaired, attachment_loader),
         ]
         # cache_control lands on the last eligible message block, caching the
         # (pruned) conversation-history prefix (arch #254, 02#3).
