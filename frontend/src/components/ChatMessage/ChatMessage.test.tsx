@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event"
 import type { UIMessage } from "ai"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
 import { turnArtifactOwners } from "./artifactReferences"
-import { ChatMessage } from "./ChatMessage"
+import { ChatMessage, ChatTextPart } from "./ChatMessage"
 import { useAppStore } from "@/store/store"
 
 // A live tool part as produced by the SSE stream: `output` is a JSON STRING
@@ -518,5 +518,17 @@ describe("artifact link card from reloaded history", () => {
     render(<ChatMessage message={message} isActiveMessage={false} />)
     expect(screen.queryByTestId("chat-artifact-title-a")).not.toBeInTheDocument()
     expect(screen.getByTestId("chat-artifact-a")).toHaveAttribute("aria-label", "View Artifact")
+  })
+})
+
+describe("ChatTextPart blank space", () => {
+  it("renders nothing for a whitespace-only text part", () => {
+    const { container } = render(<ChatTextPart role="assistant" text={"\n\n  "} />)
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  it("trims the first and last child margins of assistant markdown", () => {
+    const { container } = render(<ChatTextPart role="assistant" text="Hello" />)
+    expect(container.firstElementChild?.className).toContain("[&>:first-child]:mt-0")
   })
 })

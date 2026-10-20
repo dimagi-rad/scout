@@ -106,12 +106,14 @@ function ChatMarkdownLink({ href, children, ...markdownProps }: ComponentPropsWi
 
 export function ChatTextPart({ role, text }: ChatTextPartProps) {
   const isUser = role === "user"
+  // A whitespace-only chunk (common before a tool call) would otherwise leave an empty padded block.
+  if (!text.trim()) return null
   return (
     <div
       className={`rounded-lg text-sm ${
         isUser
           ? "bg-primary px-4 py-2 text-primary-foreground"
-          : "prose prose-sm max-w-none py-1"
+          : "prose prose-sm max-w-none py-1 [&>:first-child]:mt-0 [&>:last-child]:mb-0"
       }`}
     >
       {isUser ? text : <Markdown remarkPlugins={[remarkGfm]} components={{ a: ChatMarkdownLink }}>{text}</Markdown>}
