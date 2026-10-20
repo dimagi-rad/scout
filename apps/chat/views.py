@@ -737,12 +737,20 @@ class _TurnStreamingResponse(StreamingHttpResponse):
                 # Before the lease, so no next holder sees this claim as stale.
                 if self.held_claim is not None:
                     pending_requests.release_sync(self.held_claim)
-                if self.bound.get("ids"):
-                    unbind_unsent_sync(self.bound["ids"], thread_id=self.bound["thread"].id)
                 self.lease.release_sync()
         except Exception:
             logger.warning(
                 "Could not release the turn lease of unsent response on thread %s",
+                self.lease.thread_id,
+                exc_info=True,
+            )
+        try:
+            # After the lease and on its own, so a failure here never keeps the thread locked.
+            if not self.turn_started and self.bound.get("ids"):
+                unbind_unsent_sync(self.bound["ids"], thread_id=self.bound["thread"].id)
+        except Exception:
+            logger.warning(
+                "Could not unbind attachments of unsent response on thread %s",
                 self.lease.thread_id,
                 exc_info=True,
             )
