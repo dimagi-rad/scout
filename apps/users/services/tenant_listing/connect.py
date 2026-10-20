@@ -23,7 +23,8 @@ from mcp_server.loaders._urls import ProviderURLPolicy
 
 # Above this many opportunities, one full listing beats one request each. The
 # listing takes 10s+ for a user with hundreds of opportunities, so this must stay
-# above the largest Connect workspace (11 in prod on 2026-10-09).
+# above the largest Connect workspace (11 in prod on 2026-10-09). The frontend warns
+# above it: keep CONNECT_QUICK_CHECK_LIMIT in frontend/src/lib/connectAccessCheck.ts in step.
 MAX_SUBSET = 25
 
 _PAGINATION_KEYS = frozenset(

@@ -449,3 +449,60 @@ describe("closing the add panel", () => {
     expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
   })
 })
+
+describe("large Connect workspaces", () => {
+  beforeEach(() => localStorage.clear())
+
+  const connected = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `wt-${i}`, tenant_id: `tenant-w${i}`, tenant_name: `In ${i}`, provider: "commcare_connect",
+    }))
+
+  it("says a workspace above the quick-check limit may be slow to verify", async () => {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue(connected(26))
+    render(<TenantsTab workspaceId="ws-1" isManager={false} onWorkspaceDeleted={vi.fn()} />)
+
+    expect(await screen.findByTestId("workspace-connect-size-notice")).toHaveTextContent(
+      "This workspace has 26 CommCare Connect opportunities",
+    )
+    // Only a manager can split it.
+    expect(screen.getByTestId("workspace-connect-size-notice")).not.toHaveTextContent("or fewer")
+  })
+
+  it("tells a manager how to avoid it", async () => {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([
+      ...connected(26),
+      { id: "wt-cc", tenant_id: "tenant-cc", tenant_name: "CommCare", provider: "commcare" },
+    ])
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+
+    const notice = await screen.findByTestId("workspace-connect-size-notice")
+    expect(notice).toHaveTextContent("has 26 CommCare Connect opportunities")
+    expect(notice).toHaveTextContent("Workspaces of 25 or fewer avoid this.")
+  })
+
+  it("says nothing at the limit", async () => {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue(connected(25))
+    render(<TenantsTab workspaceId="ws-1" isManager={false} onWorkspaceDeleted={vi.fn()} />)
+
+    await screen.findByTestId("tenant-row-wt-24")
+    expect(screen.queryByTestId("workspace-connect-size-notice")).toBeNull()
+  })
+
+  it("warns before adding every shown source would cross the limit", async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ program: ["7"] }))
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue(connected(24))
+    vi.mocked(getUserTenantsCached).mockResolvedValue([
+      connect("p1", "Malaria North", { program: "7", program_name: "Malaria" }),
+      connect("p2", "Malaria South", { program: "7", program_name: "Malaria" }),
+      connect("q1", "Nutrition East", { program: "8", program_name: "Nutrition" }),
+    ])
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+
+    expect(await screen.findByTestId("add-sources-connect-size-notice")).toHaveTextContent(
+      "Adding all 2 shown would give this workspace 26 CommCare Connect opportunities",
+    )
+    expect(screen.getByTestId("available-sources-add-shown")).toBeEnabled()
+  })
+})

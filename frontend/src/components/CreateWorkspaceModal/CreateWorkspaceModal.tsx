@@ -24,6 +24,8 @@ import { workspacePath } from "@/lib/workspacePath"
 import { CONNECTIONS_PATH } from "@/lib/routes"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
 import { useTenantFacetFilters } from "@/lib/filters/useTenantFacetFilters"
+import { countConnectSources } from "@/lib/connectAccessCheck"
+import { ConnectSizeNotice } from "@/components/ConnectSizeNotice"
 
 interface Props {
   onClose: () => void
@@ -137,6 +139,10 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     const shown = new Set(filteredSources.map((t) => t.tenant_uuid))
     return [...selected].filter((id) => !shown.has(id)).length
   }, [filteredSources, selected])
+  const selectedConnectCount = useMemo(
+    () => countConnectSources(sources.filter((t) => selected.has(t.tenant_uuid))),
+    [sources, selected],
+  )
   const unselectedShown = useMemo(
     () => filteredSources.filter((t) => !selected.has(t.tenant_uuid)),
     [filteredSources, selected],
@@ -390,6 +396,13 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                 </div>
               )}
             </div>
+
+            <ConnectSizeNotice
+              count={selectedConnectCount}
+              lead="This workspace would have"
+              canSplit
+              testId="create-workspace-connect-size-notice"
+            />
 
             {duplicateWorkspace && !duplicateAcknowledged && (
               <div
