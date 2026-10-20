@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react"
+import { useState } from "react"
 import { beforeEach, expect, it, vi } from "vitest"
 import type { UserTenant } from "@/api/auth"
 import { getUserTenantsCached } from "@/api/userTenantsCache"
@@ -20,9 +21,21 @@ function source(id: string, name: string, provider = "commcare_connect"): UserTe
 
 const onCombine = vi.fn()
 
+function Harness() {
+  const [basket, setBasket] = useState<UserTenant[]>([])
+  return (
+    <CombineSourcesPanel
+      basket={basket}
+      setBasket={setBasket}
+      onBack={vi.fn()}
+      onCombine={onCombine}
+    />
+  )
+}
+
 async function renderPanel(sources: UserTenant[]) {
   vi.mocked(getUserTenantsCached).mockResolvedValue(sources)
-  render(<CombineSourcesPanel onBack={vi.fn()} onCombine={onCombine} />)
+  render(<Harness />)
   await screen.findByText(/Search \d+ data sources/)
 }
 

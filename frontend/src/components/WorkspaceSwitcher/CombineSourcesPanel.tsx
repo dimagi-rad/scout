@@ -10,6 +10,9 @@ import { combinedWorkspaceName, searchSources } from "@/lib/sourceBasket"
 import { useAppStore } from "@/store/store"
 
 interface Props {
+  /** Held by the switcher so stepping back to the list keeps the ticks. */
+  basket: UserTenant[]
+  setBasket: (update: (prev: UserTenant[]) => UserTenant[]) => void
   onBack: () => void
   onCombine: (name: string, sourceIds: string[]) => void
 }
@@ -19,12 +22,11 @@ interface Props {
  * hold hundreds of sources, so nothing lists until they type, and ticks survive new
  * searches by living in the basket rather than in the result rows.
  */
-export function CombineSourcesPanel({ onBack, onCombine }: Props) {
+export function CombineSourcesPanel({ basket, setBasket, onBack, onCombine }: Props) {
   const userId = useAppStore((s) => s.user?.id)
   const [sources, setSources] = useState<UserTenant[] | null>(null)
   const [loadError, setLoadError] = useState(false)
   const [query, setQuery] = useState("")
-  const [basket, setBasket] = useState<UserTenant[]>([])
 
   useEffect(() => {
     if (!userId) return
@@ -94,24 +96,31 @@ export function CombineSourcesPanel({ onBack, onCombine }: Props) {
       </div>
 
       {basket.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1 border-b p-2" data-testid="workspace-basket">
-          {basket.map((s) => (
-            <span
-              key={s.tenant_uuid}
-              data-testid={`workspace-basket-chip-${s.tenant_uuid}`}
-              className="flex max-w-full items-center gap-1 rounded-full bg-accent py-0.5 pl-2 pr-1 text-xs"
-            >
-              <span className="truncate">{s.tenant_name}</span>
-              <button
-                type="button"
-                onClick={() => toggle(s)}
-                aria-label={`Remove ${s.tenant_name}`}
-                className="rounded-full p-0.5 text-muted-foreground hover:text-foreground"
+        <div
+          className="flex max-h-24 flex-wrap items-center gap-1 overflow-y-auto border-b p-2"
+          data-testid="workspace-basket"
+        >
+          {basket.map((s) => {
+            const { Icon } = getProviderMeta(s.provider)
+            return (
+              <span
+                key={s.tenant_uuid}
+                data-testid={`workspace-basket-chip-${s.tenant_uuid}`}
+                className="flex max-w-full items-center gap-1 rounded-full bg-accent py-0.5 pl-2 pr-1 text-xs"
               >
-                <X className="h-3 w-3" aria-hidden />
-              </button>
-            </span>
-          ))}
+                <Icon className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+                <span className="truncate">{s.tenant_name}</span>
+                <button
+                  type="button"
+                  onClick={() => toggle(s)}
+                  aria-label={`Remove ${s.tenant_name}`}
+                  className="rounded-full p-0.5 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-3 w-3" aria-hidden />
+                </button>
+              </span>
+            )
+          })}
         </div>
       )}
 
@@ -180,7 +189,7 @@ export function CombineSourcesPanel({ onBack, onCombine }: Props) {
           type="button"
           variant="ghost"
           size="sm"
-          onClick={() => setBasket([])}
+          onClick={() => setBasket(() => [])}
           disabled={basket.length === 0}
           data-testid="workspace-basket-clear"
         >

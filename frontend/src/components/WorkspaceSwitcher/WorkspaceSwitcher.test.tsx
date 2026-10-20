@@ -309,12 +309,41 @@ describe("combining sources", () => {
     })
   })
 
-  it("goes back to the workspace list", async () => {
+  it("opens the panel, not the highlighted workspace, on Enter at the toggle", () => {
+    openSwitcher([workspace({ id: "a", display_name: "A" }), workspace({ id: "b", display_name: "B" })])
+    const before = useAppStore.getState().activeDomainId
+
+    fireEvent.keyDown(screen.getByTestId("workspace-combine-toggle"), { key: "Enter" })
+
+    expect(useAppStore.getState().activeDomainId).toBe(before)
+    expect(screen.getByTestId("workspace-combine-toggle")).toBeInTheDocument()
+  })
+
+  it("does not switch workspace on Enter inside the panel, and Escape goes back", async () => {
+    openSwitcher([workspace({ id: "a", display_name: "A" }), workspace({ id: "b", display_name: "B" })])
+    const before = useAppStore.getState().activeDomainId
+    fireEvent.click(screen.getByTestId("workspace-combine-toggle"))
+    const search = await screen.findByTestId("workspace-basket-search")
+
+    fireEvent.keyDown(search, { key: "Enter" })
+    expect(useAppStore.getState().activeDomainId).toBe(before)
+
+    fireEvent.keyDown(search, { key: "Escape" })
+    expect(screen.getByTestId("workspace-list")).toBeInTheDocument()
+  })
+
+  it("goes back to the workspace list, keeping the ticks until the switcher closes", async () => {
     openSwitcher()
     fireEvent.click(screen.getByTestId("workspace-combine-toggle"))
-    fireEvent.click(await screen.findByTestId("workspace-combine-back"))
+    fireEvent.change(await screen.findByTestId("workspace-basket-search"), {
+      target: { value: "Kenya" },
+    })
+    fireEvent.click(await screen.findByTestId("workspace-basket-option-tenant-k"))
+    fireEvent.click(screen.getByTestId("workspace-combine-back"))
 
     expect(screen.getByTestId("workspace-list")).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId("workspace-combine-toggle"))
+    expect(await screen.findByTestId("workspace-basket-chip-tenant-k")).toBeInTheDocument()
   })
 })
 
@@ -349,6 +378,29 @@ describe("switcher at scale", () => {
     expect(screen.getByText("Recent")).toBeInTheDocument()
     expect(screen.getByText("Your workspaces")).toBeInTheDocument()
     expect(screen.getByTestId("workspace-list-search-hint")).toHaveTextContent("1001")
+  })
+
+  it("arrows across the section headings to the right workspace", () => {
+    localStorage.setItem("scout.recentWorkspaces", JSON.stringify(["auto-1"]))
+    const handMade = workspace({ id: "mine", display_name: "My program", is_auto_created: false })
+    openSwitcher([handMade, ...many(3)])
+    const search = screen.getByTestId("workspace-search")
+
+    fireEvent.keyDown(search, { key: "ArrowDown" })
+    fireEvent.keyDown(search, { key: "Enter" })
+
+    expect(useAppStore.getState().activeDomainId).toBe("mine")
+  })
+
+  it("previews only a few no-access workspaces in the default view", () => {
+    const lost = Array.from({ length: 200 }, (_, i) =>
+      workspace({ id: `lost-${i}`, display_name: `Lost ${i}`, has_access: false }),
+    )
+    localStorage.setItem("scout.recentWorkspaces", JSON.stringify(["auto-0"]))
+    openSwitcher([...many(2), ...lost])
+
+    expect(screen.getAllByTestId(/^domain-item-lost-/)).toHaveLength(5)
+    expect(screen.getByTestId("workspace-list-lost-more")).toHaveTextContent("195 more")
   })
 
   it("never renders more than 50 rows and asks for a narrower search", () => {

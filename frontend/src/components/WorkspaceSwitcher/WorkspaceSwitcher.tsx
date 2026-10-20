@@ -18,6 +18,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover"
+import type { UserTenant } from "@/api/auth"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 import { CombineSourcesPanel } from "./CombineSourcesPanel"
 
@@ -26,6 +27,7 @@ const LIST_MAX_HEIGHT = 288 // px (max-h-72)
 // Sign-in auto-creates a workspace per source, so people hold hundreds (p50 ~680 for
 // active users); a list never renders more than this and asks for a search instead.
 const LIST_LIMIT = 50
+const LOST_PREVIEW = 5 // no-access rows in the suggested view; search reaches the rest
 const RECENT_LIMIT = 8
 const SEGMENT_MIN_WORKSPACES = 12 // hide segmented controls for small accounts
 
@@ -213,6 +215,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   const [segment, setSegment] = useState<SegmentKey>("recent")
   const [recordedLoadsOnly, setRecordedLoadsOnly] = useState(false)
   const [combining, setCombining] = useState(false)
+  const [basket, setBasket] = useState<UserTenant[]>([])
   const [highlight, setHighlight] = useState(0)
   const [createModal, setCreateModal] = useState<{ name: string; sourceIds: string[] } | null>(
     null,
@@ -222,6 +225,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   const [recentIds, setRecentIds] = useState<string[]>([])
 
   const scrollRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
 
   // The active workspace may be an orphan reached by deep link, so look across
   // ALL domains here. Everything else lists only workspaces the user can still
@@ -335,6 +339,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     setOpen(false)
     setSearch("")
     setCombining(false)
+    setBasket([])
   }
 
   function handleOpenChange(o: boolean) {
@@ -350,6 +355,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     } else {
       setSearch("")
       setCombining(false)
+      setBasket([])
     }
   }
 
@@ -399,8 +405,9 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
-    // The combine panel has its own inputs; Enter there must not switch workspace.
-    if (combining) return
+    // Only the search box drives the list; Enter on a footer button or pill (or anywhere
+    // in the combine panel) must do that control's own thing, not switch workspace.
+    if (combining || e.target !== searchRef.current) return
     if (e.key === "ArrowDown") {
       e.preventDefault()
       setHighlight((h) => Math.min(h + 1, shown.length - 1))
@@ -423,8 +430,11 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     row?.scrollIntoView?.({ block: "nearest" })
   }, [highlight])
 
+  const suggestedView = !search && segment === "recent"
   const shown = visible.slice(0, LIST_LIMIT)
-  const notShown = visible.length - shown.length
+  // The suggested view already ends with a search hint; "refine your search" would repeat it.
+  const notShown = suggestedView ? 0 : visible.length - shown.length
+  const lostShown = lostVisible.slice(0, suggestedView ? LOST_PREVIEW : LIST_LIMIT)
 
   // Section labels for the default view: Recent first, then hand-made workspaces.
   const suggestedHeading = (index: number) => {
@@ -530,9 +540,18 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
           className="w-[22rem] p-0"
           align={variant === "topbar" ? "end" : "start"}
           onKeyDown={onKeyDown}
+          onEscapeKeyDown={(e) => {
+            // Escape in the combine panel steps back to the list instead of closing.
+            if (combining) {
+              e.preventDefault()
+              setCombining(false)
+            }
+          }}
         >
           {combining ? (
             <CombineSourcesPanel
+              basket={basket}
+              setBasket={setBasket}
               onBack={() => setCombining(false)}
               onCombine={(name, sourceIds) => openCreate(name, sourceIds)}
             />
@@ -542,6 +561,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
             <div className="relative">
               <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
+                ref={searchRef}
                 autoFocus
                 placeholder="Search workspaces..."
                 value={search}
@@ -638,7 +658,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
                     {notShown} more — refine your search
                   </p>
                 )}
-                {!search && segment === "recent" && accessible.length > shown.length && (
+                {suggestedView && accessible.length > shown.length && (
                   <p
                     className="px-2 py-1.5 text-xs text-muted-foreground"
                     data-testid="workspace-list-search-hint"
@@ -665,9 +685,17 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
                     Check Connected Accounts
                   </button>
                 </div>
-                {lostVisible.map((ws) => (
+                {lostShown.map((ws) => (
                   <LostAccessRow key={ws.id} ws={ws} />
                 ))}
+                {lostVisible.length > lostShown.length && (
+                  <p
+                    className="px-2 py-1.5 text-xs text-muted-foreground"
+                    data-testid="workspace-list-lost-more"
+                  >
+                    {lostVisible.length - lostShown.length} more — search to find one
+                  </p>
+                )}
               </div>
             )}
           </div>
