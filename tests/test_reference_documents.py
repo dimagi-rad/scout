@@ -130,7 +130,7 @@ class TestPromptListing:
             workspace=workspace,
             title="Queries",
             content="x",
-            description="SELECT count(*) FROM visits",
+            description="Visit totals\nSELECT count(*) FROM visits",
             kind=KnowledgeEntry.Kind.REFERENCE,
         )
         result = await KnowledgeRetriever(workspace).retrieve()

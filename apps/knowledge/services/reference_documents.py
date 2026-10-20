@@ -184,7 +184,7 @@ async def aformat_reference_documents_for_prompt(workspace: Workspace) -> str:
         # Cut without an ellipsis, so the shown prefix still resolves as a title fragment.
         title = _one_line(doc.title).replace('"', "'")[:_PROMPT_TITLE_CHARS]
         fmt = (doc.source_format or "text").upper()
-        summary = sanitize_prompt_content(_one_line(doc.description)) or _head_summary(doc.head)
+        summary = _one_line(sanitize_prompt_content(doc.description)) or _head_summary(doc.head)
         line = f'- "{title}" ({fmt}, {doc.content_size:,} chars)'
         if summary:
             line += f": {_clip(summary, _PROMPT_DESCRIPTION_CHARS)}"
