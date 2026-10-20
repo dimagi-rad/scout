@@ -95,11 +95,6 @@ def test_validate_rejects_images_over_the_api_dimension_limit():
     assert excinfo.value.reason == "attachment_too_large"
 
 
-def test_image_cap_fits_the_api_base64_limit():
-    # The API's 5 MB image cap (Bedrock, Vertex) counts base64, 4/3 of the raw size.
-    assert attachments.MAX_IMAGE_BYTES * 4 / 3 <= 5 * 1024 * 1024
-
-
 def test_validate_ignores_claimed_image_type():
     validated = validate_upload(PNG, filename="shot.jpg", claimed_type="image/jpeg")
     assert validated.media_type == "image/png"
@@ -156,6 +151,7 @@ def test_validate_strips_path_and_control_characters():
         ("https://evil.example/api/chat/attachments/0b6f7a5e-1c1d-4a7e-9d43-3f1f2b0c9a11/", False),
         ("//evil.example/api/chat/attachments/0b6f7a5e-1c1d-4a7e-9d43-3f1f2b0c9a11/", False),
         ("/api/chat/attachments/not-a-uuid/", False),
+        ("/api/chat/attachments/0b6f7a5e-1c1d-4a7e-9d43-3f1f2b0c9a11/\n", False),
         ("/api/chat/attachments/0b6f7a5e-1c1d-4a7e-9d43-3f1f2b0c9a11/../x", False),
         (None, False),
     ],

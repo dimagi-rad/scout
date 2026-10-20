@@ -27,10 +27,11 @@ from apps.chat.models import AttachmentBlob, ChatAttachment
 
 logger = logging.getLogger(__name__)
 
-# The Messages API caps an image at 5 MB of base64 on Bedrock and Vertex (10 MB on
-# the direct API); base64 is 4/3 the raw size, so 3.75 MB raw fits everywhere.
+# Within the direct Messages API's per-image limit (a 5 MB raw image was accepted live;
+# the docs quote 10 MB of base64). Bedrock and Vertex quote 5 MB of base64, which
+# would need about 3.75 MB raw; Scout calls the direct API.
 # https://platform.claude.com/docs/en/build-with-claude/vision#request-limits
-MAX_IMAGE_BYTES = 3_932_160
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
 # The API rejects an image over 8000 px on either side. Requests with more than 20
 # images impose 2000 px; the model-call budget keeps them to 20
 # (apps/agents/graph/attachments.py), so 8000 px is the limit that applies.
@@ -222,8 +223,8 @@ def attachment_url(attachment_id) -> str:
 
 # The base path must not start with "//": that is a protocol-relative URL to another host.
 _ATTACHMENT_URL_RE = re.compile(
-    r"^(?:/(?!/)[A-Za-z0-9._~\-/]*)?/api/chat/attachments/"
-    r"(?P<id>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/$"
+    r"(?:/(?!/)[A-Za-z0-9._~\-/]*)?/api/chat/attachments/"
+    r"(?P<id>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/"
 )
 
 
@@ -231,7 +232,8 @@ def attachment_id_from_url(url) -> str | None:
     """The attachment id an attachment URL names, optionally behind a base path, else None."""
     if not isinstance(url, str):
         return None
-    match = _ATTACHMENT_URL_RE.match(url)
+    # fullmatch, not match with "$", which also accepts a trailing newline.
+    match = _ATTACHMENT_URL_RE.fullmatch(url)
     return match.group("id").lower() if match else None
 
 
