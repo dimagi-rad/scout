@@ -31,9 +31,28 @@ def model(workspace):
     return model
 
 
+VERSIONS = {"compiler_version": "1.6.39", "validator_version": "v1"}
+LIVE_VERSION = "1.6.39/v1"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_validator_version_cache():
+    cube_client._validator_versions.clear()
+    yield
+    cube_client._validator_versions.clear()
+
+
 @pytest.fixture
-def validator(monkeypatch):
-    validate = AsyncMock(return_value={"valid": True})
+def live_version(monkeypatch):
+    """What the validator's /version reports; a test sets ``.return_value``."""
+    version = AsyncMock(return_value=LIVE_VERSION)
+    monkeypatch.setattr(cube_schema.CubeClient, "validator_version", version)
+    return version
+
+
+@pytest.fixture
+def validator(monkeypatch, live_version):
+    validate = AsyncMock(return_value={"valid": True, **VERSIONS})
     monkeypatch.setattr(cube_schema.CubeClient, "validate_schema", validate)
     monkeypatch.setattr(cube_schema.CubeClient, "invalidate_schema_cache", AsyncMock())
     monkeypatch.setattr(
@@ -95,16 +114,23 @@ def cube_http(monkeypatch, settings):
         "load_workspace_context",
         AsyncMock(return_value=SimpleNamespace(schema_name="fixture", readonly_role="role")),
     )
-    handlers = {"validate": None, "meta": None}
-    calls = {"validate": 0, "meta": 0}
+    handlers = {"validate": None, "meta": None, "version": None}
+    calls = {"validate": 0, "meta": 0, "version": 0}
 
     def handler(request):
-        kind = "validate" if request.url.host == "validator.test" else "meta"
+        if request.url.host != "validator.test":
+            kind = "meta"
+        elif request.url.path == "/version":
+            kind = "version"
+        else:
+            kind = "validate"
         calls[kind] += 1
         scripted = handlers[kind]
         if scripted is not None:
             return scripted(request)
-        return httpx.Response(200, json={"valid": True, "errors": []})
+        if kind == "version":
+            return httpx.Response(200, json=VERSIONS)
+        return httpx.Response(200, json={"valid": True, "errors": [], **VERSIONS})
 
     transport = httpx.MockTransport(handler)
     real_async_client = httpx.AsyncClient
@@ -638,7 +664,7 @@ def test_schema_promoted_without_a_validator_is_validated_once_one_exists(
 ):
     validator.return_value = {"valid": True, "skipped": True}
     build_and_promote_cube_schema(workspace, model=model)
-    validator.return_value = {"valid": True, "errors": []}
+    validator.return_value = {"valid": True, "errors": [], **VERSIONS}
 
     build_and_promote_cube_schema(workspace, model=model)
     build_and_promote_cube_schema(workspace, model=model)
@@ -675,13 +701,71 @@ def test_skipping_validation_releases_a_slot_it_was_handed(workspace, model, val
 
 
 @pytest.mark.django_db(transaction=True)
-def test_a_row_marked_only_by_the_legacy_skip_message_is_validated_again(
-    workspace, model, validator
+def test_a_row_without_a_recorded_version_is_validated_once(workspace, model, validator):
+    serving = build_and_promote_cube_schema(workspace, model=model)
+    # As every row promoted before versions were recorded.
+    CubeSchema.objects.filter(id=serving.id).update(validated_version="")
+
+    build_and_promote_cube_schema(workspace, model=model)
+    build_and_promote_cube_schema(workspace, model=model)
+
+    assert validator.await_count == 2
+    serving.refresh_from_db()
+    assert serving.validated_version == LIVE_VERSION
+
+
+@pytest.mark.django_db(transaction=True)
+def test_an_upgraded_validator_revalidates_unchanged_content(
+    workspace, model, validator, live_version
+):
+    build_and_promote_cube_schema(workspace, model=model)
+    validator.return_value = {
+        "valid": True,
+        "compiler_version": "1.7.0",
+        "validator_version": "v1",
+    }
+    live_version.return_value = "1.7.0/v1"
+
+    upgraded = build_and_promote_cube_schema(workspace, model=model)
+    build_and_promote_cube_schema(workspace, model=model)
+
+    assert validator.await_count == 2
+    assert upgraded.validated_version == "1.7.0/v1"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_an_upgrade_that_breaks_serving_content_is_reported(
+    workspace, model, validator, live_version
 ):
     serving = build_and_promote_cube_schema(workspace, model=model)
-    serving.diagnostics = [{"level": "warning", "message": cube_schema.VALIDATION_SKIPPED_MESSAGE}]
-    serving.save(update_fields=["diagnostics"])
+    validator.return_value = {"valid": False, "errors": ["Unknown member type"], **VERSIONS}
+    live_version.return_value = "1.7.0/v1"
+
+    with pytest.raises(CubeSchemaBuildError):
+        build_and_promote_cube_schema(workspace, model=model)
+
+    serving.refresh_from_db()
+    model.refresh_from_db()
+    # Cube keeps serving the old schema, but the failure is no longer silent.
+    assert serving.status == CubeSchema.Status.ACTIVE
+    assert model.metadata["last_build"]["ok"] is False
+
+
+@pytest.mark.django_db(transaction=True)
+def test_an_unknown_live_version_validates(workspace, model, validator, live_version):
+    build_and_promote_cube_schema(workspace, model=model)
+    live_version.return_value = None
 
     build_and_promote_cube_schema(workspace, model=model)
 
     assert validator.await_count == 2
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_version_is_asked_only_for_unchanged_content(workspace, model, validator, live_version):
+    build_and_promote_cube_schema(workspace, model=model)
+    SemanticDataset.objects.filter(name="visits").update(description="Changed")
+
+    build_and_promote_cube_schema(workspace, model=model)
+
+    assert live_version.await_count == 0

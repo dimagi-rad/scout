@@ -561,3 +561,73 @@ async def test_schema_operation_unavailable_from_a_full_pool_is_capacity(
     with pytest.raises(cube_client_module.CubeServiceUnavailable) as raised:
         await _schema_operation("validate")
     assert raised.value.capacity_resource == "cube"
+
+
+@pytest.fixture
+def version_endpoint(monkeypatch, settings):
+    settings.CUBE_VALIDATOR_URL = "http://validator.test/"
+    cube_client_module._validator_versions.clear()
+    state = {"calls": 0, "reply": lambda request: httpx.Response(200, json=_VERSIONS)}
+
+    def handler(request):
+        assert request.url.path == "/version"
+        state["calls"] += 1
+        return state["reply"](request)
+
+    _patched_async_client(monkeypatch, handler)
+    yield state
+    cube_client_module._validator_versions.clear()
+
+
+_VERSIONS = {"compiler_version": "1.6.39", "validator_version": "v1"}
+
+
+@pytest.mark.asyncio
+async def test_validator_version_is_cached_per_process(version_endpoint):
+    assert await CubeClient().validator_version() == "1.6.39/v1"
+    assert await CubeClient().validator_version() == "1.6.39/v1"
+    assert version_endpoint["calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_validator_version_cache_expires(version_endpoint, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(cube_client_module.time, "monotonic", lambda: now[0])
+    await CubeClient().validator_version()
+    now[0] += cube_client_module.VERSION_CACHE_SECONDS + 1
+    version_endpoint["reply"] = lambda request: httpx.Response(
+        200, json={"compiler_version": "1.7.0", "validator_version": "v1"}
+    )
+
+    assert await CubeClient().validator_version() == "1.7.0/v1"
+    assert version_endpoint["calls"] == 2
+
+
+def _raise_timeout(request):
+    raise httpx.ReadTimeout("slow", request=request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply",
+    [
+        _raise_timeout,
+        lambda request: httpx.Response(404),
+        lambda request: httpx.Response(503, json=_VERSIONS),
+        lambda request: httpx.Response(200, text="not json"),
+        lambda request: httpx.Response(200, json={"compiler_version": "1.6.39"}),
+        lambda request: httpx.Response(200, json=["1.6.39", "v1"]),
+    ],
+)
+async def test_an_unreadable_version_is_unknown_and_not_cached(version_endpoint, reply):
+    version_endpoint["reply"] = reply
+
+    assert await CubeClient().validator_version() is None
+    assert await CubeClient().validator_version() is None
+    assert version_endpoint["calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_no_validator_means_an_unknown_version(settings):
+    settings.CUBE_VALIDATOR_URL = ""
+    assert await CubeClient().validator_version() is None

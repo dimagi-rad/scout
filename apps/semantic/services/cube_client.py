@@ -60,6 +60,23 @@ META_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 META_ATTEMPTS = 1
 # Retrying with less than this left would only manufacture another timeout.
 MIN_SCHEMA_ATTEMPT_SECONDS = 5.0
+# /version answers from constants, so a slow reply means the validator is in trouble
+# and the build should just validate. Cached per process: an upgrade redeploys the
+# validator, and a minute of stale answer only delays noticing it.
+VERSION_TIMEOUT = httpx.Timeout(2.0, connect=1.0)
+VERSION_CACHE_SECONDS = 60.0
+_validator_versions: dict[str, tuple[float, str]] = {}
+
+
+def validator_version_label(payload: Any) -> str | None:
+    """``"<compiler>/<validator>"`` from a validator reply, or None when either is missing."""
+    if not isinstance(payload, dict):
+        return None
+    compiler = payload.get("compiler_version")
+    validator = payload.get("validator_version")
+    if isinstance(compiler, str) and compiler and isinstance(validator, str) and validator:
+        return f"{compiler}/{validator}"
+    return None
 
 
 class CubeConfigurationError(RuntimeError):
@@ -336,6 +353,30 @@ class CubeClient:
             capacity_exhausted=isinstance(last_error, httpx.HTTPStatusError)
             and _is_cube_capacity_error(last_error.response.text),
         ) from last_error
+
+    async def validator_version(self) -> str | None:
+        """The live validator's version label, or None when it cannot be told.
+
+        None (no validator, an error, an unexpected reply) means "validate":
+        callers must never treat an unknown version as a match.
+        """
+        validator_url = settings.CUBE_VALIDATOR_URL.rstrip("/")
+        if not validator_url:
+            return None
+        cached = _validator_versions.get(validator_url)
+        if cached is not None and cached[0] > time.monotonic():
+            return cached[1]
+        try:
+            async with httpx.AsyncClient(timeout=VERSION_TIMEOUT) as client:
+                response = await client.get(f"{validator_url}/version")
+                response.raise_for_status()
+                label = validator_version_label(response.json())
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.info("Cube validator version unavailable (%s); validating", exc)
+            return None
+        if label is not None:
+            _validator_versions[validator_url] = (time.monotonic() + VERSION_CACHE_SECONDS, label)
+        return label
 
     async def validate_schema(self, content: str) -> dict[str, Any]:
         """Validate Cube YAML through the optional validator sidecar."""

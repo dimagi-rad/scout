@@ -25,7 +25,11 @@ from apps.common.errors import ExpectedStateError
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.semantic.services.catalog import ensure_semantic_model
 from apps.semantic.services.cube import DROPPED_JOIN_CODES, cube_schema_yaml, generate_cube_schema
-from apps.semantic.services.cube_client import CubeClient, CubeServiceUnavailable
+from apps.semantic.services.cube_client import (
+    CubeClient,
+    CubeServiceUnavailable,
+    validator_version_label,
+)
 from mcp_server.context import QueryContext, load_workspace_context
 
 logger = logging.getLogger(__name__)
@@ -51,8 +55,6 @@ VALIDATOR_SLOT_WAIT_SECONDS = 300.0
 # The 110s total is not headroom: commit_canvas's diagnostics and writes come first.
 INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS = 10.0
 VALIDATOR_SLOT_POLL_SECONDS = 1.0
-# Marks a schema promoted without validation, so an identical rebuild is not
-# trusted to skip it (#918). Older rows carry only the message.
 VALIDATION_SKIPPED_CODE = "cube_validation_skipped"
 VALIDATION_SKIPPED_MESSAGE = (
     "Cube schema validation skipped because CUBE_VALIDATOR_URL is not configured."
@@ -348,9 +350,10 @@ def _build_validate_and_promote(
         raise CubeSchemaBuildError(f"Could not generate Cube schema: {exc}") from exc
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     filename = f"workspace_{workspace.id}_{content_hash[:12]}.yaml"
-    if _serving_validated_content(workspace, model, content_hash):
+    validated_version = _serving_validated_version(workspace, model, content_hash)
+    if validated_version:
         # Validation is one global lane shared by every load and rebuild (#918);
-        # content that already passed it and is serving gains nothing from another pass.
+        # content the current validator already passed gains nothing from another pass.
         logger.info(
             "Cube schema for workspace %s is unchanged from the serving one; skipping validation",
             workspace.id,
@@ -366,6 +369,8 @@ def _build_validate_and_promote(
                 raise CubeValidatorUnavailableError(str(exc)) from exc
             finally:
                 held.release()
+        # A skipped validation (no validator configured) carries no version.
+        validated_version = validator_version_label(validation) or ""
     validation_diagnostics = _diagnostics_from_validation(validation)
     diagnostics = [
         *(model.metadata or {}).get("catalog_diagnostics", []),
@@ -423,6 +428,7 @@ def _build_validate_and_promote(
                 "content_hash": content_hash,
                 "status": CubeSchema.Status.ACTIVE,
                 "diagnostics": diagnostics,
+                "validated_version": validated_version,
             },
         )
         stale_ids = list(
@@ -470,33 +476,29 @@ def _build_validate_and_promote(
     return cube_schema
 
 
-def _serving_validated_content(workspace, model: SemanticModel, content_hash: str) -> bool:
-    """Whether ``content_hash`` is the ACTIVE schema's content and the validator passed it.
+def _serving_validated_version(workspace, model: SemanticModel, content_hash: str) -> str:
+    """The validator version that passed ``content_hash``, if it is serving and still current.
 
-    Only a schema that passed validation becomes ACTIVE, so a failed one (an ERROR
-    row) never matches. One promoted while no validator was configured did not
-    pass it, and is validated again.
+    Only a schema that passed validation becomes ACTIVE, so failed content (an
+    ERROR row) never matches. A row with no recorded version (promoted without a
+    validator, or before versions were recorded) or one the live validator has
+    moved past is validated again; so is any row when the live version is unknown.
+    Empty means "validate".
     """
-    serving = (
+    recorded = (
         CubeSchema.objects.filter(
             workspace=workspace,
             semantic_model=model,
             status=CubeSchema.Status.ACTIVE,
             content_hash=content_hash,
         )
-        .only("diagnostics")
+        .values_list("validated_version", flat=True)
         .first()
     )
-    if serving is None:
-        return False
-    return not any(
-        isinstance(diagnostic, dict)
-        and (
-            diagnostic.get("code") == VALIDATION_SKIPPED_CODE
-            or diagnostic.get("message") == VALIDATION_SKIPPED_MESSAGE
-        )
-        for diagnostic in serving.diagnostics or []
-    )
+    if not recorded:
+        return ""
+    live = async_to_sync(CubeClient().validator_version)()
+    return recorded if live == recorded else ""
 
 
 def _set_last_build(
