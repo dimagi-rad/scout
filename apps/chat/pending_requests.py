@@ -151,11 +151,19 @@ def _check_parts(parts: list[dict]) -> None:
     _check_length(combined_text(parts), len(parts), len(combined_attachments(parts)))
 
 
-def _new_part(part_id: str, text: str, attachments=()) -> dict:
+def _new_part(part_id: str, text: str, attachments=(), bound=()) -> dict:
+    """``bound`` names the attachments this part's send tied to the thread: only those
+    go back to unsent if the part is dropped, never one a sent message still carries."""
     part = {"id": part_id, "text": text, "added_at": timezone.now().isoformat()}
     if attachments:
         part["attachments"] = list(attachments)
+    if bound:
+        part["bound"] = list(bound)
     return part
+
+
+def _bound_ids(parts: list[dict]) -> list[str]:
+    return list(dict.fromkeys(i for part in parts for i in part.get("bound") or []))
 
 
 ACTIVE_JOB_STATES = ThreadJob.ACTIVE_STATES
@@ -196,7 +204,7 @@ def serialize(
         "thread_id": str(pending.thread_id),
         "request_id": str(pending.request_id),
         "version": pending.version,
-        "parts": pending.parts,
+        "parts": [{k: v for k, v in part.items() if k != "bound"} for part in pending.parts],
         "state": "claimed" if _claim_is_live(pending, thread) else "waiting",
         "thread_job_id": str(pending.thread_job_id) if pending.thread_job_id else None,
         "thread_job_state": job_state,
@@ -231,7 +239,13 @@ def _lease_is_live(thread_id) -> bool:
 
 @sync_to_async
 def ahold_message(
-    thread_id, *, part_id: str, text: str, for_workspace_load: bool = False, attachments=()
+    thread_id,
+    *,
+    part_id: str,
+    text: str,
+    for_workspace_load: bool = False,
+    attachments=(),
+    bound=(),
 ) -> dict | None:
     """Add ``text`` to the thread's held request while its load is still queued.
 
@@ -258,7 +272,7 @@ def ahold_message(
             return None
         pending = PendingRequest.objects.select_for_update().filter(thread_id=thread_id).first()
         if pending is None:
-            parts = [_new_part(part_id, text, attachments)]
+            parts = [_new_part(part_id, text, attachments, bound)]
             _check_parts(parts)
             pending = PendingRequest.objects.create(
                 thread_id=thread_id, parts=parts, thread_job=job
@@ -266,7 +280,7 @@ def ahold_message(
         elif pending.state == PendingRequest.State.CLAIMED:
             return None
         elif not any(part["id"] == part_id for part in pending.parts):
-            parts = [*pending.parts, _new_part(part_id, text, attachments)]
+            parts = [*pending.parts, _new_part(part_id, text, attachments, bound)]
             _check_parts(parts)
             pending.parts = parts
             pending.version += 1
@@ -283,7 +297,7 @@ def ahold_message(
 
 
 @sync_to_async
-def aadd_part(thread_id, *, part_id: str, text: str, attachments=()) -> dict:
+def aadd_part(thread_id, *, part_id: str, text: str, attachments=(), bound=()) -> dict:
     """Append a part; idempotent on ``part_id``. Raises ``PendingRequestConflict``
     once the request is claimed or gone, so the caller sends it as a turn instead."""
     with transaction.atomic():
@@ -293,7 +307,7 @@ def aadd_part(thread_id, *, part_id: str, text: str, attachments=()) -> dict:
         if pending.state == PendingRequest.State.CLAIMED:
             raise PendingRequestConflict("claimed")
         if not any(part["id"] == part_id for part in pending.parts):
-            parts = [*pending.parts, _new_part(part_id, text, attachments)]
+            parts = [*pending.parts, _new_part(part_id, text, attachments, bound)]
             _check_parts(parts)
             pending.parts = parts
             pending.version += 1
@@ -330,7 +344,9 @@ def aedit(
             if not text.strip() and not attachments:
                 raise PendingRequestInvalidEdit("empty")
             # One part now: the user rewrote the whole request.
-            pending.parts = [_new_part(f"edit-{uuid.uuid4()}", text, attachments)]
+            pending.parts = [
+                _new_part(f"edit-{uuid.uuid4()}", text, attachments, _bound_ids(pending.parts))
+            ]
             _check_parts(pending.parts)
         else:
             index = next(
@@ -371,12 +387,9 @@ def adiscard(thread_id, *, version: int) -> None:
 
 
 def _release_attachments(dropped: list[dict], *, keep: list[dict], thread_id) -> None:
-    """Unbind the attachments of dropped parts, so GC reclaims what no message carries."""
-    kept = {entry["id"] for entry in combined_attachments(keep)}
-    unbind_sync(
-        [e["id"] for e in combined_attachments(dropped) if e["id"] not in kept],
-        thread_id=thread_id,
-    )
+    """Unbind what dropped parts bound and no kept part carries, so GC reclaims it."""
+    kept = {entry["id"] for entry in combined_attachments(keep)} | set(_bound_ids(keep))
+    unbind_sync([i for i in _bound_ids(dropped) if i not in kept], thread_id=thread_id)
 
 
 @sync_to_async

@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import PurePath
 
-from django.db import IntegrityError
+from asgiref.sync import sync_to_async
+from django.db import IntegrityError, transaction
 from django.db.models import Exists, OuterRef, ProtectedError, Q
 from django.utils import timezone
 
@@ -366,13 +367,35 @@ async def abind_to_thread(ids, *, user, workspace, thread) -> list[str] | None:
     ids = list(ids)
     if not ids:
         return []
-    mine = ChatAttachment.objects.filter(id__in=ids, user=user, workspace=workspace)
-    unsent = [str(i) async for i in mine.filter(thread__isnull=True).values_list("id", flat=True)]
-    bound = await mine.filter(Q(thread__isnull=True) | Q(thread=thread)).aupdate(thread=thread)
-    if bound != len(ids):
-        await aunbind(unsent, thread=thread)
-        return None
-    return unsent
+    return await _bind(ids, user=user, workspace=workspace, thread=thread)
+
+
+@sync_to_async
+def _bind(ids: list[str], *, user, workspace, thread) -> list[str] | None:
+    # One transaction with the rows locked, so a concurrent bind of the same ids
+    # cannot be read as unsent here and then undone by this call's rollback.
+    with transaction.atomic():
+        rows = list(
+            ChatAttachment.objects.select_for_update()
+            .filter(Q(thread__isnull=True) | Q(thread=thread))
+            .filter(id__in=ids, user=user, workspace=workspace)
+            .values_list("id", "thread_id")
+        )
+        if len(rows) != len(ids):
+            return None
+        unsent = [str(attachment_id) for attachment_id, thread_id in rows if thread_id is None]
+        ChatAttachment.objects.filter(id__in=unsent).update(thread=thread)
+        return unsent
+
+
+def uncarried(newly_bound, pending: dict) -> list[str]:
+    """Of ``newly_bound``, the ids no part of the serialized held request carries.
+
+    A part whose id was already held is not added again, so its attachments are not
+    recorded; those must go back to unsent.
+    """
+    carried = {e["id"] for part in pending.get("parts", []) for e in part.get("attachments", [])}
+    return [i for i in newly_bound if i not in carried]
 
 
 async def aunbind(ids, *, thread) -> None:

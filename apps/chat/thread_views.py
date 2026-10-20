@@ -18,6 +18,7 @@ from apps.chat.attachments import (
     aresolve_for_send,
     attachment_ids_from_parts,
     aunbind,
+    uncarried,
 )
 from apps.chat.checkpointer import athread_has_checkpoint, ensure_checkpointer
 from apps.chat.helpers import (
@@ -352,7 +353,7 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
         )
     try:
         pending = await pending_requests.aadd_part(
-            thread.id, part_id=part_id, text=text, attachments=attachments
+            thread.id, part_id=part_id, text=text, attachments=attachments, bound=newly_bound
         )
     except pending_requests.PendingRequestConflict as e:
         # The client sends it as a message instead, which binds them again.
@@ -367,6 +368,7 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
             },
             status=400,
         )
+    await aunbind(uncarried(newly_bound, pending), thread=thread)
     return JsonResponse(pending)
 
 

@@ -30,6 +30,7 @@ from apps.chat.attachments import (
     attachment_ids_from_parts,
     aunbind,
     merge_attachments,
+    uncarried,
     with_attachments,
 )
 from apps.chat.checkpointer import athread_has_checkpoint, ensure_checkpointer
@@ -141,25 +142,26 @@ THREAD_BUSY_MESSAGE = (
 
 
 def _last_message_text(message) -> tuple[str, JsonResponse | None]:
+    # On error the text is "", never None, so callers can use it once they checked err.
     """The text of the turn's last message, or a 400 when its shape isn't one the AI SDK sends.
 
     AI SDK v6 sends ``{parts: [{type: "text", text: "..."}]}`` instead of ``{content: "..."}``.
     """
     if not isinstance(message, dict):
-        return None, JsonResponse({"error": "Each message must be an object"}, status=400)
+        return "", JsonResponse({"error": "Each message must be an object"}, status=400)
     content = message.get("content")
     if content is not None and not isinstance(content, str):
-        return None, JsonResponse({"error": "Message content must be a string"}, status=400)
+        return "", JsonResponse({"error": "Message content must be a string"}, status=400)
     if content:
         return content, None
     parts = message.get("parts")
     if parts is None:
         return "", None
     if not isinstance(parts, list) or not all(isinstance(p, dict) for p in parts):
-        return None, JsonResponse({"error": "Message parts must be a list of objects"}, status=400)
+        return "", JsonResponse({"error": "Message parts must be a list of objects"}, status=400)
     texts = [p.get("text", "") for p in parts if p.get("type") == "text"]
     if not all(isinstance(t, str) for t in texts):
-        return None, JsonResponse({"error": "Text part text must be a string"}, status=400)
+        return "", JsonResponse({"error": "Text part text must be a string"}, status=400)
     return " ".join(texts), None
 
 
@@ -328,11 +330,12 @@ async def _chat_view(request, bound: dict):
     if pending_version is None:
         try:
             held = await _hold_while_loading(
-                workspace, thread_id, messages[-1], user_content, attachments
+                workspace, thread_id, messages[-1], user_content, attachments, newly_bound
             )
         except pending_requests.PendingRequestTooLong as e:
             return _request_too_long_response(e.user_message)
         if held is not None:
+            await aunbind(uncarried(newly_bound, held), thread=thread)
             return _held_response(held)
 
     # A brief wait covers Stop-then-resend: the stopped turn releases the lease
@@ -387,7 +390,7 @@ def _pending_request_version(data: dict) -> tuple[int | None, JsonResponse | Non
 
 
 async def _hold_while_loading(
-    workspace, thread_id: str, message: dict, text: str, attachments=()
+    workspace, thread_id: str, message: dict, text: str, attachments=(), bound=()
 ) -> dict | None:
     """Hold the message for the load this chat awaits, or None to answer it now.
 
@@ -427,6 +430,7 @@ async def _hold_while_loading(
         text=text,
         for_workspace_load=not own_load,
         attachments=attachments,
+        bound=bound,
     )
 
 
