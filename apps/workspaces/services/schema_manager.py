@@ -13,6 +13,7 @@ import logging
 import re
 import threading
 import uuid
+from collections import Counter
 
 import psycopg
 import psycopg.sql
@@ -679,9 +680,33 @@ class SchemaManager:
         sanitized = self._sanitize_schema_name(tenant.canonical_name)
         if len(sanitized) <= _MAX_VIEW_PREFIX_LEN:
             return sanitized
+        return self._digested_view_prefix(tenant, sanitized)
+
+    @staticmethod
+    def _digested_view_prefix(tenant, sanitized: str) -> str:
         digest = hashlib.sha256(str(tenant.external_id).encode("utf-8")).hexdigest()[:8]
         # 23 (head) + 1 ("_") + 8 (digest) = 32
         return f"{sanitized[:23]}_{digest}"
+
+    def _view_prefixes(self, tenants) -> dict:
+        """Map each tenant to its view prefix, digesting only the prefixes that collide.
+
+        Connect opportunities in one program often share a name, so a cross-opportunity
+        workspace used to fail its whole build on the collision (#916). Tenants without
+        a collision keep ``_view_prefix`` so existing view names never change.
+        """
+        prefixes = {tenant: self._view_prefix(tenant) for tenant in tenants}
+        counts = Counter(prefixes.values())
+        return {
+            tenant: (
+                self._digested_view_prefix(
+                    tenant, self._sanitize_schema_name(tenant.canonical_name)
+                )
+                if counts[prefix] > 1
+                else prefix
+            )
+            for tenant, prefix in prefixes.items()
+        }
 
     def build_view_schema(self, workspace, *, revive_retired=True) -> WorkspaceViewSchema:
         """Publish one coherent physical view schema and its coverage per workspace.
@@ -821,11 +846,12 @@ class SchemaManager:
             # Detect collisions on the FINAL (bounded) prefixes.
             prefix_to_tenant: dict[str, str] = {}
             tenant_prefixes: list[tuple[str, Tenant, str]] = []
+            # Use the threaded tenant objects, NOT a lookup by external_id —
+            # that raises MultipleObjectsReturned across providers (arch #235).
+            view_prefixes = self._view_prefixes([tenant_obj for _, tenant_obj in tenant_schemas])
             for schema_name, tenant_obj in tenant_schemas:
                 tenant_external_id = tenant_obj.external_id
-                # Use the threaded tenant object, NOT a lookup by external_id —
-                # that raises MultipleObjectsReturned across providers (arch #235).
-                prefix = self._view_prefix(tenant_obj)
+                prefix = view_prefixes[tenant_obj]
                 if prefix in prefix_to_tenant:
                     raise ValueError(
                         f"Canonical name collision: tenants '{prefix_to_tenant[prefix]}' and "

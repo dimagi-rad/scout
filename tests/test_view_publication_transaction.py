@@ -708,7 +708,9 @@ def test_a_deterministic_plan_failure_on_an_active_row_is_reported_failed(owned,
     WorkspaceTenant.objects.create(workspace=workspace, tenant=second)
 
     with (
-        patch.object(SchemaManager, "_view_prefix", return_value="same"),
+        patch.object(
+            SchemaManager, "_view_prefixes", lambda _self, tenants: dict.fromkeys(tenants, "same")
+        ),
         pytest.raises(ValueError, match="collision"),
     ):
         manager.build_view_schema(workspace)

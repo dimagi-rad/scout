@@ -534,6 +534,65 @@ def test_build_view_schema_long_canonical_name_no_truncation_collision(db, manag
         ts2.delete()
 
 
+def test_build_view_schema_same_named_sources_get_distinct_prefixes(db, managed_db_connection):
+    """Opportunities in one program often share a name; a workspace spanning them
+    must build instead of failing on a prefix collision (#916)."""
+    ws, t1, t2 = _make_long_named_workspace("CHC Nutrition", "opp-1", "CHC Nutrition", "opp-2")
+    ts1 = TenantSchema.objects.create(
+        tenant=t1, schema_name="build_same_a", state=SchemaState.ACTIVE
+    )
+    ts2 = TenantSchema.objects.create(
+        tenant=t2, schema_name="build_same_b", state=SchemaState.ACTIVE
+    )
+    conn = managed_db_connection
+    c = conn.cursor()
+    try:
+        for schema in ("build_same_a", "build_same_b"):
+            c.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+            c.execute(f"CREATE TABLE IF NOT EXISTS {schema}.visits (id TEXT)")
+    finally:
+        c.close()
+
+    mgr = SchemaManager()
+    assert mgr._view_prefix(t1) == mgr._view_prefix(t2)
+    vs = None
+    try:
+        vs = mgr.build_view_schema(ws)
+        assert vs.state == SchemaState.ACTIVE
+
+        prefixes = mgr._view_prefixes([t1, t2])
+        assert prefixes[t1] != prefixes[t2]
+        c2 = conn.cursor()
+        try:
+            c2.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
+                (vs.schema_name,),
+            )
+            view_names = {row[0] for row in c2.fetchall()}
+        finally:
+            c2.close()
+        assert {f"{prefixes[t1]}__visits", f"{prefixes[t2]}__visits"} <= view_names
+    finally:
+        c3 = conn.cursor()
+        try:
+            if vs:
+                c3.execute(f"DROP SCHEMA IF EXISTS {vs.schema_name} CASCADE")
+            c3.execute("DROP SCHEMA IF EXISTS build_same_a CASCADE")
+            c3.execute("DROP SCHEMA IF EXISTS build_same_b CASCADE")
+        finally:
+            c3.close()
+        if vs:
+            vs.delete()
+        ts1.delete()
+        ts2.delete()
+
+
+def test_view_prefixes_keep_names_without_a_collision(db):
+    _ws, t1, t2 = _make_long_named_workspace("Alpha", "a-1", "Beta", "b-1")
+
+    assert SchemaManager()._view_prefixes([t1, t2]) == {t1: "alpha", t2: "beta"}
+
+
 def test_build_view_schema_two_long_names_shared_head_get_distinct_prefixes(
     db, managed_db_connection
 ):
