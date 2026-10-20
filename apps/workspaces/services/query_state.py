@@ -212,7 +212,7 @@ async def workspace_query_surface(workspace) -> dict[str, Any]:
                 **base,
                 "status": "recovering",
                 "recovery_action": None,
-                "message": "Waiting for source data to finish loading before rebuilding the data model.",
+                "message": "Waiting for source data to finish importing before rebuilding the data model.",
             }
         needs_reload = snapshot == "unsafe"
         return {
@@ -220,7 +220,7 @@ async def workspace_query_surface(workspace) -> dict[str, Any]:
             "status": "needs_materialization" if needs_reload else "needs_semantic_rebuild",
             "recovery_action": "materialization" if needs_reload else "semantic_rebuild",
             "message": (
-                "The previous data load did not complete successfully. Restore data before rebuilding its model."
+                "The previous import did not complete successfully. Restore data before rebuilding its model."
                 if needs_reload
                 else "Workspace data is available, but its data model needs rebuilding."
             ),

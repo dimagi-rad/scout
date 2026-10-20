@@ -69,6 +69,7 @@ from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSch
 from apps.workspaces.services.load_generations import pipeline_fingerprint
 from apps.workspaces.services.load_phases import LoadPhase
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
+from apps.workspaces.services.source_freshness import provider_label
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from mcp_server.event_time import DATE_RANGE_COLUMNS, event_time_sql, normalize_event_time
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
@@ -259,7 +260,7 @@ def run_pipeline(
     source_results: dict[str, dict] = {}
 
     try:
-        report(f"Discovering tenant metadata from {pipeline.provider}...")
+        report(f"Finding what to import from {provider_label(pipeline.provider)}...")
         discovered_metadata = _run_discover_phase(tenant_membership, credential, pipeline)
 
         # Connect's keyset-paginated exports return no total; reuse the counts
@@ -351,7 +352,7 @@ def run_pipeline(
         sources_list = list(pipeline.sources)
         for idx, source in enumerate(sources_list):
             current_source = source.name
-            load_message = f"Loading {source.name} from {pipeline.provider} API..."
+            load_message = f"Importing {source.name} from {provider_label(pipeline.provider)}..."
             report(load_message)
             source_is_resumable = (
                 is_resumable_provider

@@ -374,7 +374,7 @@ def serialized_workspace_materialization(function):
 # The view build re-reads the workspace's sources and cannot expand the T set
 # this load holds, so a source added mid-run surfaces as a LockOrderError.
 _SOURCE_ADDED_DURING_LOAD = (
-    "A source was added while this load was running, so this run did not republish "
+    "A source was added while this import was running, so this run did not republish "
     "the workspace's views; the follow-up queued when the source was added does."
 )
 
@@ -677,8 +677,8 @@ async def materialize_workspace_core(
                         # all reads as INTERNAL_ERROR on resume.
                         _preflight_failure(
                             tm.tenant,
-                            "This source was added while the load was starting and was not "
-                            "loaded. Run the load again to include it.",
+                            "This source was added while the import was starting and was not "
+                            "imported. Run the import again to include it.",
                             ErrorCode.WORKSPACE_SOURCES_CHANGED,
                         )
                     )
@@ -1410,8 +1410,8 @@ async def _load_workspace_candidate(
         )
         if not promotion.promoted:
             raise RuntimeError(
-                "The load finished without a complete, owned result to publish; "
-                "the previous data is still being served. Run the load again."
+                "The import finished without a complete, owned result to publish; "
+                "the previous data is still being served. Run the import again."
             )
     except BaseException:
         # Includes a promotion that raised: it rolled back, so the candidate is

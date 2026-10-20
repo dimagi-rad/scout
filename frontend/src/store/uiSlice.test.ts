@@ -87,7 +87,7 @@ describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
 
   it("surfaces a no-sources denial without offering a verification retry", async () => {
     const message =
-      "This workspace has no data sources, so there is nothing to load or query. " +
+      "This workspace has no data sources, so there is nothing to import or query. " +
       "A manager can delete it."
     vi.spyOn(api, "get").mockRejectedValue(
       new ApiError(403, message, { error: message, reason: "no_sources" }),

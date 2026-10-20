@@ -213,7 +213,7 @@ async def materialization_retry_view(request, workspace_id):
             )
         except Exception:
             logger.exception("materialization_retry_view: failed to dispatch")
-            return JsonResponse({"error": "Failed to dispatch materialization"}, status=500)
+            return JsonResponse({"error": "Failed to start the import"}, status=500)
         return JsonResponse({"status": "started", "thread_job_id": str(tj.id)})
 
     try:
@@ -225,6 +225,6 @@ async def materialization_retry_view(request, workspace_id):
         )
     except Exception:
         logger.exception("materialization_retry_view: failed to dispatch")
-        return JsonResponse({"error": "Failed to dispatch materialization"}, status=500)
+        return JsonResponse({"error": "Failed to start the import"}, status=500)
     job_id = getattr(job, "id", job) if not isinstance(job, int) else job
     return JsonResponse({"status": "started", "procrastinate_job_id": job_id})

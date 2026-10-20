@@ -57,8 +57,7 @@ RESUME_TASK_NAME = RESUME_THREAD_AFTER_MATERIALIZATION
 # User-facing failure copy. The frontend renders these straight from the
 # checkpointer (apps/chat/thread_views.py:_load_thread_messages → AIMessage).
 RESUME_TIMEOUT_MESSAGE = (
-    "The agent took too long to respond after materialization completed. "
-    "Please re-ask your question."
+    "The agent took too long to respond after the import completed. Please re-ask your question."
 )
 RESUME_EXCEPTION_MESSAGE = "Sorry, something went wrong while preparing your answer. Please retry."
 
@@ -148,7 +147,7 @@ async def _fail_resume_past_deadline(tj: ThreadJob, lease: TurnLease) -> dict:
         state=ThreadJob.State.FAILED,
         completed_at=timezone.now(),
         failure_phase=ThreadJob.FailurePhase.RESUME,
-        error_summary="The agent took too long to respond after materialization. Please retry.",
+        error_summary="The agent took too long to respond after the import. Please retry.",
     )
     # The write is time-bounded inside persist_synthetic_failure_message, and a
     # lease lost meanwhile cancels this task before it can write.
@@ -663,7 +662,7 @@ async def _resume_claimed_job(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
             failure_phase=ThreadJob.FailurePhase.RESUME,
-            error_summary=("The agent failed to respond after materialization. Please retry."),
+            error_summary=("The agent failed to respond after the import. Please retry."),
         )
         return {"status": "agent_failed"}
     finally:
@@ -728,13 +727,13 @@ async def _resume_claimed_job(
             error_summary = (
                 "The workspace query layer (view schema) is unavailable because a "
                 f"tenant schema it depends on was torn down: {view_schema_error}. "
-                "Re-running materialization will rebuild it."
+                "Re-running the import will rebuild it."
             )
         elif view_schema_failed:
             error_summary = (
-                "Per-tenant data loaded, but the workspace query layer (view "
+                "Per-tenant data imported, but the workspace query layer (view "
                 f"schema) failed to build: {view_schema_error}. A system-side "
-                "fix is required — re-running materialization will not help."
+                "fix is required — re-running the import will not help."
             )
         elif semantic_unavailable and status != "completed":
             error_summary = (
@@ -744,25 +743,25 @@ async def _resume_claimed_job(
             )
         elif semantic_unavailable:
             error_summary = (
-                "Data loaded, but the semantic model failed to build: "
+                "Data imported, but the semantic model failed to build: "
                 f"{semantic_error or 'unknown error'}. Semantic queries are "
                 "unavailable until a rebuild succeeds."
             )
         elif status == "no_runs":
             error_summary = (
-                "Materialization ran no pipelines, so nothing was loaded. "
+                "The import ran no pipelines, so nothing was imported. "
                 "Check the tenant failure details below."
                 if recorded_details
-                else "Materialization ran no pipelines, so nothing was loaded. "
+                else "The import ran no pipelines, so nothing was imported. "
                 "Check that the workspace's tenants are connected to your account "
                 "and have credentials configured."
             )
         else:
             error_summary = await build_failure_summary_for_job(tj.procrastinate_job_id)
             if status == "partial" or uncovered_tenants:
-                error_summary = f"Materialization did not refresh all data. {error_summary}".strip()
+                error_summary = f"The import did not refresh all data. {error_summary}".strip()
             if not error_summary:
-                error_summary = "Materialization did not complete successfully."
+                error_summary = "The import did not complete successfully."
             # Run summaries already carry source guidance; no-run tenants have
             # no run row and need their own account remediation added here.
             uncovered_guidance = credential_guidance(
@@ -833,7 +832,9 @@ FLUSH_NOTE = (
     f"{SYSTEM_RESUME_MARKER} A workspace data load ended while this message waited; "
     "answer it from the data now available, and say so if what it needs did not load."
 )
-FLUSH_FAILED_MESSAGE = "I couldn't finish answering this after your data loaded. Please ask again."
+FLUSH_FAILED_MESSAGE = (
+    "I couldn't finish answering this after your data was imported. Please ask again."
+)
 # Lets the load that queued the flush finish, so the flush does not see it pending.
 PENDING_FLUSH_DELAY_SECONDS = 5
 

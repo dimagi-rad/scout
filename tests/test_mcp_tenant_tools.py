@@ -1318,7 +1318,7 @@ async def test_schema_status_reports_which_source_an_in_flight_load_is_on(user):
             "step": 3,
             "total_steps": 5,
             "source": "visits",
-            "message": "Loading visits from commcare API...",
+            "message": "Importing visits from CommCare HQ...",
             "rows_loaded": 100,
             "rows_total": 400,
             "unit": "rows",

@@ -235,7 +235,7 @@ def test_another_members_expired_sign_in_is_not_the_viewers_to_fix():
 
     assert remedy(outcome, "commcare").startswith("reconnect CommCare HQ in Connected Accounts")
     other = remedy(outcome, "commcare", own_load=False)
-    assert "the member who ran the last load" in other
+    assert "the member who ran the last import" in other
     assert "sign-in works can refresh" in other
 
 
@@ -582,4 +582,4 @@ async def test_an_old_refresh_by_another_member_does_not_hide_a_requester_skip(
     assert recorded["refresh"] == SKIPPED
     (source,) = await aworkspace_source_freshness(workspace.id, other_user.id)
     assert source["not_refreshed"] is True
-    assert "the member who ran the last load" in source["remedy"]
+    assert "the member who ran the last import" in source["remedy"]

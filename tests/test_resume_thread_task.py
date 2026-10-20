@@ -1709,8 +1709,8 @@ async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state, rea
     assert "none of its data is in these results" not in tj.error_summary
     assert ("Settings → Connections" in tj.error_summary) is not reachable
     if view_state == SchemaState.ACTIVE:
-        assert tj.error_summary.startswith("Materialization did not refresh all data.")
-    assert "re-running materialization will not help" not in tj.error_summary
+        assert tj.error_summary.startswith("The import did not refresh all data.")
+    assert "re-running the import will not help" not in tj.error_summary
     assert "  " not in tj.error_summary
     assert tj.error_summary == tj.error_summary.strip()
 

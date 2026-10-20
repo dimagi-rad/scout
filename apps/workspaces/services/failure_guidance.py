@@ -16,13 +16,13 @@ CREDENTIAL_GUIDANCE: dict[str, str] = {
         "reconnect the affected account before retrying."
     ),
     ErrorCode.PIPELINE_UNRESOLVED: (
-        "ask an administrator to configure or repair the materialization pipeline "
+        "ask an administrator to configure or repair the import pipeline "
         "for this provider before retrying. Re-running cannot resolve this pipeline "
         "configuration problem until that configuration changes."
     ),
     ErrorCode.AUTH_TOKEN_EXPIRED: (
         "expired or revoked sign-in — reconnect the affected account "
-        "(Settings → Connections) and re-run materialization."
+        "(Settings → Connections) and re-run the import."
     ),
     ErrorCode.AUTH_REFRESH_FAILED: (
         "sign-in refresh could not complete — retry shortly. If the problem persists, "
@@ -176,7 +176,7 @@ def compose_failure_summary(runs: "list[MaterializationRun]") -> str:
     if completed_sources:
         total_rows = sum(rows for _, rows in completed_sources)
         names = ", ".join(n for n, _ in completed_sources)
-        parts.append(f"{names} ({total_rows:,} rows) loaded successfully")
+        parts.append(f"{names} ({total_rows:,} rows) imported successfully")
     if skipped_sources:
         parts.append(f"remaining sources skipped: {', '.join(skipped_sources)}")
     if cancelled_sources:
@@ -185,7 +185,7 @@ def compose_failure_summary(runs: "list[MaterializationRun]") -> str:
     if not parts:
         # No per-source detail (failure before any source ran) — surface run state.
         states = sorted({r.state for r in runs})
-        return f"Materialization {'/'.join(states)}."
+        return f"Import {'/'.join(states)}."
     summary = ". ".join(parts) + "."
     for line in credential_guidance(failed_sources):
         summary += " " + line
