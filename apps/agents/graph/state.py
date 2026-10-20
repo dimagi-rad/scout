@@ -15,6 +15,10 @@ from apps.chat.constants import SYSTEM_RESUME_MARKER
 
 DEFAULT_MAX_MESSAGES = 20
 
+# A reply like "yes", "continue" or "the first one" says nothing on its own, so the
+# user's message before it, and the assistant text each one answers, are kept too.
+PINNED_USER_MESSAGES = 2
+
 
 def prune_messages(
     messages: list[BaseMessage],
@@ -62,13 +66,12 @@ def prune_messages(
     # Only a history that is nothing but ToolMessages still opens on one.
     while pruned_conversation and isinstance(pruned_conversation[0], ToolMessage):
         pruned_conversation = pruned_conversation[1:]
+    # A backed-up round can fill the window; shed the oldest pins, never the latest.
+    overflow = len(pinned) + len(pruned_conversation) - max_messages
+    if overflow > 0 and pinned:
+        pinned = pinned[min(overflow, len(pinned) - 1) :]
 
     return system_messages + pinned + pruned_conversation
-
-
-# A reply like "yes", "continue" or "the first one" says nothing on its own, so the
-# user's message before it, and the assistant text each one answers, are kept too.
-PINNED_USER_MESSAGES = 2
 
 
 def _is_resume_marker(message: BaseMessage) -> bool:

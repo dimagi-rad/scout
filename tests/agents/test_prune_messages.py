@@ -158,6 +158,24 @@ def test_continue_after_step_limit_keeps_the_question():
     assert len(pruned) <= DEFAULT_MAX_MESSAGES
 
 
+def test_round_filling_the_window_sheds_older_pins_first():
+    history = [
+        HumanMessage(content="first"),
+        AIMessage(content="Which one?"),
+        HumanMessage(content="a"),
+        HumanMessage(content="b"),
+        HumanMessage(content="c"),
+        *_parallel_tool_rounds(1, calls_per_round=16),
+    ]
+
+    pruned = prune_messages(history)
+
+    assert len(pruned) <= DEFAULT_MAX_MESSAGES
+    assert pruned[-17:] == history[-17:]
+    assert _texts(pruned)[-1] == "c"
+    _assert_tool_pairs_intact(pruned)
+
+
 def test_round_wider_than_window_keeps_its_results():
     history = [HumanMessage(content=KK_QUESTION), *_parallel_tool_rounds(2, calls_per_round=25)]
 
