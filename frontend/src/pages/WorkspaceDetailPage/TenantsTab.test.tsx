@@ -531,11 +531,10 @@ describe("provider-specific filters", () => {
     id: `m-${id}`, tenant_uuid: `tenant-${id}`, provider: "ocs",
     tenant_id: id, tenant_name: name, last_selected_at: null, attributes,
   })
-  const recent = new Date(Date.now() - 2 * 86_400_000).toISOString()
   const mixed = [
     connect("c1", "Kenya Live", { is_active: true, organization: "dimagi" }),
-    ocs("o1", "Helper Bot", { team: "t-a", team_name: "Team A", last_session_at: recent }),
-    ocs("o2", "Old Bot", { team: "t-b", team_name: "Team B", last_session_at: null }),
+    ocs("o1", "Helper Bot", { team: "t-a", team_name: "Team A" }),
+    ocs("o2", "Old Bot", { team: "t-b", team_name: "Team B" }),
   ]
 
   async function open() {
@@ -546,7 +545,7 @@ describe("provider-specific filters", () => {
     await screen.findByTestId(`${F}-count`)
   }
 
-  it("swaps the Connect filters for team, chatbot and activity once OCS is selected", async () => {
+  it("swaps the Connect filters for team and chatbot once OCS is selected", async () => {
     await open()
     expect(screen.getByTestId(`${F}-facet-organization`)).toBeInTheDocument()
 
@@ -559,8 +558,8 @@ describe("provider-specific filters", () => {
     expect(screen.getByTestId(`${F}-facet-ocs_team`)).toBeInTheDocument()
     expect(screen.getByTestId(`${F}-facet-ocs_chatbot`)).toBeInTheDocument()
 
-    await userEvent.click(screen.getByTestId(`${F}-facet-ocs_status`))
-    await userEvent.click(await screen.findByTestId(`${F}-facet-ocs_status-option-active`))
+    await userEvent.click(screen.getByTestId(`${F}-facet-ocs_team`))
+    await userEvent.click(await screen.findByTestId(`${F}-facet-ocs_team-option-t-a`))
 
     expect(shownAvailable()).toEqual(["o1"])
   })

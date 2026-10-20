@@ -5,10 +5,9 @@ import { localIsoDate } from "@/lib/localDate"
 import type { FacetDef, FacetSelection } from "./facets"
 
 export const CONNECT_PROVIDER = "commcare_connect"
+// No Active filter for OCS yet: OCS reports no archived flag or last activity.
+// Add one once it does (open-chat-studio upstream change, #917).
 export const OCS_PROVIDER = "ocs"
-// A chatbot counts as active when its newest session started this recently (#917).
-// A first, reversible definition; OCS reports no active or archived flag.
-export const OCS_ACTIVE_DAYS = 30
 export const UNKNOWN = "unknown"
 // A colon cannot occur in an org slug or a program id, so this never collides with one.
 export const NONE = ":none"
@@ -53,21 +52,6 @@ function ocsAttributes(t: UserTenant): Record<string, unknown> | undefined {
   if (t.provider !== OCS_PROVIDER) return undefined
   const attrs = t.attributes
   return attrs !== null && typeof attrs === "object" && !Array.isArray(attrs) ? attrs : {}
-}
-
-/**
- * "active" when the chatbot's newest session started within OCS_ACTIVE_DAYS,
- * "inactive" when older or it has none, unknown before discovery has looked.
- */
-export function ocsStatus(t: UserTenant, now = Date.now()): string | undefined {
-  const attrs = ocsAttributes(t)
-  if (!attrs) return undefined
-  if (!("last_session_at" in attrs)) return UNKNOWN
-  const last = attrs.last_session_at
-  if (last === null) return "inactive"
-  const time = typeof last === "string" ? Date.parse(last) : Number.NaN
-  if (Number.isNaN(time)) return UNKNOWN
-  return now - time <= OCS_ACTIVE_DAYS * 86_400_000 ? "active" : "inactive"
 }
 
 export function connectType(t: UserTenant): string | undefined {
@@ -122,11 +106,6 @@ function providerSelected(provider: string) {
 const appliesToConnect = providerSelected(CONNECT_PROVIDER)
 const appliesToOcs = providerSelected(OCS_PROVIDER)
 
-const OCS_STATUS_LABELS: Record<string, string> = {
-  active: `Active (session in last ${OCS_ACTIVE_DAYS} days)`,
-  inactive: `Inactive (no session in ${OCS_ACTIVE_DAYS} days)`,
-  [UNKNOWN]: "Unknown",
-}
 
 export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
   {
@@ -178,17 +157,6 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
     ...labelled("program", "program_name"),
     isAvailable: hasConnectAttributes,
     appliesTo: appliesToConnect,
-  },
-  {
-    key: "ocs_status",
-    label: "Status",
-    group: "Open Chat Studio",
-    getValue: (t) => ocsStatus(t),
-    optionLabel: (value) => OCS_STATUS_LABELS[value] ?? value,
-    valueOrder: ["active", "inactive", UNKNOWN],
-    // Every row reads Unknown until discovery has recorded activity.
-    isAvailable: (items) => items.some((t) => "last_session_at" in (ocsAttributes(t) ?? {})),
-    appliesTo: appliesToOcs,
   },
   {
     key: "ocs_team",
