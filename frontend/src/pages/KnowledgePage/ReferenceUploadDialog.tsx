@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
+  KNOWLEDGE_TITLE_MAX_LENGTH,
   REFERENCE_DESCRIPTION_MAX_LENGTH,
   REFERENCE_UPLOAD_EXTENSIONS,
   REFERENCE_UPLOAD_MAX_BYTES,
@@ -41,8 +42,8 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Reset on close too, so a closed dialog doesn't keep holding the File.
   useEffect(() => {
-    if (!open) return
     setFile(null)
     setTitle("")
     setDescription("")
@@ -57,7 +58,14 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
     const picked = e.target.files?.[0] ?? null
     setFile(picked)
     setError(null)
-    if (picked) setTitle(titleFromFilename(picked.name))
+    // Keep a title the user typed; replace only the empty or file-derived one.
+    if (picked) {
+      setTitle((current) =>
+        !current.trim() || (file && current === titleFromFilename(file.name))
+          ? titleFromFilename(picked.name)
+          : current,
+      )
+    }
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -124,7 +132,7 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="Defaults to the file name"
-                maxLength={255}
+                maxLength={KNOWLEDGE_TITLE_MAX_LENGTH}
                 data-testid="reference-upload-title"
               />
             </div>

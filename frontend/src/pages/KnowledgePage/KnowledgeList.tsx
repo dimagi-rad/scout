@@ -3,6 +3,7 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
+import { cn } from "@/lib/utils"
 import {
   getKnowledgeItemName,
   type KnowledgeItem,
@@ -126,9 +127,10 @@ export function KnowledgeList({
               <CardContent className="flex-1 flex flex-col">
                 {description && (
                   <p
-                    className={`text-sm text-muted-foreground line-clamp-2 mb-3 ${
-                      isRawPreview ? "font-mono text-xs" : ""
-                    }`}
+                    className={cn(
+                      "text-sm text-muted-foreground line-clamp-2 mb-3",
+                      isRawPreview && "font-mono text-xs",
+                    )}
                   >
                     {description}
                   </p>

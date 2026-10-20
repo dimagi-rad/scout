@@ -8,7 +8,7 @@ import { REFERENCE_UPLOAD_MAX_BYTES, type KnowledgeEntryItem } from "@/store/kno
 import { KnowledgeForm } from "./KnowledgeForm"
 import { KnowledgeList } from "./KnowledgeList"
 import { ReferenceUploadDialog } from "./ReferenceUploadDialog"
-import { referenceFilename } from "./referenceFormat"
+import { fullReference, referenceFilename } from "./referenceFormat"
 
 const note: KnowledgeEntryItem = {
   id: "note-1",
@@ -199,5 +199,30 @@ describe("referenceFilename", () => {
     expect(referenceFilename({ title: "Notes", source_format: "" })).toBe("Notes.txt")
     expect(referenceFilename({ title: "指标登记表", source_format: "json" })).toBe("指标登记表.json")
     expect(referenceFilename({ title: "***", source_format: "csv" })).toBe("document.csv")
+  })
+})
+
+describe("fullReference", () => {
+  it("fetches the whole document only when the list holds a preview", async () => {
+    const whole = { ...registry, content: "[]".repeat(10), content_truncated: false }
+    const fetchItem = vi.fn().mockResolvedValue(whole)
+
+    expect(await fullReference(registry, fetchItem)).toBe(whole)
+    expect(fetchItem).toHaveBeenCalledWith("ref-1")
+
+    fetchItem.mockClear()
+    expect(await fullReference(note, fetchItem)).toBe(note)
+    expect(fetchItem).not.toHaveBeenCalled()
+  })
+})
+
+describe("upload dialog title", () => {
+  it("keeps a title typed before the file is picked", async () => {
+    render(<ReferenceUploadDialog open onOpenChange={vi.fn()} onUpload={vi.fn()} />)
+
+    await userEvent.type(screen.getByTestId("reference-upload-title"), "My registry")
+    await userEvent.upload(screen.getByTestId("reference-upload-file"), new File(["[]"], "x.json"))
+
+    expect(screen.getByTestId("reference-upload-title")).toHaveValue("My registry")
   })
 })

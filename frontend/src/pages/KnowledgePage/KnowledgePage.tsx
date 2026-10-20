@@ -18,7 +18,7 @@ import {
 import { KnowledgeList } from "./KnowledgeList"
 import { KnowledgeForm } from "./KnowledgeForm"
 import { ReferenceUploadDialog } from "./ReferenceUploadDialog"
-import { downloadText } from "./referenceFormat"
+import { downloadText, fullReference } from "./referenceFormat"
 import type { KnowledgeItem, KnowledgeType } from "@/store/knowledgeSlice"
 
 export function KnowledgePage() {
@@ -163,8 +163,8 @@ export function KnowledgePage() {
   }
 
   const handleDownload = async (item: KnowledgeItem) => {
-    const full = item.content_truncated ? await fetchKnowledgeItem(item.id) : item
-    if (!isCurrentAccount()) return
+    const full = await fullReference(item, fetchKnowledgeItem)
+    if (!full || !isCurrentAccount()) return
     downloadText(full)
   }
 
@@ -300,7 +300,8 @@ export function KnowledgePage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Knowledge Item</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete this {deleteItem?.type}? This action
+              Are you sure you want to delete this{" "}
+              {deleteItem?.kind === "reference" ? "reference document" : deleteItem?.type}? This action
               cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>

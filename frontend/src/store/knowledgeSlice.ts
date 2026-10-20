@@ -32,6 +32,8 @@ export const REFERENCE_UPLOAD_EXTENSIONS = [".json", ".csv", ".tsv", ".md", ".ma
 export const REFERENCE_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
 // KnowledgeEntry.description max_length.
 export const REFERENCE_DESCRIPTION_MAX_LENGTH = 500
+// KnowledgeEntry.title max_length.
+export const KNOWLEDGE_TITLE_MAX_LENGTH = 255
 
 export interface ReferenceUploadFields {
   title?: string
@@ -78,7 +80,8 @@ export interface KnowledgeSlice {
     exportKnowledge: () => Promise<void>
     importKnowledge: (file: File) => Promise<void>
     uploadReferenceDocument: (file: File, fields?: ReferenceUploadFields) => Promise<KnowledgeItem>
-    fetchKnowledgeItem: (id: string) => Promise<KnowledgeItem>
+    // Null when the workspace changed while it loaded.
+    fetchKnowledgeItem: (id: string) => Promise<KnowledgeItem | null>
     setFilter: (type: KnowledgeType | null) => void
     setSearch: (search: string) => void
   }
@@ -203,9 +206,11 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice & DomainSlice & A
       },
 
       fetchKnowledgeItem: async (id: string) => {
+        const isCurrent = requests.start()
         const activeDomainId = get().activeDomainId
         if (!activeDomainId) throw new Error("No active domain selected.")
-        return api.get<KnowledgeItem>(`/api/workspaces/${activeDomainId}/knowledge/${id}/`)
+        const item = await api.get<KnowledgeItem>(`/api/workspaces/${activeDomainId}/knowledge/${id}/`)
+        return isCurrent() ? item : null
       },
 
       setFilter: (type: KnowledgeType | null) => {

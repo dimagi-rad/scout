@@ -224,6 +224,8 @@ export function KnowledgeForm({
                     )}
                   </div>
                   <pre
+                    role="group"
+                    tabIndex={0}
                     aria-labelledby="reference-content-label"
                     className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 font-mono text-xs"
                     data-testid="knowledge-form-preview"

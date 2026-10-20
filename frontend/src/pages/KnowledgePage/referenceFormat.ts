@@ -34,6 +34,14 @@ export function referenceFilename(item: Pick<KnowledgeEntryItem, "title" | "sour
   return `${base || "document"}.${item.source_format || "txt"}`
 }
 
+/** The whole document: the item itself unless the list only holds a preview of it. */
+export async function fullReference(
+  item: KnowledgeEntryItem,
+  fetchItem: (id: string) => Promise<KnowledgeEntryItem | null>,
+): Promise<KnowledgeEntryItem | null> {
+  return item.content_truncated ? fetchItem(item.id) : item
+}
+
 export function downloadText(
   item: Pick<KnowledgeEntryItem, "title" | "source_format" | "content">,
 ): void {
