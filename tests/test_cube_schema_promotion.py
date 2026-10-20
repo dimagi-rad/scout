@@ -100,6 +100,7 @@ def test_failed_changed_rebuild_records_an_error_row_beside_the_serving_schema(
     assert serving.status == CubeSchema.Status.ACTIVE
     failed = CubeSchema.objects.get(semantic_model=model, status=CubeSchema.Status.ERROR)
     assert failed.diagnostics[-1]["message"] == "Cube compiler failure"
+    assert failed.validated_version == ""
 
 
 @pytest.fixture
@@ -769,3 +770,19 @@ def test_the_version_is_asked_only_for_unchanged_content(workspace, model, valid
     build_and_promote_cube_schema(workspace, model=model)
 
     assert live_version.await_count == 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_once_validated_row_that_now_fails_loses_its_version(workspace, model, validator):
+    first = build_and_promote_cube_schema(workspace, model=model)
+    SemanticDataset.objects.filter(name="visits").update(description="Changed")
+    build_and_promote_cube_schema(workspace, model=model)
+    SemanticDataset.objects.filter(name="visits").update(description="")
+    validator.return_value = {"valid": False, "errors": ["Cube compiler failure"], **VERSIONS}
+
+    with pytest.raises(CubeSchemaBuildError):
+        build_and_promote_cube_schema(workspace, model=model)
+
+    first.refresh_from_db()
+    assert first.status == CubeSchema.Status.ERROR
+    assert first.validated_version == ""

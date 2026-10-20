@@ -589,12 +589,15 @@ async def test_validator_version_is_cached_per_process(version_endpoint):
     assert version_endpoint["calls"] == 1
 
 
+def _expire_version_cache():
+    for url, (_, label) in list(cube_client_module._validator_versions.items()):
+        cube_client_module._validator_versions[url] = (0.0, label)
+
+
 @pytest.mark.asyncio
-async def test_validator_version_cache_expires(version_endpoint, monkeypatch):
-    now = [1000.0]
-    monkeypatch.setattr(cube_client_module.time, "monotonic", lambda: now[0])
+async def test_validator_version_cache_expires(version_endpoint):
     await CubeClient().validator_version()
-    now[0] += cube_client_module.VERSION_CACHE_SECONDS + 1
+    _expire_version_cache()
     version_endpoint["reply"] = lambda request: httpx.Response(
         200, json={"compiler_version": "1.7.0", "validator_version": "v1"}
     )
@@ -619,12 +622,19 @@ def _raise_timeout(request):
         lambda request: httpx.Response(200, json=["1.6.39", "v1"]),
     ],
 )
-async def test_an_unreadable_version_is_unknown_and_not_cached(version_endpoint, reply):
+async def test_an_unreadable_version_is_unknown_and_retried_soon(version_endpoint, reply):
     version_endpoint["reply"] = reply
 
     assert await CubeClient().validator_version() is None
     assert await CubeClient().validator_version() is None
-    assert version_endpoint["calls"] == 2
+    assert version_endpoint["calls"] == 1
+    url = "http://validator.test"
+    expires_at, _ = cube_client_module._validator_versions[url]
+    assert expires_at - time.monotonic() <= cube_client_module.VERSION_FAILURE_CACHE_SECONDS
+
+    _expire_version_cache()
+    version_endpoint["reply"] = lambda request: httpx.Response(200, json=_VERSIONS)
+    assert await CubeClient().validator_version() == "1.6.39/v1"
 
 
 @pytest.mark.asyncio

@@ -65,7 +65,10 @@ MIN_SCHEMA_ATTEMPT_SECONDS = 5.0
 # validator, and a minute of stale answer only delays noticing it.
 VERSION_TIMEOUT = httpx.Timeout(2.0, connect=1.0)
 VERSION_CACHE_SECONDS = 60.0
-_validator_versions: dict[str, tuple[float, str]] = {}
+# An unreachable validator is asked again only after this, so builds don't each
+# pay the timeout (some ask inside a refresh transaction).
+VERSION_FAILURE_CACHE_SECONDS = 10.0
+_validator_versions: dict[str, tuple[float, str | None]] = {}
 
 
 def validator_version_label(payload: Any) -> str | None:
@@ -371,11 +374,12 @@ class CubeClient:
                 response = await client.get(f"{validator_url}/version")
                 response.raise_for_status()
                 label = validator_version_label(response.json())
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.info("Cube validator version unavailable (%s); validating", exc)
-            return None
-        if label is not None:
-            _validator_versions[validator_url] = (time.monotonic() + VERSION_CACHE_SECONDS, label)
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
+            # Unknown disables the skip for every unchanged rebuild, so make it visible.
+            logger.warning("Cube validator version unavailable (%s); validating", exc)
+            label = None
+        ttl = VERSION_CACHE_SECONDS if label is not None else VERSION_FAILURE_CACHE_SECONDS
+        _validator_versions[validator_url] = (time.monotonic() + ttl, label)
         return label
 
     async def validate_schema(self, content: str) -> dict[str, Any]:

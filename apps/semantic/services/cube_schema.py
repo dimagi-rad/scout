@@ -403,6 +403,7 @@ def _build_validate_and_promote(
                     "content_hash": content_hash,
                     "status": CubeSchema.Status.ERROR,
                     "diagnostics": diagnostics,
+                    "validated_version": "",
                 },
             )
         if settings.CUBE_SCHEMA_VALIDATION_REQUIRED:
