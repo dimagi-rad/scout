@@ -19,6 +19,7 @@ from apps.chat.models import ChatAttachment
 
 INLINE_TEXT_MAX_CHARS = 100_000
 TRUNCATED_TEXT_CHARS = 20_000
+MIN_SHOWN_TEXT_CHARS = 2_000
 # Per model request, newest attachments first. Anthropic caps a request at 32 MB,
 # and base64 adds a third to every image.
 TEXT_BUDGET_CHARS = 200_000
@@ -165,6 +166,9 @@ async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budg
         budget.text_chars -= total
         return _text_block(wrap_attachment(attachment, text, total))
     shown = min(TRUNCATED_TEXT_CHARS, budget.text_chars)
+    if shown < MIN_SHOWN_TEXT_CHARS:
+        # A few hundred characters of a large file mislead more than they inform.
+        return _text_omitted(entry)
     budget.text_chars -= shown
     note = f"[Showing the first {shown:,} of {total:,} characters; the rest is not shown.]"
     return _text_block(wrap_attachment(attachment, f"{text[:shown]}\n{note}", total))

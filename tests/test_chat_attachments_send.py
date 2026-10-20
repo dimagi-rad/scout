@@ -545,6 +545,7 @@ async def test_expansion_builds_image_and_text_blocks(user, workspace):
 async def test_expansion_truncates_long_text(user, workspace, monkeypatch):
     monkeypatch.setattr(expansion, "INLINE_TEXT_MAX_CHARS", 50)
     monkeypatch.setattr(expansion, "TRUNCATED_TEXT_CHARS", 10)
+    monkeypatch.setattr(expansion, "MIN_SHOWN_TEXT_CHARS", 0)
     thread = await Thread.objects.acreate(user=user, workspace=workspace)
     long = await _aattachment(user, workspace, b"x" * 120, "big.txt", "text/plain", thread)
 

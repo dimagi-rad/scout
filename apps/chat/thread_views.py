@@ -357,10 +357,10 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
         )
     except pending_requests.PendingRequestConflict as e:
         # The client sends it as a message instead, which binds them again.
-        await aunbind(newly_bound, thread=thread)
+        await _unbind_quietly(newly_bound, thread)
         return _pending_conflict(e)
     except pending_requests.PendingRequestTooLong as e:
-        await aunbind(newly_bound, thread=thread)
+        await _unbind_quietly(newly_bound, thread)
         return JsonResponse(
             {
                 "error": e.user_message,
@@ -368,8 +368,19 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
             },
             status=400,
         )
-    await aunbind(uncarried(newly_bound, pending), thread=thread)
+    except BaseException:
+        await _unbind_quietly(newly_bound, thread)
+        raise
+    # The part is stored by now, so a failure here must not fail the request.
+    await _unbind_quietly(uncarried(newly_bound, pending), thread)
     return JsonResponse(pending)
+
+
+async def _unbind_quietly(ids, thread) -> None:
+    try:
+        await aunbind(ids, thread=thread)
+    except Exception:
+        logger.warning("Could not unbind attachments of thread %s", thread.id, exc_info=True)
 
 
 @async_login_required
