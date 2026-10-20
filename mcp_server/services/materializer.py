@@ -1141,6 +1141,9 @@ def _write_ocs_sessions(
     return total
 
 
+OCS_MESSAGES_PROGRESS_INTERVAL_SECONDS = 1.0
+
+
 def _write_ocs_messages(
     pages: Iterator[tuple[list[dict], int | None]],
     schema_name: str,
@@ -1182,6 +1185,7 @@ def _write_ocs_messages(
     ins_sql = _OCS_MESSAGES_INSERT.format(schema=sid)
     total = 0
     sessions_total: int | None = None
+    last_reported: float | None = None
     for sessions_done, (page, page_total) in enumerate(pages, start=1):
         if sessions_total is None and page_total is not None:
             sessions_total = page_total
@@ -1204,8 +1208,18 @@ def _write_ocs_messages(
             ]
             cur.executemany(ins_sql, rows)
             total += sum(not r.get("is_synthetic_summary", False) for r in page)
-        if on_page is not None:
+        if on_page is None:
+            continue
+        # Each report is a progress UPDATE plus a cancel-check SELECT; per
+        # session that is two queries per detail fetch (#918).
+        now = time.monotonic()
+        if (
+            last_reported is None
+            or now - last_reported >= OCS_MESSAGES_PROGRESS_INTERVAL_SECONDS
+            or sessions_done == sessions_total
+        ):
             on_page(sessions_done, sessions_total)
+            last_reported = now
 
     return total
 
