@@ -49,8 +49,11 @@ TENANT_REFRESH_TTL = 3600  # seconds (1 hour)
 FORCED_REFRESH_FLOOR = 60  # seconds between user-requested refreshes that hit upstream
 # A failing upstream is retried after this, not on every poll (#918).
 TENANT_REFRESH_FAILURE_TTL = 60  # seconds
-# Bounds a refresh another request is already running; outlives the listing deadline.
+# Bounds a refresh another request is already running, should that request die.
 TENANT_REFRESH_INFLIGHT_TTL = 120  # seconds
+# How long a poll waits on another request's refresh of the same identity.
+TENANT_REFRESH_INFLIGHT_WAIT = 60  # seconds
+TENANT_REFRESH_INFLIGHT_POLL = 0.25  # seconds
 
 logger = logging.getLogger(__name__)
 
@@ -84,21 +87,48 @@ async def _arefresh_all_identities(user, *, force: bool = False) -> None:
         f"tenant_refresh_floor:{user.id}", True, FORCED_REFRESH_FLOOR
     ):
         force = False
-    refreshes = [
-        _arefresh_identity(user, provider, resolve, token_obj, force=force)
-        for provider, resolve in _PROVIDER_RESOLVERS.items()
-        for token_obj in await aiter_social_tokens(user, provider)
-    ]
-    await asyncio.gather(*refreshes)
+    # Identities sharing a scope stay serial, newest first: the first to resolve
+    # binds the scope and deletes its siblings' tokens, so it must be the newest.
+    scopes: dict[tuple[str, str], list] = {}
+    for provider, resolve in _PROVIDER_RESOLVERS.items():
+        for token_obj in await aiter_social_tokens(user, provider):
+            scope = (provider, account_scope(token_obj.account))
+            scopes.setdefault(scope, []).append((provider, resolve, token_obj))
+
+    async def refresh_scope(identities) -> None:
+        for provider, resolve, token_obj in identities:
+            await _arefresh_identity(user, provider, resolve, token_obj, force=force)
+
+    tasks = [asyncio.ensure_future(refresh_scope(identities)) for identities in scopes.values()]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        # Leave no refresh running past the response that started it.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
+async def _await_inflight(inflight_key: str) -> None:
+    # Polled, not an Event: the refresh may be running in another worker process.
+    for _ in range(int(TENANT_REFRESH_INFLIGHT_WAIT / TENANT_REFRESH_INFLIGHT_POLL)):
+        if not await cache.aget(inflight_key):
+            return
+        await asyncio.sleep(TENANT_REFRESH_INFLIGHT_POLL)
 
 
 async def _arefresh_identity(user, provider, resolve, token_obj, *, force: bool) -> None:
     cache_key = f"tenant_refresh:{user.id}:{provider}:{token_obj.account_id}"
     if not force and await cache.aget(cache_key):
         return
-    # A concurrent poll for the same identity would repeat the same upstream fetch.
     inflight_key = f"{cache_key}:inflight"
-    if not await cache.aadd(inflight_key, True, TENANT_REFRESH_INFLIGHT_TTL):
+    owns_inflight = await cache.aadd(inflight_key, True, TENANT_REFRESH_INFLIGHT_TTL)
+    if not owns_inflight and not force:
+        # Another poll is already fetching this identity: share its result
+        # rather than repeat the upstream call. A forced refresh does not wait,
+        # since that fetch may predate the access the user is refreshing for.
+        await _await_inflight(inflight_key)
         return
     try:
         try:
@@ -120,7 +150,8 @@ async def _arefresh_identity(user, provider, resolve, token_obj, *, force: bool)
             ttl = TENANT_REFRESH_TTL
         await cache.aset(cache_key, True, ttl)
     finally:
-        await cache.adelete(inflight_key)
+        if owns_inflight:
+            await cache.adelete(inflight_key)
 
 
 # Wrap the persistence loop in sync_to_async so transaction.atomic() applies.
