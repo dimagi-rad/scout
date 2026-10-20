@@ -63,6 +63,10 @@ async def run_data_thread(function, /, *args, **kwargs):
     Cancelling ``to_thread`` only cancels its waiter, not the running thread.
     Drain a shielded thread before propagating cancellation so another repair
     cannot overlap its still-running load or Cube publication.
+
+    Await these one at a time within a job: the managed-pool cap
+    (``mcp_server.services.pool._MAX_POOLS``) is sized on one live data thread,
+    and so one ``async_to_sync`` loop, per worker job.
     """
     owner = asyncio.current_task()
 
