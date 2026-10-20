@@ -1,11 +1,13 @@
 """The load summary's per-table date range (#917)."""
 
+from types import SimpleNamespace
 from unittest import mock
 
 import psycopg
 import pytest
 from django.db import connection
 
+from mcp_server.event_time import DATE_RANGE_COLUMNS, SOURCE_TIME_COLUMNS
 from mcp_server.services import materializer
 from mcp_server.services.materializer import _source_date_range
 
@@ -22,7 +24,9 @@ def scratch_table(db):
     )
 
     def connect():
-        return psycopg.connect(conninfo, autocommit=True)
+        conn = psycopg.connect(conninfo, autocommit=True)
+        conn.execute("SET TIME ZONE 'UTC'")
+        return conn
 
     with connect() as conn:
         conn.execute("CREATE SCHEMA IF NOT EXISTS date_range_t")
@@ -81,3 +85,26 @@ def test_a_table_without_a_declared_event_time_is_skipped(scratch_table):
 
 def test_a_failing_query_does_not_fail_the_load(scratch_table):
     assert _source_date_range("missing_schema", "commcare", "raw_forms") is None
+
+
+def test_each_date_range_column_is_a_declared_event_time():
+    for provider, tables in DATE_RANGE_COLUMNS.items():
+        for table, column in tables.items():
+            assert column in SOURCE_TIME_COLUMNS[provider][table], (provider, table)
+
+
+def test_only_completed_sources_get_a_range():
+    sources = [
+        SimpleNamespace(name="forms", physical_table_name="raw_forms"),
+        SimpleNamespace(name="cases", physical_table_name="raw_cases"),
+    ]
+    results = {"forms": {"state": "completed", "rows": 3}, "cases": {"state": "failed", "rows": 0}}
+    pipeline = SimpleNamespace(provider="commcare")
+    with mock.patch.object(
+        materializer, "_source_date_range", return_value={"column": "x"}
+    ) as read_range:
+        materializer._record_date_ranges("s", pipeline, sources, results)
+
+    read_range.assert_called_once_with("s", "commcare", "raw_forms")
+    assert results["forms"]["date_range"] == {"column": "x"}
+    assert "date_range" not in results["cases"]

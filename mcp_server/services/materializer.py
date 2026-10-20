@@ -443,6 +443,8 @@ def run_pipeline(
                         "rows": 0,
                         "cursor_state": None,
                     }
+                # A PARTIAL run can be served, so its completed tables keep their ranges.
+                _record_date_ranges(schema_name, pipeline, sources_list, source_results)
                 _stamp_load_ended(run, pipeline, source_results, duration_s=_elapsed(run_started))
                 raise
             # Preserve the final cursor watermark for resumable sources; non-resumable keep None.
@@ -463,15 +465,7 @@ def run_pipeline(
         current_source = None
 
         # After every source, so a slow scan never holds up the next source's fetch.
-        # A failed or cancelled load raises before this, so its tables get no range.
-        for source in sources_list:
-            if (source_results.get(source.name) or {}).get("state") != "completed":
-                continue
-            date_range = _source_date_range(
-                schema_name, pipeline.provider, source.physical_table_name
-            )
-            if date_range is not None:
-                source_results[source.name]["date_range"] = date_range
+        _record_date_ranges(schema_name, pipeline, sources_list, source_results)
 
         # Discovery may have generated SYSTEM assets. Fingerprint and execute the
         # same in-memory snapshot: the fingerprint is this run's receipt for what
@@ -1336,6 +1330,19 @@ _DATE_RANGE_TIMEOUT_MS = 10_000
 _NATIVE_TIME_TYPES = frozenset({"timestamp with time zone", "date"})
 
 
+def _record_date_ranges(
+    schema_name: str, pipeline: PipelineConfig, sources: list, source_results: dict
+) -> None:
+    """Add each completed source's event-time range to its result entry."""
+    for source in sources:
+        entry = source_results.get(source.name) or {}
+        if entry.get("state") != "completed":
+            continue
+        date_range = _source_date_range(schema_name, pipeline.provider, source.physical_table_name)
+        if date_range is not None:
+            entry["date_range"] = date_range
+
+
 def _source_date_range(schema_name: str, provider: str, table: str) -> dict | None:
     """Earliest and latest event time in a just-committed table, for the load summary.
 
@@ -1368,6 +1375,10 @@ def _source_date_range(schema_name: str, provider: str, table: str) -> dict | No
             row = conn.execute(query).fetchone()
         finally:
             conn.close()
+    except psycopg.errors.QueryCanceled:
+        # Expected for a very large table: the timeout is what bounds the scan.
+        logger.info("Gave up reading the date range of %s.%s", schema_name, table)
+        return None
     except Exception:
         logger.warning("Could not read the date range of %s.%s", schema_name, table, exc_info=True)
         return None
