@@ -36,10 +36,11 @@ class DatabaseWrapper(PostgresDatabaseWrapper):
         return conn
 
     def _pool_is_busy(self) -> bool:
-        if self.pool.get_stats().get("pool_size", 0) >= self.pool.max_size:
-            return True
+        # A recorded connect failure decides first: pool_size counts connections
+        # created, not healthy ones, so a pool that grew under load reads as full
+        # through an outage. Served checkouts clear it, so real busy never vetoes.
         failure = RefusalRecordingConnection.last_connect_failure
-        if failure is None:
-            return False
-        sqlstate, message = failure
-        return sqlstate == TOO_MANY_CONNECTIONS_SQLSTATE or is_capacity_message(message)
+        if failure is not None:
+            sqlstate, message = failure
+            return sqlstate == TOO_MANY_CONNECTIONS_SQLSTATE or is_capacity_message(message)
+        return self.pool.get_stats().get("pool_size", 0) >= self.pool.max_size

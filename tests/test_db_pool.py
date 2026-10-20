@@ -142,9 +142,10 @@ def test_a_full_pool_is_busy_not_an_outage(make_pooled_wrapper):
     assert classify_capacity_error(raised.value).resource == CapacityResource.DATABASE
 
 
-def _timeout_after(last_connect_failure, make_pooled_wrapper, monkeypatch):
+def _timeout_after(last_connect_failure, make_pooled_wrapper, monkeypatch, *, pool_size=0):
     monkeypatch.setattr(RefusalRecordingConnection, "last_connect_failure", last_connect_failure)
     wrapper = make_pooled_wrapper(max_size=4)
+    monkeypatch.setattr(wrapper.pool, "get_stats", lambda: {"pool_size": pool_size})
     with (
         patch.object(
             PostgresDatabaseWrapper, "get_new_connection", side_effect=PoolTimeout("timed out")
@@ -177,11 +178,19 @@ def test_a_served_checkout_retires_an_old_refusal(make_pooled_wrapper, monkeypat
     assert RefusalRecordingConnection.last_connect_failure is None
 
 
-def test_a_timeout_on_an_unreachable_database_stays_an_outage(make_pooled_wrapper, monkeypatch):
+@pytest.mark.parametrize("pool_size", [1, 4], ids=["growing", "grown_to_max"])
+def test_a_timeout_on_an_unreachable_database_stays_an_outage(
+    pool_size, make_pooled_wrapper, monkeypatch
+):
     down = (None, "connection failed: Connection refused")
-    raised = _timeout_after(down, make_pooled_wrapper, monkeypatch)
+    raised = _timeout_after(down, make_pooled_wrapper, monkeypatch, pool_size=pool_size)
     assert not isinstance(raised, DjangoPoolExhausted)
     assert classify_capacity_error(raised) is None
+
+
+def test_a_full_pool_without_connect_failures_is_busy(make_pooled_wrapper, monkeypatch):
+    raised = _timeout_after(None, make_pooled_wrapper, monkeypatch, pool_size=4)
+    assert isinstance(raised, DjangoPoolExhausted)
 
 
 @pytest.mark.django_db(transaction=True)
