@@ -691,38 +691,52 @@ class SchemaManager:
         digest = hashlib.sha256(str(tenant.id).encode("utf-8")).hexdigest()[:8]
         return f"{sanitized[:23]}_{digest}"
 
-    def _view_prefixes(self, tenants, published_views=None) -> dict:
+    def _view_prefixes(self, tenants, published=None, loaded_ids=frozenset()) -> dict:
         """Map each tenant to its view prefix, digesting only the prefixes that collide.
 
         Connect opportunities in one program often share a name, so a cross-opportunity
-        workspace used to fail its whole build on the collision (#916). Pass every
-        workspace tenant, not only the loaded ones, so a source dropping out never
-        renames the others' views. In a colliding group the source that already
-        published under the plain prefix (``published_views``, the last build's
-        ``view_sources["views"]``) keeps it, else the oldest source does.
+        workspace used to fail its whole build on the collision (#916). View names are
+        what knowledge and saved artifacts key on, so an assignment never moves once
+        made: ``published`` (the last build's ``view_sources``) records each tenant's
+        prefix. Rows from before that record fall back to whoever published the plain
+        name, then a loaded source, then the oldest. Every workspace tenant is passed,
+        loaded or not, so a source dropping out never renames the others' views.
         """
         tenants = list(tenants)
+        published = published or {}
         plain = {tenant: self._view_prefix(tenant) for tenant in tenants}
+        collision = {tenant: self._collision_view_prefix(tenant) for tenant in tenants}
+        recorded = published.get("prefixes") or {}
+        kept = {
+            tenant: recorded[str(tenant.id)]
+            for tenant in tenants
+            if recorded.get(str(tenant.id)) in (plain[tenant], collision[tenant])
+        }
         by_id = {str(tenant.id): tenant for tenant in tenants}
         # Exact match, not startswith: fitting a long multibyte name can cut the prefix.
         published_plain = {
             tenant_id
-            for name, source in (published_views or {}).items()
+            for name, source in (published.get("views") or {}).items()
             if (tenant_id := source.get("tenant_id")) in by_id
             and name == view_name(plain[by_id[tenant_id]], source.get("source_table_name", ""))
         }
+        counts = Counter(plain.values())
         holder: dict[str, object] = {}
         for tenant in sorted(
-            tenants,
-            key=lambda t: (str(t.id) not in published_plain, t.created_at, str(t.id)),
+            (t for t in tenants if kept.get(t) != collision[t]),
+            key=lambda t: (
+                kept.get(t) != plain[t],
+                str(t.id) not in published_plain,
+                t.id not in loaded_ids,
+                t.created_at,
+                str(t.id),
+            ),
         ):
             holder.setdefault(plain[tenant], tenant)
-        counts = Counter(plain.values())
         return {
-            tenant: (
-                self._collision_view_prefix(tenant)
-                if counts[prefix] > 1 and holder[prefix] != tenant
-                else prefix
+            tenant: kept.get(tenant)
+            or (
+                collision[tenant] if counts[prefix] > 1 and holder.get(prefix) != tenant else prefix
             )
             for tenant, prefix in plain.items()
         }
@@ -867,7 +881,9 @@ class SchemaManager:
             tenant_prefixes: list[tuple[str, Tenant, str]] = []
             # Use the threaded tenant objects, NOT a lookup by external_id —
             # that raises MultipleObjectsReturned across providers (arch #235).
-            view_prefixes = self._view_prefixes(tenants, (vs.view_sources or {}).get("views"))
+            view_prefixes = self._view_prefixes(
+                tenants, vs.view_sources, {tenant.id for tenant in included_tenants}
+            )
             for schema_name, tenant_obj in tenant_schemas:
                 tenant_external_id = tenant_obj.external_id
                 prefix = view_prefixes[tenant_obj]
@@ -1009,7 +1025,7 @@ class SchemaManager:
             retired_as = current_state if current_state in RETIRED_VIEW_STATES else None
             if retired_as is None:
                 coverage = self._name_sources_added_since(workspace, coverage, tenants)
-                self._publish_view_row(vs, coverage, planned_sources, build_token)
+                self._publish_view_row(vs, coverage, planned_sources, view_prefixes, build_token)
         if retired_as is not None:
             # Retired while this build ran (the workspace dropped to one source):
             # that later decision wins, and marking the row ACTIVE would make its
@@ -1074,7 +1090,7 @@ class SchemaManager:
         }
 
     @staticmethod
-    def _publish_view_row(vs, coverage, planned_sources, build_token) -> None:
+    def _publish_view_row(vs, coverage, planned_sources, view_prefixes, build_token) -> None:
         # Reset the TTL on (re)build: a row resurrected from EXPIRED keeps its stale
         # last_accessed_at and expire_inactive_schemas would re-tear-down it (arch #255 03#2).
         vs.state = SchemaState.ACTIVE
@@ -1085,7 +1101,12 @@ class SchemaManager:
         # this save leaves the managed marker ahead of the row —
         # ``reconcile_view_publication`` is what closes that cross-database window.
         vs.tenant_coverage = coverage
-        vs.view_sources = {"version": VIEW_SOURCES_VERSION, "views": planned_sources}
+        vs.view_sources = {
+            "version": VIEW_SOURCES_VERSION,
+            "views": planned_sources,
+            # Every tenant's prefix, loaded or not, so the next build reuses it (#916).
+            "prefixes": {str(tenant.id): prefix for tenant, prefix in view_prefixes.items()},
+        }
         vs.physical_build_token = build_token
         vs.save(
             update_fields=[

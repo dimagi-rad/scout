@@ -1278,8 +1278,8 @@ def test_view_prefixes_keep_the_published_plain_prefix_holder(db):
     older.refresh_from_db()
     mgr = SchemaManager()
 
-    published = {"chc__visits": {"tenant_id": str(younger.id), "source_table_name": "visits"}}
-    prefixes = mgr._view_prefixes([older, younger], published)
+    views = {"chc__visits": {"tenant_id": str(younger.id), "source_table_name": "visits"}}
+    prefixes = mgr._view_prefixes([older, younger], {"version": 1, "views": views})
 
     assert prefixes[younger] == "chc"
     assert prefixes[older] != "chc"
@@ -1298,9 +1298,9 @@ def test_view_prefixes_find_a_fitted_multibyte_plain_holder(db):
     fitted = view_name(plain, "visits")
     assert not fitted.startswith(f"{plain}__")
 
-    published = {fitted: {"tenant_id": str(younger.id), "source_table_name": "visits"}}
+    views = {fitted: {"tenant_id": str(younger.id), "source_table_name": "visits"}}
 
-    assert mgr._view_prefixes([older, younger], published)[younger] == plain
+    assert mgr._view_prefixes([older, younger], {"views": views})[younger] == plain
 
 
 def test_build_keeps_the_younger_sources_published_names(db, managed_db_connection):
@@ -1347,6 +1347,14 @@ def test_build_keeps_the_younger_sources_published_names(db, managed_db_connecti
         TenantSchema.objects.filter(pk=ts_young.pk).update(state=SchemaState.EXPIRED)
         vs = mgr.build_view_schema(ws)
         assert set(vs.view_sources["views"]) == {older_name}
+        # Again with only the older source loaded: it must not take the freed plain name.
+        vs = mgr.build_view_schema(ws)
+        assert set(vs.view_sources["views"]) == {older_name}
+
+        TenantSchema.objects.filter(pk=ts_young.pk).update(state=SchemaState.ACTIVE)
+        vs = mgr.build_view_schema(ws)
+        assert set(vs.view_sources["views"]) == {older_name, plain_name}
+        assert vs.view_sources["views"][plain_name]["tenant_id"] == str(younger.id)
     finally:
         c3 = conn.cursor()
         try:
@@ -1361,3 +1369,27 @@ def test_build_keeps_the_younger_sources_published_names(db, managed_db_connecti
         ts_young.delete()
         if ts_old:
             ts_old.delete()
+
+
+def test_view_prefixes_prefer_a_loaded_source_without_a_record(db):
+    """A row from before view provenance has no record; the loaded source is the one
+    that published the plain name on main, so it keeps it."""
+    _ws, older, younger = _make_long_named_workspace("CHC", "opp-1", "CHC", "opp-2")
+    Tenant.objects.filter(pk=older.pk).update(created_at=timezone.now() - timedelta(days=1))
+    older.refresh_from_db()
+    mgr = SchemaManager()
+
+    prefixes = mgr._view_prefixes([older, younger], {}, {younger.id})
+
+    assert prefixes[younger] == "chc"
+    assert prefixes[older] != "chc"
+
+
+def test_view_prefixes_reuse_recorded_assignments(db):
+    _ws, older, younger = _make_long_named_workspace("CHC", "opp-1", "CHC", "opp-2")
+    mgr = SchemaManager()
+    digest = mgr._collision_view_prefix(younger)
+    recorded = {"prefixes": {str(younger.id): digest, str(older.id): "chc"}}
+
+    assert mgr._view_prefixes([younger], recorded) == {younger: digest}
+    assert mgr._view_prefixes([older, younger], recorded) == {older: "chc", younger: digest}
