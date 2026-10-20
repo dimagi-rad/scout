@@ -1,5 +1,6 @@
 import type { SourceFreshnessDetail, WorkspaceFreshness } from "@/api/workspaces"
 import { formatRelativeTime } from "@/lib/relativeTime"
+import { LOADING_EXPLAINER } from "@/lib/loadingCopy"
 
 import { LoadSummary } from "./LoadSummary"
 
@@ -14,9 +15,9 @@ interface Props {
 }
 
 function freshnessLabel(source: SourceFreshnessDetail): string {
-  if (!source.last_fetched_at) return "not loaded yet"
+  if (!source.last_fetched_at) return "not loaded into Scout yet"
   // Loaded, but outside what the workspace queries (e.g. no live multi-source view).
-  if (!source.serving) return "loaded but not in use"
+  if (!source.serving) return "loaded, but not used by this workspace"
   return `data as of ${formatRelativeTime(source.last_fetched_at)}`
 }
 
@@ -50,7 +51,13 @@ export function SourceFreshness({
       <ul
         className="flex flex-wrap gap-x-4 gap-y-0.5 px-4 pb-1 text-xs text-muted-foreground"
         data-testid="source-freshness"
+        title={LOADING_EXPLAINER}
       >
+        {!summaryOnly && (
+          <li className="font-medium">
+            {sources.length === 1 ? "Data source:" : `${sources.length} data sources:`}
+          </li>
+        )}
         {!summaryOnly && sources.map((source) => (
           <li key={source.tenant_id} data-testid={`source-freshness-${source.tenant_id}`}>
             {source.name}: {freshnessLabel(source)}
