@@ -15,6 +15,8 @@ from django.http import JsonResponse
 # Defaults — override via Django settings if needed.
 CHAT_RATE_LIMIT = 20  # requests per window
 CHAT_RATE_WINDOW = 60  # seconds
+# Separate from the chat budget: one message can carry ten attachments.
+ATTACHMENT_UPLOAD_RATE_LIMIT = 60
 
 
 def _get_settings():
@@ -25,7 +27,9 @@ def _get_settings():
     return limit, window
 
 
-async def check_and_record(user_id) -> tuple[bool, dict]:
+async def check_and_record(
+    user_id, *, scope: str = "chat", limit: int | None = None
+) -> tuple[bool, dict]:
     """Atomically check the rate limit and record the request if allowed.
 
     Performs a single cache read/write cycle to avoid TOCTOU races
@@ -35,9 +39,10 @@ async def check_and_record(user_id) -> tuple[bool, dict]:
     Returns (is_limited, info) where *info* contains ``limit``,
     ``remaining``, and ``reset`` (epoch timestamp).
     """
-    limit, window = _get_settings()
+    default_limit, window = _get_settings()
+    limit = default_limit if limit is None else limit
     now = time.time()
-    cache_key = f"chat_rl:{user_id}"
+    cache_key = f"chat_rl:{user_id}" if scope == "chat" else f"{scope}_rl:{user_id}"
     cutoff = now - window
 
     timestamps: list[float] = await cache.aget(cache_key, [])
@@ -60,16 +65,39 @@ def chat_rate_limit(view_func):
     Must be applied *after* ``@async_login_required`` so that
     ``request._authenticated_user`` is available.
     """
+    return _rate_limited(
+        view_func,
+        scope="chat",
+        limit=lambda: None,
+        message="Rate limit exceeded. Please wait before sending another message.",
+    )
+
+
+def attachment_upload_rate_limit(view_func):
+    """Per-user limit on attachment uploads, counted apart from chat messages."""
+    return _rate_limited(
+        view_func,
+        scope="attachment_upload",
+        limit=lambda: getattr(
+            settings, "ATTACHMENT_UPLOAD_RATE_LIMIT", ATTACHMENT_UPLOAD_RATE_LIMIT
+        ),
+        message="Too many uploads. Please wait a moment before attaching more files.",
+        reason="attachment_rate_limited",
+    )
+
+
+def _rate_limited(view_func, *, scope: str, limit, message: str, reason=None):
+    """``limit`` is read per request, so a settings override applies at once."""
 
     @functools.wraps(view_func)
     async def wrapper(request, *args, **kwargs):
         user = request._authenticated_user
-        is_limited, rl_info = await check_and_record(user.pk)
+        is_limited, rl_info = await check_and_record(user.pk, scope=scope, limit=limit())
         if is_limited:
-            resp = JsonResponse(
-                {"error": "Rate limit exceeded. Please wait before sending another message."},
-                status=429,
-            )
+            body = {"error": message}
+            if reason:
+                body["reason"] = reason
+            resp = JsonResponse(body, status=429)
             resp["Retry-After"] = str(rl_info["reset"] - int(time.time()))
             resp["X-RateLimit-Limit"] = str(rl_info["limit"])
             resp["X-RateLimit-Remaining"] = "0"

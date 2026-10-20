@@ -7,6 +7,7 @@ from datetime import timedelta
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db.models import ProtectedError, QuerySet
 from django.test import AsyncClient
 from django.utils import timezone
 
@@ -19,6 +20,7 @@ from apps.chat.attachments import (
     validate_upload,
 )
 from apps.chat.models import AttachmentBlob, ChatAttachment, Thread
+from apps.chat.rate_limiting import check_and_record
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
@@ -352,3 +354,38 @@ async def test_upload_reuses_blob_and_survives_concurrent_gc(user, workspace, mo
     assert calls[0] == blob.pk
     assert attachment.blob_id == calls[1] != blob.pk
     assert await AttachmentBlob.objects.acount() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_upload_rate_limit_is_separate_from_chat(user, workspace, settings):
+    settings.ATTACHMENT_UPLOAD_RATE_LIMIT = 1
+    client = await _client(user.email)
+    assert (await _upload(client, workspace, PNG, "a.png", "image/png")).status_code == 201
+    resp = await _upload(client, workspace, PNG, "b.png", "image/png")
+    assert resp.status_code == 429
+    assert resp.json()["reason"] == "attachment_rate_limited"
+    is_limited, _ = await check_and_record(user.pk)
+    assert not is_limited
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_gc_skips_a_blob_that_gains_a_reference_and_collects_the_rest(gc_rows, monkeypatch):
+    real_adelete = QuerySet.adelete
+    contended = gc_rows["blobs"]["orphan"].pk
+    raised = []
+
+    async def adelete(queryset):
+        pks = [pk async for pk in queryset.values_list("pk", flat=True)]
+        if pks == [contended] and not raised:
+            raised.append(contended)
+            raise ProtectedError("referenced", set())
+        return await real_adelete(queryset)
+
+    monkeypatch.setattr(QuerySet, "adelete", adelete)
+    result = await acollect_garbage()
+    assert raised == [contended]
+    assert await AttachmentBlob.objects.filter(pk=contended).aexists()
+    assert not await AttachmentBlob.objects.filter(pk=gc_rows["blobs"]["stale"].pk).aexists()
+    assert result["blobs"] == 1

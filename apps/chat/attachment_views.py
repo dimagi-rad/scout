@@ -23,6 +23,7 @@ from apps.chat.attachments import (
 )
 from apps.chat.helpers import _resolve_chat_access, async_login_required
 from apps.chat.models import ChatAttachment
+from apps.chat.rate_limiting import attachment_upload_rate_limit
 from apps.workspaces.access import access_denied_response
 
 
@@ -32,6 +33,7 @@ def _rejected(reason: str, message: str) -> JsonResponse:
 
 @csrf_protect
 @async_login_required
+@attachment_upload_rate_limit
 async def attachment_upload_view(request):
     """POST /api/chat/attachments/ — multipart ``file`` + ``workspaceId``."""
     if request.method != "POST":
