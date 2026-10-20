@@ -7,6 +7,7 @@ import { MAX_MESSAGE_LENGTH } from "./messageLimit"
 describe("MAX_MESSAGE_LENGTH", () => {
   it("matches the server's limit in apps/chat/constants.py", () => {
     const constants = readFileSync(
+      // Not import.meta.url: under jsdom it is an http URL, not a file one.
       path.resolve(__dirname, "../../../../apps/chat/constants.py"),
       "utf8",
     )

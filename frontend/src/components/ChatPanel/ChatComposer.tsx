@@ -127,7 +127,7 @@ export function ChatComposer({
   }
 
   return (
-    <div className="space-y-2">
+    <div className="flex flex-col gap-2">
       {quotes.length > 0 && (
         <ul className="space-y-1" aria-label="Quoted text">
           {quotes.map((quote, i) => (
@@ -208,7 +208,7 @@ export function ChatComposer({
           </span>
         )}
       </form>
-      <CharCounter id={counterId} length={length} />
+      <CharCounter id={counterId} length={length} includesHeld={Boolean(message && heldText)} />
     </div>
   )
 }

@@ -9,10 +9,13 @@ import { CHAR_COUNT_VISIBLE_FROM, MAX_MESSAGE_LENGTH, isOverLimit } from "./mess
 export function CharCounter({
   id,
   length,
+  includesHeld = false,
   className,
 }: {
   id: string
   length: number
+  /** The count includes a held request's text, which the composer can't shorten. */
+  includesHeld?: boolean
   className?: string
 }) {
   const visible = length >= CHAR_COUNT_VISIBLE_FROM
@@ -32,8 +35,14 @@ export function CharCounter({
         >
           {over && (
             <span data-testid="chat-char-count-hint">
-              Too long to send. Shorten it by {excess.toLocaleString()}{" "}
-              {excess === 1 ? "character" : "characters"}.
+              {includesHeld ? (
+                <>Together with your waiting request this is too long. Edit or send that request first.</>
+              ) : (
+                <>
+                  Too long to send. Shorten it by {excess.toLocaleString()}{" "}
+                  {excess === 1 ? "character" : "characters"}.
+                </>
+              )}
             </span>
           )}
           <span>

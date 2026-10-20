@@ -435,6 +435,23 @@ describe("a message sent while the chat's data loads", () => {
     })
   })
 
+  it("counts an unanswered request's text toward the limit of the message sent with it", async () => {
+    const server = mockServer()
+    server.pending = request([{ id: "p1", text: "x".repeat(9_990) }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    renderChat()
+    await screen.findByTestId("pending-request-card")
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "0123456789" } })
+
+    // held + "\n\n" + typed
+    expect(screen.getByTestId("chat-char-count")).toHaveTextContent("10,002 / 10,000")
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled()
+  })
+
   it("puts the request and the text typed with it back when its send is refused", async () => {
     const server = mockServer()
     server.pending = request([{ id: "p1", text: QUESTION }], {

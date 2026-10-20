@@ -297,6 +297,7 @@ describe("ChatComposer multi-line input and length limit (#913)", () => {
     )
     // held + "\n\n" + typed
     expect(screen.getByTestId("chat-char-count")).toHaveTextContent("11,002 / 10,000")
+    expect(screen.getByTestId("chat-char-count-hint")).toHaveTextContent("Edit or send that request first")
     expect(screen.getByTestId("chat-add-to-request")).toBeDisabled()
   })
 
