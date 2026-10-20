@@ -147,9 +147,8 @@ function exceptionValue(value: Exception, hint: EventHint): string | undefined {
   return value.value && safeText(value.value)
 }
 
-/** Removes request bodies, cookies, headers, query strings, email and raw values from an event. */
 /** The request, user, extra, context and breadcrumb scrubbing every event type gets. */
-function scrubCommon<T extends ErrorEvent | TransactionEvent>(event: T, keptContexts: Set<string>): T {
+function scrubCommon(event: ErrorEvent | TransactionEvent, keptContexts: Set<string>): void {
   if (event.request) {
     const userAgent = event.request.headers?.["User-Agent"]
     event.request = {
@@ -174,9 +173,9 @@ function scrubCommon<T extends ErrorEvent | TransactionEvent>(event: T, keptCont
       .map(scrubBreadcrumb)
       .filter((breadcrumb): breadcrumb is Breadcrumb => breadcrumb !== null)
   }
-  return event
 }
 
+/** Removes request bodies, cookies, headers, query strings, email and raw values from an event. */
 export function scrubEvent(event: ErrorEvent, hint: EventHint = {}): ErrorEvent {
   scrubCommon(event, KEPT_CONTEXTS)
 
