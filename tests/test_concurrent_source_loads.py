@@ -121,10 +121,16 @@ async def test_sources_load_at_once_and_report_in_membership_order(
 
 async def test_load_slots_bound_how_many_sources_load_at_once(three_source_workspace, user):
     overlap = _Overlap()
+    first_two = threading.Barrier(2, timeout=10)
+    calls = []
 
     def pipeline(*args, **kwargs):
+        calls.append(None)
         with overlap:
-            time.sleep(0.2)
+            if len(calls) <= 2:
+                # Both lanes held at once; a third load starting now would break the bound.
+                first_two.wait()
+                time.sleep(0.3)
         return completed_pipeline_run(*args, **kwargs)
 
     with override_settings(MATERIALIZATION_SHARED_LOAD_SLOTS=1):
