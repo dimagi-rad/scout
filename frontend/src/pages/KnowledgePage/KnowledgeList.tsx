@@ -82,6 +82,8 @@ export function KnowledgeList({
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {items.map((item) => {
             const title = getKnowledgeItemName(item)
+            const description = getItemDescription(item)
+            const isRawPreview = item.kind === "reference" && !item.description
 
             return (
             <Card key={item.id} className="flex flex-col">
@@ -122,13 +124,13 @@ export function KnowledgeList({
                 </div>
               </CardHeader>
               <CardContent className="flex-1 flex flex-col">
-                {getItemDescription(item) && (
+                {description && (
                   <p
                     className={`text-sm text-muted-foreground line-clamp-2 mb-3 ${
-                      item.kind === "reference" && !item.description ? "font-mono text-xs" : ""
+                      isRawPreview ? "font-mono text-xs" : ""
                     }`}
                   >
-                    {getItemDescription(item)}
+                    {description}
                   </p>
                 )}
 

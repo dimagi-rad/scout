@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { Loader2 } from "lucide-react"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
-import { writeErrorMessage } from "@/hooks/useWorkspaceRole"
+import { useWorkspaceRole, writeErrorMessage } from "@/hooks/useWorkspaceRole"
 import {
   Dialog,
   DialogContent,
@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
+  REFERENCE_DESCRIPTION_MAX_LENGTH,
   REFERENCE_UPLOAD_EXTENSIONS,
   REFERENCE_UPLOAD_MAX_BYTES,
   type ReferenceUploadFields,
@@ -33,6 +34,7 @@ function titleFromFilename(name: string): string {
 
 export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: ReferenceUploadDialogProps) {
   const isCurrentAccount = useIsCurrentAccount()
+  const { canWrite } = useWorkspaceRole()
   const [file, setFile] = useState<File | null>(null)
   const [title, setTitle] = useState("")
   const [description, setDescription] = useState("")
@@ -45,18 +47,22 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
     setTitle("")
     setDescription("")
     setError(null)
+    setLoading(false)
   }, [open])
+
+  const problem = file ? fileProblem(file) : null
+  const shownError = problem ?? error
 
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const picked = e.target.files?.[0] ?? null
     setFile(picked)
-    setError(picked ? fileProblem(picked) : null)
+    setError(null)
     if (picked) setTitle(titleFromFilename(picked.name))
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!file || fileProblem(file)) return
+    if (!file || problem) return
     setLoading(true)
     setError(null)
     try {
@@ -66,7 +72,7 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
     } catch (err) {
       if (!isCurrentAccount()) return
       const fallback = err instanceof Error ? err.message : "Upload failed. Try again."
-      setError(writeErrorMessage(err, fallback, true))
+      setError(writeErrorMessage(err, fallback, canWrite))
     } finally {
       if (isCurrentAccount()) setLoading(false)
     }
@@ -86,13 +92,13 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
         </DialogHeader>
 
         <form onSubmit={handleSubmit}>
-          {error && (
+          {shownError && (
             <div
               className="mb-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive"
               role="alert"
               data-testid="reference-upload-error"
             >
-              {error}
+              {shownError}
             </div>
           )}
           <div className="space-y-4">
@@ -105,7 +111,7 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
                 onChange={handleFile}
                 data-testid="reference-upload-file"
               />
-              {file && !fileProblem(file) && (
+              {file && !problem && (
                 <p className="text-xs text-muted-foreground" data-testid="reference-upload-size">
                   {formatSize(file.size)}
                 </p>
@@ -129,7 +135,7 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="What it is and when Scout should use it (optional)"
-                maxLength={500}
+                maxLength={REFERENCE_DESCRIPTION_MAX_LENGTH}
                 data-testid="reference-upload-description"
               />
             </div>
@@ -145,7 +151,7 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
             </Button>
             <Button
               type="submit"
-              disabled={loading || !file || !!fileProblem(file)}
+              disabled={loading || !file || !!problem}
               data-testid="reference-upload-submit"
             >
               {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}

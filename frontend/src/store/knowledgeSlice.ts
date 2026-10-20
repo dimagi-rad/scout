@@ -28,8 +28,10 @@ export interface KnowledgeEntryItem {
   updated_at: string
 }
 
-export const REFERENCE_UPLOAD_EXTENSIONS = [".json", ".csv", ".tsv", ".md", ".txt"] as const
+export const REFERENCE_UPLOAD_EXTENSIONS = [".json", ".csv", ".tsv", ".md", ".markdown", ".txt"] as const
 export const REFERENCE_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
+// KnowledgeEntry.description max_length.
+export const REFERENCE_DESCRIPTION_MAX_LENGTH = 500
 
 export interface ReferenceUploadFields {
   title?: string

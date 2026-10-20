@@ -139,8 +139,12 @@ describe("reference document upload", () => {
   })
 
   it.each([
-    ["registry.pdf", 10, "Upload a .json, .csv, .tsv, .md, .txt file."],
-    ["registry.json", REFERENCE_UPLOAD_MAX_BYTES + 1, "the limit is 2.0 MB"],
+    ["registry.pdf", 10, "Upload a .json, .csv, .tsv, .md, .markdown, .txt file."],
+    [
+      "registry.json",
+      REFERENCE_UPLOAD_MAX_BYTES + 1,
+      "This file is 2,097,153 bytes; the limit is 2,097,152 bytes (2.0 MB).",
+    ],
   ])("rejects %s before uploading", async (name, size, message) => {
     const onUpload = vi.fn()
     render(<ReferenceUploadDialog open onOpenChange={vi.fn()} onUpload={onUpload} />)
@@ -193,5 +197,7 @@ describe("referenceFilename", () => {
       "Registry_ v2_final.json",
     )
     expect(referenceFilename({ title: "Notes", source_format: "" })).toBe("Notes.txt")
+    expect(referenceFilename({ title: "指标登记表", source_format: "json" })).toBe("指标登记表.json")
+    expect(referenceFilename({ title: "***", source_format: "csv" })).toBe("document.csv")
   })
 })

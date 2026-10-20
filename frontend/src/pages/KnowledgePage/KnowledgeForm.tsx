@@ -14,7 +14,11 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import type { KnowledgeItem, KnowledgeType } from "@/store/knowledgeSlice"
+import {
+  REFERENCE_DESCRIPTION_MAX_LENGTH,
+  type KnowledgeItem,
+  type KnowledgeType,
+} from "@/store/knowledgeSlice"
 import { formatChars } from "./referenceFormat"
 
 interface KnowledgeFormProps {
@@ -76,6 +80,8 @@ export function KnowledgeForm({
       setForm(initialFormState)
     }
     setError(null)
+    setLoading(false)
+    setDownloading(false)
   }, [item, open])
 
   const handleChange = (
@@ -139,6 +145,10 @@ export function KnowledgeForm({
   }
 
   const entryNoun = isReference ? "Reference Document" : "Entry"
+  let dialogHint = "Add a new entry to your knowledge base"
+  if (readOnly) dialogHint = READ_ONLY_HINT
+  else if (isReference) dialogHint = "Update how Scout sees this document"
+  else if (isEdit) dialogHint = "Update the knowledge entry details"
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -147,15 +157,7 @@ export function KnowledgeForm({
           <DialogTitle>
             {readOnly ? `View ${entryNoun}` : isEdit ? `Edit ${entryNoun}` : "New Knowledge Entry"}
           </DialogTitle>
-          <DialogDescription>
-            {readOnly
-              ? READ_ONLY_HINT
-              : isReference
-                ? "Update how Scout sees this document"
-                : isEdit
-                ? "Update the knowledge entry details"
-                : "Add a new entry to your knowledge base"}
-          </DialogDescription>
+          <DialogDescription>{dialogHint}</DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit}>
@@ -190,7 +192,7 @@ export function KnowledgeForm({
                     value={form.description}
                     onChange={handleChange}
                     placeholder="What it is and when Scout should use it"
-                    maxLength={500}
+                    maxLength={REFERENCE_DESCRIPTION_MAX_LENGTH}
                     data-testid="knowledge-form-description"
                   />
                   <p className="text-xs text-muted-foreground">
@@ -200,7 +202,9 @@ export function KnowledgeForm({
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <Label>Content</Label>
+                    <span id="reference-content-label" className="text-sm font-medium">
+                      Content
+                    </span>
                     {onDownload && (
                       <Button
                         type="button"
@@ -220,6 +224,7 @@ export function KnowledgeForm({
                     )}
                   </div>
                   <pre
+                    aria-labelledby="reference-content-label"
                     className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 font-mono text-xs"
                     data-testid="knowledge-form-preview"
                   >
@@ -228,26 +233,26 @@ export function KnowledgeForm({
                   <p className="text-xs text-muted-foreground" data-testid="knowledge-form-preview-note">
                     {item.content_truncated
                       ? `Preview of the first ${item.content.length.toLocaleString()} of ${item.size.toLocaleString()} characters.`
-                      : formatChars(item.size)}{" "}
+                      : `${formatChars(item.size)}.`}{" "}
                     To change the content, upload a new version and delete this one.
                   </p>
                 </div>
               </>
             ) : (
-            <div className="space-y-2">
-              <Label htmlFor="content">Content</Label>
-              <Textarea
-                id="content"
-                name="content"
-                readOnly={readOnly}
-                value={form.content}
-                onChange={handleChange}
-                placeholder="Markdown content (metric definitions, semantic-model notes, business rules, etc.)"
-                rows={10}
-                className="font-mono text-sm"
-                required
-              />
-            </div>
+              <div className="space-y-2">
+                <Label htmlFor="content">Content</Label>
+                <Textarea
+                  id="content"
+                  name="content"
+                  readOnly={readOnly}
+                  value={form.content}
+                  onChange={handleChange}
+                  placeholder="Markdown content (metric definitions, semantic-model notes, business rules, etc.)"
+                  rows={10}
+                  className="font-mono text-sm"
+                  required
+                />
+              </div>
             )}
 
             <div className="space-y-2">

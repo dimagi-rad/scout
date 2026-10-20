@@ -1,3 +1,4 @@
+import { downloadBlob } from "@/lib/download"
 import {
   REFERENCE_UPLOAD_EXTENSIONS,
   REFERENCE_UPLOAD_MAX_BYTES,
@@ -25,22 +26,19 @@ const MIME_TYPES: Record<string, string> = {
 }
 
 export function referenceFilename(item: Pick<KnowledgeEntryItem, "title" | "source_format">): string {
-  const base = item.title.replace(/[^\w .-]+/g, "_").trim() || "document"
-  return `${base}.${item.source_format || "txt"}`
+  // Only characters a file system rejects are replaced, so non-Latin titles survive.
+  const base = item.title
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "_")
+    .replace(/^[_\s.]+|[_\s.]+$/g, "")
+  return `${base || "document"}.${item.source_format || "txt"}`
 }
 
 export function downloadText(
   item: Pick<KnowledgeEntryItem, "title" | "source_format" | "content">,
 ): void {
   const type = MIME_TYPES[item.source_format || "txt"] ?? "text/plain"
-  const url = URL.createObjectURL(new Blob([item.content], { type: `${type};charset=utf-8` }))
-  const a = document.createElement("a")
-  a.href = url
-  a.download = referenceFilename(item)
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
+  downloadBlob(referenceFilename(item), new Blob([item.content], { type: `${type};charset=utf-8` }))
 }
 
 export function fileProblem(file: File): string | null {
@@ -49,7 +47,10 @@ export function fileProblem(file: File): string | null {
     return `Upload a ${REFERENCE_UPLOAD_EXTENSIONS.join(", ")} file.`
   }
   if (file.size > REFERENCE_UPLOAD_MAX_BYTES) {
-    return `This file is ${formatSize(file.size)}; the limit is ${formatSize(REFERENCE_UPLOAD_MAX_BYTES)}.`
+    return (
+      `This file is ${file.size.toLocaleString("en-US")} bytes; the limit is ` +
+      `${REFERENCE_UPLOAD_MAX_BYTES.toLocaleString("en-US")} bytes (${formatSize(REFERENCE_UPLOAD_MAX_BYTES)}).`
+    )
   }
   return null
 }
