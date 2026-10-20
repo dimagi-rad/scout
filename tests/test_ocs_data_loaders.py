@@ -534,6 +534,14 @@ def test_message_loader_logs_only_real_messages(caplog):
     assert "Fetched 4 messages across 1 sessions" in caplog.text
 
 
+def _await_detail_threads() -> None:
+    """Abandoned in-flight fetches finish in the background; keep them stubbed until done."""
+    deadline = time.monotonic() + 5
+    while any(t.name.startswith("ocs-session-detail") for t in threading.enumerate()):
+        assert time.monotonic() < deadline, "detail fetch threads never finished"
+        time.sleep(0.01)
+
+
 def _detail_url(session_id: str) -> str:
     return f"{BASE_URL}/api/sessions/{session_id}/"
 
@@ -603,8 +611,7 @@ def test_message_loader_propagates_first_failure_and_stops_fetching():
         with pytest.raises(OCSExportError, match="boom"):
             for page in pages:
                 yielded.append(page)
-        # Abandoned in-flight fetches finish in the background; keep them stubbed.
-        time.sleep(0.05)
+        _await_detail_threads()
     # Sessions before the failure are delivered; nothing after it is.
     assert len(yielded) == 3
     # Only the bounded read-ahead was ever requested, not the remaining sessions.
@@ -629,32 +636,93 @@ def test_message_loader_stops_fetching_when_consumer_cancels():
         pages = loader.load_pages()
         next(pages)
         pages.close()
-        time.sleep(0.05)
+        _await_detail_threads()
     assert len(fetched) <= 1 + ocs_messages.DETAIL_FETCH_WINDOW + 1
 
 
-def test_concurrent_401s_spend_the_refresh_token_once():
+def _response(status: int, payload: dict | None = None) -> MagicMock:
+    resp = MagicMock(status_code=status, headers={}, url=None)
+    resp.json.return_value = payload or {}
+    return resp
+
+
+def test_concurrent_401s_share_one_refresh_and_retry_with_its_token():
     """Detail fetches that 401 together on one expired token must share one
     refresh: OAuth refresh tokens rotate, so a second refresh with the spent
     one would fail the load."""
+    ids = _session_ids(8)
     minted: list[str] = []
-    mint_lock = threading.Lock()
+    all_rejected = threading.Barrier(len(ids), timeout=5)
 
     def mint():
-        with mint_lock:
-            minted.append("x")
-        time.sleep(0.01)
-        return f"fresh-{len(minted)}"
+        minted.append("fresh")
+        return "fresh"
 
     loader = OCSMessageLoader(
         experiment_id="exp-1",
         credential={"type": "oauth", "value": "old", "refresh": mint},
         base_url=BASE_URL,
     )
-    threads = [threading.Thread(target=loader._refresh) for _ in range(8)]
+    sent_with: list[str] = []
+    sent_lock = threading.Lock()
+
+    def get(url, **_kwargs):
+        if url.startswith(f"{BASE_URL}/api/sessions/?") or url == f"{BASE_URL}/api/sessions/":
+            return _response(200, {"results": [{"id": i} for i in ids], "next": None})
+        auth = loader._session.headers["Authorization"]
+        with sent_lock:
+            sent_with.append(auth)
+        if auth == "Bearer old":
+            all_rejected.wait()
+            return _response(401)
+        return _response(200, {"messages": [{"role": "user", "content": url}]})
+
+    with patch.object(loader._session, "get", side_effect=get):
+        pages = list(loader.load_pages())
+
+    assert minted == ["fresh"]
+    assert [rows[0]["content"] for rows, _ in pages] == [_detail_url(i) for i in ids]
+    assert sent_with.count("Bearer fresh") == len(ids)
+
+
+def test_failed_refresh_is_not_retried_by_each_waiting_request():
+    attempts: list[int] = []
+
+    def mint():
+        attempts.append(1)
+        raise RuntimeError("invalid_grant")
+
+    loader = OCSMessageLoader(
+        experiment_id="exp-1",
+        credential={"type": "oauth", "value": "old", "refresh": mint},
+        base_url=BASE_URL,
+    )
+    errors = []
+
+    def refresh():
+        try:
+            loader._coalesced_refresh("Bearer old")
+        except RuntimeError as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=refresh) for _ in range(8)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
-    assert minted == ["x"]
-    assert loader._refresh() == "fresh-1"
+    assert attempts == [1]
+    assert len(errors) == 8
+
+
+def test_a_401_on_the_minted_token_refreshes_again():
+    """Reuse is keyed on the rejected token, not on timing: a fresh token that
+    is itself rejected (revoked elsewhere) must still be replaced."""
+    tokens = iter(["first", "second"])
+    loader = OCSMessageLoader(
+        experiment_id="exp-1",
+        credential={"type": "oauth", "value": "old", "refresh": lambda: next(tokens)},
+        base_url=BASE_URL,
+    )
+    assert loader._coalesced_refresh("Bearer old") == "first"
+    assert loader._coalesced_refresh("Bearer old") == "first"
+    assert loader._coalesced_refresh("Bearer first") == "second"
