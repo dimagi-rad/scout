@@ -13,6 +13,11 @@ from apps.chat.artifact_links import (
     latest_version_links,
     serialize_thread_artifact_link,
 )
+from apps.chat.attachments import (
+    abind_to_thread,
+    aresolve_for_send,
+    attachment_ids_from_parts,
+)
 from apps.chat.checkpointer import athread_has_checkpoint, ensure_checkpointer
 from apps.chat.helpers import (
     CheckpointerUnavailable,
@@ -297,15 +302,17 @@ def _pending_conflict(error: pending_requests.PendingRequestConflict) -> JsonRes
 async def thread_pending_request_parts_view(request, workspace_id, thread_id):
     """POST /api/workspaces/<workspace_id>/threads/<thread_id>/pending-request/parts/
 
-    Adds ``{id, text}`` to the request held while the chat's data loads; idempotent
-    on ``id``. A 409 means the request was claimed or is gone, and the client sends
-    the text as a normal message instead.
+    Adds ``{id, text, files?}`` to the request held while the chat's data loads;
+    idempotent on ``id``. ``files`` are the message's AI SDK file parts, which name
+    uploaded attachments; ``text`` may be empty when there are some. A 409 means
+    the request was claimed or is gone, and the client sends the text as a normal
+    message instead.
     """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
     user = request._authenticated_user
-    _workspace, err = await aresolve_workspace(user, workspace_id)
+    workspace, err = await aresolve_workspace(user, workspace_id)
     if err:
         return err
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
@@ -315,17 +322,32 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
     body, err = parse_json_object(request)
     if err:
         return err
-    part_id, text = body.get("id"), body.get("text")
+    part_id, text, files = body.get("id"), body.get("text"), body.get("files", [])
     if (
         not isinstance(part_id, str)
         or not part_id
         or len(part_id) > pending_requests.MAX_PART_ID_LENGTH
     ):
         return JsonResponse({"error": "id must be a non-empty string"}, status=400)
-    if not isinstance(text, str) or not text.strip():
+    if not isinstance(files, list):
+        return JsonResponse({"error": "files must be a list"}, status=400)
+    attachment_ids, error = attachment_ids_from_parts(files)
+    if error:
+        return JsonResponse({"error": error, "reason": "attachment_invalid"}, status=400)
+    if not isinstance(text, str) or not (text.strip() or attachment_ids):
         return JsonResponse({"error": "text must be a non-empty string"}, status=400)
+    attachments = await aresolve_for_send(
+        attachment_ids, user=user, workspace=workspace, thread_id=thread.id
+    )
+    if attachments is None or not await abind_to_thread(attachment_ids, user=user, thread=thread):
+        return JsonResponse(
+            {"error": "An attachment is no longer available.", "reason": "attachment_invalid"},
+            status=400,
+        )
     try:
-        pending = await pending_requests.aadd_part(thread.id, part_id=part_id, text=text)
+        pending = await pending_requests.aadd_part(
+            thread.id, part_id=part_id, text=text, attachments=attachments
+        )
     except pending_requests.PendingRequestConflict as e:
         return _pending_conflict(e)
     except pending_requests.PendingRequestTooLong as e:

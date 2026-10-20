@@ -23,6 +23,14 @@ from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools
 from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
 from apps.chat import pending_requests
+from apps.chat.attachments import (
+    MAX_ATTACHMENTS_PER_MESSAGE,
+    abind_to_thread,
+    aresolve_for_send,
+    attachment_ids_from_parts,
+    merge_attachments,
+    with_attachments,
+)
 from apps.chat.checkpointer import athread_has_checkpoint, ensure_checkpointer
 from apps.chat.constants import MAX_MESSAGE_LENGTH
 from apps.chat.helpers import (
@@ -154,6 +162,23 @@ def _last_message_text(message) -> tuple[str | None, JsonResponse | None]:
     return " ".join(texts), None
 
 
+def _last_message_attachment_ids(message: dict) -> tuple[list[str], JsonResponse | None]:
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return [], None
+    ids, error = attachment_ids_from_parts(parts)
+    if error:
+        return [], _attachment_invalid_response(error)
+    return ids, None
+
+
+def _attachment_invalid_response(message: str) -> JsonResponse:
+    return JsonResponse({"error": message, "reason": "attachment_invalid"}, status=400)
+
+
+ATTACHMENT_UNAVAILABLE_MESSAGE = "An attachment is no longer available. Attach it again and resend."
+
+
 @csrf_protect
 @async_login_required
 @chat_rate_limit
@@ -199,7 +224,10 @@ async def chat_view(request):
     user_content, err = _last_message_text(messages[-1])
     if err:
         return err
-    if not user_content or not user_content.strip():
+    attachment_ids, err = _last_message_attachment_ids(messages[-1])
+    if err:
+        return err
+    if not user_content.strip() and not attachment_ids:
         return JsonResponse({"error": "Empty message"}, status=400)
     if len(user_content) > MAX_MESSAGE_LENGTH:
         return JsonResponse(
@@ -239,12 +267,20 @@ async def chat_view(request):
         )
         return JsonResponse({"error": "Thread not found"}, status=404)
 
+    attachments = await aresolve_for_send(
+        attachment_ids, user=user, workspace=workspace, thread_id=thread_id
+    )
+    if attachments is None:
+        return _attachment_invalid_response(ATTACHMENT_UNAVAILABLE_MESSAGE)
+
     # The Thread row is the only authorization for this checkpointer key, so a
     # failed upsert must propagate rather than fall through to the agent.
     try:
         thread = await _upsert_thread(thread_id, user, user_content, workspace=workspace)
     except ForeignThreadError as e:
         return _foreign_thread_response(e.thread, user, workspace)
+    if not await abind_to_thread(attachment_ids, user=user, thread=thread):
+        return _attachment_invalid_response(ATTACHMENT_UNAVAILABLE_MESSAGE)
 
     pending_version, err = _pending_request_version(data)
     if err:
@@ -264,7 +300,9 @@ async def chat_view(request):
     # A version means the client is sending the held request itself (its "Send now").
     if pending_version is None:
         try:
-            held = await _hold_while_loading(workspace, thread_id, messages[-1], user_content)
+            held = await _hold_while_loading(
+                workspace, thread_id, messages[-1], user_content, attachments
+            )
         except pending_requests.PendingRequestTooLong as e:
             return _request_too_long_response(e.user_message)
         if held is not None:
@@ -284,6 +322,7 @@ async def chat_view(request):
                 access=access,
                 thread=thread,
                 user_content=user_content,
+                attachments=attachments,
                 pending_version=pending_version,
                 pending_request_id=pending_request_id,
                 request_started=request_started,
@@ -320,7 +359,9 @@ def _pending_request_version(data: dict) -> tuple[int | None, JsonResponse | Non
     return version, None
 
 
-async def _hold_while_loading(workspace, thread_id: str, message: dict, text: str) -> dict | None:
+async def _hold_while_loading(
+    workspace, thread_id: str, message: dict, text: str, attachments=()
+) -> dict | None:
     """Hold the message for the load this chat awaits, or None to answer it now.
 
     Only while the workspace serves no data: a refresh over served data answers
@@ -354,7 +395,11 @@ async def _hold_while_loading(workspace, thread_id: str, message: dict, text: st
     ):
         part_id = str(uuid.uuid4())
     return await pending_requests.ahold_message(
-        thread_id, part_id=part_id, text=text, for_workspace_load=not own_load
+        thread_id,
+        part_id=part_id,
+        text=text,
+        for_workspace_load=not own_load,
+        attachments=attachments,
     )
 
 
@@ -408,6 +453,7 @@ async def _start_turn(
     access,
     thread: Thread,
     user_content: str,
+    attachments: list[dict] | None = None,
     pending_version: int | None = None,
     pending_request_id: str | None = None,
     request_started: float | None = None,
@@ -504,6 +550,7 @@ async def _start_turn(
         thread_id,
         lease,
         user_content=user_content,
+        attachments=attachments or [],
         pending_version=pending_version,
         pending_request_id=pending_request_id,
     )
@@ -558,6 +605,7 @@ async def _claim_held_request(
     lease: TurnLease,
     *,
     user_content: str,
+    attachments: list[dict] | None = None,
     pending_version: int | None,
     pending_request_id: str | None = None,
 ) -> tuple[pending_requests.ClaimedRequest | None, HumanMessage | JsonResponse]:
@@ -573,11 +621,11 @@ async def _claim_held_request(
         if pending_version is not None:
             return None, _pending_conflict_response("unavailable")
         # The request stays held and is offered again; this turn need not fail with it.
-        return None, HumanMessage(content=user_content)
+        return None, _human_message(user_content, attachments)
     if claimed is None:
         if pending_version is not None:
             return None, _pending_conflict_response("gone")
-        return None, HumanMessage(content=user_content)
+        return None, _human_message(user_content, attachments)
     if pending_version is not None and (
         pending_version != claimed.version
         or (pending_request_id is not None and pending_request_id != str(claimed.request_id))
@@ -588,12 +636,25 @@ async def _claim_held_request(
     content = (
         user_content
         if pending_version is not None
-        else f"{claimed.text}{pending_requests.PART_SEPARATOR}{user_content}"
+        else pending_requests.PART_SEPARATOR.join(t for t in (claimed.text, user_content) if t)
     )
+    # Held attachments ride along even if the client resending it whole left them out.
+    combined = merge_attachments(claimed.attachments, attachments or [])
     if len(content) > MAX_MESSAGE_LENGTH:
         await pending_requests.arelease(claimed)
         return None, _request_too_long_response()
-    return claimed, HumanMessage(content=content, id=claimed.message_id)
+    if len(combined) > MAX_ATTACHMENTS_PER_MESSAGE:
+        await pending_requests.arelease(claimed)
+        return None, _request_too_long_response(
+            pending_requests.REFUSAL_MESSAGES["too_many_attachments"]
+        )
+    return claimed, _human_message(content, combined, message_id=claimed.message_id)
+
+
+def _human_message(content: str, attachments, *, message_id: str | None = None) -> HumanMessage:
+    return HumanMessage(
+        content=content, id=message_id, additional_kwargs=with_attachments(attachments or [])
+    )
 
 
 class _TurnStreamingResponse(StreamingHttpResponse):

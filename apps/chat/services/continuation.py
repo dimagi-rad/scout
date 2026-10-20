@@ -536,7 +536,7 @@ async def _resume_claimed_job(
             body += f" {HELD_REQUEST_NOTE}"
         resume_messages = [
             HumanMessage(content=body, id=held.marker_id),
-            HumanMessage(content=held.text, id=held.message_id),
+            pending_requests.held_human_message(held),
         ]
     else:
         resume_messages = [HumanMessage(content=body)]
@@ -972,7 +972,7 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
                         {
                             "messages": [
                                 HumanMessage(content=FLUSH_NOTE, id=held.marker_id),
-                                HumanMessage(content=held.text, id=held.message_id),
+                                pending_requests.held_human_message(held),
                             ],
                             "workspace_id": str(workspace.id),
                             "user_id": str(user.id),

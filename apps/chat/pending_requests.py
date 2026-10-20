@@ -28,6 +28,11 @@ from django.db.models.functions import Now
 from django.utils import timezone
 from langchain_core.messages import HumanMessage
 
+from apps.chat.attachments import (
+    MAX_ATTACHMENTS_PER_MESSAGE,
+    merge_attachments,
+    with_attachments,
+)
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import MAX_MESSAGE_LENGTH, SYSTEM_RESUME_MARKER
 from apps.chat.models import PendingRequest, Thread, ThreadJob
@@ -49,6 +54,9 @@ TOO_MANY_PARTS_MESSAGE = "That's as much as one request can hold — wait for yo
 REFUSAL_MESSAGES = {
     "too_long": REQUEST_TOO_LONG_MESSAGE,
     "too_many_parts": TOO_MANY_PARTS_MESSAGE,
+    "too_many_attachments": (
+        f"One request can carry at most {MAX_ATTACHMENTS_PER_MESSAGE} attachments"
+    ),
     "empty": "The request can't be empty — discard it instead",
     "first_part": "The first part can't be removed — edit it instead",
 }
@@ -86,6 +94,7 @@ class ClaimedRequest:
     version: int
     text: str
     token: uuid.UUID
+    attachments: tuple[dict, ...] = ()
 
     @property
     def message_id(self) -> str:
@@ -103,6 +112,15 @@ class _StaleClaim:
     token: uuid.UUID
 
 
+def held_human_message(claimed: ClaimedRequest) -> HumanMessage:
+    """The checkpoint message that sends ``claimed``, attachments included."""
+    return HumanMessage(
+        content=claimed.text,
+        id=claimed.message_id,
+        additional_kwargs=with_attachments(claimed.attachments),
+    )
+
+
 def held_message_id(request_id, version: int) -> str:
     # Per request, not per thread: a thread holds again after a send, and an id
     # already in the checkpoint would replace that message rather than append.
@@ -110,18 +128,32 @@ def held_message_id(request_id, version: int) -> str:
 
 
 def combined_text(parts: list[dict]) -> str:
-    return PART_SEPARATOR.join(part["text"] for part in parts)
+    # An attachments-only part adds no text, so it adds no separator either.
+    return PART_SEPARATOR.join(part["text"] for part in parts if part["text"])
 
 
-def _check_length(text: str, part_count: int = 1) -> None:
+def combined_attachments(parts: list[dict]) -> list[dict]:
+    return merge_attachments(*(part.get("attachments") or [] for part in parts))
+
+
+def _check_length(text: str, part_count: int = 1, attachment_count: int = 0) -> None:
     if len(text) > MAX_MESSAGE_LENGTH:
         raise PendingRequestTooLong("too_long")
     if part_count > MAX_PARTS:
         raise PendingRequestTooLong("too_many_parts")
+    if attachment_count > MAX_ATTACHMENTS_PER_MESSAGE:
+        raise PendingRequestTooLong("too_many_attachments")
 
 
-def _new_part(part_id: str, text: str) -> dict:
-    return {"id": part_id, "text": text, "added_at": timezone.now().isoformat()}
+def _check_parts(parts: list[dict]) -> None:
+    _check_length(combined_text(parts), len(parts), len(combined_attachments(parts)))
+
+
+def _new_part(part_id: str, text: str, attachments=()) -> dict:
+    part = {"id": part_id, "text": text, "added_at": timezone.now().isoformat()}
+    if attachments:
+        part["attachments"] = list(attachments)
+    return part
 
 
 ACTIVE_JOB_STATES = ThreadJob.ACTIVE_STATES
@@ -197,7 +229,7 @@ def _lease_is_live(thread_id) -> bool:
 
 @sync_to_async
 def ahold_message(
-    thread_id, *, part_id: str, text: str, for_workspace_load: bool = False
+    thread_id, *, part_id: str, text: str, for_workspace_load: bool = False, attachments=()
 ) -> dict | None:
     """Add ``text`` to the thread's held request while its load is still queued.
 
@@ -224,15 +256,16 @@ def ahold_message(
             return None
         pending = PendingRequest.objects.select_for_update().filter(thread_id=thread_id).first()
         if pending is None:
-            _check_length(text)
+            parts = [_new_part(part_id, text, attachments)]
+            _check_parts(parts)
             pending = PendingRequest.objects.create(
-                thread_id=thread_id, parts=[_new_part(part_id, text)], thread_job=job
+                thread_id=thread_id, parts=parts, thread_job=job
             )
         elif pending.state == PendingRequest.State.CLAIMED:
             return None
         elif not any(part["id"] == part_id for part in pending.parts):
-            parts = [*pending.parts, _new_part(part_id, text)]
-            _check_length(combined_text(parts), len(parts))
+            parts = [*pending.parts, _new_part(part_id, text, attachments)]
+            _check_parts(parts)
             pending.parts = parts
             pending.version += 1
             # A workspace-load hold leaves a load of the chat's own in charge while
@@ -248,7 +281,7 @@ def ahold_message(
 
 
 @sync_to_async
-def aadd_part(thread_id, *, part_id: str, text: str) -> dict:
+def aadd_part(thread_id, *, part_id: str, text: str, attachments=()) -> dict:
     """Append a part; idempotent on ``part_id``. Raises ``PendingRequestConflict``
     once the request is claimed or gone, so the caller sends it as a turn instead."""
     with transaction.atomic():
@@ -258,8 +291,8 @@ def aadd_part(thread_id, *, part_id: str, text: str) -> dict:
         if pending.state == PendingRequest.State.CLAIMED:
             raise PendingRequestConflict("claimed")
         if not any(part["id"] == part_id for part in pending.parts):
-            parts = [*pending.parts, _new_part(part_id, text)]
-            _check_length(combined_text(parts), len(parts))
+            parts = [*pending.parts, _new_part(part_id, text, attachments)]
+            _check_parts(parts)
             pending.parts = parts
             pending.version += 1
             pending.flush_attempts = 0
@@ -290,11 +323,13 @@ def aedit(
         if pending.version != version:
             raise PendingRequestConflict("version")
         if text is not None:
-            if not text.strip():
+            # A rewrite changes the text only; the request keeps its attachments.
+            attachments = combined_attachments(pending.parts)
+            if not text.strip() and not attachments:
                 raise PendingRequestInvalidEdit("empty")
-            _check_length(text)
             # One part now: the user rewrote the whole request.
-            pending.parts = [_new_part(f"edit-{uuid.uuid4()}", text)]
+            pending.parts = [_new_part(f"edit-{uuid.uuid4()}", text, attachments)]
+            _check_parts(pending.parts)
         else:
             index = next(
                 (i for i, part in enumerate(pending.parts) if part["id"] == remove_part_id), None
@@ -361,6 +396,7 @@ def _claim(thread_id, lease_token: uuid.UUID, thread_job_id) -> ClaimedRequest |
             version=pending.version,
             text=combined_text(pending.parts),
             token=lease_token,
+            attachments=tuple(combined_attachments(pending.parts)),
         )
 
 

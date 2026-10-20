@@ -19,7 +19,7 @@ from datetime import timedelta
 from pathlib import PurePath
 
 from django.db import IntegrityError
-from django.db.models import Exists, OuterRef, ProtectedError
+from django.db.models import Exists, OuterRef, ProtectedError, Q
 from django.utils import timezone
 
 from apps.chat.image_headers import MalformedImage, read_image_header
@@ -277,3 +277,94 @@ async def _acollect_orphans_one_by_one(orphans) -> int:
             continue
         blobs_deleted += deleted
     return blobs_deleted
+
+
+# Where a HumanMessage carries its attachments; its content stays the typed text.
+SCOUT_ATTACHMENTS_KWARG = "scout_attachments"
+
+
+def message_attachments(message) -> list[dict]:
+    """The ``{id, filename, media_type, size}`` entries a checkpointed message carries."""
+    kwargs = getattr(message, "additional_kwargs", None) or {}
+    entries = kwargs.get(SCOUT_ATTACHMENTS_KWARG)
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)]
+
+
+def with_attachments(attachments) -> dict:
+    """``additional_kwargs`` for a HumanMessage carrying ``attachments`` (none: empty)."""
+    return {SCOUT_ATTACHMENTS_KWARG: list(attachments)} if attachments else {}
+
+
+def merge_attachments(*groups) -> list[dict]:
+    """The groups' attachments in order, each id once."""
+    seen: set[str] = set()
+    merged = []
+    for group in groups:
+        for entry in group:
+            if entry["id"] not in seen:
+                seen.add(entry["id"])
+                merged.append(entry)
+    return merged
+
+
+def attachment_ids_from_parts(parts) -> tuple[list[str], str | None]:
+    """The attachment ids a message's ``file`` parts name, in order, or an error message.
+
+    Only this server's attachment URLs are accepted: a data: URL or any other link
+    would put content the server never validated in front of the model.
+    """
+    ids: list[str] = []
+    for part in parts or []:
+        if not isinstance(part, dict) or part.get("type") != "file":
+            continue
+        attachment_id = attachment_id_from_url(part.get("url"))
+        if attachment_id is None:
+            return [], "File parts must reference an uploaded attachment."
+        if attachment_id not in ids:
+            ids.append(attachment_id)
+    if len(ids) > MAX_ATTACHMENTS_PER_MESSAGE:
+        return [], f"A message can carry at most {MAX_ATTACHMENTS_PER_MESSAGE} attachments."
+    return ids, None
+
+
+async def aresolve_for_send(ids: list[str], *, user, workspace, thread_id) -> list[dict] | None:
+    """The attachments' metadata in ``ids`` order, or None unless every one is the
+    user's, in ``workspace``, and unsent or already in this thread."""
+    if not ids:
+        return []
+    rows = {
+        str(row["id"]): row
+        async for row in ChatAttachment.objects.filter(
+            Q(thread__isnull=True) | Q(thread_id=thread_id),
+            id__in=ids,
+            user=user,
+            workspace=workspace,
+        ).values("id", "filename", "media_type", "blob__size")
+    }
+    if len(rows) != len(ids):
+        return None
+    return [
+        {
+            "id": attachment_id,
+            "filename": rows[attachment_id]["filename"],
+            "media_type": rows[attachment_id]["media_type"],
+            "size": rows[attachment_id]["blob__size"],
+        }
+        for attachment_id in ids
+    ]
+
+
+async def abind_to_thread(ids, *, user, thread) -> bool:
+    """Tie the attachments to the thread their message is sent in, so GC keeps them.
+
+    False when one vanished since it was resolved (its unsent TTL ran out meanwhile).
+    """
+    ids = list(ids)
+    if not ids:
+        return True
+    bound = await ChatAttachment.objects.filter(
+        Q(thread__isnull=True) | Q(thread=thread), id__in=ids, user=user
+    ).aupdate(thread=thread)
+    return bound == len(ids)
