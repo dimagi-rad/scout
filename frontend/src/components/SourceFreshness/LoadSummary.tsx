@@ -76,8 +76,13 @@ export function LoadSummary({ sources, justLoaded, onClose }: Props) {
                 <span className="font-medium">{source.name}</span>
                 <span className="text-xs text-muted-foreground">{source.provider_label}</span>
               </div>
-              {!summary || !source.last_fetched_at ? (
+              {!source.last_fetched_at ? (
                 <p className="text-xs text-muted-foreground">Not loaded yet.</p>
+              ) : !summary ? (
+                <p className="text-xs text-muted-foreground">
+                  Loaded {formatRelativeTime(source.last_fetched_at)}; no per-table detail for
+                  this load.
+                </p>
               ) : (
                 <>
                   <p className="text-xs text-muted-foreground">

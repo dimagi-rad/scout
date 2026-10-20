@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -94,6 +94,20 @@ describe("ChatPanel load summary", () => {
 
     await vi.waitFor(() => expect(workspaceApi.getFreshness).toHaveBeenCalledTimes(2))
     expect(screen.queryByTestId("load-summary")).toBeNull()
+  })
+
+  it("can be reopened on a new chat after closing it", async () => {
+    jobs.workspaceLoads = [RUNNING_LOAD]
+    const { rerender } = render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await screen.findByTestId("workspace-load-banner")
+    jobs.workspaceLoads = []
+    rerender(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    fireEvent.click(await screen.findByTestId("load-summary-close"))
+    expect(screen.queryByTestId("load-summary")).toBeNull()
+
+    fireEvent.click(screen.getByTestId("source-freshness-details"))
+
+    expect(screen.getByTestId("load-summary")).toHaveTextContent("What's loaded")
   })
 
   it("stays closed when no load ran", async () => {

@@ -9,7 +9,7 @@ import { forgetLocalThread, isLocalThread } from "@/store/localThreads"
 import { turnArtifactOwners } from "@/components/ChatMessage/artifactReferences"
 import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
 import { workspaceApi } from "@/api/workspaces"
-import { LoadSummary, SourceFreshness } from "@/components/SourceFreshness"
+import { SourceFreshness } from "@/components/SourceFreshness"
 import { StaleDataBanner } from "@/components/StaleDataBanner"
 import { useThreadDraft } from "@/hooks/useThreadDraft"
 import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
@@ -253,12 +253,18 @@ export function ChatPanel() {
   }, [activeDomainId, freshness])
   const loadSummaryOpen = loadSummary.open && loadSummary.workspaceId === activeDomainId
   const setLoadSummaryOpen = useCallback(
-    (open: boolean) => setLoadSummary({ workspaceId: activeDomainId, open, justLoaded: false }),
+    (open: boolean) => {
+      // A choice made before the post-load data lands must not be overridden by it.
+      staleFreshnessRef.current = undefined
+      setLoadSummary({ workspaceId: activeDomainId, open, justLoaded: false })
+    },
     [activeDomainId],
   )
   // A refresh queues a job the load poll cannot see until a worker starts it;
   // the freshness endpoint does, so the banner hides instead of re-offering Refresh.
   const handleRefreshStarted = useCallback(() => {
+    // Its refetch is not the post-load data of an earlier load whose refetch failed.
+    staleFreshnessRef.current = undefined
     notifyJobLikelyStarted()
     refetchFreshness()
   }, [notifyJobLikelyStarted, refetchFreshness])
@@ -1083,13 +1089,6 @@ export function ChatPanel() {
       <div className="flex h-full min-w-0 flex-col">
         {loadBanners}
         {staleBanner}
-        {loadSummaryOpen && freshness?.sources.some((source) => source.summary) && (
-          <LoadSummary
-            sources={freshness.sources}
-            justLoaded={loadSummary.justLoaded}
-            onClose={() => setLoadSummaryOpen(false)}
-          />
-        )}
         <div className="min-h-0 flex-1">
           <ChatEmptyState
             input={input}
@@ -1098,6 +1097,12 @@ export function ChatPanel() {
             disabled={isStreaming}
           />
         </div>
+        <SourceFreshness
+          freshness={freshness}
+          summaryOpen={loadSummaryOpen}
+          onSummaryOpenChange={setLoadSummaryOpen}
+          justLoaded={loadSummary.justLoaded}
+        />
       </div>
     )
   }

@@ -54,6 +54,7 @@ describe("SourceFreshness", () => {
             },
           }),
           freshSource("Beta", null),
+          freshSource("Gamma", 2),
         ])}
       />,
     )
@@ -69,6 +70,9 @@ describe("SourceFreshness", () => {
     )
     expect(screen.getByTestId("load-summary-table-Alpha-cases")).toHaveTextContent("failed")
     expect(screen.getByTestId("load-summary-source-Beta")).toHaveTextContent("Not loaded yet.")
+    expect(screen.getByTestId("load-summary-source-Gamma")).toHaveTextContent(
+      "no per-table detail",
+    )
 
     await userEvent.click(screen.getByTestId("load-summary-close"))
     expect(screen.queryByTestId("load-summary")).toBeNull()
