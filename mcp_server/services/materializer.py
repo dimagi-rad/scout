@@ -44,6 +44,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Iterator
+from contextlib import closing
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
@@ -1032,7 +1033,10 @@ def _load_ocs_source(
 
     loader_cls, writer_fn = loader_map[source_name]
     loader = loader_cls(experiment_id=experiment_id, credential=credential)
-    return writer_fn(loader.load_pages(), schema_name, conn, on_page=on_page)
+    # Close explicitly: the messages loader's fetch pool stops only when its
+    # generator closes, and a propagating cancel would otherwise hold it open.
+    with closing(loader.load_pages()) as pages:
+        return writer_fn(pages, schema_name, conn, on_page=on_page)
 
 
 def _write_ocs_experiments(
