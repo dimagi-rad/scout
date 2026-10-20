@@ -251,6 +251,10 @@ and before it nothing watched the host disk (see [Host disk full](#host-disk-ful
   (`scout-rds-low-storage`). Use these lines to see which table grows, for
   example chat attachments.
 
+The worker reads these from its environment. Kamal passes only the variables
+listed in `config/deploy-worker.yml`, so to change one, add it under `env.clear`
+there and redeploy the worker.
+
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `STORAGE_DISK_PATH` | `/` | Path whose filesystem is checked. |
