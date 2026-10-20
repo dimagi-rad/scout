@@ -6,6 +6,7 @@ import uuid
 from datetime import timedelta
 
 import pytest
+from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models import ProtectedError, QuerySet
 from django.test import AsyncClient
@@ -29,6 +30,13 @@ GIF = b"GIF89a" + b"\x00" * 64
 WEBP = b"RIFF" + struct.pack("<I", 60) + b"WEBP" + b"\x00" * 56
 
 UPLOAD_URL = "/api/chat/attachments/"
+
+
+@pytest.fixture(autouse=True)
+def _clear_rate_limits():
+    cache.clear()
+    yield
+    cache.clear()
 
 
 async def _client(email, password="testpass123", *, csrf=True):
@@ -231,7 +239,7 @@ async def test_owner_downloads_image_inline(user, workspace):
     assert resp["Content-Type"] == "image/png"
     assert resp["X-Content-Type-Options"] == "nosniff"
     assert resp["Content-Disposition"].startswith("inline")
-    assert resp["Cache-Control"] == "private, max-age=86400"
+    assert resp["Cache-Control"] == "private, max-age=300"
 
 
 @pytest.mark.asyncio
@@ -418,4 +426,4 @@ async def test_download_needs_current_workspace_access(user, workspace):
     client = await _client(user.email)
     url = (await _upload(client, workspace, PNG, "shot.png", "image/png")).json()["url"]
     await WorkspaceMembership.objects.filter(user=user, workspace=workspace).adelete()
-    assert (await client.get(url)).status_code == 404
+    assert (await client.get(url)).status_code in (403, 404)

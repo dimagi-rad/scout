@@ -162,11 +162,10 @@ async def _blob_id_for(content: bytes) -> int:
             sha256=sha256, size=len(content), content=content
         )
     except IntegrityError:
-        # A concurrent upload of the same bytes created it first.
+        # A concurrent upload of the same bytes created it first. By sha256 alone,
+        # the unique key: the size can only differ on a SHA-256 collision.
         return (
-            await AttachmentBlob.objects.filter(sha256=sha256, size=len(content))
-            .values_list("id", flat=True)
-            .aget()
+            await AttachmentBlob.objects.filter(sha256=sha256).values_list("id", flat=True).aget()
         )
     return blob.id
 

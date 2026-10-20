@@ -62,7 +62,8 @@ async def attachment_upload_view(request):
             status=403,
         )
 
-    # Checked before reading, so an oversized upload is never pulled into memory.
+    # csrf_protect has already parsed (and spooled) the body; this check only
+    # spares copying an oversized file into memory.
     if upload.size > MAX_IMAGE_BYTES:
         return _rejected(
             "attachment_too_large",
@@ -104,7 +105,9 @@ async def attachment_detail_view(request, attachment_id: uuid.UUID):
     # Owning the upload is not enough: like every workspace read, it needs access now.
     access = await aresolve_workspace_access_ex(user, attachment.workspace_id)
     if access.workspace is None:
-        return JsonResponse({"error": "Attachment not found"}, status=404)
+        # Ownership is proven, so the real reason (and whether to retry, as for an
+        # upstream outage) discloses nothing.
+        return access_denied_response(access, reason="access_denied")
 
     is_image = attachment.media_type.startswith("image/")
     content_type = attachment.media_type if is_image else f"{attachment.media_type}; charset=utf-8"
@@ -114,5 +117,6 @@ async def attachment_detail_view(request, attachment_id: uuid.UUID):
     response["Content-Disposition"] = content_disposition_header(
         as_attachment=not is_image, filename=attachment.filename
     )
-    response["Cache-Control"] = "private, max-age=86400"
+    # Short, so the browser soon asks again and the access check above applies.
+    response["Cache-Control"] = "private, max-age=300"
     return response
