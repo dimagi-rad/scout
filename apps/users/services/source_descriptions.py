@@ -54,18 +54,32 @@ def connect_description(opportunity: Any) -> str | None:
 
 @dataclass(frozen=True)
 class ChatbotProbe:
-    """What a chatbot's newest session says about it; None with no sessions."""
+    """The description on a chatbot's newest session; None when it has no sessions."""
 
     description: str | None
 
 
+# The credential was refused or the token's rate limit hit: every other probe
+# would get the same answer, and keep spending the limit the data loads share.
+_STOP_STATUSES = frozenset({401, 403, 429})
+
+
 async def _probe_one(
-    client: httpx.AsyncClient, url: str, headers: Mapping[str, str], experiment_id: str
+    client: httpx.AsyncClient,
+    url: str,
+    headers: Mapping[str, str],
+    experiment_id: str,
+    stop: asyncio.Event,
 ) -> ChatbotProbe | None:
+    if stop.is_set():
+        return None
     try:
         response = await client.get(
             url, headers=dict(headers), params={"experiment": experiment_id, "page_size": 1}
         )
+        if response.status_code in _STOP_STATUSES:
+            stop.set()
+            return None
         if response.status_code != 200:
             return None
         results = response.json().get("results")
@@ -106,13 +120,14 @@ async def aprobe_ocs_chatbots(
         return {}
     url = f"{base_url.rstrip('/')}/api/sessions/"
     semaphore = asyncio.Semaphore(_OCS_PROBE_CONCURRENCY)
+    stop = asyncio.Event()
     probes: dict[str, ChatbotProbe] = {}
 
     async with httpx.AsyncClient(timeout=_OCS_PROBE_TIMEOUT_SECONDS) as client:
 
         async def probe(experiment_id: str) -> None:
             async with semaphore:
-                result = await _probe_one(client, url, headers, experiment_id)
+                result = await _probe_one(client, url, headers, experiment_id, stop)
             if result is not None:
                 probes[experiment_id] = result
 

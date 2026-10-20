@@ -236,3 +236,13 @@ async def test_probe_never_sends_a_credential_to_an_unsafe_origin(ocs_sessions):
     assert await aprobe_ocs_chatbots("http://ocs.example.com", {"X-api-key": "k"}, ["a"]) == {}
 
     ocs_sessions.client.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_probe_stops_once_ocs_refuses_or_rate_limits(ocs_sessions, monkeypatch):
+    monkeypatch.setattr(source_descriptions, "_OCS_PROBE_CONCURRENCY", 1)
+    ocs_sessions.update({eid: _Response(429, {}) for eid in ("a", "b", "c")})
+
+    assert await aprobe_ocs_chatbots("https://ocs.example.com", {}, ["a", "b", "c"]) == {}
+
+    assert ocs_sessions.client.get.await_count == 1
