@@ -28,7 +28,8 @@ const run = (label: string): RecipeRun => ({
   started_at: null, completed_at: null, created_at: "",
 })
 const entry = (title: string): KnowledgeEntryItem => ({
-  id: "same-id", type: "entry", title, content: "", tags: [], created_at: "", updated_at: "",
+  id: "same-id", type: "entry", kind: "note", title, description: "", source_format: "",
+  content: "", content_truncated: false, size: 0, tags: [], created_at: "", updated_at: "",
 })
 const pagination = { page: 1, page_size: 20, total_count: 1, total_pages: 1, has_next: false, has_previous: false }
 const knowledge = (label: string) => ({ results: [entry(label)], pagination })

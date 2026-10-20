@@ -1,3 +1,5 @@
+import { downloadBlob } from "./download"
+
 // Leading characters that make Excel/Sheets evaluate a cell as a formula (OWASP CSV injection).
 const FORMULA_PREFIX = /^[=+\-@\t\r]/
 
@@ -45,17 +47,5 @@ export function csvFilename(title: string | undefined, now: Date = new Date()): 
 
 export function downloadCsv(filename: string, csv: string): void {
   // BOM so Excel detects UTF-8.
-  const blob = new Blob(["﻿", csv], { type: "text/csv;charset=utf-8" })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement("a")
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  try {
-    a.click()
-  } finally {
-    document.body.removeChild(a)
-    // Revoking synchronously can cancel the download in older Safari/Firefox.
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
-  }
+  downloadBlob(filename, new Blob(["﻿", csv], { type: "text/csv;charset=utf-8" }))
 }
