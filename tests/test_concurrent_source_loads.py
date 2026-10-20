@@ -236,3 +236,30 @@ async def test_a_job_still_loads_while_other_jobs_hold_every_shared_slot(
 
     assert result["all_succeeded"] is True
     assert overlap.peak == 1
+
+
+async def test_a_cancel_during_the_next_sources_prechecks_stops_it(
+    three_source_workspace, user, membership_order
+):
+    first, second, _third = membership_order
+    first_cancelled = threading.Event()
+    calls = []
+
+    def pipeline(membership, *args, **kwargs):
+        calls.append(membership.tenant.external_id)
+        first_cancelled.set()
+        raise MaterializationCancelled()
+
+    async def credential(tm):
+        if tm.tenant.external_id == second:
+            # Lanes stay free: the cancel lands while this source is still being prepared.
+            await asyncio.to_thread(first_cancelled.wait, 5)
+            await asyncio.sleep(0.1)
+        return {"type": "api_key", "value": "k"}
+
+    with override_settings(MATERIALIZATION_SHARED_LOAD_SLOTS=2):
+        result = await _load(three_source_workspace, user, pipeline, credential=credential)
+        assert _all_slots_free(2)
+
+    assert calls == [first]
+    assert [entry["tenant"] for entry in result["tenants"]] == [first]

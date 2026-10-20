@@ -740,15 +740,18 @@ async def materialize_workspace_core(
                     )
                     continue
                 release = lanes.take_now()
-                if release is None:
+                waited = release is None
+                if waited:
                     release = await lanes.take()
+                # The prechecks await, so a load may have been cancelled meanwhile.
+                if loads_cancelled:
+                    release()
+                    attempted_tenant_ids.discard(str(tm.tenant_id))
+                    break
+                if waited:
                     try:
-                        # Waited for a lane, so the check above may have gone stale.
-                        if loads_cancelled:
-                            attempted_tenant_ids.discard(str(tm.tenant_id))
-                            stop = True
-                        else:
-                            stop = await stopped_by_denial(index)
+                        # Waited for a lane, so the access check above may have gone stale.
+                        stop = await stopped_by_denial(index)
                         skip = not stop and await membership_lost(tm)
                     except BaseException:
                         release()
