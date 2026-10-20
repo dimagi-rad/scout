@@ -12,6 +12,9 @@ export interface UserTenant {
   // Provider-specific metadata for filtering (Connect: is_active, is_test, organization, …).
   // Absent from older API responses and {} for providers that send none; treat every key as untrusted.
   attributes?: Record<string, unknown>
+  // The provider's own description (OCS chatbot, Connect opportunity); "" when unknown.
+  // Absent from older API responses.
+  description?: string
 }
 
 export const authApi = {
