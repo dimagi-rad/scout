@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -655,11 +656,32 @@ def test_concurrent_loads_share_the_process_wide_fetch_limit():
     assert state["peak"] == 5
 
 
-def test_fetch_parked_on_a_process_slot_skips_once_its_load_stopped():
+def test_fetch_of_a_stopped_load_skips_without_queueing_for_a_slot():
     loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
     stopped = threading.Event()
     stopped.set()
-    with patch.object(loader, "_get_json") as get_json:
+    with (
+        patch.object(ocs_messages, "_process_fetch_slots") as slots,
+        patch.object(loader, "_get_json") as get_json,
+    ):
+        assert loader._session_messages("sess-1", stopped) == []
+    slots.assert_not_called()
+    get_json.assert_not_called()
+
+
+def test_fetch_skips_if_its_load_stopped_while_it_waited_for_a_slot():
+    loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    stopped = threading.Event()
+
+    @contextlib.contextmanager
+    def slot_granted_after_the_load_stopped():
+        stopped.set()
+        yield
+
+    with (
+        patch.object(ocs_messages, "_process_fetch_slots", slot_granted_after_the_load_stopped),
+        patch.object(loader, "_get_json") as get_json,
+    ):
         assert loader._session_messages("sess-1", stopped) == []
     get_json.assert_not_called()
 

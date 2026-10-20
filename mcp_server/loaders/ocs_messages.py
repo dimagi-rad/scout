@@ -151,13 +151,12 @@ class OCSMessageLoader(OCSBaseLoader):
             executor.shutdown(wait=False, cancel_futures=True)
 
     def _session_messages(self, session_id: str, stopped: threading.Event) -> list:
-        # A session with no messages legitimately omits/empties the key, so a
-        # missing ``messages`` is treated as empty (not an error) — but the JSON
-        # parse itself is validated via _get_json (finding 03#6).
         if stopped.is_set():
             return []
         try:
             with _process_fetch_slots():
+                # Again: the load may have ended while this waited for a slot,
+                # which can span other loads' Retry-After sleeps.
                 if stopped.is_set():
                     return []
                 detail = self._get_json(f"{self.base_url}/api/sessions/{session_id}/")
@@ -165,6 +164,9 @@ class OCSMessageLoader(OCSBaseLoader):
             # A mid-run token refresh persists through the ORM; without this the
             # pool thread's DB connection would outlive the load (shared RDS).
             connections.close_all()
+        # A session with no messages legitimately omits/empties the key, so a
+        # missing ``messages`` is treated as empty (not an error) — but the JSON
+        # parse itself is validated via _get_json (finding 03#6).
         return detail.get("messages") or []
 
     def load(self) -> list[dict]:
