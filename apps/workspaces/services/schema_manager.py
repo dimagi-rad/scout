@@ -703,11 +703,13 @@ class SchemaManager:
         """
         tenants = list(tenants)
         plain = {tenant: self._view_prefix(tenant) for tenant in tenants}
+        by_id = {str(tenant.id): tenant for tenant in tenants}
+        # Exact match, not startswith: fitting a long multibyte name can cut the prefix.
         published_plain = {
-            source.get("tenant_id")
+            tenant_id
             for name, source in (published_views or {}).items()
-            for tenant, prefix in plain.items()
-            if source.get("tenant_id") == str(tenant.id) and name.startswith(f"{prefix}__")
+            if (tenant_id := source.get("tenant_id")) in by_id
+            and name == view_name(plain[by_id[tenant_id]], source.get("source_table_name", ""))
         }
         holder: dict[str, object] = {}
         for tenant in sorted(
