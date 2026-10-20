@@ -428,7 +428,7 @@ VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER = "[cascade-teardown]"
 VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR = (
     f"{VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER} A tenant schema this workspace's "
     "combined view depends on was torn down (inactivity TTL or teardown), so the "
-    "namespaced views were cascade-dropped. Re-running materialization rebuilds "
+    "namespaced views were cascade-dropped. Re-running the import rebuilds "
     "the tenant data and the view schema."
 )
 

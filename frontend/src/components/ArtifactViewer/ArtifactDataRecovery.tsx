@@ -84,7 +84,7 @@ export function ArtifactDataRecovery({
           </div>
           {rowsLoaded > 0 && (
             <p className="mt-1.5 text-xs text-muted-foreground">
-              {rowsLoaded.toLocaleString()} {unit} loaded
+              {rowsLoaded.toLocaleString()} {unit} imported
             </p>
           )}
         </div>

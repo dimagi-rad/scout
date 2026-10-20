@@ -260,7 +260,7 @@ def run_pipeline(
     source_results: dict[str, dict] = {}
 
     try:
-        report(f"Finding what to import from {provider_label(pipeline.provider)}...")
+        report(f"Finding what to import from {provider_label(pipeline.provider)}…")
         discovered_metadata = _run_discover_phase(tenant_membership, credential, pipeline)
 
         # Connect's keyset-paginated exports return no total; reuse the counts
@@ -352,7 +352,7 @@ def run_pipeline(
         sources_list = list(pipeline.sources)
         for idx, source in enumerate(sources_list):
             current_source = source.name
-            load_message = f"Importing {source.name} from {provider_label(pipeline.provider)}..."
+            load_message = f"Importing {source.name} from {provider_label(pipeline.provider)}…"
             report(load_message)
             source_is_resumable = (
                 is_resumable_provider

@@ -1481,7 +1481,7 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun(current_state):
     if current_state == SchemaState.ACTIVE:
         assert "re-running materialization will fix this" in lower
     else:
-        assert "re-running materialization rebuilds them" in lower
+        assert "re-running the import rebuilds them" in lower
     assert "account credentials" not in lower
     assert "ask someone with access" not in lower
     # The WRONG advice from the generic-build-failure branch must NOT appear.
@@ -1491,7 +1491,7 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun(current_state):
     # error_summary tells the truthful, recoverable story.
     assert result["terminal_state"] == ThreadJob.State.FAILED
     await tj.arefresh_from_db()
-    assert "re-running materialization" in tj.error_summary.lower()
+    assert "re-running the import" in tj.error_summary.lower()
     assert "account credentials" not in tj.error_summary.lower()
     assert tj.failure_phase == ThreadJob.FailurePhase.MATERIALIZATION
     assert _termination_to_dict(tj, [], viewer_can_write=True)["retry_available"] is True

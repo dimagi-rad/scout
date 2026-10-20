@@ -74,13 +74,13 @@ RESUME_BUSY_MAX_ATTEMPTS = 20
 # Beyond AGENT_RESUME_TIMEOUT_S: agent build, MCP tool load and the state reads.
 RESUME_SETUP_BUDGET_SECONDS = 120
 RESUME_THREAD_BUSY_SUMMARY = (
-    "The data load finished, but the conversation stayed busy, so the follow-up "
+    "The import finished, but the conversation stayed busy, so the follow-up "
     "response could not be posted. Please re-ask your question."
 )
 
 
 RESUME_LOST_LEASE_SUMMARY = (
-    "The data load finished, but another response took over the conversation before "
+    "The import finished, but another response took over the conversation before "
     "the follow-up was posted. Please re-ask your question."
 )
 
@@ -336,7 +336,7 @@ async def _resume_claimed_job(
         if VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
             missing_data_guidance += (
                 "The data and dependent views expired or were torn down. "
-                "Re-running materialization rebuilds them."
+                "Re-running the import rebuilds them."
             )
         else:
             missing_data_guidance += (
@@ -726,8 +726,7 @@ async def _resume_claimed_job(
             # 07#9: cascade teardown — re-running materialization IS the fix.
             error_summary = (
                 "The workspace query layer (view schema) is unavailable because a "
-                f"tenant schema it depends on was torn down: {view_schema_error}. "
-                "Re-running the import will rebuild it."
+                f"tenant schema it depends on was torn down: {view_schema_error}"
             )
         elif view_schema_failed:
             error_summary = (
