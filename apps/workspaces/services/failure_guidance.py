@@ -142,7 +142,7 @@ def compose_failure_summary(runs: "list[MaterializationRun]") -> str:
         if top_level_error:
             failed_sources.append(
                 SourceFailure(
-                    name="materialization",
+                    name="The import",
                     error=str(top_level_error),
                     code=str(result.get("error_code") or ErrorCode.INTERNAL_ERROR),
                 )
