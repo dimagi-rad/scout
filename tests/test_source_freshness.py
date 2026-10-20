@@ -172,7 +172,9 @@ async def test_prompt_names_the_stale_source_and_says_reconnect(
     assert "NOT refreshed" in hq_line
     assert ErrorCode.AUTH_TOKEN_EXPIRED in hq_line
     assert RECONNECT_HQ in hq_line
-    connect_line = next(line for line in volatile.splitlines() if "Reading Opp" in line)
+    connect_line = next(
+        line for line in volatile.splitlines() if "Reading Opp (CommCare Connect)" in line
+    )
     assert "today" in connect_line or "1 day ago" in connect_line
     assert "refreshed by the latest load" in connect_line
     assert "NOT refreshed" not in connect_line

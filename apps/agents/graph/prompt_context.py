@@ -489,6 +489,7 @@ async def _build_system_prompt(
             workspace, interactive, write_capable, conversation_id=conversation_id
         )
         volatile = f"\n## Data Availability\n\n{semantic_context}\n"
+        volatile += f"\n{await _workspace_sources_block(workspace)}\n"
         if await workspace.tenants.acount() > 1:
             coverage = (
                 await WorkspaceViewSchema.objects.filter(
@@ -507,6 +508,25 @@ async def _build_system_prompt(
         if freshness:
             volatile += f"\n{freshness}\n"
     return stable, volatile
+
+
+MAX_LISTED_SOURCES = 50
+
+
+async def _workspace_sources_block(workspace: Workspace) -> str:
+    """The sources this workspace can query, to check named sources against (#919)."""
+    listed = workspace.tenants.order_by("canonical_name")[: MAX_LISTED_SOURCES + 1]
+    tenants = [t async for t in listed]
+    lines = ["### Workspace Sources", ""]
+    for tenant in tenants[:MAX_LISTED_SOURCES]:
+        label = provider_label(tenant.provider)
+        if tenant.external_id and tenant.external_id != tenant.canonical_name:
+            label += f" {tenant.external_id}"
+        lines.append(f"- {tenant.canonical_name} ({label})")
+    if len(tenants) > MAX_LISTED_SOURCES:
+        more = await workspace.tenants.acount() - MAX_LISTED_SOURCES
+        lines.append(f"- and {more} more; `list_workspaces` lists them all")
+    return "\n".join(lines)
 
 
 def _fetch_age(fetched: datetime) -> str:

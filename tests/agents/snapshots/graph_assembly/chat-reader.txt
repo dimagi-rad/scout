@@ -113,6 +113,10 @@ This user saved these preferences in earlier conversations. Apply them unless th
 ## Data Availability
 
 Data is not currently queryable, and this user's workspace role is read-only. A read-write workspace role is required to load data or rebuild the semantic catalog, so tell the user a workspace member with write access can refresh it. If no data has been loaded yet, the first chat such a member opens starts the load automatically.
+
+### Workspace Sources
+
+- Test Domain (CommCare HQ test-domain)
 <<agent_date_context>>
 === ainvoke kwargs {"cache_control": {"type": "ephemeral"}} ===
 === bound tools ===

@@ -57,6 +57,10 @@ When results are truncated, suggest adding filters or using aggregations to redu
 ## Data Availability
 
 No data has been loaded yet. Call `run_materialization` to load it. This tool BLOCKS and returns a status summary once loading finishes — keep working in the same run rather than stopping. After it returns `status: completed`, continue with the requested analysis; the data is ready.
+
+### Workspace Sources
+
+- Test Domain (CommCare HQ test-domain)
 <<agent_date_context>>
 === ainvoke kwargs {"cache_control": {"type": "ephemeral"}} ===
 === bound tools ===
