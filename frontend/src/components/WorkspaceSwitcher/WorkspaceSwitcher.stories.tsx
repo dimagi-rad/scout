@@ -23,10 +23,23 @@ const workspaces: WorkspaceListItem[] = [
   created_at: "2026-01-01T12:00:00Z",
 }))
 
+const programWorkspace: WorkspaceListItem = {
+  ...workspaces[0],
+  id: "program",
+  name: "program",
+  display_name: "Example — program across opportunities",
+  tenants: ["Kenya", "Uganda", "Malawi", "Nigeria"].map((country) => ({
+    id: `tenant-${country}`,
+    tenant_name: `Example program ${country}`,
+    provider: "commcare_connect",
+  })),
+}
+workspaces.unshift(programWorkspace)
+
 function LoadHistoryFixture({ variant }: { variant: "sidebar" | "topbar" }) {
   useEffect(() => {
     const previous = useAppStore.getState()
-    useAppStore.setState({ domains: workspaces, activeDomainId: "recorded" })
+    useAppStore.setState({ domains: workspaces, activeDomainId: "program" })
     return () => useAppStore.setState(previous)
   }, [])
 

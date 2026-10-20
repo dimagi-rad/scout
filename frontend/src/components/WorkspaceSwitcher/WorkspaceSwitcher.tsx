@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useLocation } from "react-router-dom"
-import { CircleAlert, Check, ChevronDown, History, Loader2, Plus, Search, Settings } from "lucide-react"
+import { CircleAlert, Check, ChevronDown, History, Layers, Loader2, Plus, Search, Settings } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { workspaceLoadState, workspaceHasRecordedLoad, workspaceHasAccess, type WorkspaceListItem } from "@/api/workspaces"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
@@ -212,7 +212,9 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   const [segment, setSegment] = useState<SegmentKey>("recent")
   const [recordedLoadsOnly, setRecordedLoadsOnly] = useState(false)
   const [highlight, setHighlight] = useState(0)
-  const [showCreateModal, setShowCreateModal] = useState(false)
+  const [createModal, setCreateModal] = useState<{ name: string; sourceIds: string[] } | null>(
+    null,
+  )
   // Snapshot of recent ids taken when the popover opens, so selecting a
   // workspace (which writes localStorage) doesn't reshuffle the list mid-use.
   const [recentIds, setRecentIds] = useState<string[]>([])
@@ -280,6 +282,14 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     }
     return list
   }, [accessible, recent, search, segment, recordedLoadsOnly])
+
+  // The switcher picks one workspace, so a cross-opportunity question needs a new one
+  // (#916): offer to combine every source behind the current search's matches.
+  const searchTerm = search.trim()
+  const matchedSourceIds = useMemo(() => {
+    if (!searchTerm || visible.length < 2) return []
+    return [...new Set(visible.flatMap((ws) => (ws.tenants ?? []).map((t) => t.id)))]
+  }, [searchTerm, visible])
 
   // Lost-access workspaces matching the current search (or provider tab), shown
   // disabled below.
@@ -361,6 +371,12 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     ) {
       navigate(`${pathPrefix}${workspacePath(ws)}`)
     }
+  }
+
+  function openCreate(name = "", sourceIds: string[] = []) {
+    close()
+    // Let the popover finish closing before the dialog takes focus.
+    setTimeout(() => setCreateModal({ name, sourceIds }), 0)
   }
 
   function manage(ws: WorkspaceListItem) {
@@ -623,6 +639,18 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
           </div>
 
           <div className="border-t p-1">
+            {matchedSourceIds.length > 1 && (
+              <button
+                data-testid="workspace-combine-matches"
+                onClick={() => openCreate(searchTerm, matchedSourceIds)}
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm font-medium text-primary transition-colors hover:bg-accent"
+              >
+                <Layers className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">
+                  New workspace from {matchedSourceIds.length} matching sources
+                </span>
+              </button>
+            )}
             <button
               data-testid="workspace-manage"
               onClick={() => {
@@ -636,20 +664,23 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
             </button>
             <button
               data-testid="workspace-new"
-              onClick={() => {
-                close()
-                setTimeout(() => setShowCreateModal(true), 0)
-              }}
+              onClick={() => openCreate()}
               className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
             >
               <Plus className="h-3.5 w-3.5" />
-              New workspace
+              New workspace from one or more sources
             </button>
           </div>
         </PopoverContent>
       </Popover>
 
-      {showCreateModal && <CreateWorkspaceModal onClose={() => setShowCreateModal(false)} />}
+      {createModal && (
+        <CreateWorkspaceModal
+          initialName={createModal.name}
+          initialSourceIds={createModal.sourceIds}
+          onClose={() => setCreateModal(null)}
+        />
+      )}
     </>
   )
 }

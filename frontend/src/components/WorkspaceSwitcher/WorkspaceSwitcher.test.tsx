@@ -3,8 +3,11 @@ import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { api } from "@/api/client"
 import type { WorkspaceListItem } from "@/api/workspaces"
+import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 import { useAppStore } from "@/store/store"
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher"
+
+vi.mock("@/components/CreateWorkspaceModal", () => ({ CreateWorkspaceModal: vi.fn(() => null) }))
 
 const LAST_LOAD = "2026-04-16T12:00:00Z"
 const AVAILABILITY_NOTE = "Current availability is checked when opening an artifact."
@@ -231,5 +234,43 @@ describe("workspace sources", () => {
     act(() => useAppStore.getState().uiActions.openWorkspaceSwitcher())
 
     expect(screen.getByTestId("workspace-search")).toBeInTheDocument()
+  })
+})
+
+describe("combining search matches", () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useAppStore.setState(useAppStore.getInitialState(), true)
+    vi.mocked(CreateWorkspaceModal).mockClear()
+  })
+
+  function opp(id: string, name: string): WorkspaceListItem {
+    return workspace({
+      id,
+      display_name: name,
+      tenants: [{ id: `tenant-${id}`, tenant_name: name, provider: "commcare_connect" }],
+    })
+  }
+
+  it("offers a workspace spanning every source the search matches", async () => {
+    vi.useFakeTimers()
+    openSwitcher([opp("k", "CHC Kenya"), opp("u", "CHC Uganda"), opp("x", "Other")])
+    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
+
+    fireEvent.click(screen.getByTestId("workspace-combine-matches"))
+    await act(async () => vi.runAllTimers())
+    vi.useRealTimers()
+
+    expect(vi.mocked(CreateWorkspaceModal).mock.lastCall?.[0]).toMatchObject({
+      initialName: "CHC",
+      initialSourceIds: ["tenant-k", "tenant-u"],
+    })
+  })
+
+  it("does not offer to combine a single match", () => {
+    openSwitcher([opp("k", "CHC Kenya"), opp("x", "Other")])
+    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
+
+    expect(screen.queryByTestId("workspace-combine-matches")).toBeNull()
   })
 })
