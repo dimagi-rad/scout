@@ -245,17 +245,13 @@ and before it nothing watched the host disk (see [Host disk full](#host-disk-ful
   warning to critical opens a new issue, so the first-seen alert fires again.
   A low disk after someone resolved the issue reopens it as a regression, which
   pages only if the Sentry alert rule also covers regressions.
-- **Platform database.** `pg_database_size(current_database())` and the five
-  largest tables, logged at INFO in `/scout/worker` (`Storage headroom: platform
-  DB …`). It sends no alert: RDS free storage is visible only in CloudWatch
+- **Platform database.** `pg_database_size(current_database())`, logged at INFO
+  in `/scout/worker` (`Storage headroom: platform DB …`) for trends such as chat
+  attachments. It sends no alert: RDS free storage is visible only in CloudWatch
   (`scout-rds-low-storage`). In production the tenant data shares this
   database (`MANAGED_DATABASE_URL` is `DATABASE_URL`), so the size includes
-  every workspace's loaded data, and the largest tables are usually tenant
-  tables. Use these lines to see which table grows: tenant data, chat
-  attachments, or checkpoints. The table list shows `unavailable` when it could
-  not be read: a load or teardown held a lock for over 2 seconds, the scan took
-  over 10 seconds, or the query failed. A WARNING line before it says which. The
-  database size is still logged in each case.
+  every workspace's loaded data. It takes no table locks. Per-table sizes are
+  not logged, because reading them locks every tenant table.
 
 The worker reads these from its environment. Kamal passes only the variables
 listed in `config/deploy-worker.yml`, so to change one, add it under `env.clear`

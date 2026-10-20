@@ -1,14 +1,11 @@
 import logging
-import threading
 from types import SimpleNamespace
 from unittest import mock
 
-import psycopg
 import pytest
 from django.db import connection
 
 from apps.telemetry import storage, tasks
-from apps.workspaces.services import data_operation
 
 GIB = 2**30
 
@@ -96,7 +93,7 @@ async def test_plenty_of_disk_sends_nothing_and_logs_both_readings(sentry, disk,
     assert result["db_bytes"] > 0
     messages = [r.getMessage() for r in caplog.records]
     assert any("host disk 30.0 GiB free of 50.0 GiB (60.0%)" in m for m in messages)
-    assert any("platform DB" in m and "largest tables:" in m for m in messages)
+    assert any(m.startswith("Storage headroom: platform DB ") for m in messages)
     own = [r for r in caplog.records if r.name == "apps.telemetry.storage"]
     assert own
     assert all(r.levelno == logging.INFO for r in own)
@@ -157,7 +154,7 @@ async def test_the_configured_path_is_checked(sentry, disk, settings):
 @pytest.mark.django_db(transaction=True)
 async def test_a_failed_db_read_still_sends_the_disk_alert(sentry, disk):
     disk.return_value = _usage(free_gib=1)
-    with mock.patch.object(storage, "_platform_db_sizes", side_effect=RuntimeError("db down")):
+    with mock.patch.object(storage, "_platform_db_bytes", side_effect=RuntimeError("db down")):
         result = await storage.check_storage_headroom()
 
     sentry.capture_message.assert_called_once()
@@ -166,56 +163,10 @@ async def test_a_failed_db_read_still_sends_the_disk_alert(sentry, disk):
 
 @pytest.mark.django_db
 def test_db_size_matches_postgres():
-    total, largest = storage._platform_db_sizes()
     with connection.cursor() as cursor:
         cursor.execute("SELECT pg_database_size(current_database())")
-        assert total == pytest.approx(cursor.fetchone()[0], rel=0.05)
-    assert 0 < len(largest) <= 5
-    sizes = [size for _, size in largest]
-    assert sizes == sorted(sizes, reverse=True)
-
-
-@pytest.mark.django_db(transaction=True)
-def test_a_locked_table_skips_the_table_list_but_keeps_the_size(caplog):
-    with connection.cursor() as cursor:
-        cursor.execute("CREATE TABLE storage_lock_probe (id int)")
-    params = data_operation._connection_params()
-    locked, release = threading.Event(), threading.Event()
-
-    def hold_lock():
-        with psycopg.connect(**params) as other:
-            other.execute("LOCK TABLE storage_lock_probe IN ACCESS EXCLUSIVE MODE")
-            locked.set()
-            release.wait(30)
-
-    holder = threading.Thread(target=hold_lock)
-    holder.start()
-    try:
-        assert locked.wait(10)
-        total, largest = storage._platform_db_sizes()
-    finally:
-        release.set()
-        holder.join()
-        with connection.cursor() as cursor:
-            cursor.execute("DROP TABLE storage_lock_probe")
-
-    assert total > 0
-    assert largest is None
-    assert "a table was locked for over 2s" in caplog.text
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT current_setting('lock_timeout')")
-        assert cursor.fetchone()[0] == "0"
-
-
-@pytest.mark.django_db(transaction=True)
-def test_a_broken_scan_keeps_the_size_and_is_not_reported_as_a_lock(caplog):
-    with mock.patch.object(storage, "_LARGEST_TABLES_SQL", "SELECT * FROM no_such_table LIMIT %s"):
-        total, largest = storage._platform_db_sizes()
-
-    assert total > 0
-    assert largest is None
-    assert "largest tables query failed" in caplog.text
-    assert "skipped" not in caplog.text
+        expected = cursor.fetchone()[0]
+    assert storage._platform_db_bytes() == pytest.approx(expected, rel=0.05)
 
 
 @pytest.mark.asyncio
