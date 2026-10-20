@@ -52,6 +52,11 @@ export function attachmentsBlockReason(attachments: ChatAttachments | undefined)
 
 let nextLocalId = 0
 
+/** One test for "can go out with a message", so `ready` and take() never disagree. */
+function isSendable(item: ComposerAttachment): boolean {
+  return item.status === "ready" && item.uploaded !== undefined
+}
+
 const TOO_MANY = `You can attach up to ${MAX_ATTACHMENTS} files to a message.`
 
 function pastedName(mediaType: string): string {
@@ -135,7 +140,12 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
           update(inScope, item.localId, { status: "error", error: tooBig, size: prepared.size })
           return
         }
-        update(inScope, item.localId, { status: "uploading", size: prepared.size })
+        // Downscaling can change the type, and with it the name (shot.png -> shot.webp).
+        update(inScope, item.localId, {
+          status: "uploading",
+          size: prepared.size,
+          filename: prepared.name,
+        })
         const uploaded = await uploadChatAttachment(
           prepared,
           workspaceId ?? "",
@@ -220,7 +230,7 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
 
   const take = useCallback((): FileUIPart[] => {
     const list = byScopeRef.current[scope] ?? NONE
-    const sending = list.filter((item) => item.status === "ready" && item.uploaded)
+    const sending = list.filter(isSendable)
     const parts = sending.map((item): FileUIPart => ({
       type: "file",
       mediaType: item.uploaded!.mediaType,
@@ -258,7 +268,12 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
       }))
       // Files added since the send keep their place; what does not fit is said, not lost.
       const room = MAX_ATTACHMENTS - (byScopeRef.current[inScope]?.length ?? 0)
-      if (room < restored.length) setNotice({ scope: inScope, text: TOO_MANY })
+      if (room < restored.length) {
+        setNotice({
+          scope: inScope,
+          text: `${restored.length - Math.max(room, 0)} of the files from the message that wasn't sent didn't fit back: a message takes up to ${MAX_ATTACHMENTS}.`,
+        })
+      }
       if (room <= 0) return
       setList(inScope, (list) => [...list, ...restored.slice(0, room)])
     },
@@ -269,7 +284,7 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
     items,
     busy: items.some((item) => item.status === "processing" || item.status === "uploading"),
     failed: items.some((item) => item.status === "error"),
-    ready: items.some((item) => item.status === "ready"),
+    ready: items.some(isSendable),
     notice: notice?.scope === scope ? notice.text : null,
     add,
     remove,

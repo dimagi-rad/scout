@@ -3,7 +3,8 @@ import { AlertCircle, FileText, Loader2, Paperclip, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { ACCEPT_ATTRIBUTE, formatBytes } from "./rules"
+import { withBasePath } from "@/config"
+import { ACCEPT_ATTRIBUTE, formatBytes, isAttachmentUrl } from "./rules"
 import type { ComposerAttachment } from "./useChatAttachments"
 
 export function AttachmentTray({
@@ -60,6 +61,12 @@ function AttachmentChip({
   const failed = item.status === "error"
   const working = item.status === "processing" || item.status === "uploading"
   const status = statusText(item)
+  // A file handed back from a refused send has no local copy; show the uploaded one.
+  const preview =
+    item.previewUrl
+    ?? (item.kind === "image" && item.uploaded && isAttachmentUrl(item.uploaded.url)
+      ? withBasePath(item.uploaded.url)
+      : undefined)
   return (
     <li
       className={cn(
@@ -71,8 +78,8 @@ function AttachmentChip({
       title={failed ? `${item.filename}: ${item.error}` : item.filename}
     >
       <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded bg-background">
-        {item.previewUrl ? (
-          <img src={item.previewUrl} alt="" className="size-full object-cover" draggable={false} />
+        {preview ? (
+          <img src={preview} alt="" className="size-full object-cover" draggable={false} />
         ) : failed ? (
           <AlertCircle className="size-4 text-destructive" aria-hidden="true" />
         ) : (

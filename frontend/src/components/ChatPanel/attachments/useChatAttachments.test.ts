@@ -47,7 +47,7 @@ describe("useChatAttachments", () => {
       "new-0.csv", "new-1.csv", "new-2.csv", "new-3.csv",
       "sent-0.csv", "sent-1.csv", "sent-2.csv", "sent-3.csv", "sent-4.csv", "sent-5.csv",
     ])
-    expect(result.current.notice).toMatch(/up to 10 files/)
+    expect(result.current.notice).toMatch(/2 of the files .* didn't fit back/)
   })
 
   it("counts a removal before an add in the same tick", () => {

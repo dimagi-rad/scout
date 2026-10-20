@@ -336,6 +336,15 @@ describe("ChatPanel attachments (#913)", () => {
     expect(sent.type).toBe("text/markdown")
   })
 
+  it("does not take a file named after an Object.prototype key for a text file", async () => {
+    await renderThread()
+    await act(async () => {
+      fireEvent.drop(screen.getByTestId("chat-thread-title"), fileDrag([new File(["x"], "payload.constructor")]))
+    })
+    expect(screen.getByTestId("chat-attachment-chip-0")).toHaveAttribute("data-status", "error")
+    expect(upload).not.toHaveBeenCalled()
+  })
+
   it("refuses a text file over 2 MB without uploading it", async () => {
     await renderThread()
     const big = new File([new Uint8Array(2 * 1024 * 1024 + 1)], "big.csv", { type: "text/csv" })

@@ -38,8 +38,11 @@ export function checkFileType(file: File): FileCheck {
   }
   // Browsers report .md, .tsv and sometimes .csv as "" or vendor types, so the
   // extension decides for text files.
-  const textType = TEXT_EXTENSIONS[extension(file.name)]
-  if (textType) return { ok: true, kind: "text", mediaType: textType }
+  const ext = extension(file.name)
+  // Own keys only: "x.constructor" must not match Object.prototype.constructor.
+  if (Object.hasOwn(TEXT_EXTENSIONS, ext)) {
+    return { ok: true, kind: "text", mediaType: TEXT_EXTENSIONS[ext] }
+  }
   return {
     ok: false,
     error: "Unsupported type: attach an image, or a JSON, CSV, TSV, TXT or MD file.",
