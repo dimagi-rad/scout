@@ -9,6 +9,8 @@ interface Props {
   onSummaryOpenChange?: (open: boolean) => void
   /** The summary opened itself because a load just finished. */
   justLoaded?: boolean
+  /** Only the What's loaded link: the layout already says how fresh the data is. */
+  summaryOnly?: boolean
 }
 
 function freshnessLabel(source: SourceFreshnessDetail): string {
@@ -27,12 +29,14 @@ export function SourceFreshness({
   summaryOpen = false,
   onSummaryOpenChange,
   justLoaded = false,
+  summaryOnly = false,
 }: Props) {
   const sources = freshness?.sources ?? []
 
   if (sources.length === 0) return null
 
   const hasSummary = sources.some((source) => source.summary)
+  if (summaryOnly && !hasSummary) return null
 
   return (
     <>
@@ -47,7 +51,7 @@ export function SourceFreshness({
         className="flex flex-wrap gap-x-4 gap-y-0.5 px-4 pb-1 text-xs text-muted-foreground"
         data-testid="source-freshness"
       >
-        {sources.map((source) => (
+        {!summaryOnly && sources.map((source) => (
           <li key={source.tenant_id} data-testid={`source-freshness-${source.tenant_id}`}>
             {source.name}: {freshnessLabel(source)}
           </li>

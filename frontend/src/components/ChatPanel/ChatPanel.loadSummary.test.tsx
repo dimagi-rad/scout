@@ -108,6 +108,7 @@ describe("ChatPanel load summary", () => {
     fireEvent.click(screen.getByTestId("source-freshness-details"))
 
     expect(screen.getByTestId("load-summary")).toHaveTextContent("What's loaded")
+    expect(screen.queryByTestId("source-freshness-Alpha")).toBeNull()
   })
 
   it("stays closed when no load ran", async () => {

@@ -1097,11 +1097,13 @@ export function ChatPanel() {
             disabled={isStreaming}
           />
         </div>
+        {/* ChatEmptyState already says when the data was last synced. */}
         <SourceFreshness
           freshness={freshness}
           summaryOpen={loadSummaryOpen}
           onSummaryOpenChange={setLoadSummaryOpen}
           justLoaded={loadSummary.justLoaded}
+          summaryOnly
         />
       </div>
     )
