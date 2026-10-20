@@ -330,3 +330,29 @@ it("names pasted ids a remembered facet hides, and clears only the facets", asyn
   expect(screen.getByTestId("search-filter-input")).toHaveValue("523, 1236")
   expect(screen.getByTestId("create-sources-id-list-shown")).toHaveTextContent("All 2 IDs shown")
 })
+
+it("selects every source a program filter shows, keeping earlier picks", async () => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ program: ["7"] }))
+  vi.mocked(getUserTenantsCached).mockResolvedValue([
+    connect("p1", "Malaria North", { program: "7", program_name: "Malaria" }),
+    connect("p2", "Malaria South", { program: "7", program_name: "Malaria" }),
+    connect("q1", "Nutrition East", { program: "8", program_name: "Nutrition" }),
+  ])
+  const { user, onClose } = await openModal()
+  expect(shown()).toEqual(["p1", "p2"])
+
+  await user.click(screen.getByTestId("create-source-tenant-p1"))
+  expect(screen.getByTestId("create-sources-select-shown")).toHaveTextContent("Select 1 shown")
+  await user.click(screen.getByTestId("create-sources-select-shown"))
+
+  expect(screen.getByTestId("create-sources-selected")).toHaveTextContent("2 selected")
+  expect(screen.queryByTestId("create-sources-select-shown")).toBeNull()
+  await user.click(screen.getByTestId("create-workspace-submit"))
+  await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+  expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", ["tenant-p1", "tenant-p2"])
+})
+
+it("does not offer to select the whole unfiltered list", async () => {
+  await openModal()
+  expect(screen.queryByTestId("create-sources-select-shown")).toBeNull()
+})

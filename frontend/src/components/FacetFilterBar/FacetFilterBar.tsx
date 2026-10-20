@@ -1,4 +1,4 @@
-import { useId, useState } from "react"
+import { useId, useState, type ReactNode } from "react"
 import { ChevronDown } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -32,6 +32,8 @@ interface FacetFilterBarProps<T> {
   onClear: () => void
   shownCount: number
   totalCount: number
+  /** Acts on every row the filters show, e.g. "Select 12 shown"; beside the count. */
+  bulkAction?: ReactNode
 }
 
 export function FacetFilterBar<T>({
@@ -47,6 +49,7 @@ export function FacetFilterBar<T>({
   onClear,
   shownCount,
   totalCount,
+  bulkAction,
 }: FacetFilterBarProps<T>) {
   const ungrouped = facets.filter((f) => !f.group)
   const groups = [...new Set(facets.flatMap((f) => (f.group ? [f.group] : [])))]
@@ -93,8 +96,11 @@ export function FacetFilterBar<T>({
         </div>
       )}
       <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span data-testid={`${testIdPrefix}-count`}>
-          Showing {shownCount} of {totalCount}
+        <span className="flex items-center gap-2">
+          <span data-testid={`${testIdPrefix}-count`}>
+            Showing {shownCount} of {totalCount}
+          </span>
+          {bulkAction}
         </span>
         {canClear && (
           <button
