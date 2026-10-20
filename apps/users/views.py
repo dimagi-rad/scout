@@ -9,7 +9,6 @@ import uuid
 
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
-from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -27,7 +26,6 @@ from apps.users.services.api_key_providers import (
     STRATEGIES,
     CredentialVerificationError,
 )
-from apps.users.services.api_key_providers.ocs import OCS_DEFAULT_URL
 from apps.users.services.connection_access import (
     ARCHIVED_DENIED,
     archived_reason,
@@ -42,12 +40,12 @@ from apps.users.services.credential_resolver import (
 from apps.users.services.oauth_scope import account_scope, scope_account_ids
 from apps.users.services.ocs_team import adetect_team_from_api_key
 from apps.users.services.onboarding_cache import me_onboarding_cache_key
-from apps.users.services.source_descriptions import arecord_ocs_descriptions
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
+from apps.users.tasks import aschedule_ocs_probe
 from apps.workspaces.models import Workspace
 
 TENANT_REFRESH_TTL = 3600  # seconds (1 hour)
@@ -213,7 +211,10 @@ def _persist_api_key_connection(
                 provider=provider,
                 server=server,
                 external_id=desc.external_id,
-                defaults={"canonical_name": desc.canonical_name},
+                defaults={
+                    "canonical_name": desc.canonical_name,
+                    **({"description": desc.description} if desc.description else {}),
+                },
             )
             # all_objects: re-adding an API key after its memberships were archived
             # must reuse the tombstone, not create a duplicate (unique(user,tenant)).
@@ -233,7 +234,7 @@ def _persist_api_key_connection(
                     "tenant_name": tenant.canonical_name,
                 }
             )
-    return rows
+    return rows, conn.id
 
 
 @require_http_methods(["GET"])
@@ -476,7 +477,7 @@ async def tenant_credential_list_view(request):
         return JsonResponse({"error": str(e)}, status=500)
 
     try:
-        memberships_payload = await _persist_api_key_connection(
+        memberships_payload, connection_id = await _persist_api_key_connection(
             user,
             provider,
             descriptors,
@@ -491,12 +492,7 @@ async def tenant_credential_list_view(request):
         return JsonResponse({"error": str(e)}, status=500)
 
     if provider == "ocs":
-        await arecord_ocs_descriptions(
-            getattr(settings, "OCS_URL", OCS_DEFAULT_URL),
-            {"X-api-key": fields.get("api_key", "")},
-            [desc.external_id for desc in descriptors],
-            server,
-        )
+        await aschedule_ocs_probe(connection_id)
 
     await cache.adelete(me_onboarding_cache_key(user))
     return JsonResponse({"memberships": memberships_payload}, status=201)

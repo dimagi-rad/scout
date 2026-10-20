@@ -263,9 +263,7 @@ class TestTenantConnectionCreateAPI:
                 new_callable=AsyncMock,
                 return_value=("team-slug", "Team Name"),
             ),
-            patch(
-                "apps.users.views.arecord_ocs_descriptions", new_callable=AsyncMock
-            ) as record_descriptions,
+            patch("apps.users.views.aschedule_ocs_probe", new_callable=AsyncMock) as schedule_probe,
         ):
             response = client.post(
                 "/api/auth/connections/",
@@ -280,9 +278,7 @@ class TestTenantConnectionCreateAPI:
         tm = TenantMembership.objects.get(user=user, tenant__external_id="exp-1")
         assert tm.tenant.provider == "ocs"
         assert tm.team_slug == "team-slug"
-        record_descriptions.assert_awaited_once()
-        assert record_descriptions.await_args.args[1] == {"X-api-key": "ocs-key-123"}
-        assert record_descriptions.await_args.args[2] == ["exp-1"]
+        schedule_probe.assert_awaited_once_with(tm.connection_id)
         assert tm.team_name == "Team Name"
         assert tm.connection is not None
         assert tm.connection.credential_type == TenantConnection.API_KEY

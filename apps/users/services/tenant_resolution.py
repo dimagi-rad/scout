@@ -50,7 +50,6 @@ from apps.users.services.oauth_scope import (
     scope_account_ids,
 )
 from apps.users.services.ocs_team import adetect_team_name_from_oauth
-from apps.users.services.source_descriptions import arecord_ocs_descriptions
 from apps.users.services.tenant_listing import commcare as commcare_listing
 from apps.users.services.tenant_listing import connect as connect_listing
 from apps.users.services.tenant_listing import ocs as ocs_listing
@@ -70,6 +69,7 @@ from apps.users.services.upstream_denial import (
     arecord_upstream_denial,
     credential_is_current,
 )
+from apps.users.tasks import aschedule_ocs_probe
 from apps.workspaces import access_cache
 
 logger = logging.getLogger(__name__)
@@ -465,10 +465,6 @@ async def resolve_ocs_chatbots(
             },
         )
         fresh.append(tenant)
-    await arecord_ocs_descriptions(
-        base_url, {"Authorization": f"Bearer {access_token}"}, [t.external_id for t in fresh]
-    )
-
     memberships = await _sync_memberships(
         user,
         conn,
@@ -479,6 +475,7 @@ async def resolve_ocs_chatbots(
         access_token=access_token,
         archive=may_revoke,
     )
+    await aschedule_ocs_probe(conn.id)
     logger.info(
         "Resolved %d OCS chatbots for user %s (team %s)", len(memberships), user.email, team_slug
     )

@@ -1,17 +1,29 @@
 """Source descriptions: OCS chatbot probe, Connect export text, tenant list, agent prompt (#917)."""
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
+from django.core.cache import cache
 from django.test import AsyncClient
 
-from apps.users.models import Tenant, TenantMembership
+from apps.users import tasks as users_tasks
+from apps.users.adapters import encrypt_credential
+from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.services import source_descriptions
 from apps.users.services.source_descriptions import (
+    aprobe_connection_chatbots,
     aprobe_ocs_chatbots,
     arecord_ocs_descriptions,
     connect_description,
 )
 from apps.users.services.tenant_listing.rows import MAX_DESCRIPTION_CHARS, clean_description
+
+
+class _Sessions(dict):
+    """Each experiment's canned response, plus the mocked client for assertions."""
+
+    client = None
 
 
 class _Response:
@@ -23,17 +35,17 @@ class _Response:
         return self._payload
 
 
-def _session(description, created_at="2026-10-01T09:00:00Z"):
+def _session(experiment_id, description, created_at="2026-10-01T09:00:00Z"):
     return {
         "id": "s1",
         "created_at": created_at,
-        "experiment": {"id": "x", "name": "Bot", "description": description},
+        "experiment": {"id": experiment_id, "name": "Bot", "description": description},
     }
 
 
 @pytest.fixture
 def ocs_sessions(mocker):
-    by_experiment = {}
+    by_experiment = _Sessions()
 
     async def fake_get(url, headers=None, params=None, **_):
         assert url == "https://ocs.example.com/api/sessions/"
@@ -48,15 +60,18 @@ def ocs_sessions(mocker):
     client.__aexit__ = AsyncMock(return_value=False)
     client.get = AsyncMock(side_effect=fake_get)
     mocker.patch("httpx.AsyncClient", return_value=client)
+    by_experiment.client = client
     return by_experiment
 
 
 @pytest.mark.asyncio
-@pytest.mark.ocs_description_probe
 async def test_probe_reads_each_chatbots_newest_session(ocs_sessions):
     ocs_sessions.update(
         {
-            "described": _Response(200, {"results": [_session("Answers maternal health FAQs")]}),
+            "described": _Response(
+                200, {"results": [_session("described", "Answers maternal health FAQs")]}
+            ),
+            "elsewhere": _Response(200, {"results": [_session("someone-else", "Wrong bot")]}),
             "silent": _Response(200, {"results": []}),
             "refused": _Response(403, {}),
             "broken": RuntimeError("boom"),
@@ -64,7 +79,9 @@ async def test_probe_reads_each_chatbots_newest_session(ocs_sessions):
     )
 
     probes = await aprobe_ocs_chatbots(
-        "https://ocs.example.com", {"X-api-key": "k"}, ["described", "silent", "refused", "broken"]
+        "https://ocs.example.com",
+        {"X-api-key": "k"},
+        ["described", "silent", "refused", "broken", "elsewhere"],
     )
 
     assert probes["described"].description == "Answers maternal health FAQs"
@@ -73,11 +90,11 @@ async def test_probe_reads_each_chatbots_newest_session(ocs_sessions):
     assert probes["silent"].last_session_at is None
     assert "refused" not in probes
     assert "broken" not in probes
+    assert "elsewhere" not in probes
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.ocs_description_probe
 async def test_recording_stores_found_descriptions_and_keeps_the_rest(ocs_sessions):
     await Tenant.objects.acreate(provider="ocs", external_id="a", canonical_name="A")
     await Tenant.objects.acreate(
@@ -85,7 +102,7 @@ async def test_recording_stores_found_descriptions_and_keeps_the_rest(ocs_sessio
     )
     ocs_sessions.update(
         {
-            "a": _Response(200, {"results": [_session("New text")]}),
+            "a": _Response(200, {"results": [_session("a", "New text")]}),
             "b": _Response(200, {"results": []}),
         }
     )
@@ -121,3 +138,48 @@ async def test_tenant_list_includes_the_description(user, tenant, mocker):
     (row,) = (await client.get("/api/auth/tenants/")).json()
 
     assert row["description"] == "A CommCare project"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_connection_probe_uses_the_connections_own_api_key(user, ocs_sessions):
+    conn = await TenantConnection.objects.acreate(
+        user=user,
+        provider="ocs",
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential("the-key"),
+    )
+    bot = await Tenant.objects.acreate(provider="ocs", external_id="bot", canonical_name="Bot")
+    await TenantMembership.objects.acreate(user=user, tenant=bot, connection=conn)
+    ocs_sessions["bot"] = _Response(200, {"results": [_session("bot", "Triage helper")]})
+
+    await aprobe_connection_chatbots(str(conn.id), "https://ocs.example.com")
+
+    assert (await Tenant.objects.aget(id=bot.id)).description == "Triage helper"
+    headers = ocs_sessions.client.get.await_args.kwargs["headers"]
+    assert headers == {"X-api-key": "the-key"}
+
+
+@pytest.mark.asyncio
+async def test_probe_gives_up_at_its_budget(ocs_sessions, monkeypatch):
+    monkeypatch.setattr(source_descriptions, "_OCS_PROBE_BUDGET_SECONDS", 0.05)
+    hang = asyncio.Event()
+
+    async def never_answers(*_args, **_kwargs):
+        await hang.wait()
+
+    ocs_sessions.client.get = AsyncMock(side_effect=never_answers)
+
+    assert await aprobe_ocs_chatbots("https://ocs.example.com", {}, ["a", "b"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_scheduling_queues_one_probe_per_cooldown(monkeypatch):
+    queued = AsyncMock()
+    monkeypatch.setattr(users_tasks.probe_ocs_chatbots, "defer_async", queued)
+    await cache.adelete("ocs_chatbot_probe:conn-1")
+
+    await users_tasks.aschedule_ocs_probe("conn-1")
+    await users_tasks.aschedule_ocs_probe("conn-1")
+
+    queued.assert_awaited_once_with(connection_id="conn-1")

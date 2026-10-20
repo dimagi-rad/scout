@@ -9,9 +9,9 @@ from allauth.socialaccount.models import SocialApp
 from django.contrib.auth import get_user_model
 from django.contrib.sites.models import Site
 
+from apps.users import tasks as users_tasks
 from apps.users.models import Tenant, TenantMembership
 from apps.users.providers.ocs.provider import OCSProvider
-from apps.users.services import source_descriptions
 from apps.workspaces.models import (
     Workspace,
     WorkspaceMembership,
@@ -25,16 +25,14 @@ from tests.upstream_proofs import ProviderStub
 
 
 @pytest.fixture(autouse=True)
-def no_ocs_description_probe(request, monkeypatch):
-    """OCS discovery probes each chatbot's sessions for its description; tests that
-    stub the experiment list alone would otherwise see extra, unmatched requests."""
-    if request.node.get_closest_marker("ocs_description_probe"):
-        return
+def no_queued_ocs_probe(monkeypatch):
+    """OCS discovery queues a chatbot probe; a real queue row would outlive the
+    test's transaction (procrastinate_jobs is unmanaged)."""
 
-    async def no_probes(*_args, **_kwargs):
-        return {}
+    async def not_queued(**_kwargs):
+        return None
 
-    monkeypatch.setattr(source_descriptions, "aprobe_ocs_chatbots", no_probes)
+    monkeypatch.setattr(users_tasks.probe_ocs_chatbots, "defer_async", not_queued)
 
 
 @pytest.fixture

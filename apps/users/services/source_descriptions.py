@@ -3,7 +3,11 @@
 Neither provider's list endpoint carries one (as of 2026-10): OCS embeds a
 chatbot's description only in the experiment stub of ``/api/sessions/``, and
 Connect only in the per-opportunity export. So OCS is probed one session per
-chatbot at discovery, and Connect's is copied from the metadata a load fetches.
+chatbot in a background task after discovery, and Connect's is copied from the
+metadata a load fetches.
+
+A stored description is never cleared by a probe that could not see one, so
+one removed upstream lingers until the provider sends a new one.
 """
 
 from __future__ import annotations
@@ -16,15 +20,17 @@ from typing import Any
 
 import httpx
 
-from apps.users.models import Tenant
+from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.services.credential_resolver import CredentialResolutionError, aresolve_credential
 from apps.users.services.tenant_listing.rows import clean_description
 
 logger = logging.getLogger(__name__)
 
-# Discovery runs on the tenant-list request; a slow OCS must not hold it up long.
-_OCS_PROBE_BUDGET_SECONDS = 8.0
-_OCS_PROBE_CONCURRENCY = 8
-_OCS_PROBE_TIMEOUT_SECONDS = 5.0
+# Off the request path, but each probe is a paginated sessions query on OCS
+# (rate-limited per token), so keep it gentle and bounded.
+_OCS_PROBE_BUDGET_SECONDS = 60.0
+_OCS_PROBE_CONCURRENCY = 4
+_OCS_PROBE_TIMEOUT_SECONDS = 10.0
 
 
 def connect_description(opportunity: Any) -> str | None:
@@ -64,9 +70,10 @@ async def _probe_one(
         return ChatbotProbe(None, None)
     session = results[0]
     experiment = session.get("experiment")
-    description = (
-        clean_description(experiment.get("description")) if isinstance(experiment, dict) else None
-    )
+    if not isinstance(experiment, dict) or str(experiment.get("id")) != experiment_id:
+        # Not this chatbot's session: the filter was ignored, so learn nothing.
+        return None
+    description = clean_description(experiment.get("description"))
     created_at = session.get("created_at")
     return ChatbotProbe(description, created_at if isinstance(created_at, str) else None)
 
@@ -115,6 +122,36 @@ async def arecord_ocs_descriptions(
         )
     except Exception:
         logger.warning("Could not record OCS chatbot descriptions", exc_info=True)
+
+
+async def aprobe_connection_chatbots(connection_id: str, base_url: str) -> None:
+    """Probe every live chatbot an OCS connection reaches, with its own credential."""
+    memberships = [
+        tm
+        async for tm in TenantMembership.objects.filter(
+            connection_id=connection_id,
+            connection__provider="ocs",
+            archived_at__isnull=True,
+        ).select_related("connection", "user", "tenant")
+    ]
+    if not memberships:
+        return
+    try:
+        credential = await aresolve_credential(memberships[0])
+    except CredentialResolutionError:
+        credential = None
+    if not credential:
+        logger.info("No usable credential to probe OCS connection %s", connection_id)
+        return
+    if credential["type"] == TenantConnection.API_KEY:
+        headers = {"X-api-key": credential["value"]}
+    else:
+        headers = {"Authorization": f"Bearer {credential['value']}"}
+    by_server: dict[str, list[str]] = {}
+    for tm in memberships:
+        by_server.setdefault(tm.tenant.server, []).append(tm.tenant.external_id)
+    for server, experiment_ids in by_server.items():
+        await arecord_ocs_descriptions(base_url, headers, experiment_ids, server)
 
 
 async def astore_descriptions(provider: str, descriptions: Mapping[str, str | None], server=""):
