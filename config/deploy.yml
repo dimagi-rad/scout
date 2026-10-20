@@ -62,6 +62,9 @@ env:
     CUBE_SCHEMA_VALIDATION_REQUIRED: "True"
     EMBED_ALLOWED_ORIGINS: "https://labs.connect.dimagi.com"
     LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
+    # Langfuse Cloud's WAF 403s uncompressed trace batches whose first 8 KB holds
+    # agent SQL like "UNION ALL SELECT"; gzip hides the body from it (SCOUT-DJANGO-46).
+    OTEL_EXPORTER_OTLP_TRACES_COMPRESSION: "gzip"
     SENTRY_ENVIRONMENT: "production"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
     SENTRY_RELEASE: "<%= ENV.fetch('IMAGE_TAG', '') %>"
