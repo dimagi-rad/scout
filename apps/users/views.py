@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import uuid
 
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
@@ -49,8 +51,9 @@ TENANT_REFRESH_TTL = 3600  # seconds (1 hour)
 FORCED_REFRESH_FLOOR = 60  # seconds between user-requested refreshes that hit upstream
 # A failing upstream is retried after this, not on every poll (#918).
 TENANT_REFRESH_FAILURE_TTL = 60  # seconds
-# Bounds a refresh another request is already running, should that request die.
-TENANT_REFRESH_INFLIGHT_TTL = 120  # seconds
+# Bounds a refresh another request is already running, should that request die;
+# above the worst-case fetch (60s listing budget plus token refresh).
+TENANT_REFRESH_INFLIGHT_TTL = 180  # seconds
 # How long a poll waits on another request's refresh of the same identity.
 TENANT_REFRESH_INFLIGHT_WAIT = 30  # seconds
 TENANT_REFRESH_INFLIGHT_POLL = 0.25  # seconds
@@ -74,9 +77,10 @@ async def _arefresh_all_identities(user, *, force: bool = False) -> None:
     the first team refreshed cheaply and then suppressed the second for an hour —
     so the second team's chatbots could stay missing indefinitely (#156).
 
-    Identities refresh concurrently and independently: one team's failure must not
-    stop the others, and a raise means "skip refresh" (never revoke on an
-    inconclusive fetch). A failure is retried after a short TTL rather than on
+    Identities in different scopes refresh concurrently and independently (same-
+    scope ones run serially, see below): one team's failure must not stop the
+    others, and a raise means "skip refresh" (never revoke on an inconclusive
+    fetch). A failure is retried after a short TTL rather than on
     every poll, so one failing upstream does not slow every page load (#918).
 
     ``force`` bypasses the per-identity TTL so a user can pick up an opportunity or
@@ -113,7 +117,7 @@ async def _arefresh_all_identities(user, *, force: bool = False) -> None:
 async def _await_inflight(inflight_key: str) -> bool:
     """Whether another request's refresh finished within the wait."""
     # Polled, not an Event: the refresh may be running in another worker process.
-    for _ in range(int(TENANT_REFRESH_INFLIGHT_WAIT / TENANT_REFRESH_INFLIGHT_POLL)):
+    for _ in range(math.ceil(TENANT_REFRESH_INFLIGHT_WAIT / TENANT_REFRESH_INFLIGHT_POLL)):
         if not await cache.aget(inflight_key):
             return True
         await asyncio.sleep(TENANT_REFRESH_INFLIGHT_POLL)
@@ -121,17 +125,35 @@ async def _await_inflight(inflight_key: str) -> bool:
 
 
 async def _arefresh_identity(user, provider, resolve, token_obj, *, force: bool) -> None:
+    # A cache-backend error degrades this identity only, not its siblings.
+    try:
+        await _arefresh_identity_guarded(user, provider, resolve, token_obj, force=force)
+    except Exception:
+        logger.warning(
+            "Could not refresh %s tenants for account %s",
+            provider,
+            token_obj.account_id,
+            exc_info=True,
+        )
+
+
+async def _arefresh_identity_guarded(user, provider, resolve, token_obj, *, force: bool) -> None:
     cache_key = f"tenant_refresh:{user.id}:{provider}:{token_obj.account_id}"
     if not force and await cache.aget(cache_key):
         return
     inflight_key = f"{cache_key}:inflight"
-    owns_inflight = await cache.aadd(inflight_key, True, TENANT_REFRESH_INFLIGHT_TTL)
-    # Another poll is already fetching this identity: share its result rather
-    # than repeat the upstream call. A forced refresh does not wait, since that
-    # fetch may predate the access the user is refreshing for; nor does a poll
-    # whose wait outlasts it (its owner may have died holding the key).
-    if not owns_inflight and not force and await _await_inflight(inflight_key):
-        return
+    owner = uuid.uuid4().hex
+    owns_inflight = await cache.aadd(inflight_key, owner, TENANT_REFRESH_INFLIGHT_TTL)
+    if not owns_inflight:
+        # Another request is fetching this identity. Two fetches of one identity
+        # race, and the older listing can archive what the newer one found, so
+        # wait for it. A forced refresh still fetches afterwards, since that
+        # fetch may predate the access being refreshed for; so does a poll whose
+        # wait runs out (the owner may have died holding the key).
+        finished = await _await_inflight(inflight_key)
+        if finished and not force and await cache.aget(cache_key):
+            return
+        owns_inflight = await cache.aadd(inflight_key, owner, TENANT_REFRESH_INFLIGHT_TTL)
     try:
         try:
             credential = await _aresolve_oauth_credential(
@@ -152,7 +174,9 @@ async def _arefresh_identity(user, provider, resolve, token_obj, *, force: bool)
             ttl = TENANT_REFRESH_TTL
         await cache.aset(cache_key, True, ttl)
     finally:
-        if owns_inflight:
+        # Only the owner releases, and only its own key: one that expired under
+        # a slow fetch may since belong to another request.
+        if owns_inflight and await cache.aget(inflight_key) == owner:
             await cache.adelete(inflight_key)
 
 

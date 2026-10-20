@@ -30,7 +30,9 @@ def _key(provider: str, account_id: int) -> str:
 
 
 def _ttls(aset) -> dict[str, int]:
-    return {call.args[0]: call.args[2] for call in aset.call_args_list}
+    writes = [(call.args[0], call.args[2]) for call in aset.call_args_list]
+    assert len(writes) == len({key for key, _ in writes}), f"identity written twice: {writes}"
+    return dict(writes)
 
 
 @pytest.fixture
@@ -139,11 +141,14 @@ async def test_failing_identity_backs_off_without_hiding_the_others(identities, 
 @pytest.mark.asyncio
 async def test_poll_refreshes_itself_when_the_running_fetch_outlasts_its_wait(identities):
     """An owner that died holding the in-flight key must not block refreshes until it expires."""
-    await cache.aset(f"{_key('commcare', 1)}:inflight", True, 120)
+    stale = f"{_key('commcare', 1)}:inflight"
+    await cache.aset(stale, "dead-owner", 120)
     with patch.object(user_views, "TENANT_REFRESH_INFLIGHT_WAIT", 0.05):
         await asyncio.wait_for(_arefresh_all_identities(USER), timeout=2)
     assert identities["commcare"].await_count == 1
     assert await cache.aget(_key("commcare", 1))
+    # A key this request never owned is left to expire, not deleted.
+    assert await cache.aget(stale) == "dead-owner"
 
 
 @pytest.mark.asyncio
@@ -190,27 +195,51 @@ async def test_concurrent_poll_waits_for_the_running_fetch_instead_of_repeating_
 
 
 @pytest.mark.asyncio
-async def test_forced_refresh_does_not_wait_on_a_running_fetch(identities):
+async def test_forced_refresh_waits_for_a_running_fetch_then_fetches_again(identities):
+    """Two fetches of one identity must not overlap (the older listing could archive
+    what the newer found), yet a forced refresh must not be served a fetch that may
+    predate the access the user is refreshing for."""
     release = asyncio.Event()
     started = asyncio.Event()
+    running = 0
 
     async def slow(*_args, **_kwargs):
+        nonlocal running
+        running += 1
+        assert running == 1, "two fetches of one identity overlapped"
         started.set()
         await release.wait()
+        running -= 1
 
     identities["commcare"].side_effect = slow
     first = asyncio.ensure_future(_arefresh_all_identities(USER))
     await asyncio.wait_for(started.wait(), timeout=2)
 
-    # That fetch may predate the access the user is refreshing for.
-    identities["commcare"].side_effect = None
-    await asyncio.wait_for(_arefresh_all_identities(USER, force=True), timeout=2)
-    assert identities["commcare"].await_count == 2
-    # It must not release the key the running fetch still holds.
-    assert await cache.aget(f"{_key('commcare', 1)}:inflight")
+    forced = asyncio.ensure_future(_arefresh_all_identities(USER, force=True))
+    await asyncio.sleep(0.05)
+    assert not forced.done()
+    assert identities["commcare"].await_count == 1
 
     release.set()
-    await first
+    await asyncio.wait_for(asyncio.gather(first, forced), timeout=2)
+    assert identities["commcare"].await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cache_error_on_one_identity_does_not_stop_the_others(identities, aset):
+    real_aget = user_views.cache.aget
+
+    async def flaky_aget(key, *args, **kwargs):
+        if key == _key("ocs", 2):
+            raise ConnectionError("redis reset")
+        return await real_aget(key, *args, **kwargs)
+
+    with patch.object(user_views.cache, "aget", side_effect=flaky_aget):
+        await _arefresh_all_identities(USER)
+
+    assert set(_ttls(aset)) == {_key("commcare", 1), _key("ocs", 3)}
+    assert identities["commcare"].await_count == 1
+    assert identities["ocs"].await_count == 1
 
 
 @pytest.mark.asyncio
