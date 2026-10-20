@@ -1017,12 +1017,17 @@ async def refresh_oauth_token_result(
     except httpx.HTTPStatusError as e:
         if _is_invalid_grant(e.response):
             # A concurrent refresh may have spent this copy's grant first (#927).
-            adopted, advanced = await sync_to_async(_adopt_rotated_token)(
-                social_token,
-                preflight,
-                deadline=_phase_deadline(None, db_timeout, clock),
-                clock=clock,
-            )
+            try:
+                adopted, advanced = await sync_to_async(_adopt_rotated_token)(
+                    social_token,
+                    preflight,
+                    deadline=_phase_deadline(None, db_timeout, clock),
+                    clock=clock,
+                )
+            except TokenRefreshError:
+                # A failed read must not erase the provider's verdict below.
+                logger.warning("Could not check for a concurrently refreshed token", exc_info=True)
+                adopted, advanced = None, False
             if adopted is not None:
                 logger.info("Adopted a concurrently refreshed OAuth token")
                 return adopted
@@ -1198,8 +1203,12 @@ def _adopt_rotated_token(
     try:
         with transaction.atomic(), preserve_transaction_timeouts():
             _configure_transaction_deadline(deadline, clock)
+            # Locked so an in-flight persist of the winning refresh commits first.
             current = (
-                SocialToken.objects.select_related("account").filter(pk=preflight.token_id).first()
+                SocialToken.objects.select_for_update(of=("self",))
+                .select_related("account")
+                .filter(pk=preflight.token_id)
+                .first()
             )
             observed_ids = [fence.connection_id for fence in preflight.connection_fences]
             _configure_transaction_deadline(deadline, clock)
@@ -1224,6 +1233,11 @@ def _adopt_rotated_token(
         or not _identity_matches(preflight, current, connections)
         or (current.token, current.token_secret)
         == (preflight.access_token, preflight.refresh_token)
+        # Its own refresh was already refused: serving it would hand out a dead grant.
+        or any(
+            connection.oauth_refresh_failure_fingerprint == credential_fingerprint(current)
+            for connection in connections
+        )
     ):
         return None, False
     snapshot = _persisted_snapshot(current)
