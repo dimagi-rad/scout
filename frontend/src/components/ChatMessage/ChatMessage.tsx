@@ -40,7 +40,7 @@ import type {
 } from "./ToolOutput"
 import { MemorySavedChip } from "./MemorySavedChip"
 import { savedMemory } from "./savedMemory"
-import { splitQuotedMessage } from "./quotes"
+import { messageSegments } from "./quotes"
 
 function inputSql(input: unknown): string | undefined {
   if (input != null && typeof input === "object" && "sql" in input) {
@@ -92,6 +92,8 @@ interface ChatMessageProps {
 interface ChatTextPartProps {
   role: "user" | "assistant"
   text: string
+  /** A reply's own text, which the quote action may offer to quote. */
+  quotable?: boolean
 }
 
 function ChatMarkdownLink({ href, children, ...markdownProps }: ComponentPropsWithoutRef<"a"> & { node?: unknown }) {
@@ -106,25 +108,24 @@ function ChatMarkdownLink({ href, children, ...markdownProps }: ComponentPropsWi
 }
 
 function UserMessageText({ text }: { text: string }) {
-  const { quotes, body } = splitQuotedMessage(text)
-  if (quotes.length === 0) return text
-  return (
-    <>
-      {quotes.map((quote, i) => (
-        <blockquote
-          key={i}
-          className="mb-2 line-clamp-4 whitespace-pre-wrap border-l-2 border-primary-foreground/60 pl-2 text-xs text-primary-foreground/80"
-          data-testid="chat-message-quote"
-        >
-          {quote}
-        </blockquote>
-      ))}
-      {body}
-    </>
+  const segments = messageSegments(text)
+  if (!segments.some((segment) => segment.kind === "quote")) return text
+  return segments.map((segment, i) =>
+    segment.kind === "quote" ? (
+      <blockquote
+        key={i}
+        className="mb-2 whitespace-pre-wrap border-l-2 border-primary-foreground/60 pl-2 text-xs text-primary-foreground/80"
+        data-testid="chat-message-quote"
+      >
+        {segment.text}
+      </blockquote>
+    ) : (
+      <p key={i} className={i < segments.length - 1 ? "mb-2" : undefined}>{segment.text}</p>
+    ),
   )
 }
 
-export function ChatTextPart({ role, text }: ChatTextPartProps) {
+export function ChatTextPart({ role, text, quotable = false }: ChatTextPartProps) {
   const isUser = role === "user"
   return (
     <div
@@ -133,7 +134,7 @@ export function ChatTextPart({ role, text }: ChatTextPartProps) {
           ? "bg-primary px-4 py-2 text-primary-foreground"
           : "prose prose-sm max-w-none py-1"
       }`}
-      data-quotable={isUser ? undefined : "true"}
+      data-quotable={quotable && !isUser ? "true" : undefined}
     >
       {isUser ? <UserMessageText text={text} /> : <Markdown remarkPlugins={[remarkGfm]} components={{ a: ChatMarkdownLink }}>{text}</Markdown>}
     </div>
@@ -873,7 +874,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
       <div className="max-w-[90%]">
         {message.parts.map((part, i) => {
           if (part.type === "text") {
-            return <ChatTextPart key={i} role={isUser ? "user" : "assistant"} text={part.text} />
+            return <ChatTextPart key={i} role={isUser ? "user" : "assistant"} text={part.text} quotable />
           }
 
           if (part.type === "reasoning") {

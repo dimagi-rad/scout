@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { composeQuotedMessage, splitQuotedMessage } from "./quotes"
+import { composeQuotedMessage, messageSegments, splitQuotedMessage } from "./quotes"
 
 describe("quote-reply message format", () => {
   it("leaves a message without quotes untouched", () => {
@@ -22,7 +22,23 @@ describe("quote-reply message format", () => {
     expect(splitQuotedMessage(composeQuotedMessage(quotes, reply))).toEqual({ quotes, body: reply })
   })
 
-  it("reads a quote-only message", () => {
-    expect(splitQuotedMessage("> just this")).toEqual({ quotes: ["just this"], body: "" })
+  it("does not take a message that merely starts with > for a quote", () => {
+    for (const text of [">50% coverage sites last month?", "> just this", "> 5 visits\n\n> more"]) {
+      expect(splitQuotedMessage(text)).toEqual({ quotes: [], body: text })
+    }
+  })
+
+  it("finds quotes later in a message, as when a quote-reply joins a held request", () => {
+    const joined = `How many visits?\n\n${composeQuotedMessage(["42 visits"], "Only Kenya")}`
+    expect(messageSegments(joined)).toEqual([
+      { kind: "text", text: "How many visits?" },
+      { kind: "quote", text: "42 visits" },
+      { kind: "text", text: "Only Kenya" },
+    ])
+  })
+
+  it("gives back the body after the leading quotes, later quotes intact", () => {
+    const text = composeQuotedMessage(["a"], `x\n\n${composeQuotedMessage(["b"], "y")}`)
+    expect(splitQuotedMessage(text)).toEqual({ quotes: ["a"], body: "x\n\n> b\n\ny" })
   })
 })
