@@ -8,7 +8,6 @@ import { useAppStore } from "@/store/store"
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher"
 
 vi.mock("@/components/CreateWorkspaceModal", () => ({ CreateWorkspaceModal: vi.fn(() => null) }))
-
 const LAST_LOAD = "2026-04-16T12:00:00Z"
 const AVAILABILITY_NOTE = "Current availability is checked when opening an artifact."
 
@@ -317,5 +316,49 @@ describe("combining search matches", () => {
     fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
 
     expect(screen.queryByTestId("workspace-combine-matches")).toBeNull()
+  })
+})
+
+describe("switcher at scale", () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useAppStore.setState(useAppStore.getInitialState(), true)
+  })
+
+  function many(count: number): WorkspaceListItem[] {
+    return Array.from({ length: count }, (_, i) =>
+      workspace({
+        id: `auto-${i}`,
+        display_name: `Auto ${String(i).padStart(4, "0")}`,
+        is_auto_created: true,
+      }),
+    )
+  }
+
+  it("opens on recent and hand-made workspaces, not every auto-created one", () => {
+    localStorage.setItem("scout.recentWorkspaces", JSON.stringify(["auto-7"]))
+    const handMade = workspace({ id: "mine", display_name: "My program", is_auto_created: false })
+    openSwitcher([handMade, ...many(1000)])
+
+    const rows = screen
+      .getByTestId("workspace-list")
+      .querySelectorAll("[data-switcher-row]")
+    expect([...rows].map((r) => r.getAttribute("data-testid"))).toEqual([
+      "domain-item-auto-7",
+      "domain-item-mine",
+    ])
+    expect(screen.getByText("Recent")).toBeInTheDocument()
+    expect(screen.getByText("Your workspaces")).toBeInTheDocument()
+    expect(screen.getByTestId("workspace-list-search-hint")).toHaveTextContent("1001")
+  })
+
+  it("never renders more than 50 rows and asks for a narrower search", () => {
+    openSwitcher(many(1000))
+    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "Auto" } })
+
+    expect(screen.getByTestId("workspace-list").querySelectorAll("[data-switcher-row]")).toHaveLength(50)
+    expect(screen.getByTestId("workspace-list-more")).toHaveTextContent(
+      "950 more — refine your search",
+    )
   })
 })

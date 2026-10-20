@@ -20,12 +20,11 @@ import {
 } from "@/components/ui/popover"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 
-// Row windowing: when the visible list is large, only render rows near the
-// viewport so 270 workspaces stay smooth without a virtualization dependency.
 const ROW_HEIGHT = 36 // px, matches a single list row
 const LIST_MAX_HEIGHT = 288 // px (max-h-72)
-const WINDOW_OVERSCAN = 6
-const WINDOW_THRESHOLD = 60 // below this, render everything (cheap)
+// Sign-in auto-creates a workspace per source, so people hold hundreds (p50 ~680 for
+// active users); a list never renders more than this and asks for a search instead.
+const LIST_LIMIT = 50
 const RECENT_LIMIT = 8
 const SEGMENT_MIN_WORKSPACES = 12 // hide segmented controls for small accounts
 
@@ -127,6 +126,7 @@ function WorkspaceRow({ ws, active, highlighted, onSelect, onHover, onSettings }
   return (
     <button
       data-testid={`domain-item-${ws.id}`}
+      data-switcher-row
       data-has-recorded-load={workspaceHasRecordedLoad(ws)}
       data-data-state={dataState}
       onClick={onSelect}
@@ -220,7 +220,6 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   const [recentIds, setRecentIds] = useState<string[]>([])
 
   const scrollRef = useRef<HTMLDivElement>(null)
-  const [scrollTop, setScrollTop] = useState(0)
 
   // The active workspace may be an orphan reached by deep link, so look across
   // ALL domains here. Everything else lists only workspaces the user can still
@@ -254,6 +253,15 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
       .slice(0, RECENT_LIMIT)
   }, [accessible, recentIds])
 
+  // Workspaces someone made on purpose (a handful each), unlike the per-source ones
+  // sign-in creates; they sit under Recent so the default view stays short.
+  const handMade = useMemo(() => {
+    const recentSet = new Set(recent.map((d) => d.id))
+    return accessible
+      .filter((d) => !d.is_auto_created && !recentSet.has(d.id))
+      .sort((a, b) => a.display_name.localeCompare(b.display_name))
+  }, [accessible, recent])
+
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase()
     const matchesSearch = (ws: WorkspaceListItem) =>
@@ -266,7 +274,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     if (q) {
       base = accessible
     } else if (segment === "recent") {
-      base = recent
+      base = [...recent, ...handMade]
     } else if (segment === "all") {
       base = accessible
     } else {
@@ -281,7 +289,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
       list = [...list].sort((a, b) => a.display_name.localeCompare(b.display_name))
     }
     return list
-  }, [accessible, recent, search, segment, recordedLoadsOnly])
+  }, [accessible, recent, handMade, search, segment, recordedLoadsOnly])
 
   // The switcher picks one workspace, so a cross-opportunity question needs a new one
   // (#916): offer to combine every source behind the current search's matches.
@@ -318,7 +326,6 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   function resetView() {
     setHighlight(0)
     if (scrollRef.current) scrollRef.current.scrollTop = 0
-    setScrollTop(0)
   }
 
   function changeSearch(value: string) {
@@ -347,7 +354,9 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     if (o) {
       const ids = getRecentWorkspaceIds()
       setRecentIds(ids)
-      setSegment(ids.length > 0 ? "recent" : "all")
+      const hasSuggestions =
+        ids.length > 0 || accessible.some((d) => !d.is_auto_created)
+      setSegment(hasSuggestions ? "recent" : "all")
       resetView()
     } else {
       setSearch("")
@@ -402,13 +411,13 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   function onKeyDown(e: React.KeyboardEvent) {
     if (e.key === "ArrowDown") {
       e.preventDefault()
-      setHighlight((h) => Math.min(h + 1, visible.length - 1))
+      setHighlight((h) => Math.min(h + 1, shown.length - 1))
     } else if (e.key === "ArrowUp") {
       e.preventDefault()
       setHighlight((h) => Math.max(h - 1, 0))
     } else if (e.key === "Enter") {
       e.preventDefault()
-      const ws = visible[highlight] ?? visible[0]
+      const ws = shown[highlight] ?? shown[0]
       if (ws) select(ws)
     } else if (e.key === "Escape") {
       close()
@@ -417,31 +426,36 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
 
   // Keep the highlighted row in view as the user arrows through.
   useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const top = highlight * ROW_HEIGHT
-    const bottom = top + ROW_HEIGHT
-    if (top < el.scrollTop) el.scrollTop = top
-    else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight
+    // Section headings sit between rows, so find the row rather than computing its offset.
+    const row = scrollRef.current?.querySelectorAll<HTMLElement>("[data-switcher-row]")[highlight]
+    row?.scrollIntoView?.({ block: "nearest" })
   }, [highlight])
 
-  const windowed = visible.length > WINDOW_THRESHOLD
-  const startIndex = windowed
-    ? Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - WINDOW_OVERSCAN)
-    : 0
-  const visibleCount = windowed
-    ? Math.ceil(LIST_MAX_HEIGHT / ROW_HEIGHT) + WINDOW_OVERSCAN * 2
-    : visible.length
-  const endIndex = Math.min(visible.length, startIndex + visibleCount)
-  const slice = visible.slice(startIndex, endIndex)
+  const shown = visible.slice(0, LIST_LIMIT)
+  const notShown = visible.length - shown.length
+
+  // Section labels for the default view: Recent first, then hand-made workspaces.
+  const suggestedHeading = (index: number) => {
+    if (search || segment !== "recent" || recordedLoadsOnly) return null
+    const label =
+      index === 0 && recent.length > 0
+        ? "Recent"
+        : index === Math.min(recent.length, shown.length) && handMade.length > 0
+          ? "Your workspaces"
+          : null
+    if (!label) return null
+    return (
+      <p className="px-2 pb-0.5 pt-1.5 text-xs font-medium text-muted-foreground">{label}</p>
+    )
+  }
 
   const segmentLabel = (key: SegmentKey) => {
-    if (key === "recent") return "Recent"
+    if (key === "recent") return "Suggested"
     if (key === "all") return "All"
     return getProviderMeta(key).label
   }
   const segmentCount = (key: SegmentKey): number | null => {
-    if (key === "recent") return recent.length || null
+    if (key === "recent") return recent.length + handMade.length || null
     if (key === "all") return domains.length
     return providers.find((p) => p.value === key)?.count ?? null
   }
@@ -590,7 +604,6 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
 
           <div
             ref={scrollRef}
-            onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
             className="overflow-y-auto p-1"
             style={{ maxHeight: LIST_MAX_HEIGHT }}
             data-testid="workspace-list"
@@ -600,34 +613,41 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
                 {recordedLoadsOnly
                   ? "No recorded loads match these filters."
                   : !search && segment === "recent"
-                    ? "No recent workspaces — pick one to get started."
+                    ? "No recent workspaces — search to find one."
                     : "No workspaces match."}
               </p>
             ) : (
-              <div style={{ height: windowed ? visible.length * ROW_HEIGHT : undefined, position: "relative" }}>
-                <div
-                  style={
-                    windowed
-                      ? { position: "absolute", top: startIndex * ROW_HEIGHT, left: 0, right: 0 }
-                      : undefined
-                  }
-                >
-                  {slice.map((ws, i) => {
-                    const index = startIndex + i
-                    return (
-                      <WorkspaceRow
-                        key={ws.id}
-                        ws={ws}
-                        active={ws.id === activeDomainId}
-                        highlighted={index === highlight}
-                        onSelect={() => select(ws)}
-                        onHover={() => setHighlight(index)}
-                        onSettings={() => manage(ws)}
-                      />
-                    )
-                  })}
-                </div>
-              </div>
+              <>
+                {shown.map((ws, index) => (
+                  <div key={ws.id}>
+                    {suggestedHeading(index)}
+                    <WorkspaceRow
+                      ws={ws}
+                      active={ws.id === activeDomainId}
+                      highlighted={index === highlight}
+                      onSelect={() => select(ws)}
+                      onHover={() => setHighlight(index)}
+                      onSettings={() => manage(ws)}
+                    />
+                  </div>
+                ))}
+                {notShown > 0 && (
+                  <p
+                    className="px-2 py-1.5 text-xs text-muted-foreground"
+                    data-testid="workspace-list-more"
+                  >
+                    {notShown} more — refine your search
+                  </p>
+                )}
+                {!search && segment === "recent" && accessible.length > shown.length && (
+                  <p
+                    className="px-2 py-1.5 text-xs text-muted-foreground"
+                    data-testid="workspace-list-search-hint"
+                  >
+                    Search to find any of your {accessible.length} workspaces.
+                  </p>
+                )}
+              </>
             )}
 
             {lostVisible.length > 0 && (
