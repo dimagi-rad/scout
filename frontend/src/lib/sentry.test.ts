@@ -9,10 +9,17 @@ import {
   isNoiseEvent,
   scrubBreadcrumb,
   scrubEvent,
+  scrubTransaction,
   stripUrl,
+  tracesSampleRate,
 } from "./sentry"
+import type { TransactionEvent } from "./sentry"
 
-vi.mock("@sentry/react", () => ({ init: vi.fn(), setUser: vi.fn() }))
+vi.mock("@sentry/react", () => ({
+  init: vi.fn(),
+  setUser: vi.fn(),
+  browserTracingIntegration: vi.fn(() => ({ name: "BrowserTracing" })),
+}))
 
 function errorEvent(overrides: Partial<ErrorEvent> = {}): ErrorEvent {
   return {
@@ -337,7 +344,7 @@ describe("initSentry", () => {
     expect(Sentry.init).not.toHaveBeenCalled()
   })
 
-  it("reports errors only, without default PII", () => {
+  it("reports errors only, without default PII, when no trace rate is set", () => {
     vi.stubEnv("VITE_SENTRY_DSN", "https://key@o0.ingest.sentry.io/1")
     vi.stubEnv("VITE_SENTRY_RELEASE", "abc123")
     vi.stubEnv("VITE_SENTRY_ENVIRONMENT", "production")
@@ -353,5 +360,85 @@ describe("initSentry", () => {
     })
     expect(options).not.toHaveProperty("tracesSampleRate")
     expect(options).not.toHaveProperty("integrations")
+  })
+})
+
+describe("tracing", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.clearAllMocks()
+  })
+
+  it("samples traces at the configured rate and scrubs them", () => {
+    vi.stubEnv("VITE_SENTRY_DSN", "https://key@o0.ingest.sentry.io/1")
+    vi.stubEnv("VITE_SENTRY_TRACES_SAMPLE_RATE", "0.1")
+    initSentry()
+    const options = vi.mocked(Sentry.init).mock.calls[0][0]!
+    expect(options.tracesSampleRate).toBe(0.1)
+    expect(options.beforeSendTransaction).toBe(scrubTransaction)
+    expect(Sentry.browserTracingIntegration).toHaveBeenCalled()
+    expect(options).toMatchObject({ sendDefaultPii: false, beforeSend })
+  })
+
+  it("treats a missing or malformed rate as off", () => {
+    expect(tracesSampleRate(undefined)).toBe(0)
+    expect(tracesSampleRate("")).toBe(0)
+    expect(tracesSampleRate("abc")).toBe(0)
+    expect(tracesSampleRate("-1")).toBe(0)
+    expect(tracesSampleRate("2")).toBe(0)
+    expect(tracesSampleRate("0.25")).toBe(0.25)
+  })
+
+  it("scrubs URLs, selectors and stray context from transactions", () => {
+    const id = "0b6e9a52-3c1d-4f7a-9e2b-1a2b3c4d5e6f"
+    const event = scrubTransaction({
+      type: "transaction",
+      transaction: `/workspaces/acme-health/${id}/chat`,
+      request: {
+        url: `https://scout.example/workspaces/acme-health/${id}/chat?invite=tok`,
+        headers: { Cookie: "sessionid_scout=s3cret" },
+      },
+      user: { id: "u", email: "a@example.com" },
+      extra: { body: "raw" },
+      contexts: {
+        trace: {
+          trace_id: "t",
+          span_id: "s",
+          op: "pageload",
+          data: { url: "https://scout.example/x?token=abc" },
+        },
+        custom: { secret: "x" },
+      },
+      spans: [
+        {
+          op: "http.client",
+          description: `GET /api/workspaces/${id}/datasets/hiv_patients/?q=name`,
+          data: { url: "/api/x?token=abc", "http.query": "?token=abc", "http.fragment": "#a" },
+          span_id: "1",
+          trace_id: "t",
+          start_timestamp: 0,
+          origin: "auto",
+        },
+        {
+          op: "ui.interaction.click",
+          description: 'body > button[title="show me patient names"]',
+          span_id: "2",
+          trace_id: "t",
+          start_timestamp: 0,
+          origin: "auto",
+        },
+      ],
+    } as TransactionEvent)
+
+    expect(event.transaction).toBe(`/workspaces/:slug/${id}/chat`)
+    expect(event.request).toEqual({ url: `https://scout.example/workspaces/:slug/${id}/chat` })
+    expect(event.user).toEqual({ id: "u" })
+    expect(event.extra).toBeUndefined()
+    expect(Object.keys(event.contexts ?? {})).toEqual(["trace"])
+    expect(event.contexts?.trace?.data).toEqual({ url: "https://scout.example/x" })
+    const [http, click] = event.spans ?? []
+    expect(http.description).toBe(`GET /api/workspaces/${id}/datasets/:name/`)
+    expect(http.data).toEqual({ url: "/api/x" })
+    expect(click.description).toBe("body > button[title]")
   })
 })

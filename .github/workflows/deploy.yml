@@ -124,6 +124,7 @@ jobs:
             --build-arg VITE_SENTRY_DSN \
             --build-arg VITE_SENTRY_ENVIRONMENT=production \
             --build-arg VITE_SENTRY_RELEASE="$IMAGE_TAG" \
+            --build-arg VITE_SENTRY_TRACES_SAMPLE_RATE=0.1 \
             --build-arg SENTRY_ORG="${{ vars.SCOUT_SENTRY_ORG }}" \
             --build-arg SENTRY_PROJECT="${{ vars.SCOUT_SENTRY_FRONTEND_PROJECT }}" \
             --secret id=sentry_auth_token,env=SENTRY_AUTH_TOKEN \

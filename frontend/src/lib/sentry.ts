@@ -1,5 +1,12 @@
 import * as Sentry from "@sentry/react"
-import type { Breadcrumb, ErrorEvent, EventHint, Exception, StackFrame } from "@sentry/react"
+import type {
+  Breadcrumb,
+  BrowserOptions,
+  ErrorEvent,
+  EventHint,
+  Exception,
+  StackFrame,
+} from "@sentry/react"
 import { safeText } from "./reportRenderError"
 
 // Expected responses the UI already handles: signed out, no access, and the
@@ -98,6 +105,16 @@ export function isNoiseEvent(event: ErrorEvent, hint: EventHint = {}): boolean {
   return EXTENSION_URL.test(frame?.filename ?? frame?.abs_path ?? "")
 }
 
+/** Drops attribute values from a CSS selector Sentry built from a clicked element. */
+function scrubSelector(selector: string): string {
+  // Values are unescaped and may hold quotes or brackets, so a value ends only at
+  // a `"]` followed by the next attribute, the next element or the end.
+  const scrubbed = selector.replace(/\[([\w:-]+)="[\s\S]*?"\](?=$|\[| > )/g, "[$1]")
+  // A quote left over means a value fooled the pattern (one containing `"][`),
+  // so the whole selector goes rather than a fragment of it.
+  return /["']/.test(scrubbed) ? "[redacted selector]" : scrubbed
+}
+
 /**
  * Sentry `beforeBreadcrumb` hook. Console breadcrumbs hold raw error text and
  * logged values, request breadcrumbs hold full URLs, and UI breadcrumbs hold
@@ -106,12 +123,7 @@ export function isNoiseEvent(event: ErrorEvent, hint: EventHint = {}): boolean {
 export function scrubBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
   if (breadcrumb.category === "console") return null
   if (breadcrumb.category?.startsWith("ui.") && breadcrumb.message) {
-    // Values are unescaped and may hold quotes or brackets, so a value ends only at
-    // a `"]` followed by the next attribute, the next element or the end.
-    const message = breadcrumb.message.replace(/\[([\w:-]+)="[\s\S]*?"\](?=$|\[| > )/g, "[$1]")
-    // A quote left over means a value fooled the pattern (one containing `"][`),
-    // so the whole selector goes rather than a fragment of it.
-    breadcrumb = { ...breadcrumb, message: /["']/.test(message) ? "[redacted selector]" : message }
+    breadcrumb = { ...breadcrumb, message: scrubSelector(breadcrumb.message) }
   }
   if (!breadcrumb.data) return breadcrumb
   const data = { ...breadcrumb.data }
@@ -177,10 +189,74 @@ export function beforeSend(event: ErrorEvent, hint: EventHint): ErrorEvent | nul
   return isNoiseEvent(event, hint) ? null : scrubEvent(event, hint)
 }
 
-/** Errors only: no tracing, no replay, no default PII. A no-op without a DSN. */
+// @sentry/react does not re-export this type from @sentry/core.
+export type TransactionEvent = Parameters<NonNullable<BrowserOptions["beforeSendTransaction"]>>[0]
+
+const SPAN_URL_KEYS = ["url", "http.url", "http.request.redirect_url"]
+// Fetch and XHR spans are described as "<METHOD> <url>".
+const METHOD_AND_URL = /^([A-Z]+ )(.*)$/s
+
+function scrubSpanDescription(op: string | undefined, description: string): string {
+  if (op?.startsWith("ui.")) return scrubSelector(description)
+  const match = METHOD_AND_URL.exec(description)
+  return match ? match[1] + stripUrl(match[2]) : stripUrl(description)
+}
+
+/**
+ * Sentry `beforeSendTransaction` hook: the same scrubbing as errors, plus span
+ * URLs and the element selectors interaction spans are named after.
+ */
+export function scrubTransaction(event: TransactionEvent): TransactionEvent {
+  if (event.transaction) event.transaction = stripUrl(event.transaction)
+  if (event.request) event.request = { url: stripUrl(event.request.url) }
+  event.user = event.user?.id !== undefined ? { id: event.user.id } : undefined
+  delete event.extra
+  if (event.contexts) {
+    // A transaction's own timing lives in the trace context.
+    event.contexts = Object.fromEntries(
+      Object.entries(event.contexts).filter(([key]) => key === "trace" || KEPT_CONTEXTS.has(key)),
+    )
+  }
+  const trace = event.contexts?.trace
+  if (trace?.data) trace.data = scrubSpanData(trace.data)
+  for (const span of event.spans ?? []) {
+    if (span.description) span.description = scrubSpanDescription(span.op, span.description)
+    if (span.data) span.data = scrubSpanData(span.data)
+  }
+  if (event.breadcrumbs) {
+    event.breadcrumbs = event.breadcrumbs
+      .map(scrubBreadcrumb)
+      .filter((breadcrumb): breadcrumb is Breadcrumb => breadcrumb !== null)
+  }
+  return event
+}
+
+function scrubSpanData<T extends Record<string, unknown>>(data: T): T {
+  const scrubbed: Record<string, unknown> = { ...data }
+  delete scrubbed["http.query"]
+  delete scrubbed["http.fragment"]
+  for (const key of SPAN_URL_KEYS) {
+    if (key in scrubbed) scrubbed[key] = stripUrl(scrubbed[key])
+  }
+  return scrubbed as T
+}
+
+/** A sample rate in [0, 1], or 0 when unset or malformed so tracing stays off. */
+export function tracesSampleRate(raw: string | undefined): number {
+  const rate = Number(raw)
+  return raw && Number.isFinite(rate) && rate > 0 && rate <= 1 ? rate : 0
+}
+
+/**
+ * Errors, plus sampled performance traces when VITE_SENTRY_TRACES_SAMPLE_RATE is
+ * set. No replay, no default PII. A no-op without a DSN.
+ */
 export function initSentry(): void {
   const dsn = import.meta.env.VITE_SENTRY_DSN as string | undefined
   if (!dsn) return
+  const sampleRate = tracesSampleRate(
+    import.meta.env.VITE_SENTRY_TRACES_SAMPLE_RATE as string | undefined,
+  )
   Sentry.init({
     dsn,
     environment:
@@ -190,6 +266,13 @@ export function initSentry(): void {
     denyUrls: [EXTENSION_URL],
     beforeBreadcrumb: scrubBreadcrumb,
     beforeSend,
+    ...(sampleRate > 0
+      ? {
+          integrations: [Sentry.browserTracingIntegration()],
+          tracesSampleRate: sampleRate,
+          beforeSendTransaction: scrubTransaction,
+        }
+      : {}),
   })
 }
 
