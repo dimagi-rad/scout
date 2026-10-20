@@ -60,15 +60,15 @@ async def sync_column_notes(workspace, table_name: str, form_definitions: dict) 
 def _merge_column_notes(workspace, table_name, column_notes, folded) -> TableKnowledge:
     # Connect sources sharing a workspace can load at once; without the row lock
     # one source's merge would overwrite the other's notes.
-    TableKnowledge.objects.get_or_create(
-        workspace=workspace,
-        table_name=table_name,
-        defaults={
-            "column_notes": {},
-            "description": f"Auto-generated column notes for {table_name}.",
-        },
-    )
     with transaction.atomic():
+        TableKnowledge.objects.get_or_create(
+            workspace=workspace,
+            table_name=table_name,
+            defaults={
+                "column_notes": {},
+                "description": f"Auto-generated column notes for {table_name}.",
+            },
+        )
         tk = TableKnowledge.objects.select_for_update().get(
             workspace=workspace, table_name=table_name
         )
