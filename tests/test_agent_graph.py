@@ -157,7 +157,8 @@ class TestSystemPrompt:
     async def test_data_availability_section_present(self, workspace, user, tenant):
 
         # _build_system_prompt returns a (stable, volatile) split (arch #254).
-        prompt = "\n".join(await _build_system_prompt(workspace, user, write_capable=True))
+        stable, volatile = await _build_system_prompt(workspace, user, write_capable=True)
+        prompt = f"{stable}\n{volatile}"
 
         assert "Data Availability" in prompt
         # Schema context is now pre-fetched; no instruction to call get_schema_status
@@ -166,9 +167,10 @@ class TestSystemPrompt:
         assert "run_materialization" in prompt
         assert "list_workspaces" in prompt
         assert "list_datasets" in prompt
-        # Runtime workspace/provider details are tool-discovered, not preloaded.
-        assert tenant.canonical_name not in prompt
-        assert tenant.external_id not in prompt
+        # Only the volatile suffix names sources, so the cached prefix stays shared.
+        assert tenant.canonical_name not in stable
+        assert tenant.external_id not in stable
+        assert f"- {tenant.canonical_name} (" in volatile
         assert "Pipeline:" not in prompt
 
     @pytest.mark.django_db(transaction=True)

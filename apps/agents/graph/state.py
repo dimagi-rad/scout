@@ -11,7 +11,13 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from apps.chat.constants import SYSTEM_RESUME_MARKER
+
 DEFAULT_MAX_MESSAGES = 20
+
+# A reply like "yes", "continue" or "the first one" says nothing on its own, so the
+# user's message before it, and the assistant text each one answers, are kept too.
+PINNED_USER_MESSAGES = 2
 
 
 def prune_messages(
@@ -36,13 +42,84 @@ def prune_messages(
     if len(conversation_messages) <= max_messages:
         return system_messages + conversation_messages
 
-    pruned_conversation = conversation_messages[-max_messages:]
-
-    # Drop leading ToolMessages orphaned from their (now-pruned) parent AIMessage.
-    while pruned_conversation and hasattr(pruned_conversation[0], "tool_call_id"):
+    # A turn of parallel tool calls passes the window within a few rounds; without
+    # its request the model saw an "empty message" and answered with a menu (#919).
+    request = _current_request(conversation_messages)[-max(max_messages // 2, 1) :]
+    start = len(conversation_messages) - max_messages
+    if request and request[0] < start:
+        start = len(conversation_messages) - max(max_messages - len(request), 1)
+    # Skip results whose AIMessage fell out of the window. If that would leave
+    # nothing, the window sits inside one round wider than itself: back up to the
+    # round's AIMessage, or every result is lost and the model restarts silently.
+    skip = start
+    while skip < len(conversation_messages) and isinstance(
+        conversation_messages[skip], ToolMessage
+    ):
+        skip += 1
+    if skip < len(conversation_messages):
+        start = skip
+    else:
+        while start > 0 and isinstance(conversation_messages[start], ToolMessage):
+            start -= 1
+    pinned = [conversation_messages[i] for i in request if i < start]
+    pruned_conversation = conversation_messages[start:]
+    # Only a history that is nothing but ToolMessages still opens on one.
+    while pruned_conversation and isinstance(pruned_conversation[0], ToolMessage):
         pruned_conversation = pruned_conversation[1:]
+    overflow = len(pinned) + len(pruned_conversation) - max_messages
+    if overflow > 0 and pinned:
+        pinned = _shed_pins(pinned, overflow)
 
-    return system_messages + pruned_conversation
+    return system_messages + pinned + pruned_conversation
+
+
+def _shed_pins(pinned: list[BaseMessage], count: int) -> list[BaseMessage]:
+    """Drop up to ``count`` resume markers and assistant-text pins, oldest first.
+
+    The user's own messages are never shed: whichever one carries the request,
+    losing it is the #919 failure. ``_current_request``'s cap bounds the overflow.
+    """
+    droppable = [
+        k
+        for k, message in enumerate(pinned)
+        if not isinstance(message, HumanMessage) or _is_resume_marker(message)
+    ]
+    # With no user message pinned, the latest marker is the user turn the API needs.
+    if not any(isinstance(m, HumanMessage) and not _is_resume_marker(m) for m in pinned):
+        markers = [k for k in droppable if isinstance(pinned[k], HumanMessage)]
+        if markers:
+            droppable.remove(markers[-1])
+    dropped = set(droppable[:count])
+    return [message for k, message in enumerate(pinned) if k not in dropped]
+
+
+def _is_resume_marker(message: BaseMessage) -> bool:
+    content = message.content
+    return isinstance(content, str) and content.startswith(SYSTEM_RESUME_MARKER)
+
+
+def _current_request(conversation: list[BaseMessage]) -> list[int]:
+    """Indices of the human messages that state what the current turn must answer.
+
+    That is the latest run of consecutive HumanMessages plus the user's last
+    ``PINNED_USER_MESSAGES`` own messages (a resume marker is not one), each with
+    the tool-free assistant reply it answers.
+    """
+    humans = [i for i, m in enumerate(conversation) if isinstance(m, HumanMessage)]
+    if not humans:
+        return []
+    first = humans[-1]
+    while first > 0 and isinstance(conversation[first - 1], HumanMessage):
+        first -= 1
+    asked = [i for i in humans if not _is_resume_marker(conversation[i])][-PINNED_USER_MESSAGES:]
+    answered = [
+        i - 1
+        for i in asked
+        if i > 0
+        and isinstance(conversation[i - 1], AIMessage)
+        and not all_tool_calls(conversation[i - 1])
+    ]
+    return sorted({*range(first, humans[-1] + 1), *asked, *answered})
 
 
 def all_tool_calls(message: AIMessage) -> list[dict]:
