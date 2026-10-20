@@ -53,6 +53,11 @@ async def aschedule_ocs_probe(connection_id) -> None:
         key = f"ocs_chatbot_probe:{connection_id}"
         if not await cache.aadd(key, True, OCS_PROBE_COOLDOWN_SECONDS):
             return
-        await probe_ocs_chatbots.defer_async(connection_id=str(connection_id))
+        try:
+            await probe_ocs_chatbots.defer_async(connection_id=str(connection_id))
+        except Exception:
+            # Not queued, so do not hold the cooldown against the next discovery.
+            await cache.adelete(key)
+            raise
     except Exception:
         logger.warning("Could not queue the OCS chatbot probe", exc_info=True)

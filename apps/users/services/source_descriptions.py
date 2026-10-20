@@ -16,12 +16,18 @@ import asyncio
 import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import httpx
+from django.utils import timezone
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership
-from apps.users.services.credential_resolver import CredentialResolutionError, aresolve_credential
+from apps.users.services.credential_resolver import (
+    CredentialResolutionError,
+    aget_connection_token,
+    aresolve_credential,
+)
 from apps.users.services.tenant_listing.rows import clean_description
 
 logger = logging.getLogger(__name__)
@@ -31,6 +37,8 @@ logger = logging.getLogger(__name__)
 _OCS_PROBE_BUDGET_SECONDS = 60.0
 _OCS_PROBE_CONCURRENCY = 4
 _OCS_PROBE_TIMEOUT_SECONDS = 10.0
+# Enough for every request of one probe to go out on a token that is still valid.
+_TOKEN_MARGIN = timedelta(seconds=_OCS_PROBE_BUDGET_SECONDS + _OCS_PROBE_TIMEOUT_SECONDS)
 
 
 def connect_description(opportunity: Any) -> str | None:
@@ -124,6 +132,28 @@ async def arecord_ocs_descriptions(
         logger.warning("Could not record OCS chatbot descriptions", exc_info=True)
 
 
+async def _probe_headers(membership) -> dict[str, str] | None:
+    """The connection's credential as it stands, or None.
+
+    An OAuth token is used only while unexpired, never renewed: the probe can be
+    queued by another member's share refresh, and a renewal failing on a
+    transient provider error would record a failure on this member's sign-in.
+    """
+    conn = membership.connection
+    if conn.credential_type == TenantConnection.API_KEY:
+        try:
+            credential = await aresolve_credential(membership)
+        except CredentialResolutionError:
+            return None
+        return {"X-api-key": credential["value"]} if credential else None
+    token = await aget_connection_token(conn)
+    if token is None or not token.token:
+        return None
+    if token.expires_at and token.expires_at <= timezone.now() + _TOKEN_MARGIN:
+        return None
+    return {"Authorization": f"Bearer {token.token}"}
+
+
 async def aprobe_connection_chatbots(connection_id: str, base_url: str) -> None:
     """Probe every live chatbot an OCS connection reaches, with its own credential."""
     memberships = [
@@ -136,17 +166,12 @@ async def aprobe_connection_chatbots(connection_id: str, base_url: str) -> None:
     ]
     if not memberships:
         return
-    try:
-        credential = await aresolve_credential(memberships[0])
-    except CredentialResolutionError:
-        credential = None
-    if not credential:
+    headers = await _probe_headers(memberships[0])
+    if headers is None:
         logger.info("No usable credential to probe OCS connection %s", connection_id)
         return
-    if credential["type"] == TenantConnection.API_KEY:
-        headers = {"X-api-key": credential["value"]}
-    else:
-        headers = {"Authorization": f"Bearer {credential['value']}"}
+    # Undescribed chatbots first, so a budget that runs out spends itself on news.
+    memberships.sort(key=lambda tm: bool(tm.tenant.description))
     by_server: dict[str, list[str]] = {}
     for tm in memberships:
         by_server.setdefault(tm.tenant.server, []).append(tm.tenant.external_id)

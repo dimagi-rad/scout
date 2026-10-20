@@ -1,11 +1,14 @@
 """Source descriptions: OCS chatbot probe, Connect export text, tenant list, agent prompt (#917)."""
 
 import asyncio
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from django.core.cache import cache
 from django.test import AsyncClient
+from django.utils import timezone
 
 from apps.users import tasks as users_tasks
 from apps.users.adapters import encrypt_credential
@@ -183,3 +186,48 @@ async def test_scheduling_queues_one_probe_per_cooldown(monkeypatch):
     await users_tasks.aschedule_ocs_probe("conn-1")
 
     queued.assert_awaited_once_with(connection_id="conn-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_connection_probe_never_renews_a_near_expiry_oauth_token(user, ocs_sessions, mocker):
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    account = await SocialAccount.objects.acreate(user=user, provider="ocs", uid="42#team")
+    token = await SocialToken.objects.acreate(
+        account=account, app=app, token="t", token_secret="r", expires_at=timezone.now()
+    )
+    conn = await TenantConnection.objects.acreate(
+        user=user,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+        social_account=account,
+        scope_key="team",
+    )
+    bot = await Tenant.objects.acreate(provider="ocs", external_id="bot", canonical_name="Bot")
+    await TenantMembership.objects.acreate(user=user, tenant=bot, connection=conn)
+    renew = mocker.patch("apps.users.services.credential_resolver.refresh_oauth_token")
+
+    await aprobe_connection_chatbots(str(conn.id), "https://ocs.example.com")
+
+    renew.assert_not_called()
+    ocs_sessions.client.get.assert_not_called()
+
+    token.expires_at = timezone.now() + timedelta(hours=1)
+    await token.asave(update_fields=["expires_at"])
+    ocs_sessions["bot"] = _Response(200, {"results": [_session("bot", "Fresh")]})
+
+    await aprobe_connection_chatbots(str(conn.id), "https://ocs.example.com")
+
+    assert ocs_sessions.client.get.await_args.kwargs["headers"] == {"Authorization": "Bearer t"}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_queue_does_not_hold_the_cooldown(monkeypatch):
+    monkeypatch.setattr(
+        users_tasks.probe_ocs_chatbots, "defer_async", AsyncMock(side_effect=RuntimeError)
+    )
+    await cache.adelete("ocs_chatbot_probe:conn-2")
+
+    await users_tasks.aschedule_ocs_probe("conn-2")
+
+    assert await cache.aget("ocs_chatbot_probe:conn-2") is None
