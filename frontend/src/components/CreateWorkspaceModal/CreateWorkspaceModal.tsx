@@ -154,7 +154,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     })
   }
 
-  // A pasted id list narrows the list to those sources; this ticks them all.
+  // Filters (a program, a pasted id list) narrow the list to a set; this ticks it all.
   function selectAllShown() {
     setDuplicateAcknowledged(false)
     setSelected((prev) => new Set([...prev, ...unselectedShown.map((t) => t.tenant_uuid)]))
@@ -296,7 +296,25 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                 </p>
               ) : (
                 <div className="space-y-3">
-                  <FacetFilterBar testIdPrefix="create-sources-filter" {...sourceFilters.barProps} />
+                  <FacetFilterBar
+                    testIdPrefix="create-sources-filter"
+                    {...sourceFilters.barProps}
+                    bulkAction={
+                      // A pasted id list offers this in its own summary instead.
+                      !sourceFilters.idReport
+                      && filteredSources.length < sortedSources.length
+                      && unselectedShown.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={selectAllShown}
+                          className="font-medium text-foreground underline-offset-2 hover:underline"
+                          data-testid="create-sources-select-shown"
+                        >
+                          Select {unselectedShown.length} shown
+                        </button>
+                      )
+                    }
+                  />
                   {sourceFilters.idReport && (
                     <IdListSummary
                       report={sourceFilters.idReport}

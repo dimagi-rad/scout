@@ -37,6 +37,15 @@ function requiresWorkspaceDelete(err: unknown): boolean {
   )
 }
 
+const LISTED_REFUSALS = 5
+
+function describeRefusals(refused: { name: string; reason: string }[]): string {
+  const names = refused.slice(0, LISTED_REFUSALS).map((r) => r.name).join(", ")
+  const more =
+    refused.length > LISTED_REFUSALS ? ` and ${refused.length - LISTED_REFUSALS} more` : ""
+  return `Couldn't add ${names}${more}. ${refused[0].name}: ${refused[0].reason}`
+}
+
 export function TenantsTab({
   workspaceId,
   isManager,
@@ -48,6 +57,7 @@ export function TenantsTab({
 }) {
   const userId = useAppStore((s) => s.user?.id)
   const isCurrentAccount = useIsCurrentAccount()
+  const accountSession = useAppStore((s) => s.accountSession)
 
   // Connected sources — fast local-DB query, gates only its own section.
   const [tenants, setTenants] = useState<WorkspaceTenant[]>([])
@@ -61,6 +71,8 @@ export function TenantsTab({
   const [refreshing, setRefreshing] = useState(false)
 
   const [addingId, setAddingId] = useState<string | null>(null)
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null)
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null)
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const addButtonRef = useRef<HTMLButtonElement>(null)
@@ -174,6 +186,24 @@ export function TenantsTab({
     if (!showAdd) setSearch("")
   }, [showAdd, setSearch])
 
+  async function addOne(tenant: UserTenant) {
+    const created = await workspaceApi.addTenant(workspaceId, tenant.tenant_uuid)
+    // Optimistic update; backend returns the internal tenant UUID as `tenant_id`.
+    setTenants((prev) =>
+      prev.some((t) => t.tenant_id === tenant.tenant_uuid)
+        ? prev
+        : [
+            ...prev,
+            {
+              id: created.id,
+              tenant_id: tenant.tenant_uuid,
+              tenant_name: tenant.tenant_name,
+              provider: tenant.provider,
+            },
+          ],
+    )
+  }
+
   function toggleAdd(event: MouseEvent<HTMLElement>) {
     openerRef.current = event.currentTarget
     setShowAdd((v) => !v)
@@ -224,18 +254,9 @@ export function TenantsTab({
   async function handleAdd(tenant: UserTenant) {
     setAddingId(tenant.tenant_uuid)
     setMutationError(null)
+    setBulkNotice(null)
     try {
-      const created = await workspaceApi.addTenant(workspaceId, tenant.tenant_uuid)
-      // Optimistic update; backend returns the internal tenant UUID as `tenant_id`.
-      setTenants((prev) => [
-        ...prev,
-        {
-          id: created.id,
-          tenant_id: tenant.tenant_uuid,
-          tenant_name: tenant.tenant_name,
-          provider: tenant.provider,
-        },
-      ])
+      await addOne(tenant)
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to add data source")
     } finally {
@@ -243,9 +264,56 @@ export function TenantsTab({
     }
   }
 
+  // One at a time: the server checks the adder's and every member's access per source.
+  // A refusal of one source (400/409, say a member without that opportunity) must not
+  // stop the rest; any other error (signed out, no longer a manager, server down) would
+  // fail every remaining source the same way, so it ends the run. The tab is keyed by
+  // workspace, so a run always belongs to the workspace it started in, and leaving the
+  // tab lets it finish.
+  async function handleAddShown() {
+    const batch = [...filteredAvailable]
+    const refused: { name: string; reason: string }[] = []
+    let added = 0
+    let stoppedBy: string | null = null
+    setMutationError(null)
+    setBulkNotice(null)
+    // Not isCurrentAccount(): that turns false on unmount, which must not end the run.
+    const session = accountSession
+    setBulkProgress({ done: 0, total: batch.length })
+    try {
+      for (const [index, tenant] of batch.entries()) {
+        if (!session.isCurrent()) return
+        setAddingId(tenant.tenant_uuid)
+        try {
+          await addOne(tenant)
+          added += 1
+        } catch (err) {
+          const reason = err instanceof ApiError ? err.message : "Failed to add data source"
+          if (err instanceof ApiError && (err.status === 400 || err.status === 409)) {
+            refused.push({ name: tenant.tenant_name, reason })
+          } else {
+            stoppedBy = reason
+            break
+          }
+        }
+        setBulkProgress({ done: index + 1, total: batch.length })
+      }
+    } finally {
+      setAddingId(null)
+      setBulkProgress(null)
+    }
+    if (!session.isCurrent()) return
+    const parts = [`Added ${added} of ${batch.length}.`]
+    if (refused.length > 0) parts.push(describeRefusals(refused))
+    if (stoppedBy) parts.push(`Stopped: ${stoppedBy}`)
+    if (refused.length > 0 || stoppedBy) setMutationError(parts.join(" "))
+    else setBulkNotice(parts[0])
+  }
+
   async function handleRemove(wt: WorkspaceTenant) {
     setRemovingId(wt.id)
     setMutationError(null)
+    setBulkNotice(null)
     try {
       await workspaceApi.removeTenant(workspaceId, wt.id)
       setTenants((prev) => prev.filter((t) => t.id !== wt.id))
@@ -298,6 +366,10 @@ export function TenantsTab({
       setDeletingWorkspace(false)
     }
   }
+
+  const bulkAddOffered =
+    filteredAvailable.length > 0
+    && (idReport !== null || filteredAvailable.length < available.length)
 
   const canShowAddButton = isManager && (availableStatus !== "ready" || available.length > 0)
 
@@ -412,7 +484,27 @@ export function TenantsTab({
           ) : (
             <>
               <div className="mb-3">
-                <FacetFilterBar testIdPrefix="available-sources-filter" {...sourceFilters.barProps} />
+                <FacetFilterBar
+                  testIdPrefix="available-sources-filter"
+                  {...sourceFilters.barProps}
+                  bulkAction={
+                    // Only a narrowed or pasted list: one click must not add every source
+                    // the user has by accident.
+                    bulkAddOffered && (
+                      <button
+                        type="button"
+                        onClick={() => void handleAddShown()}
+                        disabled={bulkProgress !== null || addingId !== null}
+                        className="font-medium text-foreground underline-offset-2 hover:underline disabled:opacity-50"
+                        data-testid="available-sources-add-shown"
+                      >
+                        {bulkProgress
+                          ? `Adding ${Math.min(bulkProgress.done + 1, bulkProgress.total)} of ${bulkProgress.total}…`
+                          : `Add ${filteredAvailable.length} shown`}
+                      </button>
+                    )
+                  }
+                />
                 {idReport && (
                   <div className="mt-2">
                     <IdListSummary
@@ -466,7 +558,7 @@ export function TenantsTab({
                         <Button
                           size="sm"
                           onClick={() => handleAdd(t)}
-                          disabled={addingId === t.tenant_uuid}
+                          disabled={addingId === t.tenant_uuid || bulkProgress !== null}
                           data-testid={`add-tenant-${t.tenant_uuid}`}
                         >
                           {addingId === t.tenant_uuid ? "Adding…" : "Add"}
@@ -479,6 +571,12 @@ export function TenantsTab({
             </>
           )}
         </div>
+      )}
+
+      {bulkNotice && !mutationError && (
+        <p className="mb-3 text-sm text-muted-foreground" role="status" data-testid="bulk-add-notice">
+          {bulkNotice}
+        </p>
       )}
 
       {mutationError && (
