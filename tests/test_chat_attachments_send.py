@@ -339,8 +339,8 @@ async def test_discarding_or_trimming_a_held_request_unbinds_its_attachments(use
     await PendingRequest.objects.acreate(
         thread=thread,
         parts=[
-            pending_requests._new_part("p1", "q", [entries[0]]),
-            pending_requests._new_part("p2", "", [entries[1]]),
+            pending_requests._new_part("p1", "q", [entries[0]], [entries[0]["id"]]),
+            pending_requests._new_part("p2", "", [entries[1]], [entries[1]["id"]]),
         ],
     )
 
@@ -613,7 +613,7 @@ async def test_expansion_spends_the_image_budget_on_the_newest(user, workspace, 
         loader,
     )
     assert first.content[0]["type"] == "text"
-    assert "not shown again" in first.content[0]["text"]
+    assert "is not shown: this request already carries" in first.content[0]["text"]
     assert second.content[0]["type"] == "image"
     # An image left out by the budget is never read from the database.
     assert str(old.id) not in loader._cache
@@ -667,3 +667,47 @@ async def _aattachment(user, workspace, content, filename, media_type, thread):
         filename=filename,
         media_type=media_type,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_discarding_keeps_an_attachment_a_sent_message_carries(user, workspace):
+    thread = await Thread.objects.acreate(user=user, workspace=workspace)
+    sent = await _aattachment(user, workspace, PNG, "sent.png", "image/png", thread)
+    entry = {"id": str(sent.id), "filename": "sent.png", "media_type": "image/png", "size": 1}
+    # The part re-references an attachment an earlier message already bound.
+    await PendingRequest.objects.acreate(
+        thread=thread, parts=[pending_requests._new_part("p1", "again", [entry])]
+    )
+
+    await pending_requests.adiscard(thread.id, version=1)
+
+    assert (await ChatAttachment.objects.aget(pk=sent.pk)).thread_id == thread.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_repeated_part_id_does_not_strand_its_new_attachments(user, workspace):
+    thread = await Thread.objects.acreate(user=user, workspace=workspace)
+    await PendingRequest.objects.acreate(
+        thread=thread, parts=[pending_requests._new_part("p1", "q")]
+    )
+    extra = await _aattachment(user, workspace, PNG, "extra.png", "image/png", None)
+    client = await _client(user)
+    resp = await client.post(
+        f"/api/workspaces/{workspace.id}/threads/{thread.id}/pending-request/parts/",
+        data=json.dumps({"id": "p1", "text": "q", "files": [_file_part(extra)]}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert (await ChatAttachment.objects.aget(pk=extra.pk)).thread_id is None
+
+
+def test_serialized_parts_hide_what_they_bound():
+    thread = Thread(id=uuid.uuid4())
+    pending = PendingRequest(
+        thread=thread, parts=[pending_requests._new_part("p1", "", [{"id": "a"}], ["a"])]
+    )
+    serialized = pending_requests.serialize(pending, thread, None)
+    assert "bound" not in serialized["parts"][0]
+    assert serialized["parts"][0]["attachments"] == [{"id": "a"}]

@@ -55,6 +55,13 @@ class AttachmentLoader:
     def __init__(self, thread_id: str | None):
         self.thread_id = thread_id
         self._cache: dict[str, LoadedAttachment | None] = {}
+        self._base64: dict[str, str] = {}
+
+    def base64_of(self, attachment: LoadedAttachment) -> str:
+        """The image's base64, encoded once per run rather than on every model call."""
+        if attachment.id not in self._base64:
+            self._base64[attachment.id] = base64.b64encode(attachment.image or b"").decode()
+        return self._base64[attachment.id]
 
     async def aload(self, ids: list[str]) -> dict[str, LoadedAttachment | None]:
         missing = [i for i in dict.fromkeys(ids) if i not in self._cache]
@@ -109,16 +116,17 @@ class _Budget:
 
 def _image_omitted(entry: dict) -> dict:
     return _text_block(
-        f"[Image {_label(entry)} was attached earlier in this chat and is not shown "
-        "again, to keep the request small. Ask the user to attach it again if you "
-        "need to look at it.]"
+        f"[Image {_label(entry)} is not shown: this request already carries as many "
+        "images as it can. If you need to see it, ask the user to attach it again "
+        "in a message with fewer images.]"
     )
 
 
 def _text_omitted(entry: dict) -> dict:
     return _text_block(
-        f"[Text file {_label(entry)} was attached earlier in this chat and is not shown "
-        "again, to keep the request small. Ask the user to attach it again if you need it.]"
+        f"[Text file {_label(entry)} is not shown: this request already carries as "
+        "much attached text as it can. Ask the user to attach it again on its own if "
+        "you need it.]"
     )
 
 
@@ -147,7 +155,7 @@ async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budg
             "source": {
                 "type": "base64",
                 "media_type": attachment.media_type,
-                "data": base64.b64encode(attachment.image).decode("ascii"),
+                "data": loader.base64_of(attachment),
             },
         }
 
