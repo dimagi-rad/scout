@@ -64,8 +64,9 @@ def progress_payload(progress: dict | None) -> dict | None:
 async def aworkspace_load_progress(workspace: Workspace) -> list[dict]:
     """The active run of each load this workspace started, whoever started it.
 
-    A workspace load runs its sources one after another under one procrastinate
-    job id, so a run's position among that job's runs is "source i of N". Tenants
+    A workspace load runs its sources under one procrastinate job id, several at
+    once (#927), so a run's start position among that job's runs is "source i of
+    N" and each source still loading has its own entry. Tenants
     are shared, so only runs this workspace started count (a sibling's load of a
     shared tenant is not this workspace's progress). Runs that never had a
     ThreadJob (``POST /refresh/``) are found through the schema's workspace

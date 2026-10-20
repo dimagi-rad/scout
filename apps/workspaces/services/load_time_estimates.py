@@ -4,6 +4,7 @@ import logging
 from statistics import median
 
 from django.core.cache import cache
+from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
 from procrastinate.contrib.django.models import ProcrastinateJob
@@ -70,15 +71,22 @@ def transition_load_phase(job_id, phase):
     if job_id is None:
         return
     try:
-        timing = WorkspaceLoadTiming.objects.filter(job_id=job_id, completed_at=None).first()
-        if timing is None or timing.phase == phase:
-            return
-        now = timezone.now()
-        WorkspaceLoadTiming.objects.filter(pk=timing.pk).update(
-            phase=phase,
-            phase_started_at=now,
-            phase_seconds=_close_phase(timing, now),
-        )
+        # A job's sources load concurrently (#927); unlocked, two threads could both
+        # close the same phase and lose one's seconds. Time goes to the latest phase.
+        with transaction.atomic():
+            timing = (
+                WorkspaceLoadTiming.objects.select_for_update()
+                .filter(job_id=job_id, completed_at=None)
+                .first()
+            )
+            if timing is None or timing.phase == phase:
+                return
+            now = timezone.now()
+            WorkspaceLoadTiming.objects.filter(pk=timing.pk).update(
+                phase=phase,
+                phase_started_at=now,
+                phase_seconds=_close_phase(timing, now),
+            )
     except Exception:
         logger.warning("Could not record load phase timing", exc_info=True)
 

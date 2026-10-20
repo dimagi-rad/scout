@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import threading
 import time
 from datetime import timedelta
 from unittest import mock
@@ -29,6 +30,7 @@ from apps.users.services.token_refresh import (
     _preflight_token,
     refresh_oauth_token_result,
     refresh_oauth_token_result_sync,
+    refresh_oauth_token_sync,
 )
 from tests.clocks import ManualClock
 from tests.row_locks import LOCK_SAFETY_SECONDS, row_locked, user_row
@@ -1010,3 +1012,216 @@ async def test_slow_provider_does_not_spend_the_budget_meant_for_the_write(
     persisted = await SocialToken.objects.aget(pk=token.pk)
     assert persisted.token == "new-access"
     assert persisted.token_secret == "rotated-refresh"
+
+
+_ROTATED = {"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 900}
+# Refresh tokens rotate: the provider refuses the spent one.
+_SPENT = {"status_code": 400, "json": {"error": "invalid_grant"}}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_stale_copy_adopts_the_token_another_refresh_stored(oauth_identity, requests_mock):
+    token, _ = oauth_identity
+    stale_copy = SocialToken.objects.get(pk=token.pk)
+    requests_mock.post(URL, [{"json": _ROTATED}, _SPENT])
+
+    assert refresh_oauth_token_sync(token, URL) == "new-access"
+    assert refresh_oauth_token_sync(stale_copy, URL) == "new-access"
+
+    assert requests_mock.call_count == 1
+    assert stale_copy.token_secret == "new-refresh"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_refreshes_of_one_token_mint_once(oauth_identity, requests_mock):
+    """Sources sharing a connection load at once (#927), each 401ing on its own copy."""
+    token, _ = oauth_identity
+    copies = [SocialToken.objects.get(pk=token.pk) for _ in range(2)]
+    requests_mock.post(URL, [{"json": _ROTATED}, _SPENT])
+    together = threading.Barrier(2, timeout=5)
+    values, errors = [], []
+
+    def refresh(copy):
+        try:
+            together.wait()
+            values.append(refresh_oauth_token_sync(copy, URL))
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            django_connection.close()
+
+    threads = [threading.Thread(target=refresh, args=(copy,)) for copy in copies]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert errors == []
+    assert values == ["new-access", "new-access"]
+    assert requests_mock.call_count == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_an_expired_stored_token_is_refreshed_with_its_own_grant(oauth_identity, requests_mock):
+    """Another refresh stored a token whose expiry is already past (a provider that
+    omits expires_in keeps the old one): refresh with that live grant, not the spent one."""
+    token, _ = oauth_identity
+    SocialToken.objects.filter(pk=token.pk).update(
+        token="stored-access",
+        token_secret="stored-refresh",
+        expires_at=timezone.now() - timedelta(minutes=1),
+    )
+    requests_mock.post(URL, json=_ROTATED)
+
+    assert refresh_oauth_token_sync(token, URL) == "new-access"
+
+    assert requests_mock.last_request.text.count("refresh_token=stored-refresh") == 1
+    persisted = SocialToken.objects.get(pk=token.pk)
+    assert (persisted.token, persisted.token_secret) == ("new-access", "new-refresh")
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_stored_token_for_a_moved_identity_is_not_adopted(oauth_identity, user, requests_mock):
+    token, connection = oauth_identity
+    SocialToken.objects.filter(pk=token.pk).update(
+        token="stored-access",
+        token_secret="stored-refresh",
+        expires_at=timezone.now() + timedelta(minutes=15),
+    )
+    # Re-pointed at another scope while the copy was out: not the binding it validated.
+    TenantConnection.objects.filter(pk=connection.pk).update(scope_key="other-scope")
+    requests_mock.post(URL, json=_SPENT["json"], status_code=400)
+
+    with pytest.raises(TokenRefreshError):
+        refresh_oauth_token_sync(token, URL)
+
+    assert token.token == "old-access"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored_expired", [False, True])
+async def test_async_refresh_refused_for_a_spent_grant_takes_the_stored_token(
+    oauth_identity, httpx_mock, stored_expired
+):
+    """The launcher's refresh can overlap a sibling's mid-load one (#927)."""
+    token, connection = oauth_identity
+    await SocialToken.objects.filter(pk=token.pk).aupdate(
+        token="stored-access",
+        token_secret="stored-refresh",
+        expires_at=timezone.now() + timedelta(minutes=-1 if stored_expired else 15),
+    )
+    httpx_mock.add_response(url=URL, status_code=400, json=_SPENT["json"])
+    if stored_expired:
+        httpx_mock.add_response(url=URL, json=_ROTATED)
+
+    result = await refresh_oauth_token_result(token, URL)
+
+    expected = "new-access" if stored_expired else "stored-access"
+    assert result.snapshot.access_token == expected
+    posted = [request.content.decode() for request in httpx_mock.get_requests()]
+    assert "refresh_token=old-refresh" in posted[0]
+    if stored_expired:
+        assert "refresh_token=stored-refresh" in posted[1]
+    await connection.arefresh_from_db()
+    assert connection.oauth_refresh_failure_fingerprint == ""
+
+
+async def _refused(mode, token, httpx_mock, requests_mock):
+    if mode == "async":
+        httpx_mock.add_response(url=URL, status_code=400, json=_SPENT["json"])
+        return await refresh_oauth_token_result(token, URL)
+    requests_mock.post(URL, status_code=400, json=_SPENT["json"])
+    return await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_a_stored_token_whose_own_refresh_failed_is_not_adopted(
+    oauth_identity, mode, httpx_mock, requests_mock
+):
+    token, connection = oauth_identity
+    await SocialToken.objects.filter(pk=token.pk).aupdate(
+        token="stored-access",
+        token_secret="stored-refresh",
+        expires_at=timezone.now() + timedelta(minutes=15),
+    )
+    stored = await SocialToken.objects.aget(pk=token.pk)
+    # The stored credential's own refresh was refused: serving it hands out a dead grant.
+    await TenantConnection.objects.filter(pk=connection.pk).aupdate(
+        oauth_refresh_failure_fingerprint=token_refresh.credential_fingerprint(stored)
+    )
+
+    with pytest.raises(TokenRefreshRejected):
+        await _refused(mode, token, httpx_mock, requests_mock)
+
+    assert token.token == "old-access"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_a_failed_adoption_read_keeps_the_providers_verdict(
+    oauth_identity, mode, httpx_mock, requests_mock, monkeypatch
+):
+    token, connection = oauth_identity
+
+    def unavailable(*args, **kwargs):
+        raise TokenRefreshUnavailable("Failed to read OAuth refresh state.")
+
+    monkeypatch.setattr(token_refresh, "_adopt_rotated_token", unavailable)
+
+    with pytest.raises(TokenRefreshRejected):
+        await _refused(mode, token, httpx_mock, requests_mock)
+
+    await connection.arefresh_from_db()
+    assert connection.oauth_refresh_failure_fingerprint != ""
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("stored_expired", [False, True])
+def test_sync_refresh_spent_after_its_check_takes_the_stored_token(
+    oauth_identity, requests_mock, monkeypatch, stored_expired
+):
+    """Another process rotated the grant between the adoption read and the post."""
+    token, _ = oauth_identity
+    real_adopt = token_refresh._adopt_rotated_token
+    reads = []
+
+    def adopt(*args, **kwargs):
+        reads.append(None)
+        if len(reads) == 1:
+            SocialToken.objects.filter(pk=token.pk).update(
+                token="stored-access",
+                token_secret="stored-refresh",
+                expires_at=timezone.now() + timedelta(minutes=-1 if stored_expired else 15),
+            )
+            return None, False
+        return real_adopt(*args, **kwargs)
+
+    monkeypatch.setattr(token_refresh, "_adopt_rotated_token", adopt)
+    requests_mock.post(URL, [{"status_code": 400, "json": _SPENT["json"]}, {"json": _ROTATED}])
+
+    if stored_expired:
+        # Refreshed again with the stored grant, under the lock this thread holds.
+        assert refresh_oauth_token_sync(token, URL) == "new-access"
+        assert "refresh_token=stored-refresh" in requests_mock.last_request.text
+        assert len(reads) == 3
+    else:
+        assert refresh_oauth_token_sync(token, URL) == "stored-access"
+        assert len(reads) == 2
+
+
+@pytest.mark.django_db(transaction=True)
+def test_waiting_for_another_refresh_honours_the_callers_deadline(oauth_identity):
+    token, _ = oauth_identity
+    lock = token_refresh._sync_refresh_lock(token.pk)
+    lock.acquire()
+    try:
+        started = time.monotonic()
+        with pytest.raises(TokenRefreshDeadlineExceeded):
+            refresh_oauth_token_result_sync(token, URL, deadline=time.monotonic() + 0.2)
+        assert time.monotonic() - started < 2
+    finally:
+        lock.release()
