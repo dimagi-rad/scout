@@ -175,11 +175,16 @@ def _text_block(text: str) -> dict:
 _ATTACHMENT_TAG = re.compile(r"<(/?)(attachment)", re.IGNORECASE)
 
 
+def neutralise_tags(text: str) -> str:
+    """File text with any <attachment> or </attachment> made inert."""
+    return _ATTACHMENT_TAG.sub(r"<\\\1\2", text)
+
+
 def wrap_attachment(attachment: LoadedAttachment, body: str, total_chars: int) -> str:
     filename = safe_filename(attachment.filename)
     # The tags mark where user-supplied content ends; a tag inside the file must not
     # end it early or open a second one under another name.
-    body = _ATTACHMENT_TAG.sub(r"<\\\1\2", body)
+    body = neutralise_tags(body)
     return (
         f'<attachment filename="{filename}" id="{attachment.id}" '
         f'media_type="{attachment.media_type}" chars="{total_chars}">\n{body}\n</attachment>'
@@ -263,7 +268,8 @@ async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budg
         f'attachment_id="{attachment.id}" and offset={shown} to read on, or with search '
         "to find something in it.]"
     )
-    return _text_block(wrap_attachment(attachment, f"{text[:shown]}\n{note}", total))
+    # After the closing tag: inside it, the pointer would read as file content.
+    return _text_block(f"{wrap_attachment(attachment, text[:shown], total)}\n{note}")
 
 
 async def aexpand_attachments(

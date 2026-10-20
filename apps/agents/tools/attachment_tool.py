@@ -11,7 +11,12 @@ import uuid
 
 from langchain_core.tools import tool
 
-from apps.agents.graph.attachments import AttachmentLoader, safe_filename, wrap_attachment
+from apps.agents.graph.attachments import (
+    AttachmentLoader,
+    neutralise_tags,
+    safe_filename,
+    wrap_attachment,
+)
 
 READ_ATTACHMENT_TOOL_NAME = "read_attachment"
 DEFAULT_LIMIT = 20_000
@@ -30,6 +35,7 @@ def _search(text: str, needle: str, offset: int) -> str:
     matches = []
     total = 0
     resume_at = offset
+    line, counted_to = 1, 0
     for match in pattern.finditer(text, offset):
         total += 1
         if len(matches) >= MAX_SEARCH_MATCHES:
@@ -37,8 +43,10 @@ def _search(text: str, needle: str, offset: int) -> str:
         position = match.start()
         start = max(0, position - SEARCH_CONTEXT_CHARS)
         end = min(len(text), match.end() + SEARCH_CONTEXT_CHARS)
-        snippet = text[start:end].replace("\r", "").replace("\n", "\\n")
-        line = text.count("\n", 0, position) + 1
+        snippet = neutralise_tags(text[start:end].replace("\r", "").replace("\n", "\\n"))
+        # Matches come in order, so count newlines only since the previous one.
+        line += text.count("\n", counted_to, position)
+        counted_to = position
         matches.append(f"offset {position} (line {line}): …{snippet}…")
         resume_at = match.end()
     after = f" after offset {offset}" if offset else ""
@@ -68,7 +76,8 @@ def create_read_attachment_tool(conversation_id: str):
 
         Use it when an attachment was shown only in part, or was attached in a message
         no longer in view. ``offset`` is a character offset and ``limit`` the number of
-        characters to return (at most 50,000). With ``search``, returns each
+        characters to return (at most 50,000); ``limit`` applies only without
+        ``search``. With ``search``, returns each
         case-insensitive match from ``offset`` on, with its offset, line number and
         surrounding text, so you can read around it. Images cannot be read with this tool.
         """

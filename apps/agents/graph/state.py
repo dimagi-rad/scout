@@ -79,8 +79,12 @@ def prune_messages(
     if overflow > 0 and pinned:
         pinned = _shed_pins(pinned, overflow)
 
-    kept = {id(message) for message in (*pinned, *pruned_conversation)}
-    note = dropped_attachments_note([m for m in conversation_messages if id(m) not in kept])
+    window = (*pinned, *pruned_conversation)
+    kept = {id(message) for message in window}
+    note = dropped_attachments_note(
+        [m for m in conversation_messages if id(m) not in kept],
+        still_shown={e["id"] for m in window for e in message_attachments(m)},
+    )
     return system_messages + ([note] if note is not None else []) + pinned + pruned_conversation
 
 
@@ -93,11 +97,20 @@ def _describe_attachment(entry: dict) -> str:
     return f"{name} (id {entry['id']}{size_text})"
 
 
-def dropped_attachments_note(dropped: list[BaseMessage]) -> HumanMessage | None:
-    """A note naming the attachments of messages pruned from the window, or None."""
-    entries = merge_attachments(
-        *(message_attachments(m) for m in dropped if isinstance(m, HumanMessage))
-    )
+def dropped_attachments_note(
+    dropped: list[BaseMessage], still_shown: set[str] = frozenset()
+) -> HumanMessage | None:
+    """A note naming the attachments of messages pruned from the window, or None.
+
+    An attachment a kept message also carries is still shown, so it is not named.
+    """
+    entries = [
+        e
+        for e in merge_attachments(
+            *(message_attachments(m) for m in dropped if isinstance(m, HumanMessage))
+        )
+        if e["id"] not in still_shown
+    ]
     if not entries:
         return None
     shown = entries[-MAX_NOTED_ATTACHMENTS:]

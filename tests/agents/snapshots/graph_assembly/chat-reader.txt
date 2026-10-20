@@ -136,7 +136,7 @@ read_reference_document(limit,offset,search,title_or_id) required=[title_or_id] 
 artifact_graph_overview(artifact_id) required=[] schema=ffe891e2e62a
 get_artifact_semantic_queries(artifact_id,limit,offset) required=[artifact_id] schema=73b9a66f5561
 canvas_read(selector) required=[] schema=792072f8f8d4
-read_attachment(attachment_id,limit,offset,search) required=[attachment_id] schema=00c278d13d54
+read_attachment(attachment_id,limit,offset,search) required=[attachment_id] schema=cdc64fef294a
 save_personal_memory(memory) required=[memory] schema=3cf8ccf166d7
 save_workspace_memory(memory,tables) required=[memory] schema=8dd7783ecc95
 === nodes ===
