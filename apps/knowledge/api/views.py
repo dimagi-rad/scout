@@ -55,11 +55,21 @@ def _list_entries(queryset):
     )
 
 
+def _search_entries(query: str) -> Q:
+    # A reference document's body (up to 2 MB) is not scanned on every keystroke;
+    # the agent searches it with read_reference_document.
+    return (
+        Q(title__icontains=query)
+        | Q(description__icontains=query)
+        | Q(kind=KnowledgeEntry.Kind.NOTE, content__icontains=query)
+    )
+
+
 KNOWLEDGE_TYPES = {
     "entry": {
         "model": KnowledgeEntry,
         "serializer": KnowledgeEntrySerializer,
-        "search_fields": ["title", "content"],
+        "search": _search_entries,
         # Join created_by so the page slice doesn't N+1 (arch #254, 05#7).
         "select_related": ["created_by"],
         "list_queryset": _list_entries,
@@ -119,10 +129,7 @@ class KnowledgeListCreateView(APIView):
             queryset = model.objects.filter(workspace=workspace)
 
             if search_query:
-                search_q = Q()
-                for field in type_config["search_fields"]:
-                    search_q |= Q(**{f"{field}__icontains": search_query})
-                queryset = queryset.filter(search_q)
+                queryset = queryset.filter(type_config["search"](search_query))
 
             total_count += queryset.count()
 

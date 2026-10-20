@@ -87,6 +87,19 @@ class TestUploadView:
         assert resp.status_code == status.HTTP_403_FORBIDDEN
         assert not KnowledgeEntry.objects.exists()
 
+    def test_list_search_skips_reference_bodies(self, api_client, workspace):
+        _reference(workspace, description="Official registry")
+        KnowledgeEntry.objects.create(workspace=workspace, title="Note", content="IND007 rule")
+        url = reverse("knowledge:list_create", kwargs={"workspace_id": workspace.id})
+
+        def titles(search):
+            return [
+                item["title"] for item in api_client.get(url, {"search": search}).data["results"]
+            ]
+
+        assert titles("IND007") == ["Note"]
+        assert titles("official") == ["Indicator registry"]
+
     def test_list_previews_reference_docs_and_detail_has_all(self, api_client, workspace):
         doc = _reference(workspace)
         KnowledgeEntry.objects.create(workspace=workspace, title="Note", content="short note")
