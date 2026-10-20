@@ -46,6 +46,7 @@ from apps.users.services.api_key_providers.base import (
 from apps.users.services.api_key_providers.commcare import CommCareStrategy
 from apps.users.services.api_key_providers.ocs import OCSStrategy
 from apps.users.services.tenant_listing import connect as connect_listing
+from apps.users.services.tenant_listing.ocs import LIST_PAGE_SIZE
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -195,12 +196,17 @@ def origin(path: EntryPath) -> str:
 def listing_url(path: EntryPath) -> str:
     if path.family == "commcare":
         return COMMCARE_SERVERS[path.server].user_domains_url
-    return f"{OCS_ORIGIN}/api/experiments/" if path.family == "ocs" else CONNECT_LISTING
+    if path.family == "ocs":
+        return f"{OCS_ORIGIN}/api/experiments/?page_size={LIST_PAGE_SIZE}"
+    return CONNECT_LISTING
 
 
 def page_two_url(path: EntryPath) -> str:
     if path.family == "commcare":
         return f"{listing_url(path)}?limit=2&offset=2"
+    if path.family == "ocs":
+        # DRF keeps the requested page_size in its next links.
+        return f"{listing_url(path)}&cursor=cD0yMDI2"
     return f"{listing_url(path)}?cursor=cD0yMDI2"
 
 
@@ -569,7 +575,8 @@ async def test_next_outside_the_origin_is_never_followed(path, target, upstream)
     cases(PAGINATED_PATHS, ("self-loop", "back-to-first"), discovery={"back-to-first"}),
 )
 async def test_pagination_cycle_is_rejected(path, shape, upstream):
-    first_path = urlsplit(listing_url(path)).path
+    first = urlsplit(listing_url(path))
+    first_path = f"{first.path}?{first.query}" if first.query else first.path
     if shape == "self-loop":
         serve_pages(upstream, path, first=with_next(path, first_page(path), first_path))
     else:

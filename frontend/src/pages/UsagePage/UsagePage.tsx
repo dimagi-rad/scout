@@ -50,6 +50,15 @@ function percent(part: number, whole: number): string {
   return whole ? `${((part / whole) * 100).toFixed(1)}%` : "–"
 }
 
+// Short, to fit the one-third-width loads panel.
+const SOURCE_LABELS: Record<string, string> = {
+  commcare: "CommCare",
+  commcare_connect: "Connect",
+  ocs: "OCS",
+  mixed: "Mixed",
+  unknown: "Unknown",
+}
+
 function shortDay(day: string): string {
   return day.slice(5)
 }
@@ -356,6 +365,30 @@ function Dashboard({ data }: { data: UsageDashboard }) {
               <dd className="tabular-nums">{percentileText(data.loads.duration_ms)}</dd>
             </div>
           </dl>
+          {data.loads.by_source.length > 0 && (
+            <Table className="mt-3" data-testid="usage-load-sources">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Source</TableHead>
+                  <TableHead className="text-right">Loads</TableHead>
+                  <TableHead className="text-right">Failed</TableHead>
+                  <TableHead className="text-right">Median</TableHead>
+                  <TableHead className="text-right">p95</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.loads.by_source.map((row) => (
+                  <TableRow key={row.source} data-testid={`usage-load-source-${row.source}`}>
+                    <TableCell className="text-xs">{SOURCE_LABELS[row.source] ?? row.source}</TableCell>
+                    <TableCell className="text-right tabular-nums">{formatCount(row.total)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{percent(row.failed, row.total)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{formatMs(row.duration_ms.p50)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{formatMs(row.duration_ms.p95)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
           {data.loads.phases.length > 0 && (
             <Table className="mt-3" data-testid="usage-load-phases">
               <TableHeader>

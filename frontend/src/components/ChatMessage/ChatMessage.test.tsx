@@ -624,3 +624,38 @@ describe("ChatMessage collapsed steps", () => {
     expect(screen.getByTestId("tool-call-query")).toBeInTheDocument()
   })
 })
+
+describe("ChatMessage quote-replies (#920)", () => {
+  it("shows a user message's leading quotes apart from the reply", () => {
+    const message = {
+      id: "u1",
+      role: "user",
+      parts: [{ type: "text", text: "> visits fell in May\n\n> two sites closed\n\nWhich sites?" }],
+    } as UIMessage
+    render(<ChatMessage message={message} isActiveMessage={false} />)
+    const quotes = screen.getAllByTestId("chat-message-quote")
+    expect(quotes.map((q) => q.textContent)).toEqual(["visits fell in May", "two sites closed"])
+    expect(screen.getByText("Which sites?")).toBeInTheDocument()
+    expect(screen.queryByText(/^>/)).not.toBeInTheDocument()
+  })
+
+  it("does not render a user message that merely starts with > as a quote", () => {
+    const message = { id: "u3", role: "user", parts: [{ type: "text", text: ">50% coverage?" }] } as UIMessage
+    render(<ChatMessage message={message} isActiveMessage={false} />)
+    expect(screen.getByText(">50% coverage?")).toBeInTheDocument()
+    expect(screen.queryByTestId("chat-message-quote")).toBeNull()
+  })
+
+  it("marks a reply's own text, not user text or tool cards, as quotable", () => {
+    const { container } = render(
+      <>
+        <ChatMessage message={{ id: "a1", role: "assistant", parts: [{ type: "text", text: "Answer" }] } as UIMessage} isActiveMessage={false} />
+        <ChatMessage message={{ id: "u2", role: "user", parts: [{ type: "text", text: "Question" }] } as UIMessage} isActiveMessage={false} />
+        <ChatTextPart role="assistant" text="Starting Artifact editor..." />
+      </>,
+    )
+    const quotable = container.querySelectorAll("[data-quotable]")
+    expect(quotable).toHaveLength(1)
+    expect(quotable[0]).toHaveTextContent("Answer")
+  })
+})

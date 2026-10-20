@@ -9,10 +9,18 @@ import {
   isNoiseEvent,
   scrubBreadcrumb,
   scrubEvent,
+  scrubSpan,
+  scrubTransaction,
   stripUrl,
+  tracesSampleRate,
 } from "./sentry"
+import type { SpanJSON, TransactionEvent } from "./sentry"
 
-vi.mock("@sentry/react", () => ({ init: vi.fn(), setUser: vi.fn() }))
+vi.mock("@sentry/react", () => ({
+  init: vi.fn(),
+  setUser: vi.fn(),
+  browserTracingIntegration: vi.fn(() => ({ name: "BrowserTracing" })),
+}))
 
 function errorEvent(overrides: Partial<ErrorEvent> = {}): ErrorEvent {
   return {
@@ -337,7 +345,7 @@ describe("initSentry", () => {
     expect(Sentry.init).not.toHaveBeenCalled()
   })
 
-  it("reports errors only, without default PII", () => {
+  it("reports errors only, without default PII, when no trace rate is set", () => {
     vi.stubEnv("VITE_SENTRY_DSN", "https://key@o0.ingest.sentry.io/1")
     vi.stubEnv("VITE_SENTRY_RELEASE", "abc123")
     vi.stubEnv("VITE_SENTRY_ENVIRONMENT", "production")
@@ -353,5 +361,152 @@ describe("initSentry", () => {
     })
     expect(options).not.toHaveProperty("tracesSampleRate")
     expect(options).not.toHaveProperty("integrations")
+  })
+})
+
+describe("tracing", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.clearAllMocks()
+  })
+
+  it("samples traces at the configured rate and scrubs them", () => {
+    vi.stubEnv("VITE_SENTRY_DSN", "https://key@o0.ingest.sentry.io/1")
+    vi.stubEnv("VITE_SENTRY_TRACES_SAMPLE_RATE", "0.1")
+    initSentry()
+    const options = vi.mocked(Sentry.init).mock.calls[0][0]!
+    expect(options.tracesSampleRate).toBe(0.1)
+    expect(options.beforeSendTransaction).toBe(scrubTransaction)
+    expect(options.beforeSendSpan).toBe(scrubSpan)
+    expect(Sentry.browserTracingIntegration).toHaveBeenCalled()
+    expect(options).toMatchObject({ sendDefaultPii: false, beforeSend })
+  })
+
+  it("treats a missing or malformed rate as off", () => {
+    expect(tracesSampleRate(undefined)).toBe(0)
+    expect(tracesSampleRate("")).toBe(0)
+    expect(tracesSampleRate("abc")).toBe(0)
+    expect(tracesSampleRate("-1")).toBe(0)
+    expect(tracesSampleRate("2")).toBe(0)
+    expect(tracesSampleRate("0.25")).toBe(0.25)
+  })
+
+  it("scrubs URLs and stray context from transactions", () => {
+    const id = "0b6e9a52-3c1d-4f7a-9e2b-1a2b3c4d5e6f"
+    const event = scrubTransaction({
+      type: "transaction",
+      transaction: `/workspaces/acme-health/${id}/chat`,
+      request: {
+        url: `https://scout.example/workspaces/acme-health/${id}/chat?invite=tok`,
+        headers: { Cookie: "sessionid_scout=s3cret" },
+      },
+      user: { id: "u", email: "a@example.com" },
+      extra: { body: "raw" },
+      contexts: {
+        trace: { trace_id: "t", span_id: "s", op: "pageload", data: { url: "/x?token=abc" } },
+        custom: { secret: "x" },
+      },
+      spans: [
+        {
+          op: "ui.interaction.click",
+          description: 'body > button[title="show me patient names"]',
+          span_id: "2",
+          trace_id: "t",
+          start_timestamp: 0,
+          data: {},
+          origin: "auto",
+        },
+      ],
+    } as TransactionEvent)
+
+    expect(event.transaction).toBe(`/workspaces/:slug/${id}/chat`)
+    expect(event.request).toEqual({ url: `https://scout.example/workspaces/:slug/${id}/chat` })
+    expect(event.user).toEqual({ id: "u" })
+    expect(event.extra).toBeUndefined()
+    expect(Object.keys(event.contexts ?? {})).toEqual(["trace"])
+    expect(event.contexts?.trace?.data).toEqual({ url: "/x" })
+    // Scrubbed here too, not only by the SDK's beforeSendSpan pass.
+    expect(event.spans?.[0].description).toBe("body > button[title]")
+  })
+})
+
+describe("scrubEvent transaction name", () => {
+  it("masks the route browser tracing names error events after", () => {
+    const id = "0b6e9a52-3c1d-4f7a-9e2b-1a2b3c4d5e6f"
+    const event = scrubEvent(errorEvent({ transaction: `/workspaces/acme-health/${id}/chat` }))
+    expect(event.transaction).toBe(`/workspaces/:slug/${id}/chat`)
+  })
+})
+
+describe("scrubSpan", () => {
+  const id = "0b6e9a52-3c1d-4f7a-9e2b-1a2b3c4d5e6f"
+
+  function span(overrides: Partial<SpanJSON>): SpanJSON {
+    return {
+      span_id: "1",
+      trace_id: "t",
+      start_timestamp: 0,
+      data: {},
+      origin: "auto",
+      ...overrides,
+    } as SpanJSON
+  }
+
+  it("strips query strings and customer names from request spans", () => {
+    const scrubbed = scrubSpan(
+      span({
+        op: "http.client",
+        description: `GET /api/workspaces/${id}/datasets/hiv_patients/?q=name`,
+        data: {
+          url: "/api/x?token=abc",
+          "http.url": "https://scout.example/api/x#frag",
+          "http.query": "?token=abc",
+          "http.fragment": "#a",
+          "http.method": "GET",
+        },
+      }),
+    )
+    expect(scrubbed.description).toBe(`GET /api/workspaces/${id}/datasets/:name/`)
+    expect(scrubbed.data).toEqual({
+      url: "/api/x",
+      "http.url": "https://scout.example/api/x",
+      "http.method": "GET",
+    })
+  })
+
+  it("drops attribute values from standalone INP span selectors", () => {
+    const scrubbed = scrubSpan(
+      span({
+        op: "ui.interaction.click",
+        description: 'body > button[title="show me patient names"]',
+        data: { transaction: `/workspaces/acme-health/${id}/datasets/hiv_patients` },
+      }),
+    )
+    expect(scrubbed.description).toBe("body > button[title]")
+    expect(scrubbed.data.transaction).toBe(`/workspaces/:slug/${id}/datasets/:name`)
+  })
+
+  it("drops attribute values from web-vital element attributes", () => {
+    const scrubbed = scrubSpan(
+      span({
+        op: "pageload",
+        description: `/workspaces/acme/${id}/chat`,
+        data: {
+          "lcp.element": 'body > button[aria-label="Delete Weekly HIV recap"]',
+          "lcp.url": "https://scout.example/img.png?sig=abc",
+          "cls.source.1": 'div > button[title="show me patient names"]',
+          "browser.web_vital.lcp.element": 'p[title="private"]',
+          "lcp.size": 120,
+        },
+      }),
+    )
+    expect(scrubbed.description).toBe(`/workspaces/:slug/${id}/chat`)
+    expect(scrubbed.data).toEqual({
+      "lcp.element": "body > button[aria-label]",
+      "lcp.url": "https://scout.example/img.png",
+      "cls.source.1": "div > button[title]",
+      "browser.web_vital.lcp.element": "p[title]",
+      "lcp.size": 120,
+    })
   })
 })

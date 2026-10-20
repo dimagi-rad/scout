@@ -5,10 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mcp_server.loaders import ocs_messages
 from mcp_server.loaders.ocs_base import OCSAuthError, OCSExportError
 from mcp_server.loaders.ocs_experiments import OCSExperimentLoader
 from mcp_server.loaders.ocs_messages import OCSMessageLoader, map_session_messages
@@ -199,15 +202,17 @@ def test_message_loader_deduplicates_sessions_before_snapshot_fetch():
         patch.object(
             loader,
             "_get_json",
-            side_effect=[
-                {"messages": [{"role": "user", "content": "one snapshot"}]},
-                {"messages": []},
-            ],
+            side_effect=lambda url: {
+                f"{BASE_URL}/api/sessions/sess-1/": {
+                    "messages": [{"role": "user", "content": "one snapshot"}]
+                },
+                f"{BASE_URL}/api/sessions/sess-2/": {"messages": []},
+            }[url],
         ) as detail,
     ):
         pages = list(loader.load_pages())
     assert [total for _, total in pages] == [2, 2]
-    assert [call.args[0] for call in detail.call_args_list] == [
+    assert sorted(call.args[0] for call in detail.call_args_list) == [
         f"{BASE_URL}/api/sessions/sess-1/",
         f"{BASE_URL}/api/sessions/sess-2/",
     ]
@@ -254,16 +259,21 @@ def test_message_loader_indexes_sessions_before_fetching_details():
     detail_2 = MagicMock(status_code=200)
     detail_2.json.return_value = {"id": "sess-2", "messages": []}
 
+    responses = {
+        f"{BASE_URL}/api/sessions/": list_page1,
+        f"{BASE_URL}/api/sessions/?cursor=abc": list_page2,
+        f"{BASE_URL}/api/sessions/sess-1/": detail_1,
+        f"{BASE_URL}/api/sessions/sess-2/": detail_2,
+    }
     with patch.object(
-        loader._session, "get", side_effect=[list_page1, list_page2, detail_1, detail_2]
+        loader._session, "get", side_effect=lambda url, **_: responses[url]
     ) as mock_get:
         pages = list(loader.load_pages())
 
-    # Both list pages are fetched before the first session detail.
+    # Both list pages are fetched before any session detail.
     urls = [call.args[0] for call in mock_get.call_args_list]
-    assert urls == [
-        f"{BASE_URL}/api/sessions/",
-        f"{BASE_URL}/api/sessions/?cursor=abc",
+    assert urls[:2] == [f"{BASE_URL}/api/sessions/", f"{BASE_URL}/api/sessions/?cursor=abc"]
+    assert sorted(urls[2:]) == [
         f"{BASE_URL}/api/sessions/sess-1/",
         f"{BASE_URL}/api/sessions/sess-2/",
     ]
@@ -522,3 +532,197 @@ def test_message_loader_logs_only_real_messages(caplog):
         rows = loader.load()
     assert len(rows) == 5
     assert "Fetched 4 messages across 1 sessions" in caplog.text
+
+
+def _await_detail_threads() -> None:
+    """Abandoned in-flight fetches finish in the background; keep them stubbed until done."""
+    deadline = time.monotonic() + 5
+    while any(t.name.startswith("ocs-session-detail") for t in threading.enumerate()):
+        assert time.monotonic() < deadline, "detail fetch threads never finished"
+        time.sleep(0.01)
+
+
+def _detail_url(session_id: str) -> str:
+    return f"{BASE_URL}/api/sessions/{session_id}/"
+
+
+def _session_ids(n: int) -> list[str]:
+    return [f"sess-{i}" for i in range(n)]
+
+
+def test_message_loader_fetches_details_concurrently():
+    loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    workers = ocs_messages.DETAIL_FETCH_CONCURRENCY
+    # Every fetch waits until a full pool's worth is in flight at once.
+    barrier = threading.Barrier(workers, timeout=5)
+
+    def fetch(url):
+        barrier.wait()
+        return {"messages": []}
+
+    with (
+        patch.object(
+            loader,
+            "_paginate",
+            return_value=iter([([{"id": i} for i in _session_ids(workers)], None)]),
+        ),
+        patch.object(loader, "_get_json", side_effect=fetch),
+    ):
+        pages = list(loader.load_pages())
+    assert len(pages) == workers
+
+
+def test_message_loader_yields_sessions_in_list_order_when_fetches_finish_out_of_order():
+    loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    ids = _session_ids(30)
+
+    def fetch(url):
+        index = int(url.rstrip("/").rsplit("-", 1)[1])
+        # Earlier sessions finish last.
+        time.sleep((30 - index) * 0.002)
+        return {"messages": [{"role": "user", "content": url}]}
+
+    with (
+        patch.object(loader, "_paginate", return_value=iter([([{"id": i} for i in ids], None)])),
+        patch.object(loader, "_get_json", side_effect=fetch),
+    ):
+        pages = list(loader.load_pages())
+    assert [rows[0]["session_id"] for rows, _ in pages] == ids
+    assert [rows[0]["content"] for rows, _ in pages] == [_detail_url(i) for i in ids]
+
+
+def test_message_loader_propagates_first_failure_and_stops_fetching():
+    loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    ids = _session_ids(200)
+    fetched: list[str] = []
+
+    def fetch(url):
+        fetched.append(url)
+        if url == _detail_url("sess-3"):
+            raise OCSExportError("boom")
+        return {"messages": []}
+
+    with (
+        patch.object(loader, "_paginate", return_value=iter([([{"id": i} for i in ids], None)])),
+        patch.object(loader, "_get_json", side_effect=fetch),
+    ):
+        pages = loader.load_pages()
+        yielded = []
+        with pytest.raises(OCSExportError, match="boom"):
+            for page in pages:
+                yielded.append(page)
+        _await_detail_threads()
+    # Sessions before the failure are delivered; nothing after it is.
+    assert len(yielded) == 3
+    # Only the bounded read-ahead was ever requested, not the remaining sessions.
+    assert len(fetched) <= 3 + ocs_messages.DETAIL_FETCH_WINDOW + 1
+
+
+def test_message_loader_stops_fetching_when_consumer_cancels():
+    """A cancel raised from the writer's progress callback closes the loader's
+    generator; queued detail fetches must not keep hitting OCS."""
+    loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    ids = _session_ids(500)
+    fetched: list[str] = []
+
+    def fetch(url):
+        fetched.append(url)
+        return {"messages": []}
+
+    with (
+        patch.object(loader, "_paginate", return_value=iter([([{"id": i} for i in ids], None)])),
+        patch.object(loader, "_get_json", side_effect=fetch),
+    ):
+        pages = loader.load_pages()
+        next(pages)
+        pages.close()
+        _await_detail_threads()
+    assert len(fetched) <= 1 + ocs_messages.DETAIL_FETCH_WINDOW + 1
+
+
+def _response(status: int, payload: dict | None = None) -> MagicMock:
+    resp = MagicMock(status_code=status, headers={}, url=None)
+    resp.json.return_value = payload or {}
+    return resp
+
+
+def test_concurrent_401s_share_one_refresh_and_retry_with_its_token():
+    """Detail fetches that 401 together on one expired token must share one
+    refresh: OAuth refresh tokens rotate, so a second refresh with the spent
+    one would fail the load."""
+    ids = _session_ids(8)
+    minted: list[str] = []
+    all_rejected = threading.Barrier(len(ids), timeout=5)
+
+    def mint():
+        minted.append("fresh")
+        return "fresh"
+
+    loader = OCSMessageLoader(
+        experiment_id="exp-1",
+        credential={"type": "oauth", "value": "old", "refresh": mint},
+        base_url=BASE_URL,
+    )
+    sent_with: list[str] = []
+    sent_lock = threading.Lock()
+
+    def get(url, **_kwargs):
+        if url.startswith(f"{BASE_URL}/api/sessions/?") or url == f"{BASE_URL}/api/sessions/":
+            return _response(200, {"results": [{"id": i} for i in ids], "next": None})
+        auth = loader._session.headers["Authorization"]
+        with sent_lock:
+            sent_with.append(auth)
+        if auth == "Bearer old":
+            all_rejected.wait()
+            return _response(401)
+        return _response(200, {"messages": [{"role": "user", "content": url}]})
+
+    with patch.object(loader._session, "get", side_effect=get):
+        pages = list(loader.load_pages())
+
+    assert minted == ["fresh"]
+    assert [rows[0]["content"] for rows, _ in pages] == [_detail_url(i) for i in ids]
+    assert sent_with.count("Bearer fresh") == len(ids)
+
+
+def test_failed_refresh_is_not_retried_by_each_waiting_request():
+    attempts: list[int] = []
+
+    def mint():
+        attempts.append(1)
+        raise RuntimeError("invalid_grant")
+
+    loader = OCSMessageLoader(
+        experiment_id="exp-1",
+        credential={"type": "oauth", "value": "old", "refresh": mint},
+        base_url=BASE_URL,
+    )
+    errors = []
+
+    def refresh():
+        try:
+            loader._coalesced_refresh("Bearer old")
+        except RuntimeError as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=refresh) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert attempts == [1]
+    assert len(errors) == 8
+
+
+def test_a_401_on_the_minted_token_refreshes_again():
+    """Reuse is keyed on the rejected token, not on timing: a fresh token that
+    is itself rejected (revoked elsewhere) must still be replaced."""
+    tokens = iter(["first", "second"])
+    loader = OCSMessageLoader(
+        experiment_id="exp-1",
+        credential={"type": "oauth", "value": "old", "refresh": lambda: next(tokens)},
+        base_url=BASE_URL,
+    )
+    assert loader._coalesced_refresh("Bearer old") == "first"
+    assert loader._coalesced_refresh("Bearer old") == "first"
+    assert loader._coalesced_refresh("Bearer first") == "second"

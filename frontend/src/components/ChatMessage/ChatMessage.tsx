@@ -40,6 +40,7 @@ import type {
 } from "./ToolOutput"
 import { MemorySavedChip } from "./MemorySavedChip"
 import { savedMemory } from "./savedMemory"
+import { messageSegments } from "./quotes"
 
 function inputSql(input: unknown): string | undefined {
   if (input != null && typeof input === "object" && "sql" in input) {
@@ -91,6 +92,8 @@ interface ChatMessageProps {
 interface ChatTextPartProps {
   role: "user" | "assistant"
   text: string
+  /** A reply's own text, which the quote action may offer to quote. */
+  quotable?: boolean
 }
 
 function ChatMarkdownLink({ href, children, ...markdownProps }: ComponentPropsWithoutRef<"a"> & { node?: unknown }) {
@@ -104,7 +107,25 @@ function ChatMarkdownLink({ href, children, ...markdownProps }: ComponentPropsWi
   return <a href={href} {...props} data-testid="chat-markdown-link">{children}</a>
 }
 
-export function ChatTextPart({ role, text }: ChatTextPartProps) {
+function UserMessageText({ text }: { text: string }) {
+  const segments = messageSegments(text)
+  if (!segments.some((segment) => segment.kind === "quote")) return text
+  return segments.map((segment, i) =>
+    segment.kind === "quote" ? (
+      <blockquote
+        key={i}
+        className="mb-2 whitespace-pre-wrap border-l-2 border-primary-foreground/60 pl-2 text-xs text-primary-foreground/80"
+        data-testid="chat-message-quote"
+      >
+        {segment.text}
+      </blockquote>
+    ) : (
+      <p key={i} className={i < segments.length - 1 ? "mb-2" : undefined}>{segment.text}</p>
+    ),
+  )
+}
+
+export function ChatTextPart({ role, text, quotable = false }: ChatTextPartProps) {
   const isUser = role === "user"
   // A whitespace-only chunk (common before a tool call) would otherwise leave an empty padded block.
   if (!text.trim()) return null
@@ -115,8 +136,9 @@ export function ChatTextPart({ role, text }: ChatTextPartProps) {
           ? "bg-primary px-4 py-2 text-primary-foreground"
           : "prose prose-sm max-w-none py-1 [&>:first-child]:mt-0 [&>:last-child]:mb-0"
       }`}
+      data-quotable={quotable && !isUser ? "true" : undefined}
     >
-      {isUser ? text : <Markdown remarkPlugins={[remarkGfm]} components={{ a: ChatMarkdownLink }}>{text}</Markdown>}
+      {isUser ? <UserMessageText text={text} /> : <Markdown remarkPlugins={[remarkGfm]} components={{ a: ChatMarkdownLink }}>{text}</Markdown>}
     </div>
   )
 }
@@ -853,7 +875,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
   const rendered: RenderedPart[] = message.parts.map((part, i): RenderedPart => {
     if (part.type === "text") {
       if (!part.text.trim()) return { node: null, step: false }
-      return { node: <ChatTextPart key={i} role={isUser ? "user" : "assistant"} text={part.text} />, step: false }
+      return { node: <ChatTextPart key={i} role={isUser ? "user" : "assistant"} text={part.text} quotable={!isUser} />, step: false }
     }
 
     if (part.type === "reasoning") {

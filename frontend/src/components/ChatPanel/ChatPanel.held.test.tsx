@@ -686,3 +686,54 @@ describe("a message sent while the chat's data loads", () => {
     expect(screen.queryByTestId("resume-stream")).toBeNull()
   }, 15_000)
 })
+
+describe("quotes on a held request's send (#920)", () => {
+  const rangeRect = Range.prototype.getBoundingClientRect
+  const elementRect = Element.prototype.getBoundingClientRect
+  beforeEach(() => {
+    Range.prototype.getBoundingClientRect = () => new DOMRect(100, 200, 80, 16)
+    Element.prototype.getBoundingClientRect = () => new DOMRect(0, 0, 1000, 1000)
+  })
+  afterEach(() => {
+    Range.prototype.getBoundingClientRect = rangeRect
+    Element.prototype.getBoundingClientRect = elementRect
+    window.getSelection()?.removeAllRanges()
+  })
+
+  it("gives the quotes back as chips, not raw blockquotes, when the send is refused", async () => {
+    const server = mockServer()
+    server.messages = [{ id: "a0", role: "assistant", parts: [{ type: "text", text: ANSWER }] }]
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    server.refuseHeldSend = true
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    renderChat()
+    await screen.findByTestId("pending-request-card")
+
+    const answer = (await screen.findByText(ANSWER)).firstChild!
+    const range = document.createRange()
+    range.setStart(answer, 0)
+    range.setEnd(answer, 9)
+    window.getSelection()!.addRange(range)
+    act(() => {
+      document.dispatchEvent(new MouseEvent("mouseup"))
+    })
+    fireEvent.click(screen.getByTestId("chat-quote-action"))
+
+    await type(FOLLOW_UP, "Send message")
+
+    await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue(FOLLOW_UP))
+    expect(server.chatBodies.at(-1)?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          parts: [expect.objectContaining({ text: expect.stringContaining(`> There wer\n\n${FOLLOW_UP}`) })],
+        }),
+      ]),
+    )
+    expect(screen.getByTestId("composer-quote-chip")).toHaveTextContent("There wer")
+    consoleError.mockRestore()
+  })
+})

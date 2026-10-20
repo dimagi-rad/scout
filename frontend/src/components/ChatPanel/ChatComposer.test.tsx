@@ -171,3 +171,54 @@ describe.each([
     expect(onSend).toHaveBeenCalledWith("/re")
   })
 })
+
+describe("ChatComposer quotes (#920)", () => {
+  it("shows each quote as a removable chip", () => {
+    const onRemoveQuote = vi.fn()
+    render(
+      <ChatComposer
+        input=""
+        setInput={vi.fn()}
+        onSend={vi.fn()}
+        quotes={["first point", "second point"]}
+        onRemoveQuote={onRemoveQuote}
+      />,
+    )
+    const chips = screen.getAllByTestId("composer-quote-chip")
+    expect(chips.map((c) => c.textContent)).toEqual(["first point", "second point"])
+    fireEvent.click(screen.getAllByTestId("composer-quote-remove")[1])
+    expect(onRemoveQuote).toHaveBeenCalledWith(1)
+  })
+
+  it("sends the quotes ahead of the reply as blockquotes and clears them", () => {
+    const onSend = vi.fn()
+    const onQuotesSent = vi.fn()
+    render(
+      <ChatComposer
+        input="Why did that happen?"
+        setInput={vi.fn()}
+        onSend={onSend}
+        quotes={["visits fell", "two sites\nclosed"]}
+        onQuotesSent={onQuotesSent}
+      />,
+    )
+    fireEvent.keyDown(screen.getByTestId("chat-input"), { key: "Enter" })
+    expect(onSend).toHaveBeenCalledWith("> visits fell\n\n> two sites\n> closed\n\nWhy did that happen?")
+    expect(onQuotesSent).toHaveBeenCalled()
+  })
+
+  it("focuses the input when a quote is picked, not when chips just appear", () => {
+    const props = { input: "", setInput: vi.fn(), onSend: vi.fn() }
+    const { rerender } = render(<ChatComposer {...props} quotes={[]} />)
+    // As on switching to a chat that already holds quotes.
+    rerender(<ChatComposer {...props} quotes={["a point"]} />)
+    expect(screen.getByTestId("chat-input")).not.toHaveFocus()
+    rerender(<ChatComposer {...props} quotes={["a point", "another"]} focusRequest={1} />)
+    expect(screen.getByTestId("chat-input")).toHaveFocus()
+  })
+
+  it("does not refocus on a remount for a pick it already handled", () => {
+    render(<ChatComposer input="" setInput={vi.fn()} onSend={vi.fn()} focusRequest={3} />)
+    expect(screen.getByTestId("chat-input")).not.toHaveFocus()
+  })
+})

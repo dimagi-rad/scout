@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { cleanup, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -8,7 +8,7 @@ import { getUserTenantsCached, refreshUserTenants } from "@/api/userTenantsCache
 import { TenantsTab } from "./TenantsTab"
 
 vi.mock("@/api/workspaces", () => ({
-  workspaceApi: { getTenants: vi.fn(), removeTenant: vi.fn() },
+  workspaceApi: { getTenants: vi.fn(), removeTenant: vi.fn(), addTenant: vi.fn() },
 }))
 vi.mock("@/api/userTenantsCache", () => ({
   getUserTenantsCached: vi.fn(),
@@ -157,8 +157,7 @@ describe("available source filters", () => {
     expect(shownAvailable()).toEqual(["c1"])
     expect(screen.getByTestId(`${F}-count`)).toHaveTextContent("Showing 1 of 4")
 
-    await userEvent.keyboard("{Escape}")
-    await userEvent.click(screen.getByTestId("add-tenant-btn"))
+    await userEvent.click(screen.getByTestId("add-tenant-close"))
     await userEvent.click(screen.getByTestId("add-tenant-btn"))
 
     expect(screen.getByTestId("search-filter-input")).toHaveValue("")
@@ -212,5 +211,298 @@ describe("available source filters", () => {
     await userEvent.click(screen.getByTestId("refresh-available-sources"))
 
     await waitFor(() => expect(shownAvailable()).toEqual(["a", "c1", "c2"]))
+  })
+})
+
+describe("adding every shown source", () => {
+  beforeEach(() => localStorage.clear())
+
+  const programSources = [
+    connect("p1", "Malaria North", { program: "7", program_name: "Malaria" }),
+    connect("p2", "Malaria South", { program: "7", program_name: "Malaria" }),
+    connect("q1", "Nutrition East", { program: "8", program_name: "Nutrition" }),
+  ]
+
+  async function openWithProgramFilter() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ program: ["7"] }))
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    vi.mocked(getUserTenantsCached).mockResolvedValue(programSources)
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+    await screen.findByTestId(`${F}-count`)
+  }
+
+  it("adds a whole program one source at a time", async () => {
+    vi.mocked(workspaceApi.addTenant).mockImplementation(async (_ws, uuid) => ({
+      id: `wt-${uuid}`, tenant_id: uuid, tenant_name: uuid,
+    }))
+    await openWithProgramFilter()
+    expect(shownAvailable()).toEqual(["p1", "p2"])
+
+    await userEvent.click(screen.getByTestId("available-sources-add-shown"))
+
+    expect(await screen.findByTestId("tenant-row-wt-tenant-p2")).toBeInTheDocument()
+    expect(screen.getByTestId("tenant-row-wt-tenant-p1")).toBeInTheDocument()
+    expect(vi.mocked(workspaceApi.addTenant).mock.calls).toEqual([
+      ["ws-1", "tenant-p1"],
+      ["ws-1", "tenant-p2"],
+    ])
+    expect(screen.getByTestId("bulk-add-notice")).toHaveTextContent("Added 2 of 2.")
+  })
+
+  it("keeps going past a refused source and names it", async () => {
+    vi.mocked(workspaceApi.addTenant).mockImplementation(async (_ws, uuid) => {
+      if (uuid === "tenant-p1") throw new ApiError(409, "A member lacks this source", {})
+      return { id: `wt-${uuid}`, tenant_id: uuid, tenant_name: uuid }
+    })
+    await openWithProgramFilter()
+
+    await userEvent.click(screen.getByTestId("available-sources-add-shown"))
+
+    expect(await screen.findByText("Added 1 of 2. Couldn't add Malaria North. Malaria North: A member lacks this source"))
+      .toBeInTheDocument()
+    expect(screen.getByTestId("tenant-row-wt-tenant-p2")).toBeInTheDocument()
+    expect(screen.queryByTestId("tenant-row-wt-tenant-p1")).toBeNull()
+  })
+
+  it("stops at an error that would fail every source, such as losing manager rights", async () => {
+    vi.mocked(workspaceApi.addTenant).mockRejectedValue(
+      new ApiError(403, "Only workspace managers can add tenants.", {}),
+    )
+    await openWithProgramFilter()
+
+    await userEvent.click(screen.getByTestId("available-sources-add-shown"))
+
+    expect(await screen.findByText("Added 0 of 2. Stopped: Only workspace managers can add tenants."))
+      .toBeInTheDocument()
+    expect(workspaceApi.addTenant).toHaveBeenCalledOnce()
+  })
+
+  it("finishes the run when the tab unmounts", async () => {
+    let release!: () => void
+    vi.mocked(workspaceApi.addTenant)
+      .mockImplementationOnce(
+        (_ws, uuid) =>
+          new Promise((resolve) => {
+            release = () => resolve({ id: `wt-${uuid}`, tenant_id: uuid, tenant_name: uuid })
+          }),
+      )
+      .mockImplementation(async (_ws, uuid) => ({ id: `wt-${uuid}`, tenant_id: uuid, tenant_name: uuid }))
+    await openWithProgramFilter()
+    await userEvent.click(screen.getByTestId("available-sources-add-shown"))
+    await waitFor(() => expect(workspaceApi.addTenant).toHaveBeenCalledOnce())
+
+    cleanup()
+    release()
+
+    await waitFor(() => expect(workspaceApi.addTenant).toHaveBeenCalledTimes(2))
+  })
+
+  it("names a few refused sources, counts the rest, and keeps the reason with its source", async () => {
+    const many = Array.from({ length: 7 }, (_, i) =>
+      connect(`r${i}`, `Opp ${i}`, { program: "7", program_name: "Malaria" }))
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ program: ["7"] }))
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    vi.mocked(getUserTenantsCached).mockResolvedValue([...many, programSources[2]])
+    vi.mocked(workspaceApi.addTenant).mockRejectedValue(new ApiError(400, "You do not have access to this tenant.", {}))
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+
+    await userEvent.click(await screen.findByTestId("available-sources-add-shown"))
+
+    expect(await screen.findByText(
+      "Added 0 of 7. Couldn't add Opp 0, Opp 1, Opp 2, Opp 3, Opp 4 and 2 more. Opp 0: You do not have access to this tenant.",
+    )).toBeInTheDocument()
+  })
+
+  it("keeps earlier refusals when a later error stops the run", async () => {
+    vi.mocked(workspaceApi.addTenant)
+      .mockRejectedValueOnce(new ApiError(409, "A member lacks this source", {}))
+      .mockRejectedValueOnce(new Error("network down"))
+    await openWithProgramFilter()
+
+    await userEvent.click(screen.getByTestId("available-sources-add-shown"))
+
+    expect(await screen.findByText(
+      "Added 0 of 2. Couldn't add Malaria North. Malaria North: A member lacks this source Stopped: Failed to add data source",
+    )).toBeInTheDocument()
+  })
+
+  it("offers adding every source a pasted id list shows, even when that is all of them", async () => {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    vi.mocked(getUserTenantsCached).mockResolvedValue([
+      connect("11", "Malaria North", {}), connect("12", "Malaria South", {}),
+    ])
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+    await screen.findByTestId(`${F}-count`)
+    expect(screen.queryByTestId("available-sources-add-shown")).toBeNull()
+
+    await userEvent.click(screen.getByTestId("search-filter-input"))
+    await userEvent.paste("11, 12")
+
+    expect(screen.getByTestId("available-sources-add-shown")).toHaveTextContent("Add 2 shown")
+  })
+
+  it("is not offered for the unfiltered list", async () => {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    vi.mocked(getUserTenantsCached).mockResolvedValue(programSources)
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+    await screen.findByTestId(`${F}-count`)
+
+    expect(screen.queryByTestId("available-sources-add-shown")).toBeNull()
+  })
+})
+
+describe("closing the add panel", () => {
+  beforeEach(() => localStorage.clear())
+
+  it("closes from its Close button and hands focus back to the add button", async () => {
+    await openAddPanel()
+
+    await userEvent.click(screen.getByTestId("add-tenant-close"))
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+    expect(screen.getByTestId("add-tenant-btn")).toHaveFocus()
+  })
+
+  it("closes on Escape", async () => {
+    await openAddPanel()
+    await userEvent.click(screen.getByTestId("search-filter-input"))
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+    expect(screen.getByTestId("add-tenant-btn")).toHaveFocus()
+  })
+
+  it("clears a typed search on the first Escape and closes on the second", async () => {
+    await openAddPanel()
+    await userEvent.type(screen.getByTestId("search-filter-input"), "kenya")
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.getByTestId("search-filter-input")).toHaveValue("")
+    expect(screen.getByTestId("add-tenant-panel")).toBeInTheDocument()
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+  })
+
+  it("ignores Escape pressed with focus elsewhere on the page", async () => {
+    vi.mocked(getUserTenantsCached).mockResolvedValue(userSources)
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([alpha, bravo])
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+    await screen.findByTestId("add-tenant-panel")
+    await userEvent.click(screen.getByTestId("remove-tenant-wt-a"))
+    screen.getByTestId("confirm-remove-tenant-wt-a").focus()
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.getByTestId("add-tenant-panel")).toBeInTheDocument()
+  })
+
+  it("closes from the toggle button too", async () => {
+    await openAddPanel()
+
+    await userEvent.click(screen.getByTestId("add-tenant-btn"))
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+    expect(screen.getByTestId("add-tenant-btn")).toHaveAttribute("aria-expanded", "false")
+  })
+
+  it("lets Escape close an open facet menu without closing the panel", async () => {
+    await openAddPanel()
+    await userEvent.click(screen.getByTestId(`${F}-facet-status`))
+    expect(await screen.findByTestId(`${F}-facet-status-option-active`)).toBeInTheDocument()
+
+    await userEvent.keyboard("{Escape}")
+
+    await waitFor(() =>
+      expect(screen.queryByTestId(`${F}-facet-status-option-active`)).not.toBeInTheDocument(),
+    )
+    expect(screen.getByTestId("add-tenant-panel")).toBeInTheDocument()
+  })
+
+  it("closes on Escape when opened from the empty-state button, returning focus there", async () => {
+    vi.mocked(getUserTenantsCached).mockResolvedValue(userSources)
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-empty-btn"))
+    await screen.findByTestId("add-tenant-panel")
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+    expect(screen.getByTestId("add-tenant-empty-btn")).toHaveFocus()
+  })
+
+  it("closes on Escape after a click on the panel's plain text", async () => {
+    await openAddPanel()
+    screen.getByTestId("tenants-tab").focus()
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+  })
+})
+
+describe("large Connect workspaces", () => {
+  beforeEach(() => localStorage.clear())
+
+  const connected = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `wt-${i}`, tenant_id: `tenant-w${i}`, tenant_name: `In ${i}`, provider: "commcare_connect",
+    }))
+
+  it("says a workspace above the quick-check limit may be slow to verify", async () => {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue(connected(26))
+    render(<TenantsTab workspaceId="ws-1" isManager={false} onWorkspaceDeleted={vi.fn()} />)
+
+    expect(await screen.findByTestId("workspace-connect-size-notice")).toHaveTextContent(
+      "This workspace has 26 CommCare Connect opportunities",
+    )
+    // Only a manager can split it.
+    expect(screen.getByTestId("workspace-connect-size-notice")).not.toHaveTextContent("or fewer")
+  })
+
+  it("tells a manager how to avoid it", async () => {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([
+      ...connected(26),
+      { id: "wt-cc", tenant_id: "tenant-cc", tenant_name: "CommCare", provider: "commcare" },
+    ])
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+
+    const notice = await screen.findByTestId("workspace-connect-size-notice")
+    expect(notice).toHaveTextContent("has 26 CommCare Connect opportunities")
+    expect(notice).toHaveTextContent("Workspaces of 25 or fewer avoid this.")
+  })
+
+  it("says nothing at the limit", async () => {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue(connected(25))
+    render(<TenantsTab workspaceId="ws-1" isManager={false} onWorkspaceDeleted={vi.fn()} />)
+
+    await screen.findByTestId("tenant-row-wt-24")
+    expect(screen.queryByTestId("workspace-connect-size-notice")).toBeNull()
+  })
+
+  it("warns before adding every shown source would cross the limit", async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ program: ["7"] }))
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue(connected(24))
+    vi.mocked(getUserTenantsCached).mockResolvedValue([
+      connect("p1", "Malaria North", { program: "7", program_name: "Malaria" }),
+      connect("p2", "Malaria South", { program: "7", program_name: "Malaria" }),
+      connect("q1", "Nutrition East", { program: "8", program_name: "Nutrition" }),
+    ])
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+
+    expect(await screen.findByTestId("add-sources-connect-size-notice")).toHaveTextContent(
+      "Adding all 2 shown would give this workspace 26 CommCare Connect opportunities",
+    )
+    expect(screen.getByTestId("available-sources-add-shown")).toBeEnabled()
   })
 })

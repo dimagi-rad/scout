@@ -64,6 +64,8 @@ def test_frontend_build_bakes_in_its_explicit_monitoring_inputs():
     assert not any(arg.startswith("VITE_SENTRY_DSN=") for arg in args)
     assert "VITE_SENTRY_ENVIRONMENT=production" in args
     assert "VITE_SENTRY_RELEASE=$IMAGE_TAG" in args
+    # Matches the backend's SENTRY_TRACES_SAMPLE_RATE in config/deploy*.yml.
+    assert "VITE_SENTRY_TRACES_SAMPLE_RATE=0.1" in args
     assert workflow["jobs"]["deploy"]["env"]["IMAGE_TAG"] == "${{ github.sha }}"
 
 

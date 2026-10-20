@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react"
+import { useState, useEffect, useCallback, useMemo, useRef, useId, type MouseEvent } from "react"
 import { workspaceApi } from "@/api/workspaces"
 import {
   getUserTenantsCached,
@@ -19,13 +19,15 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-import { Plus, RefreshCw } from "lucide-react"
+import { Plus, RefreshCw, X } from "lucide-react"
 import { FacetFilterBar } from "@/components/FacetFilterBar/FacetFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { IdListSummary } from "@/components/IdListSummary/IdListSummary"
 import { CONNECT_PROVIDER } from "@/lib/filters/tenantFacets"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
 import { useTenantFacetFilters } from "@/lib/filters/useTenantFacetFilters"
+import { CONNECT_QUICK_CHECK_LIMIT, countConnectSources } from "@/lib/connectAccessCheck"
+import { ConnectSizeNotice } from "@/components/ConnectSizeNotice"
 
 type AvailableStatus = "idle" | "loading" | "ready" | "error"
 
@@ -35,6 +37,15 @@ function requiresWorkspaceDelete(err: unknown): boolean {
     err.status === 409 &&
     asRecord(err.body)?.requires_confirmation === "delete_workspace"
   )
+}
+
+const LISTED_REFUSALS = 5
+
+function describeRefusals(refused: { name: string; reason: string }[]): string {
+  const names = refused.slice(0, LISTED_REFUSALS).map((r) => r.name).join(", ")
+  const more =
+    refused.length > LISTED_REFUSALS ? ` and ${refused.length - LISTED_REFUSALS} more` : ""
+  return `Couldn't add ${names}${more}. ${refused[0].name}: ${refused[0].reason}`
 }
 
 export function TenantsTab({
@@ -48,6 +59,7 @@ export function TenantsTab({
 }) {
   const userId = useAppStore((s) => s.user?.id)
   const isCurrentAccount = useIsCurrentAccount()
+  const accountSession = useAppStore((s) => s.accountSession)
 
   // Connected sources — fast local-DB query, gates only its own section.
   const [tenants, setTenants] = useState<WorkspaceTenant[]>([])
@@ -61,8 +73,16 @@ export function TenantsTab({
   const [refreshing, setRefreshing] = useState(false)
 
   const [addingId, setAddingId] = useState<string | null>(null)
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null)
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null)
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
+  const addButtonRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const panelId = useId()
+  const tabRef = useRef<HTMLDivElement>(null)
+  // Whichever trigger opened the panel (header or empty-state button) gets focus back.
+  const openerRef = useRef<HTMLElement | null>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
   // The workspace's last source: removing it deletes the whole workspace (#381).
@@ -168,21 +188,77 @@ export function TenantsTab({
     if (!showAdd) setSearch("")
   }, [showAdd, setSearch])
 
+  async function addOne(tenant: UserTenant) {
+    const created = await workspaceApi.addTenant(workspaceId, tenant.tenant_uuid)
+    // Optimistic update; backend returns the internal tenant UUID as `tenant_id`.
+    setTenants((prev) =>
+      prev.some((t) => t.tenant_id === tenant.tenant_uuid)
+        ? prev
+        : [
+            ...prev,
+            {
+              id: created.id,
+              tenant_id: tenant.tenant_uuid,
+              tenant_name: tenant.tenant_name,
+              provider: tenant.provider,
+            },
+          ],
+    )
+  }
+
+  function toggleAdd(event: MouseEvent<HTMLElement>) {
+    openerRef.current = event.currentTarget
+    setShowAdd((v) => !v)
+  }
+
+  function openAdd(event: MouseEvent<HTMLElement>) {
+    openerRef.current = event.currentTarget
+    setShowAdd(true)
+  }
+
+  const closeAdd = useCallback(() => {
+    setShowAdd(false)
+    // A trigger can unmount meanwhile (e.g. once every source is connected).
+    const opener = openerRef.current?.isConnected ? openerRef.current : null
+    ;(opener ?? addButtonRef.current ?? tabRef.current)?.focus()
+  }, [])
+
+  useEffect(() => {
+    if (!showAdd) return
+    function onKeyDown(event: KeyboardEvent) {
+      // Open facet menus and dialogs are Radix layers, which preventDefault the
+      // Escape they consume, so this only fires when nothing else claimed it.
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return
+      const active = document.activeElement
+      const panel = panelRef.current
+      // A click on the panel's plain text focuses an ancestor (body, the tab), so
+      // anything containing the panel counts as in it.
+      const inScope =
+        !active ||
+        !panel ||
+        active.contains(panel) ||
+        panel.contains(active) ||
+        active === addButtonRef.current ||
+        active === openerRef.current
+      if (!inScope) return
+      // A pasted id list is costly to retype, so the first Escape only clears it.
+      if (active instanceof HTMLInputElement && active.type === "text" && active.value) {
+        event.preventDefault()
+        setSearch("")
+        return
+      }
+      closeAdd()
+    }
+    document.addEventListener("keydown", onKeyDown)
+    return () => document.removeEventListener("keydown", onKeyDown)
+  }, [showAdd, closeAdd, setSearch])
+
   async function handleAdd(tenant: UserTenant) {
     setAddingId(tenant.tenant_uuid)
     setMutationError(null)
+    setBulkNotice(null)
     try {
-      const created = await workspaceApi.addTenant(workspaceId, tenant.tenant_uuid)
-      // Optimistic update; backend returns the internal tenant UUID as `tenant_id`.
-      setTenants((prev) => [
-        ...prev,
-        {
-          id: created.id,
-          tenant_id: tenant.tenant_uuid,
-          tenant_name: tenant.tenant_name,
-          provider: tenant.provider,
-        },
-      ])
+      await addOne(tenant)
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to add data source")
     } finally {
@@ -190,9 +266,56 @@ export function TenantsTab({
     }
   }
 
+  // One at a time: the server checks the adder's and every member's access per source.
+  // A refusal of one source (400/409, say a member without that opportunity) must not
+  // stop the rest; any other error (signed out, no longer a manager, server down) would
+  // fail every remaining source the same way, so it ends the run. The tab is keyed by
+  // workspace, so a run always belongs to the workspace it started in, and leaving the
+  // tab lets it finish.
+  async function handleAddShown() {
+    const batch = [...filteredAvailable]
+    const refused: { name: string; reason: string }[] = []
+    let added = 0
+    let stoppedBy: string | null = null
+    setMutationError(null)
+    setBulkNotice(null)
+    // Not isCurrentAccount(): that turns false on unmount, which must not end the run.
+    const session = accountSession
+    setBulkProgress({ done: 0, total: batch.length })
+    try {
+      for (const [index, tenant] of batch.entries()) {
+        if (!session.isCurrent()) return
+        setAddingId(tenant.tenant_uuid)
+        try {
+          await addOne(tenant)
+          added += 1
+        } catch (err) {
+          const reason = err instanceof ApiError ? err.message : "Failed to add data source"
+          if (err instanceof ApiError && (err.status === 400 || err.status === 409)) {
+            refused.push({ name: tenant.tenant_name, reason })
+          } else {
+            stoppedBy = reason
+            break
+          }
+        }
+        setBulkProgress({ done: index + 1, total: batch.length })
+      }
+    } finally {
+      setAddingId(null)
+      setBulkProgress(null)
+    }
+    if (!session.isCurrent()) return
+    const parts = [`Added ${added} of ${batch.length}.`]
+    if (refused.length > 0) parts.push(describeRefusals(refused))
+    if (stoppedBy) parts.push(`Stopped: ${stoppedBy}`)
+    if (refused.length > 0 || stoppedBy) setMutationError(parts.join(" "))
+    else setBulkNotice(parts[0])
+  }
+
   async function handleRemove(wt: WorkspaceTenant) {
     setRemovingId(wt.id)
     setMutationError(null)
+    setBulkNotice(null)
     try {
       await workspaceApi.removeTenant(workspaceId, wt.id)
       setTenants((prev) => prev.filter((t) => t.id !== wt.id))
@@ -246,10 +369,22 @@ export function TenantsTab({
     }
   }
 
+  const connectedConnectCount = countConnectSources(tenants)
+  const bulkAddOffered =
+    filteredAvailable.length > 0
+    && (idReport !== null || filteredAvailable.length < available.length)
+  const connectCountAfterBulk =
+    connectedConnectCount + (bulkAddOffered ? countConnectSources(filteredAvailable) : 0)
+
   const canShowAddButton = isManager && (availableStatus !== "ready" || available.length > 0)
 
   return (
-    <div data-testid="tenants-tab">
+    <div
+      ref={tabRef}
+      tabIndex={-1}
+      className="rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      data-testid="tenants-tab"
+    >
       <div className="mb-4 flex items-center justify-between">
         <span className="text-sm text-muted-foreground">
           {connectedLoading
@@ -258,9 +393,12 @@ export function TenantsTab({
         </span>
         {canShowAddButton && (
           <Button
+            ref={addButtonRef}
             size="sm"
             variant={showAdd ? "secondary" : "outline"}
-            onClick={() => setShowAdd((v) => !v)}
+            onClick={toggleAdd}
+            aria-expanded={showAdd}
+            aria-controls={showAdd ? panelId : undefined}
             data-testid="add-tenant-btn"
           >
             <Plus className="mr-1 h-4 w-4" />
@@ -270,21 +408,42 @@ export function TenantsTab({
       </div>
 
       {showAdd && isManager && (
-        <div className="mb-4 rounded-lg border bg-muted/30 p-4" data-testid="add-tenant-panel">
+        <div
+          ref={panelRef}
+          id={panelId}
+          role="region"
+          aria-label="Add data source"
+          className="mb-4 rounded-lg border bg-muted/30 p-4"
+          data-testid="add-tenant-panel"
+        >
           <div className="mb-3 flex items-center justify-between">
             <p className="text-sm font-medium">Available data sources</p>
-            {availableStatus === "ready" && (
-              <button
-                type="button"
-                onClick={handleRefreshAvailable}
-                disabled={refreshing}
-                className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
-                data-testid="refresh-available-sources"
+            <div className="flex items-center gap-3">
+              {availableStatus === "ready" && (
+                <button
+                  type="button"
+                  onClick={handleRefreshAvailable}
+                  disabled={refreshing}
+                  className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+                  data-testid="refresh-available-sources"
+                >
+                  <RefreshCw className={`h-3 w-3 ${refreshing ? "animate-spin" : ""}`} />
+                  {refreshing ? "Refreshing…" : "Refresh"}
+                </button>
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-muted-foreground"
+                onClick={closeAdd}
+                aria-label="Close add data source"
+                title="Close (Esc)"
+                data-testid="add-tenant-close"
               >
-                <RefreshCw className={`h-3 w-3 ${refreshing ? "animate-spin" : ""}`} />
-                {refreshing ? "Refreshing…" : "Refresh"}
-              </button>
-            )}
+                <X className="mr-1 h-4 w-4" />
+                Close
+              </Button>
+            </div>
           </div>
 
           {availableStatus === "loading" ? (
@@ -330,7 +489,38 @@ export function TenantsTab({
           ) : (
             <>
               <div className="mb-3">
-                <FacetFilterBar testIdPrefix="available-sources-filter" {...sourceFilters.barProps} />
+                <FacetFilterBar
+                  testIdPrefix="available-sources-filter"
+                  {...sourceFilters.barProps}
+                  bulkAction={
+                    // Only a narrowed or pasted list: one click must not add every source
+                    // the user has by accident.
+                    bulkAddOffered && (
+                      <button
+                        type="button"
+                        onClick={() => void handleAddShown()}
+                        disabled={bulkProgress !== null || addingId !== null}
+                        className="font-medium text-foreground underline-offset-2 hover:underline disabled:opacity-50"
+                        data-testid="available-sources-add-shown"
+                      >
+                        {bulkProgress
+                          ? `Adding ${Math.min(bulkProgress.done + 1, bulkProgress.total)} of ${bulkProgress.total}…`
+                          : `Add ${filteredAvailable.length} shown`}
+                      </button>
+                    )
+                  }
+                />
+                {bulkAddOffered && connectedConnectCount <= CONNECT_QUICK_CHECK_LIMIT && (
+                  <ConnectSizeNotice
+                    count={connectCountAfterBulk}
+                    lead={`Adding ${
+                      filteredAvailable.length === 1 ? "the 1" : `all ${filteredAvailable.length}`
+                    } shown would give this workspace`}
+                    canSplit
+                    testId="add-sources-connect-size-notice"
+                    className="mt-2"
+                  />
+                )}
                 {idReport && (
                   <div className="mt-2">
                     <IdListSummary
@@ -384,7 +574,7 @@ export function TenantsTab({
                         <Button
                           size="sm"
                           onClick={() => handleAdd(t)}
-                          disabled={addingId === t.tenant_uuid}
+                          disabled={addingId === t.tenant_uuid || bulkProgress !== null}
                           data-testid={`add-tenant-${t.tenant_uuid}`}
                         >
                           {addingId === t.tenant_uuid ? "Adding…" : "Add"}
@@ -397,6 +587,20 @@ export function TenantsTab({
             </>
           )}
         </div>
+      )}
+
+      <ConnectSizeNotice
+        count={connectedConnectCount}
+        lead="This workspace has"
+        canSplit={isManager}
+        testId="workspace-connect-size-notice"
+        className="mb-3"
+      />
+
+      {bulkNotice && !mutationError && (
+        <p className="mb-3 text-sm text-muted-foreground" role="status" data-testid="bulk-add-notice">
+          {bulkNotice}
+        </p>
       )}
 
       {mutationError && (
@@ -437,7 +641,9 @@ export function TenantsTab({
               size="sm"
               variant="outline"
               className="mt-4"
-              onClick={() => setShowAdd(true)}
+              onClick={openAdd}
+              aria-expanded={showAdd}
+              aria-controls={showAdd ? panelId : undefined}
               data-testid="add-tenant-empty-btn"
             >
               <Plus className="mr-1 h-4 w-4" />

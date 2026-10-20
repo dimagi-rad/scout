@@ -24,6 +24,8 @@ import { workspacePath } from "@/lib/workspacePath"
 import { CONNECTIONS_PATH } from "@/lib/routes"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
 import { useTenantFacetFilters } from "@/lib/filters/useTenantFacetFilters"
+import { countConnectSources } from "@/lib/connectAccessCheck"
+import { ConnectSizeNotice } from "@/components/ConnectSizeNotice"
 
 interface Props {
   onClose: () => void
@@ -35,6 +37,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const isCurrentAccount = useIsCurrentAccount()
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
+  const newThread = useAppStore((s) => s.uiActions.newThread)
   const userId = useAppStore((s) => s.user?.id)
   const domains = useAppStore((s) => s.domains)
   const domainsStatus = useAppStore((s) => s.domainsStatus)
@@ -136,6 +139,10 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     const shown = new Set(filteredSources.map((t) => t.tenant_uuid))
     return [...selected].filter((id) => !shown.has(id)).length
   }, [filteredSources, selected])
+  const selectedConnectCount = useMemo(
+    () => countConnectSources(sources.filter((t) => selected.has(t.tenant_uuid))),
+    [sources, selected],
+  )
   const unselectedShown = useMemo(
     () => filteredSources.filter((t) => !selected.has(t.tenant_uuid)),
     [filteredSources, selected],
@@ -153,7 +160,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     })
   }
 
-  // A pasted id list narrows the list to those sources; this ticks them all.
+  // Filters (a program, a pasted id list) narrow the list to a set; this ticks it all.
   function selectAllShown() {
     setDuplicateAcknowledged(false)
     setSelected((prev) => new Set([...prev, ...unselectedShown.map((t) => t.tenant_uuid)]))
@@ -180,8 +187,10 @@ export function CreateWorkspaceModal({ onClose }: Props) {
       await fetchDomains()
       if (!isCurrentAccount()) return
       setActiveDomain(workspace.id)
+      newThread()
       onClose()
-      navigate(`${pathPrefix}${workspacePath(workspace)}`)
+      // Its sources were just chosen here, so the next step is asking it something.
+      navigate(`${pathPrefix}${workspacePath(workspace)}/chat`)
     } catch (err) {
       if (!isCurrentAccount()) return
       setError(err instanceof ApiError ? err.message : "Failed to create workspace")
@@ -293,7 +302,25 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                 </p>
               ) : (
                 <div className="space-y-3">
-                  <FacetFilterBar testIdPrefix="create-sources-filter" {...sourceFilters.barProps} />
+                  <FacetFilterBar
+                    testIdPrefix="create-sources-filter"
+                    {...sourceFilters.barProps}
+                    bulkAction={
+                      // A pasted id list offers this in its own summary instead.
+                      !sourceFilters.idReport
+                      && filteredSources.length < sortedSources.length
+                      && unselectedShown.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={selectAllShown}
+                          className="font-medium text-foreground underline-offset-2 hover:underline"
+                          data-testid="create-sources-select-shown"
+                        >
+                          Select {unselectedShown.length} shown
+                        </button>
+                      )
+                    }
+                  />
                   {sourceFilters.idReport && (
                     <IdListSummary
                       report={sourceFilters.idReport}
@@ -369,6 +396,13 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                 </div>
               )}
             </div>
+
+            <ConnectSizeNotice
+              count={selectedConnectCount}
+              lead="This workspace would have"
+              canSplit
+              testId="create-workspace-connect-size-notice"
+            />
 
             {duplicateWorkspace && !duplicateAcknowledged && (
               <div

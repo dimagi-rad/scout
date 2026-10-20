@@ -42,6 +42,8 @@ export interface UsageDashboard {
     total: number
     failed: number
     duration_ms: Percentiles
+    // One row per workspace source type: a provider id, "mixed" or "unknown".
+    by_source: { source: string; total: number; failed: number; duration_ms: Percentiles }[]
     phases: { phase: string; p50_ms: number | null; p95_ms: number | null }[]
   }
   materializations: { total: number; states: Record<string, number>; duration_ms: Percentiles }

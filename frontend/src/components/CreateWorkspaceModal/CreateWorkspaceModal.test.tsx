@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { MemoryRouter } from "react-router-dom"
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
 import { beforeEach, expect, it, vi } from "vitest"
 
 import { workspaceApi } from "@/api/workspaces"
@@ -12,11 +12,17 @@ vi.mock("@/api/userTenantsCache", () => ({
   getUserTenantsCached: vi.fn(),
   refreshUserTenants: vi.fn(),
 }))
+const storeActions = vi.hoisted(() => ({
+  fetchDomains: vi.fn(), setActiveDomain: vi.fn(), newThread: vi.fn(),
+}))
 vi.mock("@/store/store", () => {
   const state = {
     user: { id: "user" }, domains: [], domainsStatus: "loaded",
     accountSession: { isCurrent: () => true },
-    domainActions: { fetchDomains: vi.fn(), setActiveDomain: vi.fn() },
+    domainActions: {
+      fetchDomains: storeActions.fetchDomains, setActiveDomain: storeActions.setActiveDomain,
+    },
+    uiActions: { newThread: storeActions.newThread },
   }
   return { useAppStore: (selector: (value: typeof state) => unknown) => selector(state) }
 })
@@ -33,10 +39,19 @@ beforeEach(() => {
   })
 })
 
-async function openModal() {
+function CurrentPath() {
+  return <div data-testid="current-path">{useLocation().pathname}</div>
+}
+
+async function openModal(path = "/workspaces") {
   const user = userEvent.setup()
   const onClose = vi.fn()
-  render(<MemoryRouter><CreateWorkspaceModal onClose={onClose} /></MemoryRouter>)
+  render(
+    <MemoryRouter initialEntries={[path]}>
+      <CreateWorkspaceModal onClose={onClose} />
+      <Routes><Route path="*" element={<CurrentPath />} /></Routes>
+    </MemoryRouter>,
+  )
   await screen.findByTestId("create-sources-list")
   await user.type(screen.getByLabelText("Name"), "Analysis")
   return { user, onClose }
@@ -166,6 +181,30 @@ it("creates with the selected source", async () => {
   await user.click(screen.getByTestId("create-workspace-submit"))
   await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
   expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", ["tenant-a"])
+})
+
+it("opens a fresh chat in the new workspace", async () => {
+  const { user } = await openModal()
+  await user.click(screen.getByTestId("create-source-tenant-a"))
+  await user.click(screen.getByTestId("create-workspace-submit"))
+
+  await waitFor(() =>
+    expect(screen.getByTestId("current-path")).toHaveTextContent("/workspaces/analysis/workspace/chat"),
+  )
+  expect(storeActions.setActiveDomain).toHaveBeenCalledExactlyOnceWith("workspace")
+  expect(storeActions.newThread).toHaveBeenCalledOnce()
+})
+
+it("keeps the embed prefix when opening the new workspace's chat", async () => {
+  const { user } = await openModal("/embed/workspaces")
+  await user.click(screen.getByTestId("create-source-tenant-a"))
+  await user.click(screen.getByTestId("create-workspace-submit"))
+
+  await waitFor(() =>
+    expect(screen.getByTestId("current-path")).toHaveTextContent(
+      "/embed/workspaces/analysis/workspace/chat",
+    ),
+  )
 })
 
 it("refuses to create a workspace with no source (#381)", async () => {
@@ -329,4 +368,56 @@ it("names pasted ids a remembered facet hides, and clears only the facets", asyn
   expect(shown()).toEqual(["1236", "523"])
   expect(screen.getByTestId("search-filter-input")).toHaveValue("523, 1236")
   expect(screen.getByTestId("create-sources-id-list-shown")).toHaveTextContent("All 2 IDs shown")
+})
+
+it("selects every source a program filter shows, keeping earlier picks", async () => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ program: ["7"] }))
+  vi.mocked(getUserTenantsCached).mockResolvedValue([
+    connect("p1", "Malaria North", { program: "7", program_name: "Malaria" }),
+    connect("p2", "Malaria South", { program: "7", program_name: "Malaria" }),
+    connect("q1", "Nutrition East", { program: "8", program_name: "Nutrition" }),
+  ])
+  const { user, onClose } = await openModal()
+  expect(shown()).toEqual(["p1", "p2"])
+
+  await user.click(screen.getByTestId("create-source-tenant-p1"))
+  expect(screen.getByTestId("create-sources-select-shown")).toHaveTextContent("Select 1 shown")
+  await user.click(screen.getByTestId("create-sources-select-shown"))
+
+  expect(screen.getByTestId("create-sources-selected")).toHaveTextContent("2 selected")
+  expect(screen.queryByTestId("create-sources-select-shown")).toBeNull()
+  await user.click(screen.getByTestId("create-workspace-submit"))
+  await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+  expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", ["tenant-p1", "tenant-p2"])
+})
+
+it("does not offer to select the whole unfiltered list", async () => {
+  await openModal()
+  expect(screen.queryByTestId("create-sources-select-shown")).toBeNull()
+})
+
+it("warns, without blocking, when the pick has more Connect opportunities than the quick check covers", async () => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ program: ["7"] }))
+  vi.mocked(getUserTenantsCached).mockResolvedValue([
+    ...Array.from({ length: 26 }, (_, i) =>
+      connect(`${100 + i}`, `Opp ${100 + i}`, { program: "7", program_name: "Malaria" })),
+    connect("900", "Other", { program: "8", program_name: "Nutrition" }),
+  ])
+  const { user, onClose } = await openModal()
+
+  await user.click(screen.getByTestId("create-source-tenant-100"))
+  expect(screen.queryByTestId("create-workspace-connect-size-notice")).toBeNull()
+
+  await user.click(screen.getByTestId("create-sources-select-shown"))
+  expect(screen.getByTestId("create-workspace-connect-size-notice")).toHaveTextContent(
+    "This workspace would have 26 CommCare Connect opportunities",
+  )
+
+  await user.click(screen.getByTestId("create-source-tenant-125"))
+  expect(screen.queryByTestId("create-workspace-connect-size-notice")).toBeNull()
+  await user.click(screen.getByTestId("create-source-tenant-125"))
+
+  await user.click(screen.getByTestId("create-workspace-submit"))
+  await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+  expect(vi.mocked(workspaceApi.create).mock.calls[0][1]).toHaveLength(26)
 })

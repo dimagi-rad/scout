@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import patch
 
 import pytest
 from psycopg import sql as psql
@@ -184,23 +185,45 @@ def test_write_ocs_messages_reports_session_progress(tenant_schema):
         }
 
     try:
-        n = _write_ocs_messages(
-            iter(
-                [
-                    ([msg("s1", 0), msg("s1", 1)], 3),
-                    ([], 3),  # session with no messages still advances the bar
-                    ([msg("s3", 0)], 3),
-                ]
-            ),
-            tenant_schema.schema_name,
-            conn,
-            on_page=on_page,
-        )
+        with patch("mcp_server.services.materializer.OCS_MESSAGES_PROGRESS_INTERVAL_SECONDS", 0):
+            n = _write_ocs_messages(
+                iter(
+                    [
+                        ([msg("s1", 0), msg("s1", 1)], 3),
+                        ([], 3),  # session with no messages still advances the bar
+                        ([msg("s3", 0)], 3),
+                    ]
+                ),
+                tenant_schema.schema_name,
+                conn,
+                on_page=on_page,
+            )
         conn.commit()
         assert n == 3
         assert _row_count(conn, tenant_schema.schema_name, "raw_messages") == 3
         assert progress == [(1, 3), (2, 3), (3, 3)]
     finally:
+        conn.close()
+
+
+def test_write_ocs_messages_throttles_session_progress(tenant_schema):
+    """Each progress report is a DB write plus a cancel check, so per-session
+    reports are limited to about one a second; the first and final ones
+    always go out so the bar starts and finishes exactly."""
+    conn = get_managed_db_connection()
+    conn.autocommit = False
+    progress: list[tuple[int, int | None]] = []
+    try:
+        with patch("mcp_server.services.materializer.OCS_MESSAGES_PROGRESS_INTERVAL_SECONDS", 3600):
+            _write_ocs_messages(
+                iter([([], 6)] * 6),
+                tenant_schema.schema_name,
+                conn,
+                on_page=lambda loaded, total: progress.append((loaded, total)),
+            )
+        assert progress == [(1, 6), (6, 6)]
+    finally:
+        conn.rollback()
         conn.close()
 
 
