@@ -222,3 +222,78 @@ describe("ChatComposer quotes (#920)", () => {
     expect(screen.getByTestId("chat-input")).not.toHaveFocus()
   })
 })
+
+describe("ChatComposer multi-line input and length limit (#913)", () => {
+  it("is a multi-line textarea", () => {
+    render(<ChatComposer input="" setInput={vi.fn()} onSend={vi.fn()} />)
+    expect(screen.getByTestId("chat-input").tagName).toBe("TEXTAREA")
+  })
+
+  it("does not send on Enter while an IME is composing", () => {
+    const onSend = vi.fn()
+    render(<ChatComposer input="こんにちは" setInput={vi.fn()} onSend={onSend} />)
+    const field = screen.getByTestId("chat-input")
+    fireEvent.keyDown(field, { key: "Enter", isComposing: true })
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 229 })
+    expect(onSend).not.toHaveBeenCalled()
+    fireEvent.keyDown(field, { key: "Enter" })
+    expect(onSend).toHaveBeenCalledWith("こんにちは")
+  })
+
+  it("hides the counter below 8,000 characters", () => {
+    render(<ChatComposer input={"a".repeat(7_999)} setInput={vi.fn()} onSend={vi.fn()} />)
+    expect(screen.queryByTestId("chat-char-count")).toBeNull()
+  })
+
+  it("shows the counter from 8,000 characters and still sends at 10,000", () => {
+    const onSend = vi.fn()
+    const { rerender } = render(
+      <ChatComposer input={"a".repeat(8_000)} setInput={vi.fn()} onSend={onSend} />,
+    )
+    expect(screen.getByTestId("chat-char-count")).toHaveTextContent("8,000 / 10,000")
+    expect(screen.getByTestId("chat-char-count")).not.toHaveAttribute("data-over-limit")
+
+    rerender(<ChatComposer input={"a".repeat(10_000)} setInput={vi.fn()} onSend={onSend} />)
+    expect(screen.getByTestId("chat-send")).not.toBeDisabled()
+    fireEvent.keyDown(screen.getByTestId("chat-input"), { key: "Enter" })
+    expect(onSend).toHaveBeenCalledTimes(1)
+  })
+
+  it("turns red and blocks the send over 10,000 characters", () => {
+    const onSend = vi.fn()
+    render(<ChatComposer input={"a".repeat(10_001)} setInput={vi.fn()} onSend={onSend} />)
+    const counter = screen.getByTestId("chat-char-count")
+    expect(counter).toHaveAttribute("data-over-limit", "true")
+    expect(counter).toHaveClass("text-destructive")
+    expect(screen.getByTestId("chat-char-count-hint")).toHaveTextContent("Shorten it by 1 character.")
+    expect(screen.getByTestId("chat-send")).toBeDisabled()
+    fireEvent.keyDown(screen.getByTestId("chat-input"), { key: "Enter" })
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it("counts the quotes that go out with the reply", () => {
+    render(
+      <ChatComposer
+        input={"a".repeat(7_000)}
+        setInput={vi.fn()}
+        onSend={vi.fn()}
+        quotes={["q".repeat(1_500)]}
+      />,
+    )
+    // "> " + quote + "\n\n" + reply
+    expect(screen.getByTestId("chat-char-count")).toHaveTextContent("8,504 / 10,000")
+  })
+
+  it("counts characters as the server does, not UTF-16 units", () => {
+    render(<ChatComposer input={"😀".repeat(8_000)} setInput={vi.fn()} onSend={vi.fn()} />)
+    expect(screen.getByTestId("chat-char-count")).toHaveTextContent("8,000 / 10,000")
+  })
+
+  it("blocks an over-long send from the empty-state prompt", () => {
+    const onSend = vi.fn()
+    render(<ChatEmptyPrompt input={"a".repeat(10_001)} setInput={vi.fn()} onSend={onSend} />)
+    expect(screen.getByTestId("chat-char-count")).toHaveAttribute("data-over-limit", "true")
+    fireEvent.keyDown(screen.getByTestId("chat-input-prominent"), { key: "Enter" })
+    expect(onSend).not.toHaveBeenCalled()
+  })
+})

@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { ArrowUp, ArrowRight } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
@@ -9,6 +9,13 @@ import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { matchSlashCommands, resolveSlashCommand } from "@/components/ChatPanel/slashCommands"
 import type { SlashCommand } from "@/components/ChatPanel/slashCommands"
 import { SlashCommandMenu } from "@/components/ChatPanel/SlashCommandMenu"
+import { CharCounter } from "@/components/ChatPanel/CharCounter"
+import {
+  isComposingKey,
+  isOverLimit,
+  messageLength,
+  useAutoGrow,
+} from "@/components/ChatPanel/messageLimit"
 import { getStarterQuestions } from "./starterQuestions"
 
 interface ChatEmptyPromptProps {
@@ -30,6 +37,11 @@ export function ChatEmptyPrompt({
 }: ChatEmptyPromptProps) {
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const { canWrite } = useWorkspaceRole()
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  useAutoGrow(textareaRef, input)
+  const trimmedInput = input.trim()
+  const length = trimmedInput ? messageLength(resolveSlashCommand(trimmedInput)) : 0
+  const tooLong = isOverLimit(length)
 
   // Slash command menu state — mirrors ChatPanel's active-thread input so
   // slash commands work identically here.
@@ -44,7 +56,7 @@ export function ChatEmptyPrompt({
 
   function submit(text: string) {
     const trimmed = text.trim()
-    if (!trimmed || disabled) return
+    if (!trimmed || disabled || isOverLimit(messageLength(resolveSlashCommand(trimmed)))) return
     setInput("")
     onSend(resolveSlashCommand(trimmed))
   }
@@ -55,8 +67,7 @@ export function ChatEmptyPrompt({
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.nativeEvent.isComposing) return
-
+    if (isComposingKey(e)) return
     if (showSlashMenu && filteredCommands.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault()
@@ -94,7 +105,9 @@ export function ChatEmptyPrompt({
           canWrite={canWrite}
         />
         <Textarea
+          ref={textareaRef}
           data-testid="chat-input-prominent"
+          aria-invalid={tooLong || undefined}
           value={input}
           onChange={(e) => {
             setInput(e.target.value)
@@ -103,18 +116,19 @@ export function ChatEmptyPrompt({
           onKeyDown={handleKeyDown}
           placeholder="Ask about your data..."
           rows={1}
-          className="min-h-0 resize-none rounded-xl border bg-background px-4 py-3 pr-14 text-base shadow-sm"
+          className="field-sizing-fixed min-h-0 resize-none rounded-xl border bg-background px-4 py-3 pr-14 text-base shadow-sm"
         />
         <Button
           type="submit"
           size="icon"
-          disabled={disabled || !input.trim()}
-          className="absolute right-3 top-1/2 -translate-y-1/2"
+          disabled={disabled || !trimmedInput || tooLong}
+          className="absolute bottom-2 right-3"
           aria-label="Send message"
         >
           <ArrowUp className="h-4 w-4" aria-hidden="true" />
         </Button>
       </form>
+      <CharCounter length={length} className="mt-1" />
 
       <p
         className="mt-3 text-center text-xs text-muted-foreground"

@@ -449,6 +449,41 @@ export const PromptInputWithSlashMenu: Story = {
   },
 }
 
+export const PromptInputMultiLine: Story = {
+  render: function PromptInputMultiLineStory() {
+    const [input, setInput] = useState(
+      "Compare visit totals by region\nfor the last two quarters,\nand flag any region that dropped by more than 10%.",
+    )
+    return (
+      <div className="w-[720px] rounded-lg border p-4">
+        <ChatComposer input={input} setInput={setInput} onSend={() => undefined} />
+      </div>
+    )
+  },
+}
+
+export const PromptInputNearLengthLimit: Story = {
+  render: function PromptInputNearLengthLimitStory() {
+    const [input, setInput] = useState("Summarize this registry export: ".padEnd(8_500, " data"))
+    return (
+      <div className="w-[720px] rounded-lg border p-4">
+        <ChatComposer input={input} setInput={setInput} onSend={() => undefined} />
+      </div>
+    )
+  },
+}
+
+export const PromptInputOverLengthLimit: Story = {
+  render: function PromptInputOverLengthLimitStory() {
+    const [input, setInput] = useState("Summarize this registry export: ".padEnd(10_240, " data"))
+    return (
+      <div className="w-[720px] rounded-lg border p-4">
+        <ChatComposer input={input} setInput={setInput} onSend={() => undefined} />
+      </div>
+    )
+  },
+}
+
 export const StreamingPromptInput: Story = {
   render: function StreamingPromptInputStory() {
     const [input, setInput] = useState("")

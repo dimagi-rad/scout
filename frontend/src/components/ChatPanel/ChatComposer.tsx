@@ -8,6 +8,8 @@ import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { composeQuotedMessage } from "@/components/ChatMessage/quotes"
 import { matchSlashCommands, resolveSlashCommand, type SlashCommand } from "./slashCommands"
 import { SlashCommandMenu } from "./SlashCommandMenu"
+import { CharCounter } from "./CharCounter"
+import { isComposingKey, isOverLimit, messageLength, useAutoGrow } from "./messageLimit"
 
 interface ChatComposerProps {
   input: string
@@ -53,6 +55,7 @@ export function ChatComposer({
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const { canWrite } = useWorkspaceRole()
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  useAutoGrow(inputRef, input)
 
   // Latched so a remount (e.g. back from the empty state) doesn't refocus for an old pick.
   const handledFocusRef = useRef(focusRequest)
@@ -72,11 +75,15 @@ export function ChatComposer({
     setSlashMenuIndex(0)
   }
 
+  const trimmed = input.trim()
+  // Counted as sent: the server's limit covers the quotes and an expanded slash command.
+  const length = trimmed ? messageLength(composeQuotedMessage(quotes, resolveSlashCommand(trimmed))) : 0
+  const tooLong = isOverLimit(length)
+
   function submit() {
-    const text = input.trim()
-    if (!text || isStreaming || blocked) return
+    if (!trimmed || isStreaming || blocked || tooLong) return
     setInput("")
-    const message = composeQuotedMessage(quotes, resolveSlashCommand(text))
+    const message = composeQuotedMessage(quotes, resolveSlashCommand(trimmed))
     if (quotes.length) onQuotesSent?.()
     onSend(message)
   }
@@ -87,8 +94,7 @@ export function ChatComposer({
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.nativeEvent.isComposing) return
-
+    if (isComposingKey(e)) return
     if (showSlashMenu && filteredCommands.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault()
@@ -140,7 +146,7 @@ export function ChatComposer({
           ))}
         </ul>
       )}
-      <form onSubmit={handleSubmit} className="relative flex gap-2">
+      <form onSubmit={handleSubmit} className="relative flex items-end gap-2">
         <SlashCommandMenu
           query={slashQuery}
           onSelect={selectSlashCommand}
@@ -152,6 +158,7 @@ export function ChatComposer({
           ref={inputRef}
           data-testid="chat-input"
           rows={1}
+          aria-invalid={tooLong || undefined}
           value={input}
           onChange={(e) => {
             setInput(e.target.value)
@@ -159,7 +166,7 @@ export function ChatComposer({
           }}
           onKeyDown={handleKeyDown}
           placeholder={adding ? "Add to your request…" : placeholder}
-          className="min-h-9 max-h-40 flex-1 resize-none py-1.5"
+          className="field-sizing-fixed min-h-9 flex-1 resize-none py-1.5"
         />
         {isStreaming ? (
           <Button
@@ -173,11 +180,14 @@ export function ChatComposer({
             <Square className="w-4 h-4" aria-hidden="true" />
           </Button>
         ) : (
-          <span className="flex" title={blocked ? sendBlockedReason : undefined}>
+          <span
+            className="flex items-end"
+            title={blocked ? sendBlockedReason : tooLong ? "Message is too long" : undefined}
+          >
             <Button
               type="submit"
               size="icon"
-              disabled={!input.trim() || blocked}
+              disabled={!trimmed || blocked || tooLong}
               aria-label={adding ? "Add to request" : "Send message"}
               data-testid={adding ? "chat-add-to-request" : "chat-send"}
             >
@@ -190,6 +200,7 @@ export function ChatComposer({
           </span>
         )}
       </form>
+      <CharCounter length={length} />
     </div>
   )
 }
