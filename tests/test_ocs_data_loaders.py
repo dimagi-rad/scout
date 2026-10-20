@@ -10,6 +10,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.test import override_settings
 
 from mcp_server.loaders import ocs_messages
 from mcp_server.loaders.ocs_base import OCSAuthError, OCSExportError
@@ -552,7 +553,7 @@ def _session_ids(n: int) -> list[str]:
 
 def test_message_loader_fetches_details_concurrently():
     loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
-    workers = ocs_messages.DETAIL_FETCH_CONCURRENCY
+    workers = ocs_messages.detail_fetch_concurrency()
     # Every fetch waits until a full pool's worth is in flight at once.
     barrier = threading.Barrier(workers, timeout=5)
 
@@ -570,6 +571,73 @@ def test_message_loader_fetches_details_concurrently():
     ):
         pages = list(loader.load_pages())
     assert len(pages) == workers
+
+
+@override_settings(OCS_DETAIL_FETCH_CONCURRENCY=3)
+def test_message_loader_per_load_concurrency_is_a_setting():
+    loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    lock = threading.Lock()
+    in_flight = peak = 0
+
+    def fetch(url):
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        time.sleep(0.02)
+        with lock:
+            in_flight -= 1
+        return {"messages": []}
+
+    with (
+        patch.object(
+            loader, "_paginate", return_value=iter([([{"id": i} for i in _session_ids(12)], None)])
+        ),
+        patch.object(loader, "_get_json", side_effect=fetch),
+    ):
+        assert len(list(loader.load_pages())) == 12
+    assert peak == 3
+
+
+@override_settings(OCS_DETAIL_FETCH_CONCURRENCY=4, OCS_DETAIL_FETCH_PROCESS_LIMIT=5)
+def test_concurrent_loads_share_the_process_wide_fetch_limit():
+    """Three worker jobs loading OCS at once must not triple the load on OCS."""
+    lock = threading.Lock()
+    in_flight = peak = 0
+    all_started = threading.Barrier(3, timeout=5)
+
+    def fetch(url):
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        time.sleep(0.02)
+        with lock:
+            in_flight -= 1
+        return {"messages": []}
+
+    def run_load(results):
+        loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+        with (
+            patch.object(
+                loader,
+                "_paginate",
+                return_value=iter([([{"id": i} for i in _session_ids(20)], None)]),
+            ),
+            patch.object(loader, "_get_json", side_effect=fetch),
+        ):
+            all_started.wait()
+            results.append(len(list(loader.load_pages())))
+
+    results: list[int] = []
+    loads = [threading.Thread(target=run_load, args=(results,)) for _ in range(3)]
+    for load in loads:
+        load.start()
+    for load in loads:
+        load.join(timeout=10)
+    assert results == [20, 20, 20]
+    # 3 loads x 4 would be 12 at once without the process cap.
+    assert peak <= 5
 
 
 def test_message_loader_yields_sessions_in_list_order_when_fetches_finish_out_of_order():
@@ -615,7 +683,7 @@ def test_message_loader_propagates_first_failure_and_stops_fetching():
     # Sessions before the failure are delivered; nothing after it is.
     assert len(yielded) == 3
     # Only the bounded read-ahead was ever requested, not the remaining sessions.
-    assert len(fetched) <= 3 + ocs_messages.DETAIL_FETCH_WINDOW + 1
+    assert len(fetched) <= 3 + ocs_messages.detail_fetch_window() + 1
 
 
 def test_message_loader_stops_fetching_when_consumer_cancels():
@@ -637,7 +705,7 @@ def test_message_loader_stops_fetching_when_consumer_cancels():
         next(pages)
         pages.close()
         _await_detail_threads()
-    assert len(fetched) <= 1 + ocs_messages.DETAIL_FETCH_WINDOW + 1
+    assert len(fetched) <= 1 + ocs_messages.detail_fetch_window() + 1
 
 
 def _response(status: int, payload: dict | None = None) -> MagicMock:

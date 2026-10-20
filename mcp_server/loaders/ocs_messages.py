@@ -10,23 +10,44 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 
+from django.conf import settings
 from django.db import connections
 
 from mcp_server.loaders.ocs_base import OCS_MAX_PAGE_SIZE, OCSBaseLoader, OCSExportError
 
 logger = logging.getLogger(__name__)
 
-# Serial detail fetches made a 5k-session chatbot a ~25 min load (#918). Kept
-# under the session adapter's default pool of 10 connections so no request
-# waits on a socket, and low enough that the shared 429/Retry-After policy
-# still governs how hard OCS is pushed.
-DETAIL_FETCH_CONCURRENCY = 8
-# Fetched-but-unyielded details are held in memory; cap the read-ahead.
-DETAIL_FETCH_WINDOW = DETAIL_FETCH_CONCURRENCY * 2
+# Serial detail fetches made a 5k-session chatbot a ~25 min load (#918). The
+# per-load concurrency (settings.OCS_DETAIL_FETCH_CONCURRENCY, default 8) stays
+# under the session adapter's default pool of 10 connections so no request waits
+# on a socket; the per-process limit keeps several concurrent loads from
+# multiplying it against OCS. A slot is held through _get_json's Retry-After
+# sleeps, so a 429 slows every load in the process, not just one.
+_process_slots_lock = threading.Lock()
+_process_slots: tuple[int, threading.BoundedSemaphore] | None = None
+
+
+def detail_fetch_concurrency() -> int:
+    return max(1, settings.OCS_DETAIL_FETCH_CONCURRENCY)
+
+
+def detail_fetch_window() -> int:
+    """Fetched-but-unyielded details are held in memory; cap the read-ahead."""
+    return detail_fetch_concurrency() * 2
+
+
+def _process_fetch_slots() -> threading.BoundedSemaphore:
+    global _process_slots
+    limit = max(1, settings.OCS_DETAIL_FETCH_PROCESS_LIMIT)
+    with _process_slots_lock:
+        if _process_slots is None or _process_slots[0] != limit:
+            _process_slots = (limit, threading.BoundedSemaphore(limit))
+        return _process_slots[1]
 
 
 class OCSMessageLoader(OCSBaseLoader):
@@ -89,13 +110,14 @@ class OCSMessageLoader(OCSBaseLoader):
         """
         pending: deque[tuple[str, Future]] = deque()
         remaining = iter(session_ids)
+        window = detail_fetch_window()
         executor = ThreadPoolExecutor(
-            max_workers=DETAIL_FETCH_CONCURRENCY, thread_name_prefix="ocs-session-detail"
+            max_workers=detail_fetch_concurrency(), thread_name_prefix="ocs-session-detail"
         )
         try:
             for session_id in remaining:
                 pending.append((session_id, executor.submit(self._session_messages, session_id)))
-                if len(pending) >= DETAIL_FETCH_WINDOW:
+                if len(pending) >= window:
                     break
             while pending:
                 session_id, future = pending.popleft()
@@ -112,7 +134,8 @@ class OCSMessageLoader(OCSBaseLoader):
         # missing ``messages`` is treated as empty (not an error) — but the JSON
         # parse itself is validated via _get_json (finding 03#6).
         try:
-            detail = self._get_json(f"{self.base_url}/api/sessions/{session_id}/")
+            with _process_fetch_slots():
+                detail = self._get_json(f"{self.base_url}/api/sessions/{session_id}/")
         finally:
             # A mid-run token refresh persists through the ORM; without this the
             # pool thread's DB connection would outlive the load (shared RDS).

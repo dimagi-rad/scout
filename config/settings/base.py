@@ -413,6 +413,11 @@ OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
 # An OCS that predates open-chat-studio#4685 rejects the unknown `teams` scope with
 # invalid_scope, failing every OCS sign-in; turn this off when pointing at one.
 OCS_REQUEST_TEAMS_SCOPE = env.bool("OCS_REQUEST_TEAMS_SCOPE", default=True)
+# OCS session-detail fetches (the messages N+1, #918): concurrent per load, and in
+# total per process. The worker runs several loads at once and OCS has no API
+# throttling of its own, so the process cap is what bounds the load on it.
+OCS_DETAIL_FETCH_CONCURRENCY = env.int("OCS_DETAIL_FETCH_CONCURRENCY", default=8)
+OCS_DETAIL_FETCH_PROCESS_LIMIT = env.int("OCS_DETAIL_FETCH_PROCESS_LIMIT", default=10)
 
 
 # The default cache backs chat rate limiting, DRF throttles, and per-user
