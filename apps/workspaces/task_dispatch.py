@@ -12,12 +12,15 @@ raises ``TaskNotFound`` instead of queueing a row no worker will ever run.
 
 Each function writes exactly the row its call sites wrote before this module
 existed (tests/test_enqueue_call_sites.py): an optional task argument is only sent
-when it differs from the task's default, matching what callers always did.
+when it differs from the task's default, matching what callers always did. The
+exception is the rebuilds, which carry a per-workspace queueing lock since #918.
 """
 
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from django.db import connection, transaction
+from procrastinate.exceptions import AlreadyEnqueued
 from procrastinate.jobs import JobDeferrer
 
 from config.procrastinate import app
@@ -115,16 +118,65 @@ async def adefer_materialize_workspace(
     )
 
 
-def defer_rebuild_workspace_view_schema(*, workspace_id: str) -> int:
-    return _task(REBUILD_WORKSPACE_VIEW_SCHEMA).defer(workspace_id=workspace_id)
+def _view_rebuild_lock(workspace_id: str) -> str:
+    return f"view-rebuild:{workspace_id}"
 
 
-async def adefer_rebuild_workspace_view_schema(*, workspace_id: str) -> int:
-    return await _task(REBUILD_WORKSPACE_VIEW_SCHEMA).defer_async(workspace_id=workspace_id)
+def _semantic_rebuild_lock(workspace_id: str) -> str:
+    return f"semantic-rebuild:{workspace_id}"
 
 
-async def adefer_rebuild_workspace_semantic_model(*, workspace_id: str) -> int:
-    return await _task(REBUILD_WORKSPACE_SEMANTIC_MODEL).defer_async(workspace_id=workspace_id)
+def _defer_once(name: str, queueing_lock: str, **args: Any) -> int | None:
+    """Queue ``name`` unless an identical job is already waiting; None when one is.
+
+    A rebuild reads the workspace when it runs, so a waiting one covers every
+    later request. The queueing lock only counts ``todo`` jobs: a request made
+    while a rebuild is running still queues another (#918).
+    """
+    task = _task(name, queueing_lock=queueing_lock)
+    if not connection.in_atomic_block:
+        try:
+            return task.defer(**args)
+        except AlreadyEnqueued:
+            return None
+    try:
+        # Savepoint: the queueing-lock violation must not abort the caller's transaction.
+        with transaction.atomic():
+            return task.defer(**args)
+    except AlreadyEnqueued:
+        # The waiting job can start before this transaction commits and miss its
+        # writes, so ask again once they are visible.
+        transaction.on_commit(lambda: _defer_once(name, queueing_lock, **args), robust=True)
+        return None
+
+
+async def _adefer_once(name: str, queueing_lock: str, **args: Any) -> int | None:
+    """``_defer_once`` for async callers, whose writes must already be committed:
+    no async caller holds a Django transaction, so there is no commit to wait for."""
+    try:
+        return await _task(name, queueing_lock=queueing_lock).defer_async(**args)
+    except AlreadyEnqueued:
+        return None
+
+
+def defer_rebuild_workspace_view_schema(*, workspace_id: str) -> int | None:
+    return _defer_once(
+        REBUILD_WORKSPACE_VIEW_SCHEMA, _view_rebuild_lock(workspace_id), workspace_id=workspace_id
+    )
+
+
+async def adefer_rebuild_workspace_view_schema(*, workspace_id: str) -> int | None:
+    return await _adefer_once(
+        REBUILD_WORKSPACE_VIEW_SCHEMA, _view_rebuild_lock(workspace_id), workspace_id=workspace_id
+    )
+
+
+async def adefer_rebuild_workspace_semantic_model(*, workspace_id: str) -> int | None:
+    return await _adefer_once(
+        REBUILD_WORKSPACE_SEMANTIC_MODEL,
+        _semantic_rebuild_lock(workspace_id),
+        workspace_id=workspace_id,
+    )
 
 
 def defer_teardown_view_schema(*, view_schema_id: str) -> int:
