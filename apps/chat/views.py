@@ -26,10 +26,12 @@ from apps.chat import pending_requests
 from apps.chat.attachments import (
     MAX_ATTACHMENTS_PER_MESSAGE,
     abind_to_thread,
+    amark_sent,
     aresolve_for_send,
     attachment_ids_from_parts,
     aunbind,
     merge_attachments,
+    unbind_unsent_sync,
     uncarried,
     with_attachments,
 )
@@ -198,9 +200,14 @@ async def chat_view(request):
     except BaseException:
         await _unbind_unaccepted(bound)
         raise
-    # Only a stream (a turn or a hold) took the message; anything else refused it,
-    # so its attachments go back to unsent and GC can still reclaim them.
-    if not isinstance(response, StreamingHttpResponse):
+    # A turn marks its attachments sent when its body starts, and unbinds them if
+    # Django closes it unsent; a hold is accepted now. Anything else refused the
+    # message, so its attachments go back to unsent and GC can still reclaim them.
+    if isinstance(response, _TurnStreamingResponse):
+        pass
+    elif isinstance(response, StreamingHttpResponse):
+        await _mark_sent(bound)
+    else:
         await _unbind_unaccepted(bound)
     return response
 
@@ -211,6 +218,14 @@ async def _unbind_unaccepted(bound: dict) -> None:
             await aunbind(bound["ids"], thread=bound["thread"])
         except Exception:
             logger.warning("Could not unbind attachments of a refused message", exc_info=True)
+
+
+async def _mark_sent(bound: dict) -> None:
+    if bound.get("sent"):
+        try:
+            await amark_sent(bound["sent"], user=bound["user"], thread=bound["thread"])
+        except Exception:
+            logger.warning("Could not mark the attachments of a message sent", exc_info=True)
 
 
 async def _chat_view(request, bound: dict):
@@ -309,7 +324,7 @@ async def _chat_view(request, bound: dict):
     )
     if newly_bound is None:
         return _attachment_invalid_response(ATTACHMENT_UNAVAILABLE_MESSAGE)
-    bound.update(ids=newly_bound, thread=thread)
+    bound.update(ids=newly_bound, sent=attachment_ids, thread=thread, user=user)
 
     pending_version, err = _pending_request_version(data)
     if err:
@@ -335,7 +350,10 @@ async def _chat_view(request, bound: dict):
         except pending_requests.PendingRequestTooLong as e:
             return _request_too_long_response(e.user_message)
         if held is not None:
-            await aunbind(uncarried(newly_bound, held), thread=thread)
+            # A repeated part id is not stored again, so what it bound is carried by nothing.
+            dropped = set(uncarried(newly_bound, held))
+            await _unbind_unaccepted({"ids": list(dropped), "thread": thread})
+            bound.update(ids=[], sent=[i for i in attachment_ids if i not in dropped])
             return _held_response(held)
 
     # A brief wait covers Stop-then-resend: the stopped turn releases the lease
@@ -356,6 +374,7 @@ async def _chat_view(request, bound: dict):
                 pending_version=pending_version,
                 pending_request_id=pending_request_id,
                 request_started=request_started,
+                bound=bound,
             )
     except asyncio.CancelledError:
         await lease.release()
@@ -488,6 +507,7 @@ async def _start_turn(
     pending_version: int | None = None,
     pending_request_id: str | None = None,
     request_started: float | None = None,
+    bound: dict | None = None,
 ):
     """Build the agent and return the turn's stream, which owns ``lease`` from here."""
     thread_id = str(thread.id)
@@ -594,10 +614,11 @@ async def _start_turn(
         "thread_id": str(thread_id),
     }
 
-    response = _TurnStreamingResponse(lease, held_claim=claimed)
+    response = _TurnStreamingResponse(lease, held_claim=claimed, bound=bound)
 
     async def _traced_stream():
         response.turn_started = True
+        await _mark_sent(bound or {})
         live = LiveTurnWriter(thread_id)
         try:
             # aclosing: nothing else closes the inner stream on disconnect, and its
@@ -696,13 +717,18 @@ class _TurnStreamingResponse(StreamingHttpResponse):
     """
 
     def __init__(
-        self, lease: TurnLease, *, held_claim: pending_requests.ClaimedRequest | None = None
+        self,
+        lease: TurnLease,
+        *,
+        held_claim: pending_requests.ClaimedRequest | None = None,
+        bound: dict | None = None,
     ):
         super().__init__(content_type="text/event-stream; charset=utf-8")
         self["Cache-Control"] = "no-cache"
         self["X-Accel-Buffering"] = "no"
         self.lease = lease
         self.held_claim = held_claim
+        self.bound = bound or {}
         self.turn_started = False
 
     def close(self):
@@ -711,6 +737,8 @@ class _TurnStreamingResponse(StreamingHttpResponse):
                 # Before the lease, so no next holder sees this claim as stale.
                 if self.held_claim is not None:
                     pending_requests.release_sync(self.held_claim)
+                if self.bound.get("ids"):
+                    unbind_unsent_sync(self.bound["ids"], thread_id=self.bound["thread"].id)
                 self.lease.release_sync()
         except Exception:
             logger.warning(

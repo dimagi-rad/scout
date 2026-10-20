@@ -276,6 +276,9 @@ class ChatAttachment(models.Model):
     filename = models.CharField(max_length=255)
     media_type = models.CharField(max_length=100)
     created_at = models.DateTimeField(auto_now_add=True)
+    # Set once a message carrying it is accepted, by any request; a refused request
+    # unbinds only attachments no accepted message carries.
+    sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [

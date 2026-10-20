@@ -15,6 +15,7 @@ from apps.chat.artifact_links import (
 )
 from apps.chat.attachments import (
     abind_to_thread,
+    amark_sent,
     aresolve_for_send,
     attachment_ids_from_parts,
     aunbind,
@@ -372,7 +373,12 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
         await _unbind_quietly(newly_bound, thread)
         raise
     # The part is stored by now, so a failure here must not fail the request.
-    await _unbind_quietly(uncarried(newly_bound, pending), thread)
+    dropped = set(uncarried(newly_bound, pending))
+    await _unbind_quietly(list(dropped), thread)
+    try:
+        await amark_sent([i for i in attachment_ids if i not in dropped], user=user, thread=thread)
+    except Exception:
+        logger.warning("Could not mark attachments of thread %s sent", thread.id, exc_info=True)
     return JsonResponse(pending)
 
 

@@ -398,13 +398,43 @@ def uncarried(newly_bound, pending: dict) -> list[str]:
     return [i for i in newly_bound if i not in carried]
 
 
-async def aunbind(ids, *, thread) -> None:
-    """Return attachments bound for a message that was never accepted to unsent, for GC."""
+async def amark_sent(ids, *, user, thread) -> None:
+    """Record that an accepted message carries these, so no refused request unbinds them.
+
+    Binds them too: a concurrent refused request may have unbound one meanwhile.
+    """
+    ids = list(ids)
     if ids:
-        await ChatAttachment.objects.filter(id__in=list(ids), thread=thread).aupdate(thread=None)
+        await ChatAttachment.objects.filter(id__in=ids, user=user).aupdate(
+            thread=thread, sent_at=timezone.now()
+        )
+
+
+async def aunbind(ids, *, thread) -> None:
+    """Return attachments bound for a message that was never accepted to unsent, for GC.
+
+    One an accepted message carries stays bound, whoever bound it.
+    """
+    if ids:
+        await ChatAttachment.objects.filter(
+            id__in=list(ids), thread=thread, sent_at__isnull=True
+        ).aupdate(thread=None)
+
+
+def unbind_unsent_sync(ids, *, thread_id) -> None:
+    """``aunbind`` for sync callers, such as Django closing a response it never sent."""
+    if ids:
+        ChatAttachment.objects.filter(
+            id__in=list(ids), thread_id=thread_id, sent_at__isnull=True
+        ).update(thread=None)
 
 
 def unbind_sync(ids, *, thread_id) -> None:
-    """``aunbind`` for a caller already inside a transaction."""
+    """Release attachments a dropped held part bound, inside the caller's transaction.
+
+    The part was accepted, so ``sent_at`` is cleared with the binding.
+    """
     if ids:
-        ChatAttachment.objects.filter(id__in=list(ids), thread_id=thread_id).update(thread=None)
+        ChatAttachment.objects.filter(id__in=list(ids), thread_id=thread_id).update(
+            thread=None, sent_at=None
+        )
