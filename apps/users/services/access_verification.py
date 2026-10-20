@@ -45,6 +45,10 @@ from apps.users.services.upstream_denial import record_validated_upstream_denial
 from apps.workspaces import access_cache
 
 PROOF_MAX_AGE = timedelta(minutes=5)
+# An interactive request admitted on a proof this old renews it in the background, so
+# a user who makes a request at least every PROOF_MAX_AGE - PROOF_RENEW_AFTER never
+# meets an expired proof (#926). That gap must outlast PROVIDER_BUDGET_SECONDS.
+PROOF_RENEW_AFTER = timedelta(minutes=3)
 LEASE_DURATION = timedelta(seconds=30)
 CLEANUP_TIMEOUT_SECONDS = 0.05
 
@@ -258,10 +262,11 @@ ANSWERS_SHORT_OF_ACCESS = frozenset(
 _UNSETTLED_ATTEMPTS = frozenset(outcome.value for outcome in ANSWERS_SHORT_OF_ACCESS)
 
 
-def _fresh_history_tenants(
+def _fresh_history_proofs(
     current, request, history, *, now=None, max_age=PROOF_MAX_AGE, settled_only=False
-) -> frozenset:
-    """Tenants in ``history`` whose every row is live and whose proof is fresh.
+) -> dict:
+    """``{tenant_id: verified_at}`` for the tenants in ``history`` whose every row is
+    live and whose proof is fresh.
 
     ``settled_only`` also requires that no attempt since the proof answered short of
     access, for grace, which stands on an old proof rather than a fresh one.
@@ -269,44 +274,58 @@ def _fresh_history_tenants(
     archived = {tenant_id for tenant_id, archived_at in history if archived_at is not None}
     live = {tenant_id for tenant_id, _archived_at in history} - archived
     if not live:
-        return frozenset()
+        return {}
     proofs = {
         proof.tenant_id: proof
         for proof in UpstreamAccessProof.objects.filter(connection=current, tenant_id__in=live)
     }
     fresh_now = now or timezone.now()
-    return frozenset(
-        tenant_id
+    return {
+        tenant_id: proofs[tenant_id].verified_at
         for tenant_id in live
         if tenant_id in proofs
         and proof_is_fresh(proofs[tenant_id], request.observation, now=fresh_now, max_age=max_age)
         and not (settled_only and proofs[tenant_id].last_attempt_result in _UNSETTLED_ATTEMPTS)
+    }
+
+
+def _fresh_history_tenants(current, request, history, **kwargs) -> frozenset:
+    return frozenset(_fresh_history_proofs(current, request, history, **kwargs))
+
+
+def _history_is_fresh(
+    current, request, requested, history, *, now=None, max_age=PROOF_MAX_AGE
+) -> bool:
+    return (
+        bool(requested)
+        and _fresh_history_tenants(current, request, history, now=now, max_age=max_age) == requested
     )
 
 
-def _history_is_fresh(current, request, requested, history, *, now=None) -> bool:
-    return bool(requested) and _fresh_history_tenants(current, request, history, now=now) == (
-        requested
-    )
-
-
-def fresh_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, now=None) -> frozenset:
-    """The subset of ``tenant_ids`` a claim on this connection would find fresh.
+def fresh_proof_verified_at(actor_user_id, connection_id, tenant_ids, *, now=None) -> dict:
+    """``{tenant_id: verified_at}`` for the subset of ``tenant_ids`` a claim on this
+    connection would find fresh.
 
     Freshness is per tenant, so one read answers :func:`proofs_are_fresh` for every
-    subset: a listing checks many workspaces' tenants on one connection at once.
+    subset: a listing checks many workspaces' tenants on one connection at once. The
+    proof times tell an admission which fresh proofs are due for renewal.
     Database-only and lock-free, like :func:`proofs_are_fresh`.
     """
     requested = frozenset(tenant_ids)
     if not requested:
-        return frozenset()
+        return {}
     with transaction.atomic():
         try:
             current, request = _current_snapshot(actor_user_id, connection_id, lock=False)
         except (TenantConnection.DoesNotExist, ValueError):
-            return frozenset()
+            return {}
         history = _owned_history(actor_user_id, current, requested)
-        return _fresh_history_tenants(current, request, history, now=now)
+        return _fresh_history_proofs(current, request, history, now=now)
+
+
+def fresh_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, now=None) -> frozenset:
+    """The subset of ``tenant_ids`` a claim on this connection would find fresh."""
+    return frozenset(fresh_proof_verified_at(actor_user_id, connection_id, tenant_ids, now=now))
 
 
 def grace_proof_tenant_ids(actor_user_id, connection_id, tenant_ids, *, max_age, now=None):
@@ -496,6 +515,7 @@ def _claim_verification(
     deadline=None,
     clock=time.monotonic,
     cancelled=None,
+    fresh_max_age=PROOF_MAX_AGE,
 ):
     requested = frozenset(tenant_ids)
     if not requested:
@@ -522,7 +542,7 @@ def _claim_verification(
         if owned != requested:
             return VerificationClaim(ClaimStatus.DENIED, requested)
         _configure_transaction_deadline(deadline, clock, cancelled)
-        if _history_is_fresh(current, request, requested, history, now=now):
+        if _history_is_fresh(current, request, requested, history, now=now, max_age=fresh_max_age):
             _ensure_before_deadline(deadline, clock, cancelled)
             return VerificationClaim(
                 ClaimStatus.FRESH, requested, observation=request.observation, request=request
@@ -573,7 +593,13 @@ def claim_verification(
     deadline=None,
     clock=time.monotonic,
     cancelled=None,
+    fresh_max_age=PROOF_MAX_AGE,
 ):
+    """Claim the connection's verification lease unless the proofs are already fresh.
+
+    ``fresh_max_age`` below ``PROOF_MAX_AGE`` makes a renewal claim the lease for
+    proofs that are still fresh but due for renewal; it never admits an older proof.
+    """
     requested = frozenset(tenant_ids)
     try:
         return _claim_verification(
@@ -584,6 +610,7 @@ def claim_verification(
             deadline=deadline,
             clock=clock,
             cancelled=cancelled,
+            fresh_max_age=min(fresh_max_age, PROOF_MAX_AGE),
         )
     except VerificationDeadlineExceeded:
         return VerificationClaim(ClaimStatus.DEADLINE, requested)
@@ -1022,6 +1049,7 @@ def publish_verification(
 
 aclaim_verification = sync_to_async(claim_verification)
 afresh_proof_tenant_ids = sync_to_async(fresh_proof_tenant_ids)
+afresh_proof_verified_at = sync_to_async(fresh_proof_verified_at)
 agrace_proof_tenant_ids = sync_to_async(grace_proof_tenant_ids)
 avoid_positive_proofs = sync_to_async(void_positive_proofs)
 aproofs_are_fresh = sync_to_async(proofs_are_fresh)

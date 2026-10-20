@@ -10,6 +10,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import timedelta
 
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import SyncToAsync, ThreadSensitiveContext
@@ -131,7 +132,7 @@ async def _release_late_claim(claim) -> None:
 
 
 async def _claim_with_cancellation_cleanup(
-    actor_user_id, connection_id, tenant_ids, *, deadline, clock
+    actor_user_id, connection_id, tenant_ids, *, deadline, clock, fresh_max_age=PROOF_MAX_AGE
 ):
     cancelled = threading.Event()
     try:
@@ -143,6 +144,7 @@ async def _claim_with_cancellation_cleanup(
                 deadline=deadline,
                 clock=clock,
                 cancelled=cancelled,
+                fresh_max_age=fresh_max_age,
             ),
             deadline=deadline,
             clock=clock,
@@ -445,6 +447,7 @@ async def _wait_for_claim(
     deadline,
     clock,
     sleep,
+    fresh_max_age=PROOF_MAX_AGE,
 ):
     original_lease_token = initial_claim.lease_token
     original_observation = initial_claim.observation
@@ -456,6 +459,7 @@ async def _wait_for_claim(
             tenant_ids,
             deadline=deadline,
             clock=clock,
+            fresh_max_age=fresh_max_age,
         )
         if claim.status == ClaimStatus.DEADLINE:
             return AccessVerificationResult(
@@ -853,6 +857,7 @@ async def verify_connection_access(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     limiter: asyncio.Semaphore = NETWORK_LIMITER,
+    fresh_max_age: timedelta = PROOF_MAX_AGE,
 ) -> AccessVerificationResult:
     """Verify one connection once and publish only its known membership history.
 
@@ -860,6 +865,8 @@ async def verify_connection_access(
     deadline) is when the caller needs an answer: a provider check still running
     then keeps going in the background and publishes its proof, holding the lease
     so concurrent callers coalesce on it, and this call answers IN_PROGRESS.
+    ``fresh_max_age`` is the proof age below which no provider call is made; a
+    renewal passes ``PROOF_RENEW_AFTER``.
     """
     requested = frozenset(tenant_ids)
     if not requested:
@@ -877,6 +884,7 @@ async def verify_connection_access(
         requested,
         deadline=respond_by,
         clock=clock,
+        fresh_max_age=fresh_max_age,
     )
     if claim.status == ClaimStatus.FRESH:
         return AccessVerificationResult(AccessVerificationStatus.VERIFIED)
@@ -897,6 +905,7 @@ async def verify_connection_access(
             deadline=respond_by,
             clock=clock,
             sleep=sleep,
+            fresh_max_age=fresh_max_age,
         )
         if claim is None:
             return AccessVerificationResult(
@@ -973,11 +982,14 @@ async def verify_connection_access(
 _BACKGROUND_RECHECKS: dict[tuple, asyncio.Task] = {}
 
 
-def schedule_background_verification(actor_user_id, connection_id, tenant_ids) -> bool:
+def schedule_background_verification(
+    actor_user_id, connection_id, tenant_ids, *, fresh_max_age=PROOF_MAX_AGE
+) -> bool:
     """Re-run a verification in the background, at most one per tenant set per process.
 
     Must be called on a running event loop. Its publication is what turns an
-    admission under grace into either a fresh proof or a recorded revocation.
+    admission under grace into either a fresh proof or a recorded revocation, and
+    what renews a proof older than ``fresh_max_age`` before it expires.
     Returns whether a new check was started.
     """
     requested = frozenset(tenant_ids)
@@ -997,6 +1009,7 @@ def schedule_background_verification(actor_user_id, connection_id, tenant_ids) -
             connection_id,
             frozenset(tenant_ids),
             deadline=time.monotonic() + PROVIDER_BUDGET_SECONDS,
+            fresh_max_age=fresh_max_age,
         )
     )
     _BACKGROUND_RECHECKS[key] = task
