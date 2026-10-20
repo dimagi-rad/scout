@@ -5,7 +5,7 @@ export const IMPORT_EXPLAINER =
   "Scout copies each data source so it can answer questions. "
   + "This happens the first time a source is used and whenever its data is refreshed."
 
-/** "Importing from Connect…" when every source is from one provider, else "Importing data…". */
+/** "Importing from CommCare Connect…" when every source is from one provider, else "Importing data…". */
 export function importingLabel(
   providers: string | null | undefined | ReadonlyArray<string | null | undefined>,
 ): string {
@@ -15,7 +15,7 @@ export function importingLabel(
   return labels.size === 1 && only ? `Importing from ${only}…` : "Importing data…"
 }
 
-/** "Importing visits from Connect…", falling back to whichever half is known. */
+/** "Importing visits from CommCare Connect…", falling back to whichever half is known. */
 export function importingSourceLabel(
   source: string | null | undefined,
   provider: string | null | undefined,

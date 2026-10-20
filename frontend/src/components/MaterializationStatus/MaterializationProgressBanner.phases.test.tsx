@@ -75,7 +75,7 @@ describe("post-load phases", () => {
       progress: { ...baseProgress, source: "visits", rows_loaded: 50, rows_total: 100 },
     })
     expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent(
-      "Importing visits from Connect…",
+      "Importing visits from CommCare Connect…",
     )
     expect(screen.getByTestId("materialization-banner-rows")).toHaveTextContent("50 of 100")
   })
@@ -83,7 +83,7 @@ describe("post-load phases", () => {
   it("names only the provider when the source is not known yet", () => {
     renderJob({ provider: "ocs", progress: { ...baseProgress, source: null } })
     expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent(
-      "Importing from OCS…",
+      "Importing from Open Chat Studio…",
     )
   })
 })
