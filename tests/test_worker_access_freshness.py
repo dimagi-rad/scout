@@ -78,8 +78,11 @@ async def test_provider_outage_denies_the_job_without_touching_memberships(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_proof_expiring_mid_run_stops_before_the_next_tenant(
-    workspace, tenant, user, upstream_provider
+    workspace, tenant, user, upstream_provider, settings
 ):
+    # No shared slot, so the second source waits for the job's lane and is checked
+    # when it starts (#927).
+    settings.MATERIALIZATION_SHARED_LOAD_SLOTS = 0
     second = await Tenant.objects.acreate(
         provider="commcare", external_id="second-domain", canonical_name="Second"
     )
@@ -118,8 +121,11 @@ async def test_proof_expiring_mid_run_stops_before_the_next_tenant(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_one_tenant_revoked_mid_run_is_skipped_while_the_other_stays_loaded(
-    workspace, tenant, user, upstream_provider
+    workspace, tenant, user, upstream_provider, settings
 ):
+    # No shared slot, so the second source waits for the job's lane and is checked
+    # when it starts (#927).
+    settings.MATERIALIZATION_SHARED_LOAD_SLOTS = 0
     # Memberships load in canonical-name order, so this tenant is loaded second.
     second = await Tenant.objects.acreate(
         provider="commcare", external_id="second-domain", canonical_name="Zeta Second"

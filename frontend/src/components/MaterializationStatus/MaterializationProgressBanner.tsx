@@ -89,7 +89,7 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
   // The per-source step count says nothing about the named phases after it.
   const stepText =
     !phaseTitle && step != null && totalSteps != null ? `Step ${step} of ${totalSteps}` : null
-  // Sequential loads run one bar per source, so say which of how many this is.
+  // Each source of a load has its own bar, so say which of how many this is.
   const positionText =
     sourceIndex != null && sourceTotal != null && sourceTotal > 1
       ? `Source ${sourceIndex} of ${sourceTotal}`

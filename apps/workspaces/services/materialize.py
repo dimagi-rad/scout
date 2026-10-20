@@ -8,10 +8,12 @@ so this module never imports the tasks module.
 
 import asyncio
 import logging
+import weakref
 from collections.abc import Iterable
 from functools import wraps
 
 import sentry_sdk
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import close_old_connections
 from django.utils import timezone
@@ -53,6 +55,7 @@ from apps.workspaces.services.access_freshness import (
 from apps.workspaces.services.credential_coverage import CoverageRecovery, MissingTenant
 from apps.workspaces.services.data_operation import (
     TenantLocksExpanded,
+    create_task_sharing_data_locks,
     run_data_thread,
     tenant_data_lock,
     workspace_data_lock,
@@ -431,6 +434,71 @@ async def _already_loaded(tm, served) -> dict:
     }
 
 
+class _SharedLoadSlots:
+    """Loads beyond each job's first, shared by every job on one event loop."""
+
+    def __init__(self, free: int):
+        self.free = free
+        self.waiters: set[asyncio.Future] = set()
+
+
+_shared_slots_by_loop: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+class _LoadLanes:
+    """Where one job's next source may load (#927).
+
+    Each job has its own lane, so its first load never waits on another job and
+    no job loads slower than one source at a time. Further loads take a slot
+    shared by every job on the loop; a worker runs all its jobs on one loop, so
+    the process runs at most (jobs + ``MATERIALIZATION_SHARED_LOAD_SLOTS``)
+    pipelines, each holding a default-executor thread and its DB connections.
+    """
+
+    def __init__(self):
+        loop = asyncio.get_running_loop()
+        self._shared = _shared_slots_by_loop.get(loop)
+        if self._shared is None:
+            self._shared = _SharedLoadSlots(max(0, settings.MATERIALIZATION_SHARED_LOAD_SLOTS))
+            _shared_slots_by_loop[loop] = self._shared
+        self._own_free = True
+
+    def take_now(self):
+        """A lane's release callable, or None when every lane is busy."""
+        if self._own_free:
+            self._own_free = False
+            return self._free_own
+        if self._shared.free > 0:
+            self._shared.free -= 1
+            return self._free_shared
+        return None
+
+    async def take(self):
+        while (release := self.take_now()) is None:
+            waiter = asyncio.get_running_loop().create_future()
+            self._shared.waiters.add(waiter)
+            try:
+                await waiter
+            finally:
+                self._shared.waiters.discard(waiter)
+        return release
+
+    # Synchronous, so a task's done-callback frees its lane even when the task
+    # was cancelled before it ran.
+    def _free_own(self) -> None:
+        self._own_free = True
+        self._wake()
+
+    def _free_shared(self) -> None:
+        self._shared.free += 1
+        self._wake()
+
+    def _wake(self) -> None:
+        for waiter in self._shared.waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+
 @serialized_workspace_materialization
 async def materialize_workspace_core(
     workspace_id: str,
@@ -442,6 +510,9 @@ async def materialize_workspace_core(
     only_unserved: bool = False,
 ) -> dict:
     """Run materialization for all tenants in a workspace and rebuild view schemas.
+
+    Sources load concurrently (``_LoadLanes``): one at a time on the job's own
+    lane, and more while the process has shared load slots free.
 
     Returns a per-tenant summary. Does NOT defer any chat-resume task — the
     interactive chat path uses the ``materialize_workspace`` Procrastinate task
@@ -510,203 +581,216 @@ async def materialize_workspace_core(
     # passed over below: the run must never report it as a clean success.
     determinate_denial: dict | None = None
 
-    for index, tm in enumerate(memberships):
-        # The wrapper checked before the first tenant. A long load can outlive a
-        # five-minute proof, so each later tenant re-checks before protected work.
-        if index:
-            denial = await _materialization_write_denial(workspace_id, user_id)
-            if denial is not None:
-                if denial["error_code"] != ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE:
-                    determinate_denial = denial
-                denied_by_tenant = {entry.get("tenant_id"): entry for entry in denial["tenants"]}
-                pending = []
-                for later in memberships[index:]:
-                    served = (
-                        await _served_schema(later)
-                        if only_unserved
-                        and await _skippable_despite_denial(
-                            later, denied_by_tenant, locked_tenant_ids
-                        )
-                        else None
-                    )
-                    if served is not None:
-                        tenant_results.append(await _already_loaded(later, served))
-                    else:
-                        pending.append(later)
-                attempted_tenant_ids.update(str(later.tenant_id) for later in pending)
-                tenant_results.extend(
-                    denied_by_tenant.get(str(later.tenant_id))
-                    or _preflight_failure(later.tenant, denial["error"], denial["error_code"])
-                    for later in pending
-                )
-                # Only source loads stop here. The derived view and Cube rebuilds below
-                # read already-published tenant data and keep other members' views
-                # consistent; the Cube gate treats the pending (denied) tenants as
-                # failed, while serving siblings passed over above count as served.
-                break
-            # The workspace can stay accessible through another tenant after this
-            # recheck archived this one, so the membership itself must still be live.
-            if not await TenantMembership.objects.filter(id=tm.id).aexists():
-                attempted_tenant_ids.add(str(tm.tenant_id))
-                tenant_results.append(
-                    _preflight_failure(
-                        tm.tenant,
-                        "Access to this source was removed upstream during the run.",
-                        ErrorCode.AUTH_ACCESS_DENIED,
-                    )
-                )
-                continue
-        tenant_id = tm.tenant.external_id
-        if locked_tenant_ids is not None and str(tm.tenant_id) not in locked_tenant_ids:
-            # Added after the tenant locks were taken; loading it now would run
-            # outside T. Report it truthfully and let a re-run cover it.
-            tenant_results.append(
-                # Its own code: the access codes carry advice (reconnect an
-                # account) that would contradict "run it again", and no code at
-                # all reads as INTERNAL_ERROR on resume.
-                _preflight_failure(
-                    tm.tenant,
-                    "This source was added while the load was starting and was not "
-                    "loaded. Run the load again to include it.",
-                    ErrorCode.WORKSPACE_SOURCES_CHANGED,
-                )
+    lanes = _LoadLanes()
+    loads_cancelled = False
+
+    def load_finished(load: asyncio.Task) -> None:
+        nonlocal loads_cancelled
+        if not load.cancelled() and load.exception() is None:
+            loads_cancelled = loads_cancelled or bool(load.result().get("cancelled"))
+
+    async def stopped_by_denial(index) -> bool:
+        """Re-check access; on a denial, report every source from ``index`` on."""
+        nonlocal determinate_denial
+        denial = await _materialization_write_denial(workspace_id, user_id)
+        if denial is None:
+            return False
+        if denial["error_code"] != ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE:
+            determinate_denial = denial
+        denied_by_tenant = {entry.get("tenant_id"): entry for entry in denial["tenants"]}
+        pending = []
+        for later in memberships[index:]:
+            served = (
+                await _served_schema(later)
+                if only_unserved
+                and await _skippable_despite_denial(later, denied_by_tenant, locked_tenant_ids)
+                else None
             )
-            continue
-        served = await _served_schema(tm) if only_unserved else None
-        if served is not None:
-            # A source added to the workspace loads before publication; sources
-            # already serving data are only published, never reloaded for it.
-            tenant_results.append(await _already_loaded(tm, served))
-            continue
+            if served is not None:
+                tenant_results.append(await _already_loaded(later, served))
+            else:
+                pending.append(later)
+        attempted_tenant_ids.update(str(later.tenant_id) for later in pending)
+        tenant_results.extend(
+            denied_by_tenant.get(str(later.tenant_id))
+            or _preflight_failure(later.tenant, denial["error"], denial["error_code"])
+            for later in pending
+        )
+        # Only source loads stop here. The derived view and Cube rebuilds below
+        # read already-published tenant data and keep other members' views
+        # consistent; the Cube gate treats the pending (denied) tenants as
+        # failed, while serving siblings passed over above count as served.
+        return True
+
+    async def membership_lost(tm) -> bool:
+        # The workspace can stay accessible through another tenant after a
+        # recheck archived this one, so the membership itself must still be live.
+        if await TenantMembership.objects.filter(id=tm.id).aexists():
+            return False
         attempted_tenant_ids.add(str(tm.tenant_id))
-        pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
-        if pipeline_name is None:
-            tenant_results.append(
-                _preflight_failure(
-                    tm.tenant,
-                    no_pipeline_message(registry, tm.tenant.provider),
-                    ErrorCode.PIPELINE_UNRESOLVED,
-                )
+        tenant_results.append(
+            _preflight_failure(
+                tm.tenant,
+                "Access to this source was removed upstream during the run.",
+                ErrorCode.AUTH_ACCESS_DENIED,
             )
-            continue
+        )
+        return True
 
+    launch_error: Exception | None = None
+    async with asyncio.TaskGroup() as loads:
         try:
-            credential = await aresolve_credential(tm)
-        except CredentialResolutionError as e:
-            # Actionable failure (e.g. token scoped to a different team) —
-            # surface a distinct message + code so the user knows to
-            # re-connect, not the generic "No usable credential could be resolved"
-            # (arch #245 finding 07#3).
-            tenant_results.append(_preflight_failure(tm.tenant, e.message, e.code))
-            continue
-        if credential is None:
-            tenant_results.append(
-                _preflight_failure(
-                    tm.tenant,
-                    "No usable credential could be resolved",
-                    ErrorCode.AUTH_CREDENTIAL_MISSING,
-                )
-            )
-            continue
+            for index, tm in enumerate(memberships):
+                if loads_cancelled:
+                    # As before, a cancelled load stops the sources not yet started.
+                    break
+                # The wrapper checked before the first tenant. A long load can outlive a
+                # five-minute proof, so each later tenant re-checks before protected work.
+                if index:
+                    if await stopped_by_denial(index):
+                        break
+                    if await membership_lost(tm):
+                        continue
+                tenant_id = tm.tenant.external_id
+                if locked_tenant_ids is not None and str(tm.tenant_id) not in locked_tenant_ids:
+                    # Added after the tenant locks were taken; loading it now would run
+                    # outside T. Report it truthfully and let a re-run cover it.
+                    tenant_results.append(
+                        # Its own code: the access codes carry advice (reconnect an
+                        # account) that would contradict "run it again", and no code at
+                        # all reads as INTERNAL_ERROR on resume.
+                        _preflight_failure(
+                            tm.tenant,
+                            "This source was added while the load was starting and was not "
+                            "loaded. Run the load again to include it.",
+                            ErrorCode.WORKSPACE_SOURCES_CHANGED,
+                        )
+                    )
+                    continue
+                served = await _served_schema(tm) if only_unserved else None
+                if served is not None:
+                    # A source added to the workspace loads before publication; sources
+                    # already serving data are only published, never reloaded for it.
+                    tenant_results.append(await _already_loaded(tm, served))
+                    continue
+                attempted_tenant_ids.add(str(tm.tenant_id))
+                pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
+                if pipeline_name is None:
+                    tenant_results.append(
+                        _preflight_failure(
+                            tm.tenant,
+                            no_pipeline_message(registry, tm.tenant.provider),
+                            ErrorCode.PIPELINE_UNRESOLVED,
+                        )
+                    )
+                    continue
 
-        pipeline_config = registry.get(pipeline_name)
-        required = load_intent.get(str(tm.tenant_id))
-        evidence = None
-        if required is not None:
-            fingerprint = await _to_thread_fresh_db(
-                pipeline_fingerprint, pipeline_config, tm.tenant
-            )
-            evidence = await _to_thread_fresh_db(
-                reusable_generation, tm.tenant_id, required, fingerprint
-            )
-        if evidence is not None:
-            # An equivalent load completed while this request waited. The requester
-            # authorized and resolved its own credential above, and still publishes
-            # its own views and Cube below; its status says what really happened.
-            # Reuse counts as use: without the touch, the inactivity sweep could
-            # retire the schema this run just reported ready.
-            await evidence.schema.atouch()
-            successful_attempted_tenant_ids.add(str(tm.tenant_id))
-            tenant_results.append(
-                {
-                    "tenant": tenant_id,
-                    "tenant_id": str(tm.tenant_id),
-                    "provider": tm.tenant.provider,
-                    "success": True,
-                    "reused_generation": evidence.generation,
-                    "result": {
-                        "status": "completed",
-                        "reused": True,
-                        "run_id": str(evidence.run.id),
-                        "schema": evidence.schema.schema_name,
-                        "pipeline": pipeline_config.name,
-                    },
-                }
-            )
-            continue
-        loaded_tenant_ids.add(str(tm.tenant_id))
-        try:
-            result = await _load_workspace_candidate(
-                workspace, tm, credential, pipeline_config, job_id
-            )
-            successful_attempted_tenant_ids.add(str(tm.tenant_id))
-            tenant_results.append(
-                {
-                    "tenant": tenant_id,
-                    "tenant_id": str(tm.tenant_id),
-                    "provider": tm.tenant.provider,
-                    "success": True,
-                    "result": result,
-                }
-            )
-        except MaterializationCancelled:
-            tenant_results.append(
-                {
-                    "tenant": tenant_id,
-                    "tenant_id": str(tm.tenant_id),
-                    "provider": tm.tenant.provider,
-                    "success": False,
-                    "cancelled": True,
-                }
-            )
-            break
-        except ConnectExportError as e:
-            # Capture the sentry-trace header so support can correlate with
-            # Connect's Sentry in one hop. set_tag is a no-op without a DSN.
-            logger.exception(
-                "Materialization failed for tenant %s on pipeline %s: "
-                "connect status=%s after %d attempts (last_id=%s, sentry-trace=%s)",
-                tenant_id,
-                pipeline_name,
-                e.status,
-                e.attempts,
-                e.last_id,
-                e.sentry_trace,
-            )
-            sentry_sdk.set_tag("connect.upstream_sentry_trace", e.sentry_trace or "")
-            sentry_sdk.set_tag("connect.pipeline", pipeline_name or "")
-            tenant_results.append(
-                {
-                    "tenant": tenant_id,
-                    "tenant_id": str(tm.tenant_id),
-                    "provider": tm.tenant.provider,
-                    "success": False,
-                    "error": str(e),
-                    "error_code": code_of(e),
-                }
-            )
-        except Exception as e:
-            logger.exception("Materialization failed for tenant %s", tenant_id)
-            tenant_results.append(
-                {
-                    "tenant": tenant_id,
-                    "tenant_id": str(tm.tenant_id),
-                    "provider": tm.tenant.provider,
-                    "success": False,
-                    "error": str(e),
-                    "error_code": code_of(e),
-                }
-            )
+                try:
+                    credential = await aresolve_credential(tm)
+                except CredentialResolutionError as e:
+                    # Actionable failure (e.g. token scoped to a different team) —
+                    # surface a distinct message + code so the user knows to
+                    # re-connect, not the generic "No usable credential could be resolved"
+                    # (arch #245 finding 07#3).
+                    tenant_results.append(_preflight_failure(tm.tenant, e.message, e.code))
+                    continue
+                if credential is None:
+                    tenant_results.append(
+                        _preflight_failure(
+                            tm.tenant,
+                            "No usable credential could be resolved",
+                            ErrorCode.AUTH_CREDENTIAL_MISSING,
+                        )
+                    )
+                    continue
+
+                pipeline_config = registry.get(pipeline_name)
+                required = load_intent.get(str(tm.tenant_id))
+                evidence = None
+                if required is not None:
+                    fingerprint = await _to_thread_fresh_db(
+                        pipeline_fingerprint, pipeline_config, tm.tenant
+                    )
+                    evidence = await _to_thread_fresh_db(
+                        reusable_generation, tm.tenant_id, required, fingerprint
+                    )
+                if evidence is not None:
+                    # An equivalent load completed while this request waited. The requester
+                    # authorized and resolved its own credential above, and still publishes
+                    # its own views and Cube below; its status says what really happened.
+                    # Reuse counts as use: without the touch, the inactivity sweep could
+                    # retire the schema this run just reported ready.
+                    await evidence.schema.atouch()
+                    successful_attempted_tenant_ids.add(str(tm.tenant_id))
+                    tenant_results.append(
+                        {
+                            "tenant": tenant_id,
+                            "tenant_id": str(tm.tenant_id),
+                            "provider": tm.tenant.provider,
+                            "success": True,
+                            "reused_generation": evidence.generation,
+                            "result": {
+                                "status": "completed",
+                                "reused": True,
+                                "run_id": str(evidence.run.id),
+                                "schema": evidence.schema.schema_name,
+                                "pipeline": pipeline_config.name,
+                            },
+                        }
+                    )
+                    continue
+                release = lanes.take_now()
+                if release is None:
+                    release = await lanes.take()
+                    try:
+                        # Waited for a lane, so the check above may have gone stale.
+                        if loads_cancelled:
+                            attempted_tenant_ids.discard(str(tm.tenant_id))
+                            stop = True
+                        else:
+                            stop = await stopped_by_denial(index)
+                        skip = not stop and await membership_lost(tm)
+                    except BaseException:
+                        release()
+                        raise
+                    if stop or skip:
+                        release()
+                        if stop:
+                            break
+                        continue
+                loaded_tenant_ids.add(str(tm.tenant_id))
+                try:
+                    load = create_task_sharing_data_locks(
+                        loads,
+                        _load_tenant,
+                        workspace,
+                        tm,
+                        credential,
+                        pipeline_config,
+                        pipeline_name,
+                        job_id,
+                    )
+                except BaseException:
+                    release()
+                    raise
+                load.add_done_callback(lambda _load, release=release: release())
+                load.add_done_callback(load_finished)
+                tenant_results.append(load)
+        except Exception as exc:
+            # Raised unwrapped once the running loads finish; the group would wrap
+            # it in an ExceptionGroup and cancel loads that are not at fault.
+            launch_error = exc
+    if launch_error is not None:
+        raise launch_error
+
+    tenant_results = [
+        entry.result() if isinstance(entry, asyncio.Task) else entry for entry in tenant_results
+    ]
+    successful_attempted_tenant_ids.update(
+        entry["tenant_id"]
+        for entry in tenant_results
+        if entry.get("success") and entry.get("tenant_id") in loaded_tenant_ids
+    )
 
     # Two questions, so two flags. `attempted_succeeded` asks whether every
     # attempted load succeeded; the coverage-aware Cube gate below can refine it
@@ -1140,6 +1224,63 @@ def _run_pipeline_with_progress(
         target_schema=target_schema,
         defer_schema_promotion=target_schema is not None,
     )
+
+
+async def _load_tenant(
+    workspace, tm, credential: dict, pipeline_config, pipeline_name: str, job_id: int | None
+) -> dict:
+    """Load one source and report it as a ``tenant_results`` entry; never raises."""
+    tenant_id = tm.tenant.external_id
+    try:
+        result = await _load_workspace_candidate(workspace, tm, credential, pipeline_config, job_id)
+    except MaterializationCancelled:
+        return {
+            "tenant": tenant_id,
+            "tenant_id": str(tm.tenant_id),
+            "provider": tm.tenant.provider,
+            "success": False,
+            "cancelled": True,
+        }
+    except ConnectExportError as e:
+        # Capture the sentry-trace header so support can correlate with
+        # Connect's Sentry in one hop. set_tag is a no-op without a DSN.
+        logger.exception(
+            "Materialization failed for tenant %s on pipeline %s: "
+            "connect status=%s after %d attempts (last_id=%s, sentry-trace=%s)",
+            tenant_id,
+            pipeline_name,
+            e.status,
+            e.attempts,
+            e.last_id,
+            e.sentry_trace,
+        )
+        sentry_sdk.set_tag("connect.upstream_sentry_trace", e.sentry_trace or "")
+        sentry_sdk.set_tag("connect.pipeline", pipeline_name or "")
+        return {
+            "tenant": tenant_id,
+            "tenant_id": str(tm.tenant_id),
+            "provider": tm.tenant.provider,
+            "success": False,
+            "error": str(e),
+            "error_code": code_of(e),
+        }
+    except Exception as e:
+        logger.exception("Materialization failed for tenant %s", tenant_id)
+        return {
+            "tenant": tenant_id,
+            "tenant_id": str(tm.tenant_id),
+            "provider": tm.tenant.provider,
+            "success": False,
+            "error": str(e),
+            "error_code": code_of(e),
+        }
+    return {
+        "tenant": tenant_id,
+        "tenant_id": str(tm.tenant_id),
+        "provider": tm.tenant.provider,
+        "success": True,
+        "result": result,
+    }
 
 
 async def _load_workspace_candidate(
