@@ -132,7 +132,7 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
               className="text-sm font-medium text-blue-900 dark:text-blue-100"
               data-testid="materialization-banner-source"
               data-phase={phase ?? undefined}
-              title={LOADING_EXPLAINER}
+              title={phaseTitle ? undefined : LOADING_EXPLAINER}
             >
               {phaseTitle ?? (sourceName ? `Loading ${sourceName} into Scout` : "Loading data into Scout")}
             </span>

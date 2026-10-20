@@ -5,7 +5,7 @@ import type { WorkspaceListItem } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher"
 
-const workspaces: WorkspaceListItem[] = [
+const baseWorkspaces: WorkspaceListItem[] = [
   { id: "recorded", display_name: "Example — recorded load", schema_status: "available" },
   { id: "loading", display_name: "Example — loading data", schema_status: "provisioning" },
   { id: "failed", display_name: "Example — setup failed", schema_status: "failed" },
@@ -24,7 +24,7 @@ const workspaces: WorkspaceListItem[] = [
 }))
 
 const programWorkspace: WorkspaceListItem = {
-  ...workspaces[0],
+  ...baseWorkspaces[0],
   id: "program",
   name: "program",
   display_name: "Example — program across opportunities",
@@ -34,7 +34,7 @@ const programWorkspace: WorkspaceListItem = {
     provider: "commcare_connect",
   })),
 }
-workspaces.unshift(programWorkspace)
+const workspaces = [programWorkspace, ...baseWorkspaces]
 
 function LoadHistoryFixture({ variant }: { variant: "sidebar" | "topbar" }) {
   useEffect(() => {
