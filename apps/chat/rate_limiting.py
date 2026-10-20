@@ -42,7 +42,7 @@ async def check_and_record(
     default_limit, window = _get_settings()
     limit = default_limit if limit is None else limit
     now = time.time()
-    cache_key = f"chat_rl:{user_id}" if scope == "chat" else f"{scope}_rl:{user_id}"
+    cache_key = f"{scope}_rl:{user_id}"
     cutoff = now - window
 
     timestamps: list[float] = await cache.aget(cache_key, [])
@@ -68,7 +68,7 @@ def chat_rate_limit(view_func):
     return _rate_limited(
         view_func,
         scope="chat",
-        limit=lambda: None,
+        limit=lambda: _get_settings()[0],
         message="Rate limit exceeded. Please wait before sending another message.",
     )
 
@@ -87,7 +87,7 @@ def attachment_upload_rate_limit(view_func):
 
 
 def _rate_limited(view_func, *, scope: str, limit, message: str, reason=None):
-    """``limit`` is read per request, so a settings override applies at once."""
+    """``limit`` is a callable read per request, so a settings override applies at once."""
 
     @functools.wraps(view_func)
     async def wrapper(request, *args, **kwargs):
