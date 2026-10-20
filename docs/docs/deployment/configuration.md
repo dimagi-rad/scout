@@ -80,6 +80,7 @@ The managed database stores materialized data. Each tenant (a CommCare domain, C
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MANAGED_DATABASE_URL` | (empty) | PostgreSQL connection URL for materialized data. Only the development settings fill it in when it is unset, pointing it at the main app database; tenant schemas still keep the data separate. |
+| `MATERIALIZATION_SHARED_LOAD_SLOTS` | `2` | Sources a process loads at once beyond each job's first, shared by all its jobs. Each load holds a thread and about two database connections for its whole run, so the worker can hold its job count plus this many. Count them against the database's connection limit. `0` loads each job's sources one at a time. |
 
 ### Database TLS
 

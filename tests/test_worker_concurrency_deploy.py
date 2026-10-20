@@ -58,6 +58,7 @@ def test_worker_runs_more_than_one_job(read_cmd):
 @WORKER_CMDS
 def test_worker_load_lanes_fit_the_source_load_pool(read_cmd):
     # Each job's own lane plus the shared slots (#927). Past the pool size a load that
-    # has its lane would wait for a thread while holding the run's locks.
+    # has its lane would wait for a thread while holding the run's locks. The pool is
+    # sized from the setting, so this pins the job count, whatever a deploy sets.
     lanes = _concurrency(read_cmd()) + settings.MATERIALIZATION_SHARED_LOAD_SLOTS
     assert lanes <= _SOURCE_LOAD_EXECUTOR._max_workers

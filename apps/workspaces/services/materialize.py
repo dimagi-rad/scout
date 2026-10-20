@@ -439,9 +439,14 @@ async def _already_loaded(tm, served) -> dict:
 # Pipelines hold their thread for the whole load. On the loop's default executor
 # (min(32, cpu + 4): 6 threads on the worker host) a job's loads would starve every
 # other job's short thread work, so they get their own. ``_LoadLanes`` bounds how
-# many run; past this size a load just waits for a thread.
-# tests/test_worker_concurrency_deploy.py pins it above the worker's lane ceiling.
-_SOURCE_LOAD_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="source-load")
+# many run: room for 8 jobs' own lanes plus the shared slots, so a load holding its
+# lane never waits for a thread on the worker (tests/test_worker_concurrency_deploy.py).
+# A request-serving process has no job ceiling; a load past the pool size queues for a
+# thread, slower but never stuck, since no pipeline thread waits on another.
+_SOURCE_LOAD_EXECUTOR = ThreadPoolExecutor(
+    max_workers=8 + max(0, settings.MATERIALIZATION_SHARED_LOAD_SLOTS),
+    thread_name_prefix="source-load",
+)
 
 
 class _SharedLoadSlots:
