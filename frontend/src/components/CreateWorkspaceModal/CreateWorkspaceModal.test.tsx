@@ -130,6 +130,17 @@ it("cannot create from a preselection before the user's sources load", async () 
   expect(screen.getByTestId("create-workspace-submit")).toBeDisabled()
 })
 
+it("mentions the Program filter only when Connect sources are listed", async () => {
+  await openModal()
+  expect(screen.queryByText(/Program filter/)).toBeNull()
+})
+
+it("mentions the Program filter when Connect sources are listed", async () => {
+  vi.mocked(getUserTenantsCached).mockResolvedValue(mixedSources)
+  await openModal()
+  expect(screen.getByText(/Program filter/)).toBeInTheDocument()
+})
+
 it("does not offer Connect facets when no Connect source is present", async () => {
   await openModal()
   expect(screen.getByTestId(`${F}-facet-provider`)).toBeInTheDocument()

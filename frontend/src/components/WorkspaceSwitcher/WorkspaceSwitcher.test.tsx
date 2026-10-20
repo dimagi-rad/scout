@@ -236,6 +236,15 @@ describe("workspace sources", () => {
     expect(screen.getByTestId("workspace-search")).toBeInTheDocument()
   })
 
+  it("keeps an open switcher's search on a repeat request", () => {
+    openSwitcher()
+    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "rec" } })
+
+    act(() => useAppStore.getState().uiActions.openWorkspaceSwitcher())
+
+    expect(screen.getByTestId("workspace-search")).toHaveValue("rec")
+  })
+
   it("ignores a request made before it mounted", () => {
     useAppStore.setState({ domains: [workspace()], activeDomainId: "workspace-recorded" })
     act(() => useAppStore.getState().uiActions.openWorkspaceSwitcher())
