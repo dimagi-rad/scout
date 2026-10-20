@@ -520,3 +520,30 @@ describe("artifact link card from reloaded history", () => {
     expect(screen.getByTestId("chat-artifact-a")).toHaveAttribute("aria-label", "View Artifact")
   })
 })
+
+describe("ChatMessage quote-replies (#920)", () => {
+  it("shows a user message's leading quotes apart from the reply", () => {
+    const message = {
+      id: "u1",
+      role: "user",
+      parts: [{ type: "text", text: "> visits fell in May\n\n> two sites closed\n\nWhich sites?" }],
+    } as UIMessage
+    render(<ChatMessage message={message} isActiveMessage={false} />)
+    const quotes = screen.getAllByTestId("chat-message-quote")
+    expect(quotes.map((q) => q.textContent)).toEqual(["visits fell in May", "two sites closed"])
+    expect(screen.getByText("Which sites?")).toBeInTheDocument()
+    expect(screen.queryByText(/^>/)).not.toBeInTheDocument()
+  })
+
+  it("marks assistant text, not user text, as quotable", () => {
+    const { container } = render(
+      <>
+        <ChatMessage message={{ id: "a1", role: "assistant", parts: [{ type: "text", text: "Answer" }] } as UIMessage} isActiveMessage={false} />
+        <ChatMessage message={{ id: "u2", role: "user", parts: [{ type: "text", text: "Question" }] } as UIMessage} isActiveMessage={false} />
+      </>,
+    )
+    const quotable = container.querySelectorAll("[data-quotable]")
+    expect(quotable).toHaveLength(1)
+    expect(quotable[0]).toHaveTextContent("Answer")
+  })
+})

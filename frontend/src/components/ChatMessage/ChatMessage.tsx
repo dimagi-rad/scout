@@ -40,6 +40,7 @@ import type {
 } from "./ToolOutput"
 import { MemorySavedChip } from "./MemorySavedChip"
 import { savedMemory } from "./savedMemory"
+import { splitQuotedMessage } from "./quotes"
 
 function inputSql(input: unknown): string | undefined {
   if (input != null && typeof input === "object" && "sql" in input) {
@@ -104,6 +105,25 @@ function ChatMarkdownLink({ href, children, ...markdownProps }: ComponentPropsWi
   return <a href={href} {...props} data-testid="chat-markdown-link">{children}</a>
 }
 
+function UserMessageText({ text }: { text: string }) {
+  const { quotes, body } = splitQuotedMessage(text)
+  if (quotes.length === 0) return text
+  return (
+    <>
+      {quotes.map((quote, i) => (
+        <blockquote
+          key={i}
+          className="mb-2 line-clamp-4 whitespace-pre-wrap border-l-2 border-primary-foreground/60 pl-2 text-xs text-primary-foreground/80"
+          data-testid="chat-message-quote"
+        >
+          {quote}
+        </blockquote>
+      ))}
+      {body}
+    </>
+  )
+}
+
 export function ChatTextPart({ role, text }: ChatTextPartProps) {
   const isUser = role === "user"
   return (
@@ -113,8 +133,9 @@ export function ChatTextPart({ role, text }: ChatTextPartProps) {
           ? "bg-primary px-4 py-2 text-primary-foreground"
           : "prose prose-sm max-w-none py-1"
       }`}
+      data-quotable={isUser ? undefined : "true"}
     >
-      {isUser ? text : <Markdown remarkPlugins={[remarkGfm]} components={{ a: ChatMarkdownLink }}>{text}</Markdown>}
+      {isUser ? <UserMessageText text={text} /> : <Markdown remarkPlugins={[remarkGfm]} components={{ a: ChatMarkdownLink }}>{text}</Markdown>}
     </div>
   )
 }
