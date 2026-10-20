@@ -144,6 +144,19 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+describe("workspace scope strip", () => {
+  it("names the workspace on the new-chat screen and inside the thread", async () => {
+    mockApi()
+    renderChat()
+    expect(await screen.findByTestId("chat-empty-state")).toBeInTheDocument()
+    expect(screen.getByTestId("chat-workspace-scope")).toHaveTextContent("Workspace")
+
+    await send(QUESTION)
+    await screen.findByText("Here are the rates.")
+    expect(screen.getByTestId("chat-workspace-scope")).toHaveTextContent("Workspace")
+  })
+})
+
 describe("chat thread title", () => {
   it("shows the provisional title, then the generated title in header and sidebar", async () => {
     const server = mockApi()

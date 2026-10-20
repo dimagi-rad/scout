@@ -1067,7 +1067,6 @@ export function ChatPanel() {
   return (
     <div className="flex h-full min-w-0">
       <div className="flex min-w-0 flex-1 flex-col">
-        <ChatWorkspaceScope />
         <ChatThreadHeader
           title={threadTitle}
           panelOpen={threadPanelOpen}
@@ -1076,6 +1075,8 @@ export function ChatPanel() {
           onOpenFiles={openThreadFiles}
           onOpenCanvas={openThreadCanvas}
         />
+        {/* Below the header, which lines up with the side panel's. */}
+        <ChatWorkspaceScope />
         {/* Message list */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
           {visibleMessages.map((msg: UIMessage, msgIdx: number) => (
