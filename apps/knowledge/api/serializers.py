@@ -22,7 +22,7 @@ def _shown_content(obj: KnowledgeEntry, full: bool) -> str:
 
 class _ContentField(serializers.CharField):
     def __init__(self, **kwargs):
-        # Uploaded documents are stored byte for byte; validate() trims notes as before.
+        # Untrimmed so an echoed preview compares exactly; validate() trims note content.
         super().__init__(trim_whitespace=False, **kwargs)
 
     def get_attribute(self, instance):
@@ -53,9 +53,13 @@ class KnowledgeEntrySerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+        # Only the upload and import paths create reference documents; they validate
+        # the file, which a plain create would skip.
         read_only_fields = [
             "id",
             "type",
+            "kind",
+            "source_format",
             "size",
             "content_truncated",
             "created_by_name",
@@ -83,8 +87,7 @@ class KnowledgeEntrySerializer(serializers.ModelSerializer):
                     }
                 )
             del attrs["content"]
-        kind = attrs.get("kind") or (instance.kind if instance else None)
-        if "content" in attrs and kind != KnowledgeEntry.Kind.REFERENCE:
+        if "content" in attrs:
             attrs["content"] = attrs["content"].strip()
             if not attrs["content"]:
                 raise serializers.ValidationError({"content": "This field may not be blank."})

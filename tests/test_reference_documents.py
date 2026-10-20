@@ -219,6 +219,37 @@ class TestReadReferenceDocumentTool:
         assert " 20: C18,plain row 18" in match["text"]
 
     @pytest.mark.asyncio
+    async def test_a_term_on_every_line_stays_within_the_limit(self, workspace):
+        content = "\n".join(f"row {index}, value {'y' * 900}" for index in range(2000))
+        await KnowledgeEntry.objects.acreate(
+            workspace=workspace, title="Rows", content=content, kind="reference"
+        )
+        tool = create_reference_document_tool(workspace)
+
+        result = await tool.ainvoke({"title_or_id": "Rows", "search": "row", "limit": 5000})
+
+        assert result["total_matches"] > 1
+        assert all(match["text"].count("\n") < 25 for match in result["matches"])
+        assert len(json.dumps(result["matches"])) < 6000
+
+    @pytest.mark.asyncio
+    async def test_a_single_oversized_match_is_clipped_to_the_limit(self, workspace):
+        await KnowledgeEntry.objects.acreate(
+            workspace=workspace,
+            title="Blob",
+            content=json.dumps({"note": "needle " + "z" * 10_000}),
+            kind="reference",
+            source_format="json",
+        )
+        tool = create_reference_document_tool(workspace)
+
+        result = await tool.ainvoke({"title_or_id": "Blob", "search": "needle", "limit": 1000})
+
+        [match] = result["matches"]
+        assert match["path"] == "$.note"
+        assert len(match["entry"]) <= 1000
+
+    @pytest.mark.asyncio
     async def test_search_output_respects_limit(self, workspace):
         await KnowledgeEntry.objects.acreate(
             workspace=workspace,

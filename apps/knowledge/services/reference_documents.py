@@ -9,6 +9,7 @@ reads it on demand, a page at a time or by search.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import PurePath
@@ -42,6 +43,7 @@ SEARCH_CONTEXT_LINES = 2
 # returns the registry entry that matched rather than the whole registry.
 MAX_JSON_RECORD_CHARS = 3_000
 MAX_LINE_SNIPPET_CHARS = 1_000
+MAX_WINDOW_LINES = 25
 
 MAX_PROMPT_LISTED_DOCUMENTS = 25
 _PROMPT_DESCRIPTION_CHARS = 160
@@ -263,44 +265,95 @@ def _dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _search_json(data: Any, terms: list[str]) -> list[tuple[str, Any]]:
-    """Smallest JSON nodes whose text (keys included) contains every term.
+def _terms_in(text: str, terms: list[str]) -> frozenset[str]:
+    folded = text.casefold()
+    return frozenset(term for term in terms if term in folded)
+
+
+@dataclass(frozen=True)
+class _JsonNode:
+    size: int
+    terms: frozenset[str]
+
+
+def _index_json(value: Any, terms: list[str], index: dict[int, _JsonNode]) -> _JsonNode:
+    """Each node's compact JSON size and the terms it contains, in one bottom-up pass.
+
+    Keyed by ``id``: a scalar object shared between positions has the same answer
+    at each, and containers are distinct objects.
+    """
+    if isinstance(value, dict | list):
+        found: set[str] = set()
+        size = 2
+        items = value.items() if isinstance(value, dict) else enumerate(value)
+        for key, child in items:
+            node = _index_json(child, terms, index)
+            found |= node.terms
+            size += node.size + 1
+            if isinstance(value, dict):
+                label = _dumps(str(key))
+                found |= _terms_in(label, terms)
+                size += len(label) + 1
+    else:
+        text = _dumps(value)
+        found, size = set(_terms_in(text, terms)), len(text)
+    node = _JsonNode(size=size, terms=frozenset(found))
+    index[id(value)] = node
+    return node
+
+
+def _search_json(
+    data: Any, terms: list[str], max_matches: int
+) -> tuple[list[tuple[str, Any]], int]:
+    """Smallest JSON nodes whose text (keys included) contains every term, and their count.
 
     A matching node small enough to read is returned whole; a larger one is
     narrowed to its matching children, and returned clipped only when the terms
-    are spread across children so that no single child matches.
+    are spread across children so that no single child matches. Each node is
+    serialised at most once, and only the first ``max_matches`` are kept.
     """
+    index: dict[int, _JsonNode] = {}
+    _index_json(data, terms, index)
+    wanted = frozenset(terms)
     results: list[tuple[str, Any]] = []
+    total = 0
 
-    def visit(path: str, label: str, value: Any) -> None:
-        text = _dumps(value)
-        if not _matches(f"{label}{text}", terms):
-            return
-        if len(text) <= MAX_JSON_RECORD_CHARS:
+    def emit(path: str, value: Any) -> None:
+        nonlocal total
+        total += 1
+        if len(results) < max_matches:
             results.append((path, value))
+
+    def visit(path: str, label_terms: frozenset[str], value: Any) -> None:
+        node = index[id(value)]
+        if not wanted <= node.terms | label_terms:
+            return
+        if node.size <= MAX_JSON_RECORD_CHARS:
+            emit(path, value)
             return
         if not isinstance(value, dict | list):
-            results.append((path, _clip(str(value), MAX_JSON_RECORD_CHARS)))
+            emit(path, _clip(str(value), MAX_JSON_RECORD_CHARS))
             return
-        before = len(results)
-        children = (
-            ((f"{path}.{key}", _dumps(str(key)), child) for key, child in value.items())
-            if isinstance(value, dict)
-            else ((f"{path}[{index}]", "", child) for index, child in enumerate(value))
-        )
-        for child_path, child_label, child in children:
-            visit(child_path, child_label, child)
-        if len(results) == before:
-            results.append((path, _clip(text, MAX_JSON_RECORD_CHARS)))
+        before = total
+        if isinstance(value, dict):
+            for key, child in value.items():
+                visit(f"{path}.{key}", _terms_in(_dumps(str(key)), terms), child)
+        else:
+            for position, child in enumerate(value):
+                visit(f"{path}[{position}]", frozenset(), child)
+        if total == before:
+            emit(path, _clip(_dumps(value)[: MAX_JSON_RECORD_CHARS * 2], MAX_JSON_RECORD_CHARS))
 
-    visit("$", "", data)
-    return results
+    visit("$", frozenset(), data)
+    return results, total
 
 
 def _line_snippet(line: str, terms: list[str]) -> str:
     if len(line) <= MAX_LINE_SNIPPET_CHARS:
         return line
-    position = max(0, line.casefold().find(terms[0]))
+    # Located on the original line: casefold() can change a string's length.
+    found = re.search(re.escape(terms[0]), line, re.IGNORECASE)
+    position = found.start() if found else 0
     start = max(0, position - MAX_LINE_SNIPPET_CHARS // 2)
     snippet = line[start : start + MAX_LINE_SNIPPET_CHARS]
     return f"{'…' if start else ''}{snippet}{'…' if start + len(snippet) < len(line) else ''}"
@@ -311,10 +364,11 @@ def _search_lines(lines: list[str], terms: list[str], context: int) -> list[dict
     windows: list[list[int]] = []
     for index in hits:
         start, end = max(0, index - context), min(len(lines) - 1, index + context)
-        if windows and start <= windows[-1][1] + 1:
+        # Merging is capped so a term on every line can't make one window of the whole file.
+        if windows and start <= windows[-1][1] + 1 and end - windows[-1][0] < MAX_WINDOW_LINES:
             windows[-1][1] = end
         else:
-            windows.append([start, end])
+            windows.append([max(start, windows[-1][1] + 1) if windows else start, end])
     hit_set = set(hits)
     return [
         {
@@ -344,6 +398,12 @@ def _parse_json(document: KnowledgeEntry) -> tuple[bool, Any]:
         return False, None
 
 
+def _clip_match(match: dict[str, Any], limit: int) -> dict[str, Any]:
+    if "text" in match:
+        return {**match, "text": _clip(match["text"], limit)}
+    return {**match, "entry": _clip(_dumps(match["entry"]), limit)}
+
+
 def search_document(
     document: KnowledgeEntry, query: str, *, limit: int, max_matches: int = DEFAULT_MAX_MATCHES
 ) -> dict[str, Any]:
@@ -356,15 +416,18 @@ def search_document(
     is_json, data = _parse_json(document)
     result: dict[str, Any] = {"search": query, "total_chars": len(document.content)}
     found: list[dict[str, Any]] | None = None
+    total = 0
     if is_json:
         try:
-            found = [{"path": path, "entry": value} for path, value in _search_json(data, terms)]
+            entries, total = _search_json(data, terms, max_matches)
+            found = [{"path": path, "entry": value} for path, value in entries]
             result["match_mode"] = "json_entries"
         except RecursionError:
             found = None
     if found is None:
         lines = document.content.splitlines()
         found = _search_lines(lines, terms, SEARCH_CONTEXT_LINES)
+        total = len(found)
         result["match_mode"] = "lines"
         if document.source_format in ("csv", "tsv") and lines:
             result["header"] = _line_snippet(lines[0], terms)
@@ -372,18 +435,20 @@ def search_document(
     used = 0
     for match in found[:max_matches]:
         size = len(_dumps(match))
-        if kept and used + size > limit:
+        if used + size > limit:
+            if not kept:
+                kept.append(_clip_match(match, limit))
             break
         kept.append(match)
         used += size
-    result["total_matches"] = len(found)
+    result["total_matches"] = total
     result["matches"] = kept
-    if len(kept) < len(found):
+    if len(kept) < total:
         result["note"] = (
-            f"Showing {len(kept)} of {len(found)} matches. Add words to narrow the search, "
+            f"Showing {len(kept)} of {total} matches. Add words to narrow the search, "
             "or page through the document with offset instead."
         )
-    elif not found:
+    elif not total:
         result["note"] = (
             "No matches. Every word in search must appear in the same entry or line; "
             "try fewer or different words."

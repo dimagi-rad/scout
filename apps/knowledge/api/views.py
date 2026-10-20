@@ -5,6 +5,7 @@ import logging
 import zipfile
 
 import yaml
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Case, F, Q, TextField, When
 from django.db.models.functions import Length, Substr
@@ -491,17 +492,21 @@ class KnowledgeUploadView(APIView):
 
         title = str(request.data.get("title") or "").strip() or decoded.title
         description = str(request.data.get("description") or "") or decoded.description
-        serializer = KnowledgeEntrySerializer(
-            data={
-                "title": title,
-                "description": " ".join(description.split())[:DESCRIPTION_MAX_CHARS],
-                "content": decoded.content,
-                "kind": KnowledgeEntry.Kind.REFERENCE,
-                "source_format": decoded.source_format,
-                "tags": [],
-            }
+        # Built here rather than through the serializer, where kind and format are
+        # read-only so only this path (and import) can create a reference document.
+        entry = KnowledgeEntry(
+            workspace=workspace,
+            created_by=request.user,
+            title=title,
+            description=" ".join(description.split())[:DESCRIPTION_MAX_CHARS],
+            content=decoded.content,
+            kind=KnowledgeEntry.Kind.REFERENCE,
+            source_format=decoded.source_format,
+            tags=[],
         )
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        instance = serializer.save(workspace=workspace, created_by=request.user)
-        return Response(KnowledgeEntrySerializer(instance).data, status=status.HTTP_201_CREATED)
+        try:
+            entry.full_clean()
+        except DjangoValidationError as exc:
+            return Response(exc.message_dict, status=status.HTTP_400_BAD_REQUEST)
+        entry.save()
+        return Response(KnowledgeEntrySerializer(entry).data, status=status.HTTP_201_CREATED)

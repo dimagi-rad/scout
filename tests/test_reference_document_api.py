@@ -143,6 +143,24 @@ class TestUploadView:
         assert resp.status_code == status.HTTP_201_CREATED, resp.data
         assert KnowledgeEntry.objects.get().content == "\n# Codes\n\nA: Alpha\n"
 
+    def test_kind_cannot_be_set_through_the_entry_api(self, api_client, workspace):
+        created = api_client.post(
+            reverse("knowledge:list_create", kwargs={"workspace_id": workspace.id}),
+            {"type": "entry", "title": "Sneaky", "content": "body", "kind": "reference"},
+            format="json",
+        )
+        assert created.status_code == status.HTTP_201_CREATED, created.data
+        assert created.data["kind"] == "note"
+
+        doc = _reference(workspace)
+        api_client.put(
+            reverse("knowledge:detail", kwargs={"workspace_id": workspace.id, "item_id": doc.id}),
+            {"kind": "note", "source_format": "txt"},
+            format="json",
+        )
+        doc.refresh_from_db()
+        assert (doc.kind, doc.source_format) == ("reference", "json")
+
     def test_note_content_is_still_trimmed(self, api_client, workspace):
         resp = api_client.post(
             reverse("knowledge:list_create", kwargs={"workspace_id": workspace.id}),
