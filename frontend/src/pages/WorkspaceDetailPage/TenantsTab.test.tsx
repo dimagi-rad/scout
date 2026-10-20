@@ -469,6 +469,18 @@ describe("large Connect workspaces", () => {
     expect(screen.getByTestId("workspace-connect-size-notice")).not.toHaveTextContent("or fewer")
   })
 
+  it("tells a manager how to avoid it", async () => {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([
+      ...connected(26),
+      { id: "wt-cc", tenant_id: "tenant-cc", tenant_name: "CommCare", provider: "commcare" },
+    ])
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+
+    const notice = await screen.findByTestId("workspace-connect-size-notice")
+    expect(notice).toHaveTextContent("has 26 CommCare Connect opportunities")
+    expect(notice).toHaveTextContent("Workspaces of 25 or fewer avoid this.")
+  })
+
   it("says nothing at the limit", async () => {
     vi.mocked(workspaceApi.getTenants).mockResolvedValue(connected(25))
     render(<TenantsTab workspaceId="ws-1" isManager={false} onWorkspaceDeleted={vi.fn()} />)

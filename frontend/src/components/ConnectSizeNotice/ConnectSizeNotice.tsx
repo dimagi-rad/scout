@@ -13,7 +13,7 @@ interface Props {
   canSplit: boolean
 }
 
-/** Warns, never blocks: a large Connect workspace works, but its access check is slow. */
+/** Warns, never blocks: above the limit the access check can time out for some people. */
 export function ConnectSizeNotice({ count, lead, testId, className, canSplit }: Props) {
   if (count <= CONNECT_QUICK_CHECK_LIMIT) return null
   return (
