@@ -885,9 +885,12 @@ async def test_active_jobs_exposes_rows_total_for_percentage():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_active_jobs_shows_a_loading_source_over_a_later_finished_one():
+@pytest.mark.parametrize("phase_published", [False, True])
+async def test_active_jobs_shows_a_loading_source_over_a_later_finished_one(phase_published):
     """Sources of one job load concurrently (#927): a later-started source that
-    already finished must not replace the progress of one still loading."""
+    already finished must not replace the progress of one still loading. Once a
+    post-load phase is published, a run left active (a crashed attempt's) must
+    not hide it."""
     user = await User.objects.acreate_user(email="concurrent@rows.test", password="x")
     ws = await Workspace.objects.acreate(name="WConcurrent", created_by=user)
     await WorkspaceMembership.objects.acreate(
@@ -927,7 +930,16 @@ async def test_active_jobs_shows_a_loading_source_over_a_later_finished_one():
         state=MaterializationRun.RunState.COMPLETED,
         procrastinate_job_id=7790,
         completed_at=timezone.now(),
-        progress={"source": "payments", "rows_loaded": 50, "rows_total": 50},
+        progress={
+            "source": "payments",
+            "rows_loaded": 50,
+            "rows_total": 50,
+            **(
+                {"phase": "building_model", "phase_message": "Preparing the model"}
+                if phase_published
+                else {}
+            ),
+        },
     )
     # started_at is auto_now_add; the finished run is the later-started one.
     await MaterializationRun.objects.filter(id=finished.id).aupdate(
@@ -940,8 +952,12 @@ async def test_active_jobs_shows_a_loading_source_over_a_later_finished_one():
 
     assert resp.status_code == 200
     progress = resp.json()["jobs"][0]["progress"]
-    assert progress["source"] == "visits"
-    assert progress["percent"] == 25
+    if phase_published:
+        assert progress["phase"] == "building_model"
+        assert progress["message"] == "Preparing the model"
+    else:
+        assert progress["source"] == "visits"
+        assert progress["percent"] == 25
 
 
 @pytest.mark.asyncio

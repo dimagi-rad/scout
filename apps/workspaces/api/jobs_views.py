@@ -198,7 +198,11 @@ async def active_jobs_view(request, workspace_id):
         runs_by_job[r.procrastinate_job_id] = r.progress or {}
         if r.state in MaterializationRun.ACTIVE_STATES:
             active_runs_by_job[r.procrastinate_job_id] = r.progress or {}
-    runs_by_job.update(active_runs_by_job)
+    for job_id, progress in active_runs_by_job.items():
+        # Once a post-load phase is published every load is over; a run still
+        # "active" then is a crashed attempt's, and must not hide the phase.
+        if not runs_by_job[job_id].get("phase_message"):
+            runs_by_job[job_id] = progress
 
     workspace_loads = await aworkspace_load_progress(workspace)
     loads_by_job = {
