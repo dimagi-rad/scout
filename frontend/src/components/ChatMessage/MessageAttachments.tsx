@@ -1,8 +1,9 @@
 import type { FileUIPart } from "ai"
-import { FileText } from "lucide-react"
+import { FileText, ImageOff } from "lucide-react"
+import { useState } from "react"
 
 import { withBasePath } from "@/config"
-import { isAttachmentUrl } from "@/components/ChatPanel/attachments/rules"
+import { isAttachmentUrl } from "@/api/chatAttachments"
 import { cn } from "@/lib/utils"
 
 const TYPE_LABELS: Record<string, string> = {
@@ -27,67 +28,87 @@ function typeLabel(part: FileUIPart): string {
   return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toUpperCase() : "File"
 }
 
+const CHIP_CLASS =
+  "flex max-w-64 items-center gap-2 rounded-lg border bg-muted/50 py-1 pl-1 pr-3 text-xs"
+
+function Chip({ name, detail, broken = false }: { name: string; detail: string; broken?: boolean }) {
+  const Icon = broken ? ImageOff : FileText
+  return (
+    <>
+      <span className="flex size-8 shrink-0 items-center justify-center rounded bg-background">
+        <Icon className="size-4 text-muted-foreground" aria-hidden="true" />
+      </span>
+      <span className="min-w-0">
+        <span className="block truncate font-medium">{name}</span>
+        <span className="block text-muted-foreground">{detail}</span>
+      </span>
+    </>
+  )
+}
+
+function MessageAttachment({ part }: { part: FileUIPart }) {
+  // The download can fail after the send: access to the workspace lost (403), or
+  // the attachment gone. A broken image then reads as a named chip.
+  const [broken, setBroken] = useState(false)
+  const name = part.filename || "attachment"
+  // Only our own attachment urls are fetched or linked; anything else shows as a name.
+  const href = isAttachmentUrl(part.url) ? withBasePath(part.url) : null
+  const image = mediaTypeOf(part).startsWith("image/")
+  if (href && image && !broken) {
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="block overflow-hidden rounded-lg border bg-muted"
+        title={`Open ${name}`}
+        data-testid="chat-message-attachment"
+        data-kind="image"
+      >
+        <img
+          src={href}
+          alt={name}
+          loading="lazy"
+          draggable={false}
+          onError={() => setBroken(true)}
+          className="max-h-48 max-w-64 object-contain"
+        />
+      </a>
+    )
+  }
+  if (href && !broken) {
+    return (
+      <a
+        href={href}
+        download={name}
+        className={cn(CHIP_CLASS, "hover:bg-muted")}
+        title={`Download ${name}`}
+        data-testid="chat-message-attachment"
+        data-kind="file"
+      >
+        <Chip name={name} detail={typeLabel(part)} />
+      </a>
+    )
+  }
+  return (
+    <span
+      className={CHIP_CLASS}
+      title={broken ? `${name} can't be shown` : undefined}
+      data-testid="chat-message-attachment"
+      data-kind={broken ? "unavailable" : "file"}
+    >
+      <Chip name={name} detail={broken ? "Image unavailable" : typeLabel(part)} broken={broken} />
+    </span>
+  )
+}
+
 /** The files a user message carried: image thumbnails that open full size, and file chips. */
 export function MessageAttachments({ parts, alignEnd }: { parts: FileUIPart[]; alignEnd: boolean }) {
   return (
     <div className={cn("mb-1 flex flex-wrap items-start gap-2", alignEnd && "justify-end")}>
-      {parts.map((part, i) => {
-        const name = part.filename || "attachment"
-        // Only our own attachment urls are fetched or linked; anything else shows as a name.
-        const href = isAttachmentUrl(part.url) ? withBasePath(part.url) : null
-        if (href && mediaTypeOf(part).startsWith("image/")) {
-          return (
-            <a
-              key={i}
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="block overflow-hidden rounded-lg border bg-muted"
-              title={`Open ${name}`}
-              data-testid="chat-message-attachment"
-              data-kind="image"
-            >
-              <img
-                src={href}
-                alt={name}
-                loading="lazy"
-                draggable={false}
-                className="max-h-48 max-w-64 object-contain"
-              />
-            </a>
-          )
-        }
-        const chip = (
-          <>
-            <span className="flex size-8 shrink-0 items-center justify-center rounded bg-background">
-              <FileText className="size-4 text-muted-foreground" aria-hidden="true" />
-            </span>
-            <span className="min-w-0">
-              <span className="block truncate font-medium">{name}</span>
-              <span className="block text-muted-foreground">{typeLabel(part)}</span>
-            </span>
-          </>
-        )
-        const chipClass =
-          "flex max-w-64 items-center gap-2 rounded-lg border bg-muted/50 py-1 pl-1 pr-3 text-xs"
-        return href ? (
-          <a
-            key={i}
-            href={href}
-            download={name}
-            className={cn(chipClass, "hover:bg-muted")}
-            title={`Download ${name}`}
-            data-testid="chat-message-attachment"
-            data-kind="file"
-          >
-            {chip}
-          </a>
-        ) : (
-          <span key={i} className={chipClass} data-testid="chat-message-attachment" data-kind="file">
-            {chip}
-          </span>
-        )
-      })}
+      {parts.map((part, i) => (
+        <MessageAttachment key={`${i}:${part.url}`} part={part} />
+      ))}
     </div>
   )
 }

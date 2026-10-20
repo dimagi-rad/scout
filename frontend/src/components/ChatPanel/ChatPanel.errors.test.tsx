@@ -184,6 +184,21 @@ describe("a turn that fails after the user switched threads", () => {
   })
 })
 
+describe("a chat turn refused for an attachment (#913)", () => {
+  it("says what to do and offers no Retry, which would fail the same way", async () => {
+    const body = {
+      error: "An attachment is no longer available. Attach it again and resend.",
+      reason: "attachment_invalid",
+    }
+    const api = mockChat([() => Response.json(body, { status: 400 })])
+    await renderAndSend(api)
+
+    const notice = await screen.findByTestId("chat-error")
+    expect(notice).toHaveTextContent(body.error)
+    expect(screen.queryByTestId("chat-error-retry")).toBeNull()
+  })
+})
+
 describe("a chat turn denied because the credential expired", () => {
   it("shows the backend remedy with a Connected Accounts link and no Retry", async () => {
     const body = {

@@ -1,4 +1,4 @@
-import { useRef } from "react"
+import { useRef, useState } from "react"
 import { AlertCircle, FileText, Loader2, Paperclip, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -62,8 +62,10 @@ function AttachmentChip({
   const working = item.status === "processing" || item.status === "uploading"
   const status = statusText(item)
   // A file handed back from a refused send has no local copy; show the uploaded one.
-  const preview =
-    item.previewUrl
+  const [previewFailed, setPreviewFailed] = useState(false)
+  const preview = previewFailed
+    ? undefined
+    : item.previewUrl
     ?? (item.kind === "image" && item.uploaded && isAttachmentUrl(item.uploaded.url)
       ? withBasePath(item.uploaded.url)
       : undefined)
@@ -79,7 +81,13 @@ function AttachmentChip({
     >
       <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded bg-background">
         {preview ? (
-          <img src={preview} alt="" className="size-full object-cover" draggable={false} />
+          <img
+            src={preview}
+            alt=""
+            className="size-full object-cover"
+            draggable={false}
+            onError={() => setPreviewFailed(true)}
+          />
         ) : failed ? (
           <AlertCircle className="size-4 text-destructive" aria-hidden="true" />
         ) : (

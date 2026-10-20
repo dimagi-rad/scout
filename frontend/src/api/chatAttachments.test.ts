@@ -36,6 +36,10 @@ class FakeXHR {
   abort() {
     this.onabort?.()
   }
+  responseHeaders: Record<string, string> = {}
+  getResponseHeader(name: string) {
+    return this.responseHeaders[name] ?? null
+  }
   respond(status: number, body: unknown) {
     this.status = status
     this.responseText = JSON.stringify(body)
@@ -73,11 +77,11 @@ describe("uploadChatAttachment", () => {
     await expect(result).resolves.toEqual(body)
   })
 
-  it("rejects with the server's message and reason", async () => {
+  it("rejects with the server's message", async () => {
     const result = uploadChatAttachment(file, "ws-1", vi.fn(), new AbortController().signal)
     FakeXHR.last.respond(400, { error: "Images can be at most 5 MB.", reason: "attachment_too_large" })
     await expect(result).rejects.toEqual(
-      expect.objectContaining({ message: "Images can be at most 5 MB.", reason: "attachment_too_large" }),
+      expect.objectContaining({ message: "Images can be at most 5 MB." }),
     )
     await expect(result).rejects.toBeInstanceOf(AttachmentUploadError)
   })
@@ -100,6 +104,27 @@ describe("uploadChatAttachment", () => {
     expect(FakeXHR.last.timeout).toBeGreaterThan(0)
     FakeXHR.last.ontimeout?.()
     await expect(result).rejects.toMatchObject({ message: expect.stringContaining("timed out") })
+  })
+
+  it("says when to try again after the upload rate limit", async () => {
+    const result = uploadChatAttachment(file, "ws-1", vi.fn(), new AbortController().signal)
+    FakeXHR.last.responseHeaders["Retry-After"] = "42"
+    FakeXHR.last.respond(429, { error: "Too many uploads.", reason: "attachment_rate_limited" })
+    await expect(result).rejects.toMatchObject({ message: expect.stringContaining("again in 42s") })
+  })
+
+  it("explains the cap on unsent uploads", async () => {
+    const result = uploadChatAttachment(file, "ws-1", vi.fn(), new AbortController().signal)
+    FakeXHR.last.respond(429, { error: "Too many unsent attachments.", reason: "attachment_limit" })
+    await expect(result).rejects.toMatchObject({
+      message: expect.stringContaining("too many files waiting to be sent"),
+    })
+  })
+
+  it("shows the server's message for a malformed workspace", async () => {
+    const result = uploadChatAttachment(file, "nope", vi.fn(), new AbortController().signal)
+    FakeXHR.last.respond(400, { error: "workspaceId must be a UUID" })
+    await expect(result).rejects.toMatchObject({ message: "workspaceId must be a UUID" })
   })
 
   it("aborts with its signal", async () => {

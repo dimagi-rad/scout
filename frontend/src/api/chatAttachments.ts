@@ -2,6 +2,20 @@ import { withBasePath } from "@/config"
 import { BUSY_MESSAGE, isBusyBody } from "./busy"
 import { asRecord, getCsrfToken } from "./client"
 
+/** The upload route; an attachment's own url is this plus ``<id>/``. */
+export const ATTACHMENTS_PATH = "/api/chat/attachments/"
+
+export function attachmentUrl(id: string): string {
+  return `${ATTACHMENTS_PATH}${id}/`
+}
+
+const ATTACHMENT_URL = new RegExp(`^${ATTACHMENTS_PATH.replaceAll("/", "\\/")}[0-9a-f-]{36}\\/$`, "i")
+
+/** Our attachment urls only: anything else in a file part is not fetched or linked. */
+export function isAttachmentUrl(url: string): boolean {
+  return ATTACHMENT_URL.test(url)
+}
+
 export interface UploadedAttachment {
   id: string
   filename: string
@@ -22,9 +36,22 @@ function isUploadedAttachment(body: Record<string, unknown> | undefined): body i
   )
 }
 
-function uploadErrorMessage(body: Record<string, unknown> | undefined, status: number): string {
+function uploadErrorMessage(
+  body: Record<string, unknown> | undefined,
+  status: number,
+  retryAfter: string | null,
+): string {
   // A capacity 503's ``error`` is the machine code "busy"; its prose is ``message``.
   if (isBusyBody(body)) return typeof body?.message === "string" ? body.message : BUSY_MESSAGE
+  if (body?.reason === "attachment_rate_limited") {
+    const seconds = Number(retryAfter)
+    return Number.isFinite(seconds) && seconds > 0
+      ? `Too many uploads at once. Remove this and attach it again in ${Math.ceil(seconds)}s.`
+      : "Too many uploads at once. Remove this and attach it again in a minute."
+  }
+  if (body?.reason === "attachment_limit") {
+    return "You have too many files waiting to be sent. Send or remove some, then attach this again."
+  }
   if (typeof body?.error === "string" && body.error.trim()) return body.error
   if (status === 413) return "Too large to upload."
   return `Upload failed (HTTP ${status}).`
@@ -33,12 +60,9 @@ function uploadErrorMessage(body: Record<string, unknown> | undefined, status: n
 const UPLOAD_TIMEOUT_MS = 120_000
 
 export class AttachmentUploadError extends Error {
-  reason: string | null
-
-  constructor(message: string, reason: string | null = null) {
+  constructor(message: string) {
     super(message)
     this.name = "AttachmentUploadError"
-    this.reason = reason
   }
 }
 
@@ -58,7 +82,7 @@ export function uploadChatAttachment(
       return
     }
     const xhr = new XMLHttpRequest()
-    xhr.open("POST", withBasePath("/api/chat/attachments/"))
+    xhr.open("POST", withBasePath(ATTACHMENTS_PATH))
     xhr.withCredentials = true
     xhr.setRequestHeader("X-CSRFToken", getCsrfToken())
     xhr.responseType = "text"
@@ -99,8 +123,11 @@ export function uploadChatAttachment(
         reject(new AttachmentUploadError("Upload failed: the server's reply was not understood."))
         return
       }
-      const reason = typeof body?.reason === "string" ? body.reason : null
-      reject(new AttachmentUploadError(uploadErrorMessage(body, xhr.status), reason))
+      reject(
+        new AttachmentUploadError(
+          uploadErrorMessage(body, xhr.status, xhr.getResponseHeader("Retry-After")),
+        ),
+      )
     }
     const form = new FormData()
     form.append("file", file, file.name)

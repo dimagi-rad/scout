@@ -23,6 +23,9 @@ const FINAL_REASONS: ReadonlySet<string> = new Set([
   "message_too_long",
   "pending_request_too_long",
   "access_denied",
+  // A data: url, an attachment that expired, belongs elsewhere or was sent in another
+  // chat, or too many: resending the same parts fails the same way.
+  "attachment_invalid",
 ])
 
 export type ChatErrorKind =

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 import type { UIMessage } from "ai"
 import { MemoryRouter } from "react-router-dom"
 import { describe, expect, it, vi } from "vitest"
@@ -32,6 +32,25 @@ describe("ChatMessage file parts (#913)", () => {
     expect(link).toHaveAttribute("target", "_blank")
     expect(link.querySelector("img")).toHaveAttribute("src", `/scout${URL_A}`)
     expect(screen.getByText("What does this chart show?")).toBeInTheDocument()
+  })
+
+  it("shows an attachments-only message from history, which has no text part", () => {
+    renderMessage([
+      { type: "file", mediaType: "image/png", filename: "shot.png", url: URL_A },
+      { type: "file", mediaType: "text/csv", filename: "sites.csv", url: URL_B },
+    ])
+    expect(screen.getAllByTestId("chat-message-attachment")).toHaveLength(2)
+    expect(document.querySelector(".bg-primary")).toBeNull()
+  })
+
+  it("falls back to a named chip when the image can't be loaded", () => {
+    renderMessage([{ type: "file", mediaType: "image/png", filename: "shot.png", url: URL_A }])
+    fireEvent.error(screen.getByRole("img"))
+    const chip = screen.getByTestId("chat-message-attachment")
+    expect(chip).toHaveAttribute("data-kind", "unavailable")
+    expect(chip).toHaveTextContent("shot.png")
+    expect(chip).toHaveTextContent("Image unavailable")
+    expect(chip).not.toHaveAttribute("href")
   })
 
   it("shows a data file as a named chip", () => {

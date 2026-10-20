@@ -66,12 +66,7 @@ export function carriesFiles(dataTransfer: DataTransfer | null): boolean {
   return Boolean(dataTransfer && Array.from(dataTransfer.types).includes("Files"))
 }
 
-/** Our attachment urls only: anything else in a file part is not fetched or linked. */
-const ATTACHMENT_URL = /^\/api\/chat\/attachments\/[0-9a-f-]{36}\/$/i
-
-export function isAttachmentUrl(url: string): boolean {
-  return ATTACHMENT_URL.test(url)
-}
+export { isAttachmentUrl } from "@/api/chatAttachments"
 
 /**
  * Files a paste should attach, or none to let the text paste as usual. Copying
