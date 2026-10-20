@@ -23,8 +23,9 @@ DEFAULT_LIMIT = 20_000
 # Characters, not bytes: compact_tool_results shapes MCP tool output only, so this
 # cap is what bounds a result (a non-ASCII file can exceed 50 KB of UTF-8).
 MAX_LIMIT = 50_000
-# Per run, across calls: each result is replayed with the window and stored in the
-# checkpoint, so paging a whole 2 MB file through would bloat both.
+# Per run, across paging calls: each result is replayed with the window and stored
+# in the checkpoint, so paging a whole 2 MB file through would bloat both. Search
+# results are bounded by MAX_SEARCH_MATCHES instead and do not draw on it.
 READ_BUDGET_CHARS = 150_000
 MAX_SEARCH_MATCHES = 50
 # Characters shown either side of each match.
@@ -63,10 +64,13 @@ def _search(text: str, needle: str, offset: int) -> str:
     return f"{total} matches{after}:\n" + "\n".join(matches) + more
 
 
-def create_read_attachment_tool(conversation_id: str):
-    """Bind the tool to the thread, so it reads only attachments sent in this chat."""
-    # One per run, like the graph's: paging a file must not reload it on every call.
-    loader = AttachmentLoader(conversation_id)
+def create_read_attachment_tool(conversation_id: str, loader: AttachmentLoader | None = None):
+    """Bind the tool to the thread, so it reads only attachments sent in this chat.
+
+    ``loader`` is the run's, shared with the graph so a file is loaded once; paging a
+    file must not reload it on every call either way.
+    """
+    loader = loader or AttachmentLoader(conversation_id)
     budget = {"chars": READ_BUDGET_CHARS}
 
     @tool(READ_ATTACHMENT_TOOL_NAME)
