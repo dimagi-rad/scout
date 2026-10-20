@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from "react"
 import { useNavigate, useParams, useLocation } from "react-router-dom"
-import { Download, Loader2, Plus, Upload } from "lucide-react"
+import { Download, FileUp, Loader2, Plus, Upload } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
@@ -17,6 +17,8 @@ import {
 } from "@/components/ui/alert-dialog"
 import { KnowledgeList } from "./KnowledgeList"
 import { KnowledgeForm } from "./KnowledgeForm"
+import { ReferenceUploadDialog } from "./ReferenceUploadDialog"
+import { downloadText } from "./referenceFormat"
 import type { KnowledgeItem, KnowledgeType } from "@/store/knowledgeSlice"
 
 export function KnowledgePage() {
@@ -42,6 +44,8 @@ export function KnowledgePage() {
     deleteKnowledge,
     exportKnowledge,
     importKnowledge,
+    uploadReferenceDocument,
+    fetchKnowledgeItem,
     setFilter,
     setSearch,
   } = useAppStore((s) => s.knowledgeActions)
@@ -49,6 +53,7 @@ export function KnowledgePage() {
   const { status: networkStatus } = useNetworkStatus()
   const { canWrite } = useWorkspaceRole()
   const [formOpen, setFormOpen] = useState(false)
+  const [uploadOpen, setUploadOpen] = useState(false)
   const [editItem, setEditItem] = useState<KnowledgeItem | null>(null)
   const [deleteItem, setDeleteItem] = useState<KnowledgeItem | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
@@ -157,6 +162,12 @@ export function KnowledgePage() {
     e.target.value = ""
   }
 
+  const handleDownload = async (item: KnowledgeItem) => {
+    const full = item.content_truncated ? await fetchKnowledgeItem(item.id) : item
+    if (!isCurrentAccount()) return
+    downloadText(full)
+  }
+
   const filteredItems = knowledgeItems
 
   return (
@@ -191,6 +202,15 @@ export function KnowledgePage() {
                 className="hidden"
                 onChange={handleImport}
               />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setUploadOpen(true)}
+                data-testid="knowledge-upload"
+              >
+                <FileUp className="mr-2 h-4 w-4" />
+                Upload document
+              </Button>
               <Button onClick={handleNewClick} data-testid="knowledge-new">
                 <Plus className="mr-2 h-4 w-4" />
                 New
@@ -266,6 +286,13 @@ export function KnowledgePage() {
         item={editItem}
         onSave={handleSave}
         readOnly={!canWrite}
+        onDownload={handleDownload}
+      />
+
+      <ReferenceUploadDialog
+        open={uploadOpen}
+        onOpenChange={setUploadOpen}
+        onUpload={uploadReferenceDocument}
       />
 
       <AlertDialog open={!!deleteItem} onOpenChange={(open) => !isDeleting && !open && setDeleteItem(null)}>

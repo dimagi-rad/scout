@@ -7,15 +7,33 @@ import { createWorkspaceRequestGuard } from "./workspaceRequest"
 // AgentLearning rows moved to the Memory page as workspace memory (#849).
 export type KnowledgeType = "entry"
 
+// A note is injected into every prompt; a reference document (#913) is only
+// listed there, and the agent reads it on demand.
+export type KnowledgeKind = "note" | "reference"
+
 // Backend KnowledgeEntry model
 export interface KnowledgeEntryItem {
   id: string
   type: "entry"
+  kind: KnowledgeKind
   title: string
+  description: string
+  source_format: "" | "json" | "csv" | "tsv" | "md" | "txt"
+  // In the list, a reference document's content is only a preview; see content_truncated.
   content: string
+  content_truncated: boolean
+  size: number
   tags: string[]
   created_at: string
   updated_at: string
+}
+
+export const REFERENCE_UPLOAD_EXTENSIONS = [".json", ".csv", ".tsv", ".md", ".txt"] as const
+export const REFERENCE_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
+
+export interface ReferenceUploadFields {
+  title?: string
+  description?: string
 }
 
 export type KnowledgeItem = KnowledgeEntryItem
@@ -57,6 +75,8 @@ export interface KnowledgeSlice {
     deleteKnowledge: (id: string) => Promise<void>
     exportKnowledge: () => Promise<void>
     importKnowledge: (file: File) => Promise<void>
+    uploadReferenceDocument: (file: File, fields?: ReferenceUploadFields) => Promise<KnowledgeItem>
+    fetchKnowledgeItem: (id: string) => Promise<KnowledgeItem>
     setFilter: (type: KnowledgeType | null) => void
     setSearch: (search: string) => void
   }
@@ -161,6 +181,29 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice & DomainSlice & A
         await api.upload(`/api/workspaces/${activeDomainId}/knowledge/import/`, formData)
         if (!isCurrent()) return
         await get().knowledgeActions.fetchKnowledge()
+      },
+
+      uploadReferenceDocument: async (file: File, fields?: ReferenceUploadFields) => {
+        const isCurrent = requests.start()
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        const formData = new FormData()
+        formData.append("file", file)
+        if (fields?.title) formData.append("title", fields.title)
+        if (fields?.description) formData.append("description", fields.description)
+        const item = await api.upload<KnowledgeItem>(
+          `/api/workspaces/${activeDomainId}/knowledge/upload/`,
+          formData,
+        )
+        if (!isCurrent()) return item
+        set({ knowledgeItems: [item, ...get().knowledgeItems] })
+        return item
+      },
+
+      fetchKnowledgeItem: async (id: string) => {
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        return api.get<KnowledgeItem>(`/api/workspaces/${activeDomainId}/knowledge/${id}/`)
       },
 
       setFilter: (type: KnowledgeType | null) => {

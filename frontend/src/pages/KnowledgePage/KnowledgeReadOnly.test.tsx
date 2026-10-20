@@ -11,8 +11,13 @@ import { KnowledgeList } from "./KnowledgeList"
 const entry: KnowledgeEntryItem = {
   id: "entry-1",
   type: "entry",
+  kind: "note",
   title: "Active user",
+  description: "",
+  source_format: "",
   content: "A user with a visit in the last 30 days.",
+  content_truncated: false,
+  size: 40,
   tags: ["metric"],
   created_at: "2026-09-01T10:00:00Z",
   updated_at: "2026-09-01T10:00:00Z",

@@ -1,4 +1,4 @@
-import { Eye, Search, Pencil, Trash2 } from "lucide-react"
+import { Eye, FileText, Search, Pencil, Trash2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -8,6 +8,7 @@ import {
   type KnowledgeItem,
   type KnowledgeType,
 } from "@/store/knowledgeSlice"
+import { formatChars } from "./referenceFormat"
 
 interface KnowledgeListProps {
   items: KnowledgeItem[]
@@ -29,11 +30,12 @@ const typeBadgeStyles: Record<KnowledgeType, string> = {
   entry: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
 }
 
+const referenceBadgeStyle =
+  "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400"
+
 function getItemDescription(item: KnowledgeItem): string | null {
-  switch (item.type) {
-    case "entry":
-      return item.content ? item.content.slice(0, 120) + (item.content.length > 120 ? "..." : "") : null
-  }
+  if (item.kind === "reference" && item.description) return item.description
+  return item.content ? item.content.slice(0, 120) + (item.content.length > 120 ? "..." : "") : null
 }
 
 export function KnowledgeList({
@@ -87,12 +89,31 @@ export function KnowledgeList({
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
-                      <Badge
-                        variant="secondary"
-                        className={typeBadgeStyles[item.type]}
-                      >
-                        {item.type}
-                      </Badge>
+                      {item.kind === "reference" ? (
+                        <>
+                          <Badge
+                            variant="secondary"
+                            className={referenceBadgeStyle}
+                            data-testid={`knowledge-reference-badge-${item.id}`}
+                          >
+                            <FileText />
+                            reference{item.source_format ? ` · ${item.source_format}` : ""}
+                          </Badge>
+                          <span
+                            className="text-xs text-muted-foreground"
+                            data-testid={`knowledge-size-${item.id}`}
+                          >
+                            {formatChars(item.size)}
+                          </span>
+                        </>
+                      ) : (
+                        <Badge
+                          variant="secondary"
+                          className={typeBadgeStyles[item.type]}
+                        >
+                          {item.type}
+                        </Badge>
+                      )}
                     </div>
                     <h3 className="font-medium truncate" title={title}>
                       {title}
@@ -102,7 +123,11 @@ export function KnowledgeList({
               </CardHeader>
               <CardContent className="flex-1 flex flex-col">
                 {getItemDescription(item) && (
-                  <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
+                  <p
+                    className={`text-sm text-muted-foreground line-clamp-2 mb-3 ${
+                      item.kind === "reference" && !item.description ? "font-mono text-xs" : ""
+                    }`}
+                  >
                     {getItemDescription(item)}
                   </p>
                 )}
