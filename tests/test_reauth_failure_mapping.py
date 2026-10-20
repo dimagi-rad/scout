@@ -160,4 +160,4 @@ def test_summary_survives_a_failure_record_with_no_code():
 def test_summary_calls_a_run_level_failure_the_import():
     run = SimpleNamespace(state="failed", result={"error": "Worker stopped responding"})
 
-    assert compose_failure_summary([run]) == "the import failed: Worker stopped responding."
+    assert compose_failure_summary([run]) == "The import failed: Worker stopped responding."
