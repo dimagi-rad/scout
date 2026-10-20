@@ -2,11 +2,14 @@
 
 import io
 import logging
+import uuid
 import zipfile
 
 import yaml
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Case, F, Q, TextField, When
+from django.db.models.functions import Length, Substr
 from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser
@@ -16,11 +19,17 @@ from rest_framework.views import APIView
 
 from apps.common.http import string_field
 from apps.knowledge.models import KnowledgeEntry
+from apps.knowledge.services.reference_documents import (
+    DESCRIPTION_MAX_CHARS,
+    MAX_UPLOAD_BYTES,
+    ReferenceDocumentError,
+    decode_upload,
+)
 from apps.knowledge.utils import parse_frontmatter, render_frontmatter
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
-from .serializers import KnowledgeEntrySerializer
+from .serializers import REFERENCE_PREVIEW_CHARS, KnowledgeEntrySerializer
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +40,40 @@ MAX_PAGE_SIZE = 200
 # base, which is re-billed into the system prompt on every LLM call (arch #254, 01#4).
 MAX_IMPORT_DECOMPRESSED_BYTES = 25 * 1024 * 1024
 
+
+def _list_entries(queryset):
+    """Defer ``content`` so a page of multi-megabyte reference documents isn't loaded."""
+    return queryset.defer("content").annotate(
+        content_size=Length("content"),
+        listed_content=Case(
+            When(
+                kind=KnowledgeEntry.Kind.REFERENCE,
+                then=Substr("content", 1, REFERENCE_PREVIEW_CHARS),
+            ),
+            default=F("content"),
+            output_field=TextField(),
+        ),
+    )
+
+
+def _search_entries(query: str) -> Q:
+    # A reference document's body (up to 2 MB) is not scanned on every keystroke;
+    # the agent searches it with read_reference_document.
+    return (
+        Q(title__icontains=query)
+        | Q(description__icontains=query)
+        | Q(kind=KnowledgeEntry.Kind.NOTE, content__icontains=query)
+    )
+
+
 KNOWLEDGE_TYPES = {
     "entry": {
         "model": KnowledgeEntry,
         "serializer": KnowledgeEntrySerializer,
-        "search_fields": ["title", "content"],
+        "search": _search_entries,
         # Join created_by so the page slice doesn't N+1 (arch #254, 05#7).
         "select_related": ["created_by"],
+        "list_queryset": _list_entries,
     },
 }
 # AgentLearning rows are workspace memory now (#849): listed and changed only through
@@ -94,14 +130,14 @@ class KnowledgeListCreateView(APIView):
             queryset = model.objects.filter(workspace=workspace)
 
             if search_query:
-                search_q = Q()
-                for field in type_config["search_fields"]:
-                    search_q |= Q(**{f"{field}__icontains": search_query})
-                queryset = queryset.filter(search_q)
+                queryset = queryset.filter(type_config["search"](search_query))
 
             total_count += queryset.count()
 
             page_window = queryset.order_by("-created_at")
+            list_queryset = type_config.get("list_queryset")
+            if list_queryset:
+                page_window = list_queryset(page_window)
             select_related = type_config.get("select_related")
             if select_related:
                 page_window = page_window.select_related(*select_related)
@@ -198,7 +234,7 @@ class KnowledgeDetailView(APIView):
                 {"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND
             )
 
-        serializer = serializer_class(item)
+        serializer = serializer_class(item, context={"full_content": True})
         return Response(serializer.data)
 
     def put(self, request, workspace_id, item_id):
@@ -276,7 +312,9 @@ class KnowledgeExportView(APIView):
                     filename = f"{safe_title}_{suffix}.md"
                     suffix += 1
                 used_filenames.add(filename)
-                content = render_frontmatter(entry.title, entry.tags or [], entry.content)
+                content = render_frontmatter(
+                    entry.title, entry.tags or [], entry.content, extra=_reference_meta(entry)
+                )
                 zf.writestr(filename, content)
 
         buf.seek(0)
@@ -344,10 +382,13 @@ class KnowledgeImportView(APIView):
         # re-import updates in place (idempotent) while N duplicate titles map to
         # N entries instead of collapsing onto one (arch #262, finding 05#8).
         available_by_title: dict[str, list] = {}
-        for pk, title in KnowledgeEntry.objects.filter(workspace=workspace).values_list(
-            "id", "title"
+        reference_pks: set[uuid.UUID] = set()
+        for pk, title, kind in KnowledgeEntry.objects.filter(workspace=workspace).values_list(
+            "id", "title", "kind"
         ):
             available_by_title.setdefault(title, []).append(pk)
+            if kind == KnowledgeEntry.Kind.REFERENCE:
+                reference_pks.add(pk)
 
         # Atomic: a hard DB failure rolls back the whole batch (arch #262, finding
         # 05#8). Per-entry parse/decode errors are collected, not fatal.
@@ -362,27 +403,62 @@ class KnowledgeImportView(APIView):
                         errors.append({"file": name, "error": "File is not valid UTF-8."})
                         continue
                     try:
-                        title, tags, body = parse_frontmatter(raw)
+                        title, tags, body, meta = parse_frontmatter(raw)
                     except (ValueError, yaml.YAMLError) as exc:
                         errors.append({"file": name, "error": f"Malformed frontmatter: {exc}"})
+                        continue
+                    fields = {"content": body, "tags": tags, **_reference_fields(meta)}
+                    # Postgres can't store NUL, and would fail the whole batch on it.
+                    if "\x00" in raw:
+                        errors.append({"file": name, "error": "File contains binary data."})
+                        continue
+                    if (
+                        fields["kind"] == KnowledgeEntry.Kind.REFERENCE
+                        and len(body.encode()) > MAX_UPLOAD_BYTES
+                    ):
+                        errors.append(
+                            {
+                                "file": name,
+                                "error": (
+                                    f"Reference document is larger than {MAX_UPLOAD_BYTES:,} bytes."
+                                ),
+                            }
+                        )
                         continue
 
                     if not title:
                         skipped += 1
                         continue
 
-                    pool = available_by_title.get(title)
-                    if pool:
-                        pk = pool.pop(0)
-                        KnowledgeEntry.objects.filter(pk=pk).update(content=body, tags=tags)
+                    pool = available_by_title.get(title) or []
+                    # Each file updates a same-titled entry of its own kind first, whatever
+                    # the pool's order. A note (or a pre-#913 export) never replaces a
+                    # reference document's body; a document may upgrade a spare note.
+                    is_reference = fields["kind"] == KnowledgeEntry.Kind.REFERENCE
+                    notes = [pk for pk in pool if pk not in reference_pks]
+                    if is_reference:
+                        usable = [pk for pk in pool if pk in reference_pks] or notes
+                    else:
+                        usable = notes
+                    if pool and not usable:
+                        errors.append(
+                            {
+                                "file": name,
+                                "error": (
+                                    "A reference document already has this title; rename "
+                                    "the entry or delete the document first."
+                                ),
+                            }
+                        )
+                        continue
+                    if usable:
+                        pk = usable[0]
+                        pool.remove(pk)
+                        KnowledgeEntry.objects.filter(pk=pk).update(**fields)
                         updated += 1
                     else:
                         KnowledgeEntry.objects.create(
-                            workspace=workspace,
-                            title=title,
-                            content=body,
-                            tags=tags,
-                            created_by=request.user,
+                            workspace=workspace, title=title, created_by=request.user, **fields
                         )
                         created += 1
         except Exception:
@@ -395,3 +471,99 @@ class KnowledgeImportView(APIView):
         payload = {"created": created, "updated": updated, "skipped": skipped, "errors": errors}
         http_status = status.HTTP_207_MULTI_STATUS if errors else status.HTTP_200_OK
         return Response(payload, status=http_status)
+
+
+def _reference_meta(entry: KnowledgeEntry) -> dict:
+    meta = {}
+    if entry.kind == KnowledgeEntry.Kind.REFERENCE:
+        meta["kind"] = entry.kind
+    if entry.description:
+        meta["description"] = entry.description
+    if entry.kind == KnowledgeEntry.Kind.REFERENCE and entry.source_format:
+        meta["source_format"] = entry.source_format
+    return meta
+
+
+def _reference_fields(meta: dict) -> dict:
+    """An imported entry's kind fields, so a reference document round-trips as one."""
+    is_reference = meta.get("kind") == KnowledgeEntry.Kind.REFERENCE
+    source_format = meta.get("source_format", "")
+    return {
+        "kind": KnowledgeEntry.Kind.REFERENCE if is_reference else KnowledgeEntry.Kind.NOTE,
+        "description": " ".join(str(meta.get("description") or "").split())[:DESCRIPTION_MAX_CHARS],
+        "source_format": (
+            source_format
+            if is_reference and source_format in KnowledgeEntry.SourceFormat.values
+            else ""
+        ),
+    }
+
+
+class KnowledgeUploadView(APIView):
+    """
+    POST /api/workspaces/<id>/knowledge/upload/
+
+    Upload one file (JSON, CSV, TSV, Markdown or text; UTF-8; up to 2 MB) as a
+    reference document (#913). ``title`` and ``description`` are optional; the
+    title defaults to the file name.
+    """
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser]
+
+    def post(self, request, workspace_id):
+        workspace, _membership, err = resolve_workspace(
+            request, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
+        if err:
+            return err
+
+        uploaded = request.FILES.get("file")
+        if not uploaded:
+            return Response(
+                {"error": "No file uploaded. Send the document as 'file'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Checked before reading so an oversized upload is never pulled into memory.
+        if uploaded.size > MAX_UPLOAD_BYTES:
+            return Response(
+                {
+                    "error": (
+                        f"File is too large ({uploaded.size:,} bytes); the limit is "
+                        f"{MAX_UPLOAD_BYTES:,} bytes."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            decoded = decode_upload(uploaded.name, uploaded.read())
+        except ReferenceDocumentError as exc:
+            return Response({"error": exc.user_message}, status=status.HTTP_400_BAD_REQUEST)
+
+        title = str(request.data.get("title") or "").strip() or decoded.title
+        description = (
+            " ".join(str(request.data.get("description") or "").split()) or decoded.description
+        )
+        if "\x00" in title or "\x00" in description:
+            return Response(
+                {"error": "Title and description cannot contain NUL characters."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Built here rather than through the serializer, where kind and format are
+        # read-only so only this path (and import) can create a reference document.
+        entry = KnowledgeEntry(
+            workspace=workspace,
+            created_by=request.user,
+            title=title,
+            description=description[:DESCRIPTION_MAX_CHARS],
+            content=decoded.content,
+            kind=KnowledgeEntry.Kind.REFERENCE,
+            source_format=decoded.source_format,
+            tags=[],
+        )
+        try:
+            entry.full_clean()
+        except DjangoValidationError as exc:
+            return Response(exc.message_dict, status=status.HTTP_400_BAD_REQUEST)
+        entry.save()
+        return Response(KnowledgeEntrySerializer(entry).data, status=status.HTTP_201_CREATED)
