@@ -106,8 +106,9 @@ async def test_sources_load_at_once_and_report_in_membership_order(
     together = threading.Barrier(3, timeout=10)
 
     def pipeline(membership, *args, **kwargs):
-        # Each load co-owns the run's tenant locks from its own thread.
+        # Each load co-owns the run's tenant locks from its own source-load thread.
         data_operation.assert_tenant_lock_held(membership.tenant_id)
+        assert threading.current_thread().name.startswith("source-load")
         together.wait()
         return completed_pipeline_run(membership, *args, **kwargs)
 

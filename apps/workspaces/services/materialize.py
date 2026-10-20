@@ -10,12 +10,13 @@ import asyncio
 import logging
 import weakref
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 
 import sentry_sdk
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import close_old_connections
+from django.db import close_old_connections, connections
 from django.utils import timezone
 
 from apps.chat.models import ThreadJob
@@ -57,6 +58,7 @@ from apps.workspaces.services.data_operation import (
     TenantLocksExpanded,
     create_task_sharing_data_locks,
     run_data_thread,
+    run_data_thread_on,
     tenant_data_lock,
     workspace_data_lock,
 )
@@ -434,6 +436,13 @@ async def _already_loaded(tm, served) -> dict:
     }
 
 
+# Pipelines hold their thread for the whole load. On the loop's default executor
+# (min(32, cpu + 4): 6 threads on the worker host) a job's loads would starve every
+# other job's short thread work, so they get their own. ``_LoadLanes`` bounds how
+# many run; past this size a load just waits for a thread.
+_SOURCE_LOAD_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="source-load")
+
+
 class _SharedLoadSlots:
     """Loads beyond each job's first, shared by every job on one event loop."""
 
@@ -452,7 +461,7 @@ class _LoadLanes:
     no job loads slower than one source at a time. Further loads take a slot
     shared by every job on the loop; a worker runs all its jobs on one loop, so
     the process runs at most (jobs + ``MATERIALIZATION_SHARED_LOAD_SLOTS``)
-    pipelines, each holding a default-executor thread and its DB connections.
+    pipelines, each holding a source-load thread and its DB connections.
     """
 
     def __init__(self):
@@ -1228,6 +1237,14 @@ def _run_pipeline_with_progress(
     )
 
 
+def _on_load_thread(function, *args):
+    try:
+        return function(*args)
+    finally:
+        # An idle load thread would otherwise keep its connection until its next load.
+        connections.close_all()
+
+
 async def _load_tenant(
     workspace, tm, credential: dict, pipeline_config, pipeline_name: str, job_id: int | None
 ) -> dict:
@@ -1360,8 +1377,15 @@ async def _load_workspace_candidate(
             # Best effort; an abort still reaches the guard below and settles the candidate.
             logger.exception("Could not queue cleanup of abandoned candidates for %s", tm.tenant_id)
         await run_data_thread(SchemaManager().create_physical_schema, candidate)
-        result = await run_data_thread(
-            _run_pipeline_with_progress, tm, credential, pipeline_config, job_id, candidate
+        result = await run_data_thread_on(
+            _SOURCE_LOAD_EXECUTOR,
+            _on_load_thread,
+            _run_pipeline_with_progress,
+            tm,
+            credential,
+            pipeline_config,
+            job_id,
+            candidate,
         )
         promotion = await _to_thread_fresh_db(
             retirement.promote_and_queue_retirement,

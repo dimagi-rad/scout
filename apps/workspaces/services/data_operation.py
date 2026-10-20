@@ -19,7 +19,7 @@ import asyncio
 import hashlib
 import threading
 from contextlib import asynccontextmanager, contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from functools import wraps
 
 import psycopg
@@ -71,6 +71,20 @@ async def run_data_thread(function, /, *args, **kwargs):
     thread, and so one ``async_to_sync`` loop, per worker job. A job's source
     loads run concurrently (#927) because pipelines never open a managed pool.
     """
+    return await _run_drained(asyncio.to_thread, function, args, kwargs)
+
+
+async def run_data_thread_on(executor, function, /, *args, **kwargs):
+    """``run_data_thread`` on ``executor`` instead of the loop's default one."""
+    loop = asyncio.get_running_loop()
+
+    def start(invoke):
+        return loop.run_in_executor(executor, copy_context().run, invoke)
+
+    return await _run_drained(start, function, args, kwargs)
+
+
+async def _run_drained(start, function, args, kwargs):
     owner = asyncio.current_task()
 
     def invoke():
@@ -80,7 +94,7 @@ async def run_data_thread(function, /, *args, **kwargs):
         finally:
             _data_thread_owner.reset(token)
 
-    work = asyncio.create_task(asyncio.to_thread(invoke))
+    work = asyncio.ensure_future(start(invoke))
     try:
         return await asyncio.shield(work)
     except asyncio.CancelledError:

@@ -3,6 +3,7 @@
 import asyncio
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import psycopg
@@ -336,6 +337,41 @@ async def test_co_owner_child_reuses_parent_locks_in_task_and_thread():
             assert shared.result() is True
             # The parent keeps its own ownership alongside the child's.
             data_operation.assert_tenant_lock_held(tenant)
+
+
+async def test_a_thread_on_another_executor_keeps_its_tasks_locks_until_it_stops():
+    tenant = uuid.uuid4()
+    entered = asyncio.Event()
+    gate = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def work():
+        data_operation.assert_tenant_lock_held(tenant)
+        with data_operation.sync_tenant_data_lock([tenant]):
+            loop.call_soon_threadsafe(entered.set)
+            gate.wait(5)
+
+    async def owner(executor):
+        async with tenant_data_lock([tenant]):
+            await data_operation.run_data_thread_on(executor, work)
+
+    with (
+        ThreadPoolExecutor(max_workers=1) as executor,
+        patch.object(data_operation, "_LOCK_TIMEOUT", "5s"),
+    ):
+        task = asyncio.create_task(owner(executor))
+        await asyncio.wait_for(entered.wait(), 10)
+        try:
+            task.cancel()
+            await asyncio.sleep(0)
+            with try_tenant_data_lock(tenant) as held:
+                assert not held
+        finally:
+            gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    with try_tenant_data_lock(tenant) as held:
+        assert held
 
 
 async def test_co_owner_child_cannot_expand_parent_tenant_locks():
