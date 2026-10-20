@@ -129,6 +129,24 @@ def test_clean_description_drops_what_postgres_rejects():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_tenant_list_gives_an_ocs_chatbot_its_members_team(user, mocker):
+    mocker.patch("apps.users.views._arefresh_all_identities", AsyncMock())
+    bot = await Tenant.objects.acreate(provider="ocs", external_id="bot", canonical_name="Bot")
+    membership = TenantMembership(user=user, tenant=bot)
+    membership.team_slug = "maternal"
+    membership.team_name = "Maternal Health"
+    await membership.asave()
+    client = AsyncClient()
+    await client.aforce_login(user)
+
+    (row,) = (await client.get("/api/auth/tenants/")).json()
+
+    assert row["attributes"] == {"team": "maternal", "team_name": "Maternal Health"}
+    assert (await Tenant.objects.aget(id=bot.id)).provider_attributes == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_tenant_list_includes_the_description(user, tenant, mocker):
     mocker.patch("apps.users.views._arefresh_all_identities", AsyncMock())
     await Tenant.objects.filter(id=tenant.id).aupdate(description="A CommCare project")
