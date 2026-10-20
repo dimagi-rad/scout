@@ -54,8 +54,8 @@ TENANT_REFRESH_FAILURE_TTL = 60  # seconds
 # Bounds a refresh another request is already running, should that request die;
 # above the worst-case fetch (60s listing budget plus token refresh).
 TENANT_REFRESH_INFLIGHT_TTL = 180  # seconds
-# How long a poll waits on another request's refresh of the same identity. Kept
-# below the worst-case fetch on purpose: it bounds the tenant-list request, at the
+# How long one identity waits on another request's fetch of it. Kept below the
+# worst-case fetch on purpose, so a waiter does not double its own latency, at the
 # cost of overlapping (as before #918) a fetch slower than the wait.
 TENANT_REFRESH_INFLIGHT_WAIT = 30  # seconds
 TENANT_REFRESH_INFLIGHT_POLL = 0.25  # seconds

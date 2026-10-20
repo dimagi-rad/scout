@@ -215,13 +215,14 @@ async def test_forced_refresh_waits_for_a_running_fetch_then_fetches_again(ident
     first = asyncio.ensure_future(_arefresh_all_identities(USER))
     await asyncio.wait_for(started.wait(), timeout=2)
 
-    forced = asyncio.ensure_future(_arefresh_all_identities(USER, force=True))
-    await asyncio.sleep(0.05)
-    assert not forced.done()
-    assert identities["commcare"].await_count == 1
+    with patch.object(user_views, "TENANT_REFRESH_INFLIGHT_WAIT", 1):
+        forced = asyncio.ensure_future(_arefresh_all_identities(USER, force=True))
+        await asyncio.sleep(0.05)
+        assert not forced.done()
+        assert identities["commcare"].await_count == 1
 
-    release.set()
-    await asyncio.wait_for(asyncio.gather(first, forced), timeout=2)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(first, forced), timeout=2)
     assert identities["commcare"].await_count == 2
 
 
