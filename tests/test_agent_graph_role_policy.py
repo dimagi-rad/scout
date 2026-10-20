@@ -23,6 +23,7 @@ from apps.agents.prompts.base_system import (
     HEADLESS_BASE_SYSTEM_PROMPT,
     PLACEHOLDERS,
     READ_ONLY_BASE_SYSTEM_PROMPT,
+    READ_ONLY_HEADLESS_BASE_SYSTEM_PROMPT,
 )
 from apps.users.models import Tenant
 from apps.workspaces.models import (
@@ -294,8 +295,13 @@ async def test_headless_writer_drift_rule_rebuilds_without_asking(workspace, wri
 
 @pytest.mark.parametrize(
     "prompt",
-    [BASE_SYSTEM_PROMPT, HEADLESS_BASE_SYSTEM_PROMPT, READ_ONLY_BASE_SYSTEM_PROMPT],
-    ids=["interactive", "headless", "read_only"],
+    [
+        BASE_SYSTEM_PROMPT,
+        HEADLESS_BASE_SYSTEM_PROMPT,
+        READ_ONLY_BASE_SYSTEM_PROMPT,
+        READ_ONLY_HEADLESS_BASE_SYSTEM_PROMPT,
+    ],
+    ids=["interactive", "headless", "read_only", "read_only_headless"],
 )
 def test_every_base_prompt_variant_keeps_the_shared_guardrails(prompt):
     for invariant in (

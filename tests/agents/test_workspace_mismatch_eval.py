@@ -27,6 +27,8 @@ from apps.agents.prompts.base_system import (
     BASE_SYSTEM_PROMPT,
     HEADLESS_BASE_SYSTEM_PROMPT,
     READ_ONLY_BASE_SYSTEM_PROMPT,
+    READ_ONLY_HEADLESS_BASE_SYSTEM_PROMPT,
+    select_base_system_prompt,
 )
 from apps.users.models import Tenant
 from apps.workspaces.models import WorkspaceTenant
@@ -34,10 +36,20 @@ from apps.workspaces.models import WorkspaceTenant
 PRIMARY_OPP = "CHC - NG - EHA - RCT - AUG 26"
 REVISIT_OPP = "CHC - NG - EHA - RCT - AUG 26 - R1"
 
-ALL_PROMPTS = [BASE_SYSTEM_PROMPT, HEADLESS_BASE_SYSTEM_PROMPT, READ_ONLY_BASE_SYSTEM_PROMPT]
+ALL_PROMPTS = [
+    BASE_SYSTEM_PROMPT,
+    HEADLESS_BASE_SYSTEM_PROMPT,
+    READ_ONLY_BASE_SYSTEM_PROMPT,
+    READ_ONLY_HEADLESS_BASE_SYSTEM_PROMPT,
+]
 
 
-INTERACTIVE_PROMPTS = [BASE_SYSTEM_PROMPT, READ_ONLY_BASE_SYSTEM_PROMPT]
+INTERACTIVE_PROMPTS = [
+    select_base_system_prompt(write_capable=w, interactive=True) for w in (True, False)
+]
+HEADLESS_PROMPTS = [
+    select_base_system_prompt(write_capable=w, interactive=False) for w in (True, False)
+]
 
 
 @pytest.mark.parametrize("prompt", ALL_PROMPTS)
@@ -58,13 +70,14 @@ def test_prompt_asks_about_missing_assumptions(prompt):
     assert "Offer to add it" in prompt
 
 
-def test_headless_prompt_states_its_default_instead_of_asking():
-    """A recipe run has no one to answer, so it must not end on a question."""
-    assert "only partly launched" in HEADLESS_BASE_SYSTEM_PROMPT
-    assert "choose a sensible default, state it" in HEADLESS_BASE_SYSTEM_PROMPT
-    assert "Ask about the specific assumption" not in HEADLESS_BASE_SYSTEM_PROMPT
-    assert "Offer to add it" not in HEADLESS_BASE_SYSTEM_PROMPT
-    assert "never reply with a generic menu" in HEADLESS_BASE_SYSTEM_PROMPT
+@pytest.mark.parametrize("prompt", HEADLESS_PROMPTS)
+def test_headless_prompt_states_its_default_instead_of_asking(prompt):
+    """A recipe run, read-only or not, has no one to answer, so it must not end on a question."""
+    assert "only partly launched" in prompt
+    assert "choose a sensible default, state it" in prompt
+    assert "Ask about the specific assumption" not in prompt
+    assert "Offer to add it" not in prompt
+    assert "never reply with a generic menu" in prompt
 
 
 def test_source_names_cannot_forge_prompt_headings():

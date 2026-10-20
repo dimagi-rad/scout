@@ -270,17 +270,21 @@ you will continue only then; otherwise nothing will resume it, so tell the user 
 ask again once loading finishes, without naming a time.""",
 )
 
+# Headless runs, read-only ones included, have no one to answer a question.
+_NOTE_HOW_TO_ADD_SOURCE = (
+    "Say in the result that a workspace manager can add it with Add data source "
+    "on the Data sources tab of this workspace's settings."
+)
+_STATE_ASSUMED_DEFAULT = (
+    "No one can answer a question in this run: choose a sensible default, state it "
+    "and its trade-off in the result, and finish the analysis."
+)
+
 # Headless (recipe) runs have no user to answer an ask-first question and no
 # resume path, so every rebuild offer becomes a direct call to the blocking tool.
 HEADLESS_BASE_SYSTEM_PROMPT = _render(
-    missing_source_next_step=(
-        "Say in the result that a workspace manager can add it with Add data source "
-        "on the Data sources tab of this workspace's settings."
-    ),
-    missing_assumption_guidance=(
-        "No one can answer a question in this run: choose a sensible default, state it "
-        "and its trade-off in the result, and finish the analysis."
-    ),
+    missing_source_next_step=_NOTE_HOW_TO_ADD_SOURCE,
+    missing_assumption_guidance=_STATE_ASSUMED_DEFAULT,
     query_failure_fix=(
         "propose a corrected semantic member, or call `run_materialization` to "
         "rebuild the data and continue in the same run"
@@ -295,24 +299,37 @@ once per run; if the data is still unreachable afterwards, report that and stop.
 Never infer missing data from a failed describe or query alone.""",
 )
 
-READ_ONLY_BASE_SYSTEM_PROMPT = _render(
-    missing_source_next_step=_OFFER_TO_ADD_SOURCE,
-    missing_assumption_guidance=_ASK_ABOUT_ASSUMPTION,
-    query_failure_fix=(
+_READ_ONLY_REPAIR = {
+    "query_failure_fix": (
         "propose a corrected semantic member, or explain that a workspace member "
         "with write access can refresh the data"
     ),
-    unavailable_count_guidance=(
+    "unavailable_count_guidance": (
         "Report the typed cause. If a repair is indicated, a workspace member with "
         "write access must perform the specified repair."
     ),
-    schema_drift_guidance="""The user's workspace role is read-only. When a repair is indicated,
+    "schema_drift_guidance": """The user's workspace role is read-only. When a repair is indicated,
 refer it to a workspace member with write access. Do not offer to rebuild or
 re-materialize it yourself; a generic query error does not establish missing data.""",
+}
+
+READ_ONLY_BASE_SYSTEM_PROMPT = _render(
+    missing_source_next_step=_OFFER_TO_ADD_SOURCE,
+    missing_assumption_guidance=_ASK_ABOUT_ASSUMPTION,
+    **_READ_ONLY_REPAIR,
+)
+
+# A read-only member can run a recipe, so role and run mode compose.
+READ_ONLY_HEADLESS_BASE_SYSTEM_PROMPT = _render(
+    missing_source_next_step=_NOTE_HOW_TO_ADD_SOURCE,
+    missing_assumption_guidance=_STATE_ASSUMED_DEFAULT,
+    **_READ_ONLY_REPAIR,
 )
 
 
 def select_base_system_prompt(*, write_capable: bool, interactive: bool) -> str:
     if not write_capable:
-        return READ_ONLY_BASE_SYSTEM_PROMPT
+        return (
+            READ_ONLY_BASE_SYSTEM_PROMPT if interactive else READ_ONLY_HEADLESS_BASE_SYSTEM_PROMPT
+        )
     return BASE_SYSTEM_PROMPT if interactive else HEADLESS_BASE_SYSTEM_PROMPT

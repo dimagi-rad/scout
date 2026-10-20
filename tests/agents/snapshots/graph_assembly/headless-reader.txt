@@ -1,5 +1,5 @@
 === system block 0 {"cache_control": {"type": "ephemeral"}} ===
-<<READ_ONLY_BASE_SYSTEM_PROMPT>>
+<<READ_ONLY_HEADLESS_BASE_SYSTEM_PROMPT>>
 <<ARTIFACT_READ_ONLY_PROMPT_ADDITION>>
 
 ## Workspace Instructions
