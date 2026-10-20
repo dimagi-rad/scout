@@ -11,13 +11,16 @@ from apps.users.services.tenant_listing.types import (
     ProviderRequest,
     TenantListPage,
 )
-from mcp_server.loaders.ocs_base import OCS_MAX_PAGE_SIZE
+
+# OCS defaults to 100 per page and allows up to 1500, but serializes every
+# experiment's versions without prefetching; verification gives one request
+# 10s, so stay well under the max rather than risk a page that cannot finish (#918).
+LIST_PAGE_SIZE = 500
 
 
 def list_request(base_url: str, credential_type: str, credential: str) -> ProviderRequest | None:
     """The first-page request, or None for a credential type OCS does not take."""
-    # OCS defaults to 100 per page; one request covers any real team (#918).
-    url = f"{base_url.rstrip('/')}/api/experiments/?page_size={OCS_MAX_PAGE_SIZE}"
+    url = f"{base_url.rstrip('/')}/api/experiments/?page_size={LIST_PAGE_SIZE}"
     if credential_type == TenantConnection.OAUTH:
         return ProviderRequest(url, {"Authorization": f"Bearer {credential}"})
     if credential_type == TenantConnection.API_KEY:

@@ -110,7 +110,7 @@ async def _verify(
             TenantConnection.OAUTH,
             "oauth-token",
             {"results": [{"id": "bot", "name": "Bot"}], "next": None},
-            "https://ocs.example/api/experiments/?page_size=1500",
+            "https://ocs.example/api/experiments/?page_size=500",
             ("Authorization", "Bearer oauth-token"),
         ),
         (
@@ -118,7 +118,7 @@ async def _verify(
             TenantConnection.API_KEY,
             "api-key",
             {"results": [{"id": "bot", "name": "Bot"}], "next": None},
-            "https://ocs.example/api/experiments/?page_size=1500",
+            "https://ocs.example/api/experiments/?page_size=500",
             ("X-api-key", "api-key"),
         ),
         (
@@ -172,7 +172,7 @@ async def test_complete_pagination_accepts_relative_and_same_origin_absolute_url
     assert result.outcome == VerificationOutcome.COMPLETE
     assert result.external_ids == frozenset({"one", "two"})
     assert [request[0] for request in requests] == [
-        "https://ocs.example/api/experiments/?page_size=1500",
+        "https://ocs.example/api/experiments/?page_size=500",
         "https://ocs.example/api/experiments/?page=2",
         "https://ocs.example/api/experiments/?page=3",
     ]
@@ -370,7 +370,7 @@ async def test_page_two_failure_discards_partial_results(settings):
     "next_url",
     [
         "https://evil.example/steal",
-        "/api/experiments/?page_size=1500",
+        "/api/experiments/?page_size=500",
     ],
 )
 async def test_unsafe_or_repeated_pagination_is_indeterminate(settings, next_url):
@@ -1138,7 +1138,7 @@ async def test_external_ids_do_not_change_other_providers(settings):
     assert result.outcome == VerificationOutcome.COMPLETE
     assert result.scoped is False
     assert [url for url, _kwargs in requests] == [
-        "https://ocs.example/api/experiments/?page_size=1500"
+        "https://ocs.example/api/experiments/?page_size=500"
     ]
 
 

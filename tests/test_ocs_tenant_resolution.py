@@ -197,7 +197,7 @@ async def _discover(user, pages):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_ocs_discovery_follows_same_origin_next(user, ocs_account):
-    first = "https://ocs.example.com/api/experiments/?page_size=1500"
+    first = "https://ocs.example.com/api/experiments/?page_size=500"
     second = "https://ocs.example.com/api/experiments/?cursor=2"
     pages = {
         first: {"results": [{"id": "e1", "name": "One"}], "next": second},
@@ -219,7 +219,7 @@ async def test_ocs_discovery_follows_same_origin_next(user, ocs_account):
     ],
 )
 async def test_ocs_discovery_rejects_foreign_next(user, ocs_account, next_url):
-    first = "https://ocs.example.com/api/experiments/?page_size=1500"
+    first = "https://ocs.example.com/api/experiments/?page_size=500"
     pages = {first: {"results": [{"id": "e1", "name": "One"}], "next": next_url}}
     result, seen = await _discover(user, pages)
     assert isinstance(result, TenantResolutionError)
@@ -229,7 +229,7 @@ async def test_ocs_discovery_rejects_foreign_next(user, ocs_account, next_url):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_ocs_discovery_detects_next_cycle(user, ocs_account):
-    first = "https://ocs.example.com/api/experiments/?page_size=1500"
+    first = "https://ocs.example.com/api/experiments/?page_size=500"
     pages = {first: {"results": [{"id": "e1", "name": "One"}], "next": first}}
     result, seen = await _discover(user, pages)
     assert isinstance(result, TenantResolutionError)

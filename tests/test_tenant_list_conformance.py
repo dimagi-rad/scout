@@ -46,12 +46,12 @@ from apps.users.services.api_key_providers.base import (
 from apps.users.services.api_key_providers.commcare import CommCareStrategy
 from apps.users.services.api_key_providers.ocs import OCSStrategy
 from apps.users.services.tenant_listing import connect as connect_listing
+from apps.users.services.tenant_listing.ocs import LIST_PAGE_SIZE
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
-from mcp_server.loaders.ocs_base import OCS_MAX_PAGE_SIZE
 
 pytestmark = pytest.mark.asyncio
 
@@ -197,7 +197,7 @@ def listing_url(path: EntryPath) -> str:
     if path.family == "commcare":
         return COMMCARE_SERVERS[path.server].user_domains_url
     if path.family == "ocs":
-        return f"{OCS_ORIGIN}/api/experiments/?page_size={OCS_MAX_PAGE_SIZE}"
+        return f"{OCS_ORIGIN}/api/experiments/?page_size={LIST_PAGE_SIZE}"
     return CONNECT_LISTING
 
 
@@ -205,8 +205,8 @@ def page_two_url(path: EntryPath) -> str:
     if path.family == "commcare":
         return f"{listing_url(path)}?limit=2&offset=2"
     if path.family == "ocs":
-        # The saved page's own next link, which the paginator follows verbatim.
-        return f"{OCS_ORIGIN}/api/experiments/?cursor=cD0yMDI2"
+        # DRF keeps the requested page_size in its next links.
+        return f"{listing_url(path)}&cursor=cD0yMDI2"
     return f"{listing_url(path)}?cursor=cD0yMDI2"
 
 

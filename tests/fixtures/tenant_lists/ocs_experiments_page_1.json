@@ -1,5 +1,5 @@
 {
-  "next": "{origin}/api/experiments/?cursor=cD0yMDI2",
+  "next": "{origin}/api/experiments/?page_size=500&cursor=cD0yMDI2",
   "previous": null,
   "results": [
     {
