@@ -107,9 +107,6 @@ These are staged-rollout switches.
 | `LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE` | `20` (`4` in development) | Maximum size of that pool. The pool is per process, so multiply by the number of API and worker processes when sizing PostgreSQL `max_connections`. |
 | `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_BASE_URL` | (empty) | Langfuse tracing for agent runs. Leave blank to disable. |
 | `TELEMETRY_ENABLED` | `True` | In-app usage and performance events (#862), stored in the platform database: ids, durations, counts, outcomes and tool names, never message or query text. Raw events are deleted after 400 days by a nightly task. Set it to `False` to stop every write; requests and chat turns behave the same either way. |
-| `STORAGE_DISK_PATH` | `/` | Path whose filesystem the worker's 15-minute storage check reads. In a container, `/` reports the filesystem that holds Docker's data root. |
-| `STORAGE_DISK_WARNING_FREE_PERCENT`, `STORAGE_DISK_WARNING_FREE_GIB` | `20`, `16` | The storage check sends a Sentry warning when free space is below either one. |
-| `STORAGE_DISK_CRITICAL_FREE_PERCENT`, `STORAGE_DISK_CRITICAL_FREE_GIB` | `10`, `8` | The storage check sends a Sentry error when free space is below either one. The GiB defaults match the deploy workflow's disk guard (`HOST_MIN_FREE_GB`). |
 
 ### Email
 
@@ -121,6 +118,16 @@ The development settings always print email to the console. Elsewhere the base s
 | `AWS_SES_REGION` | `us-east-1` | SES region, used by the production settings. |
 | `AWS_SES_ACCESS_KEY_ID`, `AWS_SES_SECRET_ACCESS_KEY` | (empty) | Explicit SES credentials. When unset, boto3's default credential chain is used. |
 | `DEFAULT_FROM_EMAIL` | `Scout <noreply@scout.dimagi.com>` | Sender address. |
+
+### Storage headroom
+
+Every 15 minutes the worker checks free space on the host filesystem and sends a Sentry warning or error when it runs low. It sends the error on whichever threshold free space crosses first: the percentage or the GiB floor. The same applies to the warning. In the Kamal deployment the worker receives only the variables listed in `config/deploy-worker.yml`, so add these under `env.clear` there to change them.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STORAGE_DISK_PATH` | `/` | Path whose filesystem the worker's 15-minute storage check reads. In a container, `/` reports the filesystem that holds Docker's data root. |
+| `STORAGE_DISK_WARNING_FREE_PERCENT`, `STORAGE_DISK_WARNING_FREE_GIB` | `20`, `16` | The storage check sends a Sentry warning when free space is below either one. |
+| `STORAGE_DISK_CRITICAL_FREE_PERCENT`, `STORAGE_DISK_CRITICAL_FREE_GIB` | `10`, `8` | The storage check sends a Sentry error when free space is below either one. The GiB defaults match the deploy workflow's disk guard (`HOST_MIN_FREE_GB`). |
 
 ### Error monitoring (Sentry)
 

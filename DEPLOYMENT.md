@@ -251,7 +251,8 @@ and before it nothing watched the host disk (see [Host disk full](#host-disk-ful
   (`scout-rds-low-storage`). In production the tenant data shares this
   database (`MANAGED_DATABASE_URL` is `DATABASE_URL`), so the size includes
   every workspace's loaded data. It takes no table locks. Per-table sizes are
-  not logged, because reading them locks every tenant table.
+  not logged: sizing a table waits behind any load or teardown holding it
+  `ACCESS EXCLUSIVE`, and later DDL then queues behind the check.
 
 The worker reads these from its environment. Kamal passes only the variables
 listed in `config/deploy-worker.yml`, so to change one, add it under `env.clear`
