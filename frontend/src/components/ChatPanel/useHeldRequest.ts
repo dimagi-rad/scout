@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import type { FileUIPart } from "ai"
 
 import type { PendingRequest } from "@/api/jobs"
 import { ApiError } from "@/api/client"
@@ -12,10 +13,15 @@ import {
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 
 /** "send": the request was claimed or is gone, so the text is a new turn instead. */
-function isTooLong(error: unknown): boolean {
+/** A 400 the server explains (too long, too many attachments, one no longer available). */
+function isExplainedRefusal(error: unknown): boolean {
   if (!(error instanceof ApiError) || error.status !== 400) return false
   const body = error.body as { reason?: unknown } | null | undefined
-  return body?.reason === "pending_request_too_long"
+  return body?.reason === "pending_request_too_long" || body?.reason === "attachment_invalid"
+}
+
+function partKey(text: string, files: FileUIPart[]): string {
+  return JSON.stringify([text, files.map((file) => file.url)])
 }
 
 /**
@@ -42,7 +48,7 @@ export interface HeldRequest {
   onHeld: (pending: PendingRequest) => void
   /** ``keepHidden``: a turn is running, so the messages it hid are still its own. */
   onMessagesLoaded: (pending: PendingRequest | null, opts?: { keepHidden?: boolean }) => void
-  add: (text: string) => Promise<AddOutcome>
+  add: (text: string, files?: FileUIPart[]) => Promise<AddOutcome>
   /** Hide the request before the client sends it itself; ``restore`` undoes it. */
   takeForSend: () => PendingRequest | null
   restore: (sendThreadId: string) => void
@@ -124,7 +130,7 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
     })
   }
   const { sent, hiddenMessageIds } = seen
-  const failedPartRef = useRef<{ id: string; text: string } | null>(null)
+  const failedPartRef = useRef<{ id: string; key: string } | null>(null)
   const pending = current ?? sent
   const phase = pending ? (current ? pendingPhase(pending) : "answering") : null
 
@@ -164,19 +170,37 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
   )
 
   const add = useCallback(
-    async (text: string): Promise<AddOutcome> => {
+    async (text: string, files: FileUIPart[] = []): Promise<AddOutcome> => {
       if (!workspaceId || !current) return "send"
-      // A resend of text whose add failed reuses its id, so an add that landed
+      // A resend of a part whose add failed reuses its id, so an add that landed
       // although its response was lost is not added twice.
       const retry = failedPartRef.current
-      const part = { id: retry?.text === text ? retry.id : newPartId(), text }
+      const key = partKey(text, files)
+      const part = {
+        id: retry?.key === key ? retry.id : newPartId(),
+        text,
+        ...(files.length ? { files } : {}),
+      }
       failedPartRef.current = null
       setPendingRequest(
         threadId,
         {
           ...current,
           version: current.version + 1,
-          parts: [...current.parts, { ...part, added_at: new Date().toISOString() }],
+          parts: [
+            ...current.parts,
+            {
+              id: part.id,
+              text,
+              added_at: new Date().toISOString(),
+              attachments: files.map((file) => ({
+                id: file.url.split("/").at(-2) ?? file.url,
+                filename: file.filename ?? "attachment",
+                media_type: file.mediaType,
+                size: 0,
+              })),
+            },
+          ],
         },
         "inFlight",
       )
@@ -189,10 +213,10 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
         void refresh()
         // Claimed or gone: it is being (or was) answered, so this is a new turn.
         if (isPendingConflict(error)) return "send"
-        failedPartRef.current = part
-        // A 400 (the request would be too long) says what to do; it is not transient.
+        failedPartRef.current = { id: part.id, key }
+        // A 400 the server explains says what to do; it is not transient.
         return {
-          failed: isTooLong(error)
+          failed: isExplainedRefusal(error)
             ? `${(error as ApiError).message}. It's back in the message box.`
             : ADD_FAILED_MESSAGE,
         }

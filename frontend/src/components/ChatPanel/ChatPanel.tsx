@@ -17,7 +17,7 @@ import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import type { PendingRequest } from "@/api/jobs"
-import { PART_SEPARATOR, pendingRequestText } from "@/api/pendingRequests"
+import { joinPartTexts, pendingRequestFiles, pendingRequestText } from "@/api/pendingRequests"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
 import { ChatComposer } from "./ChatComposer"
 import { QuoteSelectionAction } from "./QuoteSelectionAction"
@@ -977,9 +977,13 @@ export function ChatPanel() {
 
   /** Send the held request as this turn, with ``extra`` after it. */
   function sendHeld(pending: PendingRequest, extra?: string, files: FileUIPart[] = []) {
-    const text = extra
-      ? `${pendingRequestText(pending)}${PART_SEPARATOR}${extra}`
-      : pendingRequestText(pending)
+    const text = joinPartTexts([pendingRequestText(pending), extra ?? ""])
+    // The server adds the held attachments itself; sending them too shows them now.
+    const heldFiles = pendingRequestFiles(pending)
+    const sentFiles = [
+      ...heldFiles,
+      ...files.filter((file) => !heldFiles.some((held) => held.url === file.url)),
+    ]
     const messageId = generateId()
     heldSends.set(threadId, {
       messageId,
@@ -993,8 +997,12 @@ export function ChatPanel() {
     })
     resetOverloadState()
     setStoppedNotice(false)
-    const settle = listSendingThread(text)
-    void sendMessage({ id: messageId, role: "user", parts: [{ type: "text", text }, ...files] })
+    const settle = listSendingThread(text || sentFiles[0]?.filename || "")
+    void sendMessage({
+      id: messageId,
+      role: "user",
+      parts: [...(text ? [{ type: "text" as const, text }] : []), ...sentFiles],
+    })
       .finally(settle)
   }
 
@@ -1044,13 +1052,17 @@ export function ChatPanel() {
       setInput(body)
       return
     }
+    // Files taken for an add that turned into a send go out with it.
+    let carried: FileUIPart[] = []
     if (held.adding) {
       const sentFrom = threadId
-      const outcome = await held.add(text)
+      carried = attachments.take()
+      if (!text.trim() && !carried.length) return
+      const outcome = await held.add(text, carried)
       if (outcome === "send" && contextRef.current.threadId === sentFrom && historyLoadingRef.current) {
         // The request is gone, but a turn still can't start before the history lands.
         setAddFailed(null)
-        returnToComposer(activeDomainId, sentFrom, text)
+        returnToComposer(activeDomainId, sentFrom, text, carried)
         return
       }
       if (outcome === "added") {
@@ -1059,17 +1071,17 @@ export function ChatPanel() {
       }
       if (contextRef.current.threadId !== sentFrom) {
         // The user moved on meanwhile; keep the text in that chat's draft.
-        returnToComposer(activeDomainId, sentFrom, text)
+        returnToComposer(activeDomainId, sentFrom, text, carried)
         return
       }
       if (outcome !== "send") {
-        returnToComposer(activeDomainId, sentFrom, text)
+        returnToComposer(activeDomainId, sentFrom, text, carried)
         setAddFailed(outcome.failed)
         return
       }
     }
     setAddFailed(null)
-    const files = attachments.take()
+    const files = [...carried, ...attachments.take()]
     if (!text.trim() && !files.length) return
     const unanswered = held.phase === "unanswered" ? held.takeForSend() : null
     if (unanswered) sendHeld(unanswered, text || undefined, files)
@@ -1162,12 +1174,7 @@ export function ChatPanel() {
   }
 
   return (
-    <ChatDropZone
-      onFiles={attachments.add}
-      // A message joining a held request takes text only.
-      disabled={held.adding}
-      className="flex h-full min-w-0"
-    >
+    <ChatDropZone onFiles={attachments.add} className="flex h-full min-w-0">
       <div className="flex min-w-0 flex-1 flex-col">
         <ChatThreadHeader
           title={threadTitle}

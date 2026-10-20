@@ -78,10 +78,20 @@ export interface RecentTermination {
   retry_available: boolean
 }
 
+/** An attachment a held part carries, as the server stores it. */
+export interface PendingAttachment {
+  id: string
+  filename: string
+  media_type: string
+  size: number
+}
+
 export interface PendingRequestPart {
   id: string
+  /** Empty when the part carries only attachments. */
   text: string
   added_at: string
+  attachments?: PendingAttachment[]
 }
 
 /** What the user typed while their chat's first data load ran, held server-side

@@ -97,14 +97,9 @@ export function ChatComposer({
   const length = messageLength(measured)
   const tooLong = isOverLimit(length)
   const hasFiles = attachments?.ready ?? false
-  // A held request takes text only: its files would have nowhere to go.
-  const addBlock =
-    adding && attachments?.items.length ? "Files can be sent once the data has loaded" : null
   const holdReason =
     (blocked ? sendBlockedReason : null)
     ?? (tooLong ? "Message is too long" : null)
-    // Ahead of the upload state: waiting for an upload would not help here.
-    ?? addBlock
     ?? attachmentsBlockReason(attachments)
     // Quotes are only read back as quotes when a reply follows them.
     ?? (quotes.length && !trimmed ? "Type a reply to go with the quotes" : null)
@@ -190,7 +185,7 @@ export function ChatComposer({
           selectedIndex={slashMenuIndex}
           canWrite={canWrite}
         />
-        {attachments && !adding && <AttachButton onFiles={attachments.add} className="-mr-1" />}
+        {attachments && <AttachButton onFiles={attachments.add} className="-mr-1" />}
         <Textarea
           ref={inputRef}
           data-testid="chat-input"
@@ -203,7 +198,7 @@ export function ChatComposer({
             setSlashMenuIndex(0)
           }}
           onKeyDown={handleKeyDown}
-          onPaste={(e) => attachPastedFiles(e, adding ? undefined : attachments)}
+          onPaste={(e) => attachPastedFiles(e, attachments)}
           placeholder={adding ? "Add to your request…" : placeholder}
           className="field-sizing-fixed min-h-9 flex-1 resize-none py-1.5"
         />
@@ -243,7 +238,7 @@ export function ChatComposer({
         id={counterId}
         length={length}
         includesHeld={Boolean(message && heldText)}
-        suggestAttach={Boolean(attachments) && !adding}
+        suggestAttach={Boolean(attachments)}
       />
     </div>
   )

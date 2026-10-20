@@ -1,5 +1,8 @@
+import type { FileUIPart } from "ai"
+
+import { attachmentUrl } from "@/api/chatAttachments"
 import { api, ApiError } from "@/api/client"
-import type { PendingRequest } from "@/api/jobs"
+import type { PendingAttachment, PendingRequest } from "@/api/jobs"
 
 /** Joins the parts the way the server sends them as one message. */
 export const PART_SEPARATOR = "\n\n"
@@ -11,7 +14,11 @@ function base(workspaceId: string, threadId: string): string {
 }
 
 export const pendingRequestApi = {
-  addPart: (workspaceId: string, threadId: string, part: { id: string; text: string }) =>
+  addPart: (
+    workspaceId: string,
+    threadId: string,
+    part: { id: string; text: string; files?: FileUIPart[] },
+  ) =>
     api.post<PendingRequest>(`${base(workspaceId, threadId)}/parts/`, part),
   discard: (workspaceId: string, threadId: string, version: number) =>
     api.delete<{ status: string }>(`${base(workspaceId, threadId)}/`, { version }),
@@ -35,8 +42,34 @@ export function pendingErrorReason(error: unknown): string | null {
   return typeof reason === "string" ? reason : null
 }
 
+/** Joins the text as the server does: an attachments-only part adds no text and no separator. */
+export function joinPartTexts(texts: string[]): string {
+  return texts.filter((text) => text).join(PART_SEPARATOR)
+}
+
 export function pendingRequestText(pending: PendingRequest): string {
-  return pending.parts.map((part) => part.text).join(PART_SEPARATOR)
+  return joinPartTexts(pending.parts.map((part) => part.text))
+}
+
+export function pendingAttachmentPart(attachment: PendingAttachment): FileUIPart {
+  return {
+    type: "file",
+    mediaType: attachment.media_type,
+    filename: attachment.filename,
+    url: attachmentUrl(attachment.id),
+  }
+}
+
+/** The request's attachments as message parts, each once. */
+export function pendingRequestFiles(pending: PendingRequest): FileUIPart[] {
+  const seen = new Set<string>()
+  return pending.parts.flatMap((part) =>
+    (part.attachments ?? []).flatMap((attachment) => {
+      if (seen.has(attachment.id)) return []
+      seen.add(attachment.id)
+      return [pendingAttachmentPart(attachment)]
+    }),
+  )
 }
 
 /**

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react"
-import { AlertCircle, Clock, Loader2, Pencil, X } from "lucide-react"
+import { AlertCircle, Clock, Loader2, Paperclip, Pencil, X } from "lucide-react"
 
 import type { PendingRequest } from "@/api/jobs"
 import { pendingRequestText, type PendingPhase } from "@/api/pendingRequests"
@@ -58,6 +58,8 @@ export function PendingRequestCard({
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const editing = draft !== null && editable
+  // A rewrite keeps the request's attachments, so the text may then be left empty.
+  const hasAttachments = pending.parts.some((part) => part.attachments?.length)
 
   const abandonRef = useRef(onAbandonEdit)
   abandonRef.current = onAbandonEdit
@@ -187,7 +189,7 @@ export function PendingRequestCard({
                 type="button"
                 size="sm"
                 onClick={() => void save()}
-                disabled={saving || !draft?.trim()}
+                disabled={saving || !(draft?.trim() || hasAttachments)}
                 data-testid="pending-request-edit-save"
               >
                 Save
@@ -209,7 +211,23 @@ export function PendingRequestCard({
                   }`}
                   data-testid={`pending-request-part-${part.id}`}
                 >
-                  <p className="flex-1 whitespace-pre-wrap">{part.text}</p>
+                  <div className="flex-1 space-y-1">
+                    {part.text && <p className="whitespace-pre-wrap">{part.text}</p>}
+                    {part.attachments?.length ? (
+                      <ul className="flex flex-wrap gap-1" aria-label="Attached files">
+                        {part.attachments.map((attachment) => (
+                          <li
+                            key={attachment.id}
+                            className="flex max-w-56 items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-xs"
+                            data-testid="pending-request-attachment"
+                          >
+                            <Paperclip className="size-3 shrink-0" aria-hidden="true" />
+                            <span className="truncate">{attachment.filename}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
                   {editable && index > 0 && onRemovePart && (
                     <button
                       type="button"
