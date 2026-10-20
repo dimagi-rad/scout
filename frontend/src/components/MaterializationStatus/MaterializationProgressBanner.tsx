@@ -3,7 +3,7 @@ import { api } from "@/api/client"
 import type { ActiveJob, LoadPhase, WorkspaceLoad } from "@/api/jobs"
 import { useRetryableAction } from "@/hooks/useRetryableAction"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
-import { IMPORT_EXPLAINER, importingLabel } from "@/lib/importCopy"
+import { IMPORT_EXPLAINER, importingSourceLabel } from "@/lib/importCopy"
 
 import { formatTimeEstimate } from "./timeEstimate"
 
@@ -82,8 +82,6 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
       rowsTotal != null && rowsTotal > 0
         ? `${rowsStr} of ${rowsTotal.toLocaleString()} ${unit}`
         : `${rowsStr} ${unit}`
-  } else if (sourceName && provider) {
-    countText = `Importing ${sourceName}…`
   } else {
     countText = "Preparing…"
   }
@@ -135,8 +133,7 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
               data-phase={phase ?? undefined}
               title={phaseTitle ? undefined : IMPORT_EXPLAINER}
             >
-              {phaseTitle
-                ?? (provider || !sourceName ? importingLabel(provider) : `Importing ${sourceName}…`)}
+              {phaseTitle ?? importingSourceLabel(sourceName, provider)}
             </span>
             {sourceText && (
               <span

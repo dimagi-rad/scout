@@ -69,13 +69,22 @@ describe("post-load phases", () => {
     expect(screen.getByTestId("materialization-banner-rows")).toHaveTextContent("Preparing…")
   })
 
-  it("names the provider being imported from, and the source below it", () => {
-    renderJob({ provider: "commcare_connect", progress: { ...baseProgress, source: "visits" } })
-
+  it("names the source and its provider, also while rows arrive", () => {
+    renderJob({
+      provider: "commcare_connect",
+      progress: { ...baseProgress, source: "visits", rows_loaded: 50, rows_total: 100 },
+    })
     expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent(
-      "Importing from Connect…",
+      "Importing visits from Connect…",
     )
-    expect(screen.getByTestId("materialization-banner-rows")).toHaveTextContent("Importing visits…")
+    expect(screen.getByTestId("materialization-banner-rows")).toHaveTextContent("50 of 100")
+  })
+
+  it("names only the provider when the source is not known yet", () => {
+    renderJob({ provider: "ocs", progress: { ...baseProgress, source: null } })
+    expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent(
+      "Importing from OCS…",
+    )
   })
 })
 

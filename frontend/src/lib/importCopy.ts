@@ -14,3 +14,14 @@ export function importingLabel(
   const [only] = labels
   return labels.size === 1 && only ? `Importing from ${only}…` : "Importing data…"
 }
+
+/** "Importing visits from Connect…", falling back to whichever half is known. */
+export function importingSourceLabel(
+  source: string | null | undefined,
+  provider: string | null | undefined,
+): string {
+  const short = provider ? providerShortLabel(provider) : null
+  if (source && short) return `Importing ${source} from ${short}…`
+  if (source) return `Importing ${source}…`
+  return importingLabel(provider)
+}
