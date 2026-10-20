@@ -31,6 +31,8 @@ async def isolate_job_thread(
     # Not ``async with ThreadSensitiveContext()``: its exit shuts the executor down
     # with wait=True on the event loop, so a job cancelled twice mid sync call would
     # freeze the whole worker (other jobs, heartbeat) until that call returned.
+    # The cost: such an orphaned call keeps running after its job has ended and
+    # released its data locks, so a retry may overlap it.
     try:
         SyncToAsync.thread_sensitive_context.get()
     except LookupError:

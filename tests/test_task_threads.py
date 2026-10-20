@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import threading
 import time
 
@@ -47,10 +48,12 @@ async def test_job_exit_does_not_wait_for_a_sync_call_still_running():
         loop.call_soon_threadsafe(started.set)
         release.wait(3)
 
+    calls = []
+
     async def job():
-        call = asyncio.ensure_future(sync_to_async(slow)())
+        calls.append(asyncio.ensure_future(sync_to_async(slow)()))
         await started.wait()
-        call.cancel()
+        calls[0].cancel()
 
     # A blocked loop can't time itself out, so measure instead of wait_for.
     began = time.monotonic()
@@ -59,4 +62,6 @@ async def test_job_exit_does_not_wait_for_a_sync_call_still_running():
     finally:
         elapsed = time.monotonic() - began
         release.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await calls[0]
     assert elapsed < 1
