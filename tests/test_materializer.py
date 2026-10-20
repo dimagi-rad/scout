@@ -663,6 +663,14 @@ class TestRunPipeline:
             ) as mock_cw,
             patch("mcp_server.services.materializer.ConnectPaymentLoader") as mock_payments,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch(
+                "mcp_server.services.materializer._source_date_range",
+                side_effect=lambda _schema, _provider, table: (
+                    {"column": "visit_date", "earliest": "a", "latest": "b"}
+                    if table == "raw_visits"
+                    else None
+                ),
+            ),
         ):
             schema = self._make_schema()
             mock_mgr.return_value.provision.return_value = schema
@@ -691,6 +699,9 @@ class TestRunPipeline:
         assert sources["visits"]["state"] == "completed"
         assert sources["completed_works"]["state"] == "failed"
         assert sources["payments"]["state"] == "skipped"
+        # A served PARTIAL run keeps the date range of a table it completed.
+        assert sources["visits"]["date_range"]["column"] == "visit_date"
+        assert "date_range" not in sources["completed_works"]
         # 4th source we never reached is recorded as skipped, not completed.
         assert "rows" in sources["completed_works"]
         assert sources["completed_works"]["rows"] == 0

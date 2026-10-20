@@ -443,9 +443,8 @@ def run_pipeline(
                         "rows": 0,
                         "cursor_state": None,
                     }
-                # A PARTIAL run can be served, so its completed tables keep their ranges.
-                _record_date_ranges(schema_name, pipeline, sources_list, source_results)
                 _stamp_load_ended(run, pipeline, source_results, duration_s=_elapsed(run_started))
+                _add_partial_date_ranges(run, schema_name, pipeline, sources_list, source_results)
                 raise
             # Preserve the final cursor watermark for resumable sources; non-resumable keep None.
             final_cursor = (source_results.get(source.name) or {}).get("cursor_state")
@@ -1341,6 +1340,25 @@ def _record_date_ranges(
         date_range = _source_date_range(schema_name, pipeline.provider, source.physical_table_name)
         if date_range is not None:
             entry["date_range"] = date_range
+
+
+def _add_partial_date_ranges(
+    run, schema_name: str, pipeline: PipelineConfig, sources: list, source_results: dict
+) -> None:
+    """A PARTIAL run can be served, so its completed tables get ranges too.
+
+    After the run is stamped, so the scan never holds it non-terminal; the write
+    is conditional so a later state change (a reconcile) is not overwritten.
+    """
+    if run.state != MaterializationRun.RunState.PARTIAL:
+        return
+    _record_date_ranges(schema_name, pipeline, sources, source_results)
+    try:
+        MaterializationRun.objects.filter(
+            id=run.id, state=MaterializationRun.RunState.PARTIAL
+        ).update(result={**run.result, "sources": source_results})
+    except Exception:
+        logger.warning("Could not save date ranges for run %s", run.id, exc_info=True)
 
 
 def _source_date_range(schema_name: str, provider: str, table: str) -> dict | None:
