@@ -3,19 +3,10 @@ const Fastify = require('fastify');
 const Redis = require('ioredis');
 const { LRUCache } = require('lru-cache');
 
-// The image's pinned Cube version; the installed compiler's own version wins, so
-// an upgrade is reported even if this line is not bumped.
-const PINNED_COMPILER_VERSION = '1.6.39';
-
-function installedCompilerVersion(load = require) {
-  try {
-    return load('@cubejs-backend/schema-compiler/package.json').version || PINNED_COMPILER_VERSION;
-  } catch (error) {
-    return PINNED_COMPILER_VERSION;
-  }
-}
-
-const COMPILER_VERSION = installedCompilerVersion();
+// Read from the installed compiler, never a hand-kept constant: Scout skips
+// revalidation while this matches (#918), so a stale value would hide an upgrade.
+// No fallback on purpose: if this throws, the validator must not start.
+const COMPILER_VERSION = require('@cubejs-backend/schema-compiler/package.json').version;
 const VALIDATOR_VERSION = 'v1';
 const DEFAULT_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
 const DEFAULT_RESULT_CACHE_MAX = 2000;
@@ -317,7 +308,6 @@ module.exports = {
   buildCacheKey,
   createRedisClient,
   createValidatorApp,
-  installedCompilerVersion,
   sanitizeCachedResult,
   serviceFailureResult,
   sha256,

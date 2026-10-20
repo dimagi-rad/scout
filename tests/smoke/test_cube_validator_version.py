@@ -16,7 +16,7 @@ _VERIFY = r"""
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
-const { createValidatorApp, installedCompilerVersion } = require('/cube/conf/validator-core');
+const { createValidatorApp } = require('/cube/conf/validator-core');
 
 async function run() {
   const compilerDir = path.dirname(require.resolve('@cubejs-backend/schema-compiler'));
@@ -42,7 +42,6 @@ async function run() {
   const body = response.json();
   assert.equal(body.compiler_version, installed);
   assert.ok(body.validator_version);
-  assert.equal(installedCompilerVersion(() => { throw new Error('missing'); }), '1.6.39');
   process.stdout.write(JSON.stringify(body));
   await app.close();
 }
