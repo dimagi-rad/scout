@@ -53,13 +53,14 @@ export function useStickToBottom(
     else setDetached((prev) => (prev && current ? prev : { content, streamingText, resetKey, forceKey }))
   }
 
-  // Wheel/touch are not coalesced like scroll events, so they catch a user scroll that a
-  // concurrent pin would otherwise swallow. They only ever detach; scroll alone re-attaches.
-  const detachOnIntent = () => {
-    if (isStuck) setDetached({ content, streamingText, resetKey, forceKey })
-  }
+  // Wheel isn't coalesced like scroll events, so it catches a user scroll that a concurrent
+  // pin would otherwise swallow. It only detaches, and only when the list can actually move up
+  // (otherwise no scroll event follows to re-attach).
   const onWheel = (e: { deltaY: number }) => {
-    if (e.deltaY < 0) detachOnIntent()
+    const el = ref.current
+    if (e.deltaY < 0 && isStuck && el && el.scrollTop > BOTTOM_THRESHOLD_PX) {
+      setDetached({ content, streamingText, resetKey, forceKey })
+    }
   }
 
   const jumpToBottom = useCallback(() => {
@@ -68,5 +69,5 @@ export function useStickToBottom(
     if (el) el.scrollTop = el.scrollHeight
   }, [ref])
 
-  return { onScroll, onWheel, onTouchMove: detachOnIntent, hasNewBelow, jumpToBottom }
+  return { onScroll, onWheel, hasNewBelow, jumpToBottom }
 }
