@@ -692,20 +692,25 @@ class SchemaManager:
         """Map each tenant to its view prefix, digesting only the prefixes that collide.
 
         Connect opportunities in one program often share a name, so a cross-opportunity
-        workspace used to fail its whole build on the collision (#916). Tenants without
-        a collision keep ``_view_prefix`` so existing view names never change.
+        workspace used to fail its whole build on the collision (#916). Pass every
+        workspace tenant, not only the loaded ones, so a source dropping out never
+        renames the others' views. In a colliding group the oldest source keeps the
+        plain prefix, so adding a same-named source leaves the existing views alone.
         """
-        prefixes = {tenant: self._view_prefix(tenant) for tenant in tenants}
-        counts = Counter(prefixes.values())
+        plain = {tenant: self._view_prefix(tenant) for tenant in tenants}
+        oldest: dict[str, object] = {}
+        for tenant in sorted(tenants, key=lambda t: (t.created_at, str(t.id))):
+            oldest.setdefault(plain[tenant], tenant)
+        counts = Counter(plain.values())
         return {
             tenant: (
                 self._digested_view_prefix(
                     tenant, self._sanitize_schema_name(tenant.canonical_name)
                 )
-                if counts[prefix] > 1
+                if counts[prefix] > 1 and oldest[prefix] != tenant
                 else prefix
             )
-            for tenant, prefix in prefixes.items()
+            for tenant, prefix in plain.items()
         }
 
     def build_view_schema(self, workspace, *, revive_retired=True) -> WorkspaceViewSchema:
@@ -848,7 +853,7 @@ class SchemaManager:
             tenant_prefixes: list[tuple[str, Tenant, str]] = []
             # Use the threaded tenant objects, NOT a lookup by external_id —
             # that raises MultipleObjectsReturned across providers (arch #235).
-            view_prefixes = self._view_prefixes([tenant_obj for _, tenant_obj in tenant_schemas])
+            view_prefixes = self._view_prefixes(tenants)
             for schema_name, tenant_obj in tenant_schemas:
                 tenant_external_id = tenant_obj.external_id
                 prefix = view_prefixes[tenant_obj]
