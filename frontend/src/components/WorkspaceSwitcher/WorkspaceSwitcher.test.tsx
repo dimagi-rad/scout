@@ -235,6 +235,20 @@ describe("workspace sources", () => {
 
     expect(screen.getByTestId("workspace-search")).toBeInTheDocument()
   })
+
+  it("ignores a request made before it mounted", () => {
+    useAppStore.setState({ domains: [workspace()], activeDomainId: "workspace-recorded" })
+    act(() => useAppStore.getState().uiActions.openWorkspaceSwitcher())
+
+    render(
+      <MemoryRouter>
+        <WorkspaceSwitcher />
+      </MemoryRouter>,
+    )
+
+    expect(screen.queryByTestId("workspace-search")).toBeNull()
+    expect(useAppStore.getState().workspaceSwitcherMounts).toBe(1)
+  })
 })
 
 describe("combining search matches", () => {

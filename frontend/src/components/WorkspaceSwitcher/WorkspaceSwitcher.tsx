@@ -354,8 +354,16 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     }
   }
 
+  const mountWorkspaceSwitcher = useAppStore((s) => s.uiActions.mountWorkspaceSwitcher)
+  useEffect(() => mountWorkspaceSwitcher(), [mountWorkspaceSwitcher])
+
+  // Requests made before this switcher mounted (e.g. embed mode switching to "full")
+  // must not pop it open unasked.
+  const handledRequest = useRef(openRequest)
   useEffect(() => {
-    if (openRequest > 0) handleOpenChange(true)
+    if (openRequest === handledRequest.current) return
+    handledRequest.current = openRequest
+    handleOpenChange(true)
     // Only a new request opens it; handleOpenChange is recreated every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openRequest])

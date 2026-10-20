@@ -23,8 +23,12 @@ function workspace(tenantNames: string[]): WorkspaceListItem {
   }
 }
 
-function renderEmptyState(ws: WorkspaceListItem) {
-  useAppStore.setState({ domains: [ws], activeDomainId: ws.id })
+function renderEmptyState(ws: WorkspaceListItem, switcherMounts = 1) {
+  useAppStore.setState({
+    domains: [ws],
+    activeDomainId: ws.id,
+    workspaceSwitcherMounts: switcherMounts,
+  })
   render(<ChatEmptyState input="" setInput={vi.fn()} onSend={vi.fn()} />)
 }
 
@@ -51,4 +55,19 @@ it("opens the workspace switcher from Change", () => {
   fireEvent.click(screen.getByTestId("chat-workspace-change"))
 
   expect(useAppStore.getState().workspaceSwitcherRequest).toBe(before + 1)
+})
+
+it("hides Change when no workspace switcher is mounted (embed chat mode)", () => {
+  renderEmptyState(workspace(["Kenya"]), 0)
+
+  expect(screen.getByTestId("chat-workspace-context")).toHaveTextContent(
+    "Asking about CHC program · Source: Kenya",
+  )
+  expect(screen.queryByTestId("chat-workspace-change")).toBeNull()
+})
+
+it("does not label an empty source list as sources", () => {
+  renderEmptyState(workspace([]))
+
+  expect(screen.getByTestId("chat-workspace-sources")).toHaveTextContent(/^no data sources$/)
 })

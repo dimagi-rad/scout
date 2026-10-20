@@ -79,9 +79,13 @@ export interface UiSlice {
   localTurnThreadIds: ReadonlySet<string>
   // Bumped to ask the mounted workspace switcher to open, e.g. from the chat's "Change" link.
   workspaceSwitcherRequest: number
+  // How many switchers are mounted; embed chat mode has none, so nothing may ask to open one.
+  workspaceSwitcherMounts: number
   uiActions: {
     newThread: () => void
     openWorkspaceSwitcher: () => void
+    /** Registers a mounted switcher; call the returned function on unmount. */
+    mountWorkspaceSwitcher: () => () => void
     selectThread: (id: string) => Promise<void>
     fetchThreads: (workspaceId: string) => Promise<void>
     /** Lists a new chat whose first message is on its way, until the server lists it. */
@@ -144,9 +148,15 @@ export const createUiSlice: StateCreator<UiSlice & DomainSlice, [], [], UiSlice>
     accessRetryOutcome: null,
     localTurnThreadIds: new Set(),
     workspaceSwitcherRequest: 0,
+    workspaceSwitcherMounts: 0,
     uiActions: {
       openWorkspaceSwitcher: () => {
         set((state) => ({ workspaceSwitcherRequest: state.workspaceSwitcherRequest + 1 }))
+      },
+      mountWorkspaceSwitcher: () => {
+        set((state) => ({ workspaceSwitcherMounts: state.workspaceSwitcherMounts + 1 }))
+        return () =>
+          set((state) => ({ workspaceSwitcherMounts: state.workspaceSwitcherMounts - 1 }))
       },
       startLocalTurn: (threadId: string) => {
         set((state) => ({ localTurnThreadIds: new Set([...state.localTurnThreadIds, threadId]) }))

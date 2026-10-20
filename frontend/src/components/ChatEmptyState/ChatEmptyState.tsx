@@ -146,6 +146,7 @@ export function ChatEmptyState({
   )
 
   const openWorkspaceSwitcher = useAppStore((s) => s.uiActions.openWorkspaceSwitcher)
+  const canChangeWorkspace = useAppStore((s) => s.workspaceSwitcherMounts > 0)
 
   const provider = workspace?.tenants[0]?.provider
   const starters = getStarterQuestions(provider)
@@ -198,17 +199,23 @@ export function ChatEmptyState({
             <span className="font-medium text-foreground">{workspace.display_name}</span>
             {" · "}
             <span title={workspaceSourcesLabel(workspace)} data-testid="chat-workspace-sources">
-              {workspace.tenants.length === 1 ? "Source" : "Sources"}:{" "}
+              {workspace.tenants.length > 0 &&
+                `${workspace.tenants.length === 1 ? "Source" : "Sources"}: `}
               {workspaceSourcesShortLabel(workspace)}
-            </span>{" "}
-            <button
-              type="button"
-              onClick={openWorkspaceSwitcher}
-              className="underline underline-offset-2 hover:text-foreground"
-              data-testid="chat-workspace-change"
-            >
-              Change
-            </button>
+            </span>
+            {canChangeWorkspace && (
+              <>
+                {" "}
+                <button
+                  type="button"
+                  onClick={openWorkspaceSwitcher}
+                  className="underline underline-offset-2 hover:text-foreground"
+                  data-testid="chat-workspace-change"
+                >
+                  Change
+                </button>
+              </>
+            )}
           </p>
         )}
 
