@@ -31,6 +31,11 @@ export interface FacetDef<T> {
   searchable?: boolean
   /** Whether to offer the facet at all for these items. Defaults to "has at least one value". */
   isAvailable?: (items: readonly T[]) => boolean
+  /**
+   * Whether the facet applies under the other facets' selection, e.g. only while its
+   * provider is selected. A facet that does not apply is hidden and does not filter.
+   */
+  appliesTo?: (selection: FacetSelection) => boolean
 }
 
 export type FacetSelection = Readonly<Record<string, readonly string[]>>

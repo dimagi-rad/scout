@@ -2,9 +2,13 @@ import type { UserTenant } from "@/api/auth"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { localIsoDate } from "@/lib/localDate"
 
-import type { FacetDef } from "./facets"
+import type { FacetDef, FacetSelection } from "./facets"
 
 export const CONNECT_PROVIDER = "commcare_connect"
+export const OCS_PROVIDER = "ocs"
+// A chatbot counts as active when its newest session started this recently (#917).
+// A first, reversible definition; OCS reports no active or archived flag.
+export const OCS_ACTIVE_DAYS = 30
 export const UNKNOWN = "unknown"
 // A colon cannot occur in an org slug or a program id, so this never collides with one.
 export const NONE = ":none"
@@ -43,6 +47,27 @@ export function connectStatus(t: UserTenant, today = currentDay()): string | und
   if (endDateHasPassed(attrs.end_date, today)) return "inactive"
   if (typeof attrs.is_active === "boolean") return attrs.is_active ? "active" : "inactive"
   return UNKNOWN
+}
+
+function ocsAttributes(t: UserTenant): Record<string, unknown> | undefined {
+  if (t.provider !== OCS_PROVIDER) return undefined
+  const attrs = t.attributes
+  return attrs !== null && typeof attrs === "object" && !Array.isArray(attrs) ? attrs : {}
+}
+
+/**
+ * "active" when the chatbot's newest session started within OCS_ACTIVE_DAYS,
+ * "inactive" when older or it has none, unknown before discovery has looked.
+ */
+export function ocsStatus(t: UserTenant, now = Date.now()): string | undefined {
+  const attrs = ocsAttributes(t)
+  if (!attrs) return undefined
+  if (!("last_session_at" in attrs)) return UNKNOWN
+  const last = attrs.last_session_at
+  if (last === null) return "inactive"
+  const time = typeof last === "string" ? Date.parse(last) : Number.NaN
+  if (Number.isNaN(time)) return UNKNOWN
+  return now - time <= OCS_ACTIVE_DAYS * 86_400_000 ? "active" : "inactive"
 }
 
 export function connectType(t: UserTenant): string | undefined {
@@ -87,6 +112,22 @@ const STATUS_LABELS: Record<string, string> = {
 }
 const TYPE_LABELS: Record<string, string> = { real: "Real", test: "Test", [UNKNOWN]: "Unknown" }
 
+// Provider-specific facets show while their provider is selected, or no provider is.
+function providerSelected(provider: string) {
+  return (selection: FacetSelection) => {
+    const providers = selection.provider
+    return !providers || providers.length === 0 || providers.includes(provider)
+  }
+}
+const appliesToConnect = providerSelected(CONNECT_PROVIDER)
+const appliesToOcs = providerSelected(OCS_PROVIDER)
+
+const OCS_STATUS_LABELS: Record<string, string> = {
+  active: `Active (session in last ${OCS_ACTIVE_DAYS} days)`,
+  inactive: `Inactive (no session in ${OCS_ACTIVE_DAYS} days)`,
+  [UNKNOWN]: "Unknown",
+}
+
 export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
   {
     key: "provider",
@@ -103,6 +144,7 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
     optionLabel: (value) => STATUS_LABELS[value] ?? value,
     valueOrder: ["active", "inactive", UNKNOWN],
     isAvailable: hasConnectAttributes,
+    appliesTo: appliesToConnect,
   },
   {
     key: "type",
@@ -114,6 +156,7 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
     // Only meaningful once the backend reports is_test; otherwise every row is "Unknown".
     isAvailable: (items) =>
       items.some((t) => typeof connectAttributes(t)?.is_test === "boolean"),
+    appliesTo: appliesToConnect,
   },
   {
     key: "organization",
@@ -124,6 +167,7 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
     trailingValues: [NONE],
     ...labelled("organization", "organization_name"),
     isAvailable: hasConnectAttributes,
+    appliesTo: appliesToConnect,
   },
   {
     key: "program",
@@ -133,6 +177,43 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
     trailingValues: [NONE],
     ...labelled("program", "program_name"),
     isAvailable: hasConnectAttributes,
+    appliesTo: appliesToConnect,
+  },
+  {
+    key: "ocs_status",
+    label: "Status",
+    group: "Open Chat Studio",
+    getValue: (t) => ocsStatus(t),
+    optionLabel: (value) => OCS_STATUS_LABELS[value] ?? value,
+    valueOrder: ["active", "inactive", UNKNOWN],
+    // Every row reads Unknown until discovery has recorded activity.
+    isAvailable: (items) => items.some((t) => "last_session_at" in (ocsAttributes(t) ?? {})),
+    appliesTo: appliesToOcs,
+  },
+  {
+    key: "ocs_team",
+    label: "Team",
+    group: "Open Chat Studio",
+    searchable: true,
+    getValue: (t) => {
+      const attrs = ocsAttributes(t)
+      if (!attrs) return undefined
+      return nonEmptyString(attrs.team) ?? NONE
+    },
+    optionLabel: (value, t) =>
+      value === NONE ? "None" : nonEmptyString(ocsAttributes(t)?.team_name),
+    trailingValues: [NONE],
+    isAvailable: (items) => items.some((t) => nonEmptyString(ocsAttributes(t)?.team)),
+    appliesTo: appliesToOcs,
+  },
+  {
+    key: "ocs_chatbot",
+    label: "Chatbot",
+    group: "Open Chat Studio",
+    searchable: true,
+    getValue: (t) => (t.provider === OCS_PROVIDER ? t.tenant_id : undefined),
+    optionLabel: (value, t) => t.tenant_name || value,
+    appliesTo: appliesToOcs,
   },
 ]
 

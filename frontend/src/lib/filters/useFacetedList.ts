@@ -33,7 +33,14 @@ export function useFacetedList<T>({
   const knownKeys = useMemo(() => facets.map((f) => f.key), [facets])
   const [stored, setStored] = usePersistentFacetSelection(storageKey, knownKeys)
 
-  const visibleFacets = useMemo(() => availableFacets(facets, items), [facets, items])
+  const visibleFacets = useMemo(() => {
+    const offered = availableFacets(facets, items)
+    // A facet's applicability reads the others' selection (e.g. the provider), so
+    // that selection is resolved first, without the conditional facets.
+    const unconditional = offered.filter((f) => !f.appliesTo)
+    const base = effectiveSelection(stored, unconditional, items)
+    return offered.filter((f) => !f.appliesTo || f.appliesTo(base))
+  }, [facets, items, stored])
   const selection = useMemo(
     () => effectiveSelection(stored, visibleFacets, items),
     [stored, visibleFacets, items],

@@ -522,3 +522,56 @@ it("shows each available source's own description", async () => {
   )
   expect(screen.queryByTestId("available-source-description-tenant-b")).toBeNull()
 })
+
+
+describe("provider-specific filters", () => {
+  beforeEach(() => localStorage.clear())
+
+  const ocs = (id: string, name: string, attributes: Record<string, unknown>) => ({
+    id: `m-${id}`, tenant_uuid: `tenant-${id}`, provider: "ocs",
+    tenant_id: id, tenant_name: name, last_selected_at: null, attributes,
+  })
+  const recent = new Date(Date.now() - 2 * 86_400_000).toISOString()
+  const mixed = [
+    connect("c1", "Kenya Live", { is_active: true, organization: "dimagi" }),
+    ocs("o1", "Helper Bot", { team: "t-a", team_name: "Team A", last_session_at: recent }),
+    ocs("o2", "Old Bot", { team: "t-b", team_name: "Team B", last_session_at: null }),
+  ]
+
+  async function open() {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    vi.mocked(getUserTenantsCached).mockResolvedValue(mixed)
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+    await screen.findByTestId(`${F}-count`)
+  }
+
+  it("swaps the Connect filters for team, chatbot and activity once OCS is selected", async () => {
+    await open()
+    expect(screen.getByTestId(`${F}-facet-organization`)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId(`${F}-facet-provider`))
+    await userEvent.click(await screen.findByTestId(`${F}-facet-provider-option-ocs`))
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.queryByTestId(`${F}-facet-organization`)).toBeNull()
+    expect(screen.queryByTestId(`${F}-facet-status`)).toBeNull()
+    expect(screen.getByTestId(`${F}-facet-ocs_team`)).toBeInTheDocument()
+    expect(screen.getByTestId(`${F}-facet-ocs_chatbot`)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId(`${F}-facet-ocs_status`))
+    await userEvent.click(await screen.findByTestId(`${F}-facet-ocs_status-option-active`))
+
+    expect(shownAvailable()).toEqual(["o1"])
+  })
+
+  it("keeps a hidden Connect filter from hiding OCS rows", async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ provider: ["ocs"], organization: ["dimagi"] }),
+    )
+    await open()
+
+    expect(shownAvailable()).toEqual(["o1", "o2"])
+  })
+})

@@ -5,11 +5,13 @@ import type { UserTenant } from "@/api/auth"
 import { applyFacets, availableFacets, computeFacetOptions } from "./facets"
 import {
   NONE,
+  OCS_ACTIVE_DAYS,
   TENANT_FACETS,
   UNKNOWN,
   connectStatus,
   connectType,
   formatIdSample,
+  ocsStatus,
   parseTenantIdList,
   tenantMatchesSearch,
   normalizeTenantSearch,
@@ -154,6 +156,7 @@ describe("TENANT_FACETS", () => {
       "status",
       "organization",
       "program",
+      "ocs_chatbot",
     ])
   })
 
@@ -227,4 +230,25 @@ describe("a pasted list of ids", () => {
 it("scopes the storage key to the user", () => {
   expect(sourceFiltersStorageKey("u1")).toBe("scout:source-filters:v1:u1")
   expect(sourceFiltersStorageKey(undefined)).toBeNull()
+})
+
+describe("ocsStatus", () => {
+  const NOW = Date.parse("2026-10-20T12:00:00Z")
+  const DAY = 86_400_000
+
+  it("is active with a session inside the window, inactive outside it or with none", () => {
+    const recent = new Date(NOW - (OCS_ACTIVE_DAYS - 1) * DAY).toISOString()
+    const old = new Date(NOW - (OCS_ACTIVE_DAYS + 1) * DAY).toISOString()
+    expect(ocsStatus(tenant("a", "ocs", { last_session_at: recent }), NOW)).toBe("active")
+    expect(ocsStatus(tenant("b", "ocs", { last_session_at: old }), NOW)).toBe("inactive")
+    expect(ocsStatus(tenant("c", "ocs", { last_session_at: null }), NOW)).toBe("inactive")
+  })
+
+  it("is unknown before discovery looked, and does not apply to other providers", () => {
+    expect(ocsStatus(tenant("a", "ocs", {}), NOW)).toBe(UNKNOWN)
+    expect(ocsStatus(tenant("b", "ocs", { last_session_at: "soon" }), NOW)).toBe(UNKNOWN)
+    expect(ocsStatus(tenant("c", "commcare_connect", { last_session_at: null }), NOW)).toBe(
+      undefined,
+    )
+  })
 })
