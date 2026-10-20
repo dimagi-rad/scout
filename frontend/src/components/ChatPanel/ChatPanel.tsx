@@ -231,9 +231,48 @@ export function ChatPanel() {
     activeDomainId,
     workspaceLoading,
   )
+  // Opens itself when a load in this workspace ends, so the user sees what it brought in.
+  const [loadSummary, setLoadSummary] = useState<{
+    workspaceId: string | null
+    open: boolean
+    justLoaded: boolean
+  }>({ workspaceId: activeDomainId, open: false, justLoaded: false })
+  const loadingSeenRef = useRef<{ workspaceId: string | null; loading: boolean }>({
+    workspaceId: activeDomainId,
+    loading: workspaceLoading,
+  })
+  // The freshness held when the load ended: the card waits for the response that
+  // replaces it, or it would open on the snapshot from before the load.
+  const staleFreshnessRef = useRef<typeof freshness | undefined>(undefined)
+  useEffect(() => {
+    const seen = loadingSeenRef.current
+    const loadEnded = seen.workspaceId === activeDomainId && seen.loading && !workspaceLoading
+    loadingSeenRef.current = { workspaceId: activeDomainId, loading: workspaceLoading }
+    if (loadEnded) staleFreshnessRef.current = freshness
+    else if (seen.workspaceId !== activeDomainId || workspaceLoading) {
+      staleFreshnessRef.current = undefined
+    }
+  }, [activeDomainId, workspaceLoading, freshness])
+  useEffect(() => {
+    if (staleFreshnessRef.current === undefined || !freshness) return
+    if (freshness === staleFreshnessRef.current) return
+    staleFreshnessRef.current = undefined
+    setLoadSummary({ workspaceId: activeDomainId, open: true, justLoaded: true })
+  }, [activeDomainId, freshness])
+  const loadSummaryOpen = loadSummary.open && loadSummary.workspaceId === activeDomainId
+  const setLoadSummaryOpen = useCallback(
+    (open: boolean) => {
+      // A choice made before the post-load data lands must not be overridden by it.
+      staleFreshnessRef.current = undefined
+      setLoadSummary({ workspaceId: activeDomainId, open, justLoaded: false })
+    },
+    [activeDomainId],
+  )
   // A refresh queues a job the load poll cannot see until a worker starts it;
   // the freshness endpoint does, so the banner hides instead of re-offering Refresh.
   const handleRefreshStarted = useCallback(() => {
+    // Its refetch is not the post-load data of an earlier load whose refetch failed.
+    staleFreshnessRef.current = undefined
     notifyJobLikelyStarted()
     refetchFreshness()
   }, [notifyJobLikelyStarted, refetchFreshness])
@@ -1087,6 +1126,14 @@ export function ChatPanel() {
             disabled={isStreaming}
           />
         </div>
+        {/* ChatEmptyState already says when the data was last synced. */}
+        <SourceFreshness
+          freshness={freshness}
+          summaryOpen={loadSummaryOpen}
+          onSummaryOpenChange={setLoadSummaryOpen}
+          justLoaded={loadSummary.justLoaded}
+          summaryOnly
+        />
       </div>
     )
   }
@@ -1218,7 +1265,12 @@ export function ChatPanel() {
 
         {loadBanners}
         {staleBanner}
-        <SourceFreshness freshness={freshness} />
+        <SourceFreshness
+          freshness={freshness}
+          summaryOpen={loadSummaryOpen}
+          onSummaryOpenChange={setLoadSummaryOpen}
+          justLoaded={loadSummary.justLoaded}
+        />
 
         {/* Input area */}
         <div className="border-t p-4">

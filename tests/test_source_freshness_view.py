@@ -14,6 +14,7 @@ from apps.workspaces.models import (
     TenantSchema,
     WorkspaceTenant,
 )
+from apps.workspaces.services.source_freshness import aworkspace_source_freshness
 from apps.workspaces.tasks import materialize_workspace
 
 User = get_user_model()
@@ -143,3 +144,84 @@ async def test_only_get_is_allowed(user, workspace):
     response = await client.post(f"/api/workspaces/{workspace.id}/freshness/")
 
     assert response.status_code == 405
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_summarises_what_the_serving_snapshot_loaded(user, workspace, tenant):
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="serving_summary", state=SchemaState.ACTIVE
+    )
+    earlier = timezone.now() - timezone.timedelta(days=2)
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        completed_at=earlier,
+        result={"sources": {"forms": {"state": "completed", "rows": 1}}},
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.PARTIAL,
+        completed_at=timezone.now(),
+        result={
+            "sources": {
+                "forms": {
+                    "state": "completed",
+                    "rows": 120,
+                    "date_range": {
+                        "column": "received_on",
+                        "earliest": "2025-01-02T00:00:00+00:00",
+                        "latest": "2026-10-01T00:00:00+00:00",
+                    },
+                },
+                "cases": {"state": "failed", "rows": 7, "error": "boom"},
+                "broken": "not a dict",
+            }
+        },
+    )
+
+    (source,) = (await _get(user, workspace)).json()["sources"]
+
+    assert source["summary"] == {
+        "tables": [
+            {"name": "cases", "state": "failed", "rows": None},
+            {
+                "name": "forms",
+                "state": "completed",
+                "rows": 120,
+                "earliest": "2025-01-02T00:00:00+00:00",
+                "latest": "2026-10-01T00:00:00+00:00",
+            },
+        ],
+        "total_rows": 120,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_never_loaded_source_has_no_summary(user, workspace):
+    (source,) = (await _get(user, workspace)).json()["sources"]
+
+    assert source["summary"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_agent_freshness_payload_carries_no_row_counts(workspace, tenant):
+    # Materialization-time counts must not reach the agent as answerable numbers.
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="serving_agent", state=SchemaState.ACTIVE
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        completed_at=timezone.now(),
+        result={"sources": {"forms": {"state": "completed", "rows": 5}}},
+    )
+
+    (source,) = await aworkspace_source_freshness(workspace.id)
+
+    assert "summary" not in source
