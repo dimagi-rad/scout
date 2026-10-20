@@ -229,3 +229,10 @@ async def test_a_failed_queue_does_not_hold_the_cooldown(monkeypatch):
     await users_tasks.aschedule_ocs_probe("conn-2")
 
     assert await cache.aget("ocs_chatbot_probe:conn-2") is None
+
+
+@pytest.mark.asyncio
+async def test_probe_never_sends_a_credential_to_an_unsafe_origin(ocs_sessions):
+    assert await aprobe_ocs_chatbots("http://ocs.example.com", {"X-api-key": "k"}, ["a"]) == {}
+
+    ocs_sessions.client.get.assert_not_called()

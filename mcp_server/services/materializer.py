@@ -701,10 +701,14 @@ def _run_discover_phase(
     if pipeline.provider == "commcare_connect":
         # Connect's list export has no description; its per-opportunity export does.
         description = connect_description((metadata or {}).get("opportunity"))
-        if description:
-            Tenant.objects.filter(id=tenant_membership.tenant_id).exclude(
-                description=description
-            ).update(description=description)
+        try:
+            if description:
+                Tenant.objects.filter(id=tenant_membership.tenant_id).exclude(
+                    description=description
+                ).update(description=description)
+        except Exception:
+            # A description only decorates the picker; it must not fail the load.
+            logger.warning("Could not store the opportunity description", exc_info=True)
     logger.info("Stored metadata for tenant %s", tenant_membership.tenant.external_id)
     return metadata
 

@@ -475,7 +475,8 @@ async def resolve_ocs_chatbots(
         access_token=access_token,
         archive=may_revoke,
     )
-    await aschedule_ocs_probe(conn.id)
+    if memberships:
+        await aschedule_ocs_probe(conn.id)
     logger.info(
         "Resolved %d OCS chatbots for user %s (team %s)", len(memberships), user.email, team_slug
     )

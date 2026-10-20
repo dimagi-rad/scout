@@ -30,6 +30,7 @@ from apps.users.services.credential_resolver import (
     aresolve_credential,
 )
 from apps.users.services.tenant_listing.rows import clean_description
+from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
 
 logger = logging.getLogger(__name__)
 
@@ -88,13 +89,20 @@ async def _probe_one(
 async def aprobe_ocs_chatbots(
     base_url: str, headers: Mapping[str, str], experiment_ids: Iterable[str]
 ) -> dict[str, ChatbotProbe]:
-    """Each chatbot's description and newest session time, best effort.
+    """Each chatbot's description, best effort.
 
     A chatbot whose probe failed or ran past the budget is left out, so callers
     keep what they stored before rather than blanking it.
     """
     ids = list(dict.fromkeys(experiment_ids))
     if not ids:
+        return {}
+    # Checked here, not trusted from an earlier listing: this runs in a worker,
+    # possibly hours later and under different settings, and sends a credential.
+    try:
+        base_url = ProviderURLPolicy(base_url).base_url
+    except UnsafeProviderURL:
+        logger.warning("OCS_URL is not a safe provider origin; skipping the chatbot probe")
         return {}
     url = f"{base_url.rstrip('/')}/api/sessions/"
     semaphore = asyncio.Semaphore(_OCS_PROBE_CONCURRENCY)
