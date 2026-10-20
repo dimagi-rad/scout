@@ -119,8 +119,13 @@ def credential_guidance(failures: Iterable[SourceFailure]) -> list[str]:
     ]
 
 
-# Lower-case so credential_guidance can list it mid-sentence ("visits, the import: ...").
+# A failure name that is not a source; lower-case so it reads after other names in a list.
 _RUN_FAILURE_NAME = "the import"
+
+
+def _sentence(text: str) -> str:
+    """Capitalize text that opens with the run-level name; source names are table names."""
+    return text[0].upper() + text[1:] if text.startswith(_RUN_FAILURE_NAME) else text
 
 
 def compose_failure_summary(runs: "list[MaterializationRun]") -> str:
@@ -176,11 +181,9 @@ def compose_failure_summary(runs: "list[MaterializationRun]") -> str:
         # listing the rest as bare names discarded the very string the loaders
         # are asked to produce, and left a second failure indistinguishable
         # from a skipped source (#388 review).
-        failures = "; ".join(f"{f.name} failed: {f.error.rstrip('.')}" for f in failed_sources)
-        # Source names are case-sensitive table names, so only the run-level name is capitalized.
-        if failures.startswith(_RUN_FAILURE_NAME):
-            failures = failures[0].upper() + failures[1:]
-        parts.append(failures)
+        parts.append(
+            _sentence("; ".join(f"{f.name} failed: {f.error.rstrip('.')}" for f in failed_sources))
+        )
     if completed_sources:
         total_rows = sum(rows for _, rows in completed_sources)
         names = ", ".join(n for n, _ in completed_sources)
@@ -196,5 +199,5 @@ def compose_failure_summary(runs: "list[MaterializationRun]") -> str:
         return f"Import {'/'.join(states)}."
     summary = ". ".join(parts) + "."
     for line in credential_guidance(failed_sources):
-        summary += " " + line
+        summary += " " + _sentence(line)
     return summary

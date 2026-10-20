@@ -161,3 +161,14 @@ def test_summary_calls_a_run_level_failure_the_import():
     run = SimpleNamespace(state="failed", result={"error": "Worker stopped responding"})
 
     assert compose_failure_summary([run]) == "The import failed: Worker stopped responding."
+
+
+def test_guidance_for_a_run_level_credential_failure_starts_a_sentence():
+    run = SimpleNamespace(
+        state="failed",
+        result={"error": _EXPIRED_ERROR, "error_code": ErrorCode.AUTH_TOKEN_EXPIRED},
+    )
+
+    summary = compose_failure_summary([run])
+
+    assert ". The import: " in summary
