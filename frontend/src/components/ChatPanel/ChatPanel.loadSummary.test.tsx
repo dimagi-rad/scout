@@ -74,8 +74,26 @@ describe("ChatPanel load summary", () => {
     rerender(<MemoryRouter><ChatPanel /></MemoryRouter>)
 
     const summary = await screen.findByTestId("load-summary")
-    expect(summary).toHaveTextContent("Data load finished")
+    expect(summary).toHaveTextContent("Data load ended")
     expect(screen.getByTestId("load-summary-table-Alpha-forms")).toHaveTextContent("42")
+  })
+
+  it("waits for the post-load data and stays closed if it never arrives", async () => {
+    const before = freshness([freshSource("Alpha", 30)])
+    vi.mocked(workspaceApi.getFreshness)
+      .mockResolvedValueOnce(before)
+      .mockRejectedValueOnce(new Error("offline"))
+    const { rerender } = render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await vi.waitFor(() => expect(workspaceApi.getFreshness).toHaveBeenCalledTimes(1))
+
+    jobs.workspaceLoads = [RUNNING_LOAD]
+    rerender(<MemoryRouter><ChatPanel /></MemoryRouter>)
+    await screen.findByTestId("workspace-load-banner")
+    jobs.workspaceLoads = []
+    rerender(<MemoryRouter><ChatPanel /></MemoryRouter>)
+
+    await vi.waitFor(() => expect(workspaceApi.getFreshness).toHaveBeenCalledTimes(2))
+    expect(screen.queryByTestId("load-summary")).toBeNull()
   })
 
   it("stays closed when no load ran", async () => {

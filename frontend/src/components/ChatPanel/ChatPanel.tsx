@@ -233,12 +233,24 @@ export function ChatPanel() {
     workspaceId: activeDomainId,
     loading: workspaceLoading,
   })
+  // The freshness held when the load ended: the card waits for the response that
+  // replaces it, or it would open on the snapshot from before the load.
+  const staleFreshnessRef = useRef<typeof freshness | undefined>(undefined)
   useEffect(() => {
     const seen = loadingSeenRef.current
     const loadEnded = seen.workspaceId === activeDomainId && seen.loading && !workspaceLoading
     loadingSeenRef.current = { workspaceId: activeDomainId, loading: workspaceLoading }
-    if (loadEnded) setLoadSummary({ workspaceId: activeDomainId, open: true, justLoaded: true })
-  }, [activeDomainId, workspaceLoading])
+    if (loadEnded) staleFreshnessRef.current = freshness
+    else if (seen.workspaceId !== activeDomainId || workspaceLoading) {
+      staleFreshnessRef.current = undefined
+    }
+  }, [activeDomainId, workspaceLoading, freshness])
+  useEffect(() => {
+    if (staleFreshnessRef.current === undefined || !freshness) return
+    if (freshness === staleFreshnessRef.current) return
+    staleFreshnessRef.current = undefined
+    setLoadSummary({ workspaceId: activeDomainId, open: true, justLoaded: true })
+  }, [activeDomainId, freshness])
   const loadSummaryOpen = loadSummary.open && loadSummary.workspaceId === activeDomainId
   const setLoadSummaryOpen = useCallback(
     (open: boolean) => setLoadSummary({ workspaceId: activeDomainId, open, justLoaded: false }),

@@ -52,7 +52,9 @@ export function LoadSummary({ sources, justLoaded, onClose }: Props) {
       data-testid="load-summary"
     >
       <div className="mb-2 flex items-center justify-between gap-2">
-        <p className="font-medium">{justLoaded ? "Data load finished" : "What's loaded"}</p>
+        <p className="font-medium">
+          {justLoaded ? "Data load ended: here is what's loaded now" : "What's loaded"}
+        </p>
         <Button
           variant="ghost"
           size="sm"
