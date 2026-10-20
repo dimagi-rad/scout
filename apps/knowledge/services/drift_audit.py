@@ -166,7 +166,10 @@ def _audit_workspace(workspace: Workspace) -> WorkspaceDriftReport:
     catalog = _Catalog(model)
 
     rows: list[tuple[str, str, str, list[DriftedReference]]] = []
-    for entry in KnowledgeEntry.objects.filter(workspace=workspace).order_by("title", "id"):
+    # Reference documents are uploaded data the prompt never carries, so their
+    # backticked tokens aren't drift.
+    notes = KnowledgeEntry.objects.filter(workspace=workspace, kind=KnowledgeEntry.Kind.NOTE)
+    for entry in notes.order_by("title", "id"):
         references = _unique(catalog.text_references(entry.content))
         rows.append(("knowledge_entry", str(entry.id), entry.title, references))
     for table in TableKnowledge.objects.filter(workspace=workspace).order_by("table_name"):
