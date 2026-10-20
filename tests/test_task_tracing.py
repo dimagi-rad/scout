@@ -4,11 +4,12 @@ import datetime
 
 import pytest
 import sentry_sdk
+from procrastinate.exceptions import JobAborted
 from procrastinate.testing import InMemoryConnector
 from sentry_sdk.transport import Transport
 
 from config.procrastinate import app
-from config.task_tracing import queue_wait_seconds, trace_job
+from config.task_tracing import _fetch_queued_at, queue_wait_seconds, trace_job
 
 QUEUE = "tests_task_tracing"
 UTC = datetime.UTC
@@ -114,6 +115,21 @@ async def test_failed_job_marks_the_transaction(sentry_transactions):
 
 
 @pytest.mark.asyncio
+async def test_aborted_job_is_cancelled_not_failed(sentry_transactions):
+    job = traced_ok.configure().job.evolve(id=9)
+    context = type("Ctx", (), {"job": job, "start_timestamp": 0.0})()
+    worker = type("W", (), {"app": type("A", (), {"connector": _StubConnector()})()})()
+
+    async def call_next():
+        raise JobAborted
+
+    with pytest.raises(JobAborted):
+        await trace_job(call_next, context, worker)
+    [event] = sentry_transactions
+    assert event["contexts"]["trace"]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_queue_wait_is_recorded_from_the_last_enqueue(sentry_transactions):
     queued_at = datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
     connector = _StubConnector(row={"queued_at": queued_at})
@@ -146,6 +162,21 @@ async def test_unreadable_queue_time_does_not_fail_the_job(sentry_transactions):
     assert await trace_job(call_next, context, worker) == "done"
     [event] = sentry_transactions
     assert "queue.wait_ms" not in event["contexts"]["trace"].get("data", {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_queue_time_query_runs_against_the_real_event_table():
+    """Every event type the query names must exist in procrastinate's enum, or
+    Postgres rejects the query and the wait is silently never recorded."""
+    before = datetime.datetime.now(UTC)
+    job_id = await traced_ok.defer_async()
+    worker = type("W", (), {"app": app})()
+
+    queued_at = await _fetch_queued_at(worker, job_id)
+
+    assert queued_at is not None
+    assert queued_at >= before - datetime.timedelta(seconds=5)
 
 
 def test_queue_wait_starts_at_the_later_of_enqueue_and_schedule():

@@ -192,20 +192,49 @@ export function beforeSend(event: ErrorEvent, hint: EventHint): ErrorEvent | nul
 // @sentry/react does not re-export this type from @sentry/core.
 export type TransactionEvent = Parameters<NonNullable<BrowserOptions["beforeSendTransaction"]>>[0]
 
-const SPAN_URL_KEYS = ["url", "http.url", "http.request.redirect_url"]
+export type SpanJSON = Parameters<NonNullable<BrowserOptions["beforeSendSpan"]>>[0]
+
 // Fetch and XHR spans are described as "<METHOD> <url>".
 const METHOD_AND_URL = /^([A-Z]+ )(.*)$/s
+// Web-vital attributes name the element they measured, e.g. lcp.element,
+// cls.source.1 and browser.web_vital.lcp.element.
+const SELECTOR_KEY = /(?:^|\.)(?:element|source\.\d+)$/
+const URL_KEY = /(?:^|\.)url$/
+const DROPPED_KEYS = new Set(["http.query", "http.fragment"])
 
 function scrubSpanDescription(op: string | undefined, description: string): string {
+  // Interaction and web-vital spans (ui.interaction.*, ui.webvital.*) are named
+  // after the element's selector.
   if (op?.startsWith("ui.")) return scrubSelector(description)
   const match = METHOD_AND_URL.exec(description)
   return match ? match[1] + stripUrl(match[2]) : stripUrl(description)
 }
 
+function scrubSpanData<T extends Record<string, unknown>>(data: T): T {
+  const scrubbed: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(data)) {
+    if (DROPPED_KEYS.has(key)) continue
+    if (typeof value === "string" && SELECTOR_KEY.test(key)) scrubbed[key] = scrubSelector(value)
+    else if (URL_KEY.test(key)) scrubbed[key] = stripUrl(value)
+    else scrubbed[key] = value
+  }
+  return scrubbed as T
+}
+
 /**
- * Sentry `beforeSendTransaction` hook: the same scrubbing as errors, plus span
- * URLs and the element selectors interaction spans are named after.
+ * Sentry `beforeSendSpan` hook. It sees every span: a transaction's root and
+ * children, and standalone ones such as INP, which never pass through
+ * `beforeSendTransaction`. Strips URLs and the attribute values in element selectors.
  */
+export function scrubSpan(span: SpanJSON): SpanJSON {
+  return {
+    ...span,
+    ...(span.description ? { description: scrubSpanDescription(span.op, span.description) } : {}),
+    data: scrubSpanData(span.data ?? {}),
+  }
+}
+
+/** Sentry `beforeSendTransaction` hook: the event-level scrubbing errors get. Spans go through scrubSpan. */
 export function scrubTransaction(event: TransactionEvent): TransactionEvent {
   if (event.transaction) event.transaction = stripUrl(event.transaction)
   if (event.request) event.request = { url: stripUrl(event.request.url) }
@@ -217,28 +246,12 @@ export function scrubTransaction(event: TransactionEvent): TransactionEvent {
       Object.entries(event.contexts).filter(([key]) => key === "trace" || KEPT_CONTEXTS.has(key)),
     )
   }
-  const trace = event.contexts?.trace
-  if (trace?.data) trace.data = scrubSpanData(trace.data)
-  for (const span of event.spans ?? []) {
-    if (span.description) span.description = scrubSpanDescription(span.op, span.description)
-    if (span.data) span.data = scrubSpanData(span.data)
-  }
   if (event.breadcrumbs) {
     event.breadcrumbs = event.breadcrumbs
       .map(scrubBreadcrumb)
       .filter((breadcrumb): breadcrumb is Breadcrumb => breadcrumb !== null)
   }
   return event
-}
-
-function scrubSpanData<T extends Record<string, unknown>>(data: T): T {
-  const scrubbed: Record<string, unknown> = { ...data }
-  delete scrubbed["http.query"]
-  delete scrubbed["http.fragment"]
-  for (const key of SPAN_URL_KEYS) {
-    if (key in scrubbed) scrubbed[key] = stripUrl(scrubbed[key])
-  }
-  return scrubbed as T
 }
 
 /** A sample rate in [0, 1], or 0 when unset or malformed so tracing stays off. */
@@ -270,6 +283,7 @@ export function initSentry(): void {
       ? {
           integrations: [Sentry.browserTracingIntegration()],
           tracesSampleRate: sampleRate,
+          beforeSendSpan: scrubSpan,
           beforeSendTransaction: scrubTransaction,
         }
       : {}),

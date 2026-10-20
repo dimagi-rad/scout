@@ -9,11 +9,12 @@ import {
   isNoiseEvent,
   scrubBreadcrumb,
   scrubEvent,
+  scrubSpan,
   scrubTransaction,
   stripUrl,
   tracesSampleRate,
 } from "./sentry"
-import type { TransactionEvent } from "./sentry"
+import type { SpanJSON, TransactionEvent } from "./sentry"
 
 vi.mock("@sentry/react", () => ({
   init: vi.fn(),
@@ -376,6 +377,7 @@ describe("tracing", () => {
     const options = vi.mocked(Sentry.init).mock.calls[0][0]!
     expect(options.tracesSampleRate).toBe(0.1)
     expect(options.beforeSendTransaction).toBe(scrubTransaction)
+    expect(options.beforeSendSpan).toBe(scrubSpan)
     expect(Sentry.browserTracingIntegration).toHaveBeenCalled()
     expect(options).toMatchObject({ sendDefaultPii: false, beforeSend })
   })
@@ -389,7 +391,7 @@ describe("tracing", () => {
     expect(tracesSampleRate("0.25")).toBe(0.25)
   })
 
-  it("scrubs URLs, selectors and stray context from transactions", () => {
+  it("scrubs URLs and stray context from transactions", () => {
     const id = "0b6e9a52-3c1d-4f7a-9e2b-1a2b3c4d5e6f"
     const event = scrubTransaction({
       type: "transaction",
@@ -401,33 +403,9 @@ describe("tracing", () => {
       user: { id: "u", email: "a@example.com" },
       extra: { body: "raw" },
       contexts: {
-        trace: {
-          trace_id: "t",
-          span_id: "s",
-          op: "pageload",
-          data: { url: "https://scout.example/x?token=abc" },
-        },
+        trace: { trace_id: "t", span_id: "s", op: "pageload" },
         custom: { secret: "x" },
       },
-      spans: [
-        {
-          op: "http.client",
-          description: `GET /api/workspaces/${id}/datasets/hiv_patients/?q=name`,
-          data: { url: "/api/x?token=abc", "http.query": "?token=abc", "http.fragment": "#a" },
-          span_id: "1",
-          trace_id: "t",
-          start_timestamp: 0,
-          origin: "auto",
-        },
-        {
-          op: "ui.interaction.click",
-          description: 'body > button[title="show me patient names"]',
-          span_id: "2",
-          trace_id: "t",
-          start_timestamp: 0,
-          origin: "auto",
-        },
-      ],
     } as TransactionEvent)
 
     expect(event.transaction).toBe(`/workspaces/:slug/${id}/chat`)
@@ -435,10 +413,76 @@ describe("tracing", () => {
     expect(event.user).toEqual({ id: "u" })
     expect(event.extra).toBeUndefined()
     expect(Object.keys(event.contexts ?? {})).toEqual(["trace"])
-    expect(event.contexts?.trace?.data).toEqual({ url: "https://scout.example/x" })
-    const [http, click] = event.spans ?? []
-    expect(http.description).toBe(`GET /api/workspaces/${id}/datasets/:name/`)
-    expect(http.data).toEqual({ url: "/api/x" })
-    expect(click.description).toBe("body > button[title]")
+  })
+})
+
+describe("scrubSpan", () => {
+  const id = "0b6e9a52-3c1d-4f7a-9e2b-1a2b3c4d5e6f"
+
+  function span(overrides: Partial<SpanJSON>): SpanJSON {
+    return {
+      span_id: "1",
+      trace_id: "t",
+      start_timestamp: 0,
+      data: {},
+      origin: "auto",
+      ...overrides,
+    } as SpanJSON
+  }
+
+  it("strips query strings and customer names from request spans", () => {
+    const scrubbed = scrubSpan(
+      span({
+        op: "http.client",
+        description: `GET /api/workspaces/${id}/datasets/hiv_patients/?q=name`,
+        data: {
+          url: "/api/x?token=abc",
+          "http.url": "https://scout.example/api/x#frag",
+          "http.query": "?token=abc",
+          "http.fragment": "#a",
+          "http.method": "GET",
+        },
+      }),
+    )
+    expect(scrubbed.description).toBe(`GET /api/workspaces/${id}/datasets/:name/`)
+    expect(scrubbed.data).toEqual({
+      url: "/api/x",
+      "http.url": "https://scout.example/api/x",
+      "http.method": "GET",
+    })
+  })
+
+  it("drops attribute values from standalone INP span selectors", () => {
+    const scrubbed = scrubSpan(
+      span({
+        op: "ui.interaction.click",
+        description: 'body > button[title="show me patient names"]',
+      }),
+    )
+    expect(scrubbed.description).toBe("body > button[title]")
+  })
+
+  it("drops attribute values from web-vital element attributes", () => {
+    const scrubbed = scrubSpan(
+      span({
+        op: "pageload",
+        description: `/workspaces/acme/${id}/chat`,
+        data: {
+          "lcp.element": 'body > button[aria-label="Delete Weekly HIV recap"]',
+          "lcp.url": "https://scout.example/img.png?sig=abc",
+          "cls.source.1": 'div > button[title="show me patient names"]',
+          "browser.web_vital.lcp.element": 'p[title="private"]',
+          "lcp.size": 120,
+        },
+      }),
+    )
+    expect(scrubbed.description).toBe(`/workspaces/:slug/${id}/chat`)
+    expect(scrubbed.data).toEqual({
+      "lcp.element": "body > button[aria-label]",
+      "lcp.url": "https://scout.example/img.png",
+      "cls.source.1": "div > button[title]",
+      "browser.web_vital.lcp.element": "p[title]",
+      "lcp.size": 120,
+    })
   })
 })

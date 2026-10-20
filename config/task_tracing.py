@@ -9,15 +9,18 @@ HTTP) attach to the job's transaction.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 from typing import TYPE_CHECKING, Any
 
 import sentry_sdk
+from procrastinate.exceptions import JobAborted
 
 if TYPE_CHECKING:
-    from procrastinate import job_context, worker
+    from procrastinate import job_context
     from procrastinate.middleware import AsyncCallNext
+    from procrastinate.worker import Worker
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +48,7 @@ def queue_wait_seconds(
     return max(0.0, started_at - ready_at.timestamp())
 
 
-async def _fetch_queued_at(worker: worker.Worker, job_id: int) -> datetime.datetime | None:
+async def _fetch_queued_at(worker: Worker, job_id: int) -> datetime.datetime | None:
     try:
         row = await worker.app.connector.execute_query_one_async(_LAST_QUEUED_AT, job_id=job_id)
     except Exception:  # Timing is best-effort; never fail a job over it.
@@ -54,10 +57,21 @@ async def _fetch_queued_at(worker: worker.Worker, job_id: int) -> datetime.datet
     return row["queued_at"] if row else None
 
 
+def _status(error: BaseException | None) -> str:
+    if error is None:
+        return "ok"
+    if isinstance(error, (JobAborted, asyncio.CancelledError)):
+        return "cancelled"
+    return "internal_error"
+
+
 async def trace_job(
-    call_next: AsyncCallNext, context: job_context.JobContext, worker: worker.Worker
+    call_next: AsyncCallNext, context: job_context.JobContext, worker: Worker
 ) -> Any:
     job = context.job
+    result = error = None
+    # The error is re-raised only after the spans close: their __exit__ would
+    # mark an aborted or cancelled job as internal_error.
     with (
         sentry_sdk.isolation_scope(),
         sentry_sdk.start_transaction(
@@ -83,8 +97,10 @@ async def trace_job(
                 span.set_data("messaging.message.receive.latency", round(wait * 1000))
             try:
                 result = await call_next()
-            except BaseException:
-                transaction.set_status("internal_error")
-                raise
-        transaction.set_status("ok")
-        return result
+            except BaseException as exc:
+                error = exc
+            span.set_status(_status(error))
+        transaction.set_status(_status(error))
+    if error is not None:
+        raise error
+    return result
