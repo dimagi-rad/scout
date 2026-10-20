@@ -612,4 +612,15 @@ describe("ChatMessage collapsed steps", () => {
     expect(screen.queryByTestId("chat-steps-toggle")).not.toBeInTheDocument()
     expect(screen.getByTestId("tool-call-artifact_manager")).toBeInTheDocument()
   })
+
+  it("keeps a failed ordinary tool call visible", () => {
+    const msg = {
+      id: "m",
+      role: "assistant",
+      parts: [{ type: "tool-query", toolName: "query", toolCallId: "q1", state: "output-error", input: {}, errorText: "bad sql" }],
+    } as unknown as UIMessage
+    baseRender(<ChatMessage message={msg} isActiveMessage={false} />)
+    expect(screen.queryByTestId("chat-steps-toggle")).not.toBeInTheDocument()
+    expect(screen.getByTestId("tool-call-query")).toBeInTheDocument()
+  })
 })

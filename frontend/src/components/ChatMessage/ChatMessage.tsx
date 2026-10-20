@@ -904,7 +904,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
         ),
         // Materialization carries a live progress card and Stop button the user must see.
         // A failed helper stays visible: its error and retry path must not hide.
-        step: toolName !== "run_materialization" && !buttons.length && !helperFailedOutcome,
+        step: toolName !== "run_materialization" && !buttons.length && !helperFailedOutcome && toolPart.state !== "output-error",
         key: toolCallId ?? `tool-${i}`,
         label: displayToolName(toolName),
         pending: toolPart.state === "input-streaming" || toolPart.state === "input-available",
@@ -928,14 +928,17 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
     )
     run = null
   }
+  // Keyed by the preceding visible part so a step leaving the run mid-stream keeps the group mounted.
+  let lastVisible = -1
   rendered.forEach((item, i) => {
     if (item.step) {
-      run ??= { key: item.key ?? String(i), items: [] }
+      run ??= { key: `after-${lastVisible}`, items: [] }
       run.items.push(item)
       return
     }
     if (item.node === null) return
     flushRun(false)
+    lastVisible = i
     blocks.push(item.node)
   })
   flushRun(true)
