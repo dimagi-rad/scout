@@ -9,12 +9,12 @@ export function SourceDescription({
   const text = description?.trim()
   if (!text) return null
   return (
-    <p
+    <span
       className="mt-0.5 line-clamp-2 text-xs whitespace-normal text-muted-foreground/90"
       title={text}
       data-testid={testId}
     >
       {text}
-    </p>
+    </span>
   )
 }
