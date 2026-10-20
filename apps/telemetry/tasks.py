@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from apps.telemetry.models import TelemetryEvent
 from apps.telemetry.snapshots import take_daily_snapshot
+from apps.telemetry.storage import check_storage_headroom
 from config.procrastinate import app
 
 logger = logging.getLogger(__name__)
@@ -62,3 +63,11 @@ async def snapshot_daily_metrics(timestamp: int = 0) -> dict:
     # would stamp today's values on an older day.
     gauges = now - scheduled < timedelta(hours=20)
     return {"rows": await take_daily_snapshot(day, gauges=gauges)}
+
+
+# One queued tick is enough; a check stuck behind a slow job must not pile up.
+@app.periodic(cron="*/15 * * * *")
+@app.task(queueing_lock="check_storage_headroom")
+async def storage_headroom(timestamp: int = 0) -> dict:
+    """Alert through Sentry when the host disk runs low; log disk and DB size."""
+    return await check_storage_headroom()

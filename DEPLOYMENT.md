@@ -221,6 +221,37 @@ hidden source maps, uploads them to Sentry tagged with the release (git SHA), th
 deletes them from `dist/` so they don't ship to browsers. The auth token is passed as a
 BuildKit secret (`--secret id=sentry_auth_token`) and never lands in an image layer.
 
+### Storage headroom alerts
+
+Every 15 minutes the worker runs `apps.telemetry.tasks.storage_headroom`. It
+reports through Sentry because the CloudWatch alarm topic has no subscribers,
+and before it nothing watched the host disk (see [Host disk full](#host-disk-full)).
+
+- **Host disk.** `shutil.disk_usage("/")` inside the worker container. The
+  container root is an overlay2 mount, which reports the free space of the
+  filesystem that holds Docker's data root on the host. That is the filesystem
+  that image pulls fill and the deploy guard checks. Below 20% free it sends a
+  Sentry **warning**, `Host disk low: …`. Below 10% free it sends an **error**.
+  Each severity is one issue under a fixed fingerprint
+  (`storage-headroom / host-disk / warning|critical`). Each run while the disk is
+  low adds an event to that issue; it does not open a new one. Going from
+  warning to critical opens a new issue, so the first-seen alert fires again.
+  On the 50 GB host, 20% (10 GB) is just above the deploy guard's 8 GB limit,
+  so the warning comes before deploys start to fail.
+- **Platform database.** `pg_database_size(current_database())` and the five
+  largest tables, logged at INFO in `/scout/worker` (`Storage headroom: platform
+  DB …`). It sends no alert: RDS free storage is visible only in CloudWatch
+  (`scout-rds-low-storage`). Use these lines to see which table grows, for
+  example chat attachments.
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `STORAGE_DISK_PATH` | `/` | Path whose filesystem is checked. |
+| `STORAGE_DISK_WARNING_FREE_PERCENT` | `20` | Sentry warning below this percent free. |
+| `STORAGE_DISK_CRITICAL_FREE_PERCENT` | `10` | Sentry error below this percent free. |
+
+If the worker stops, the check stops too. There is no Sentry Cron monitor for it.
+
 ## Retired staging environment
 
 A staging stack used to run co-located on the production host (`-d staging`
@@ -574,6 +605,9 @@ pending drain receipt (see [Migration-safe backend handoff](#migration-safe-back
    `kamal prune` fails (for example a stale Kamal lock), the step fails.
 2. `Check host disk space` — fails the deploy with a clear error when Docker's
    filesystem has less than `HOST_MIN_FREE_GB` (8 GB) free, and warns below twice that.
+
+Between deploys, the worker's storage check sends a Sentry alert when the disk
+runs low (see [Storage headroom alerts](#storage-headroom-alerts)).
 
 A failed production deploy on `main` opens (or comments on) a single GitHub issue
 labelled `deploy-failure` and mentions whoever pushed; the next successful deploy

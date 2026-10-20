@@ -148,6 +148,13 @@ MANAGED_DATABASE_URL = env("MANAGED_DATABASE_URL", default="")
 # In-app usage and performance events (#862); off stops every write, never a request.
 TELEMETRY_ENABLED = env.bool("TELEMETRY_ENABLED", default=True)
 
+# Host disk headroom alerts from the worker's storage check (apps/telemetry/storage.py).
+# The deploy guard refuses to deploy below 8 GB free; on the 50 GB host, 20% warns
+# before that and 10% is an error.
+STORAGE_DISK_PATH = env("STORAGE_DISK_PATH", default="/")
+STORAGE_DISK_WARNING_FREE_PERCENT = env.float("STORAGE_DISK_WARNING_FREE_PERCENT", default=20.0)
+STORAGE_DISK_CRITICAL_FREE_PERCENT = env.float("STORAGE_DISK_CRITICAL_FREE_PERCENT", default=10.0)
+
 # Cube semantic-query runtime. Leave empty to disable live Cube calls in tests
 # and local setups that have not started the cube service yet.
 CUBE_API_URL = env("CUBE_API_URL", default="")
