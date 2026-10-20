@@ -1,5 +1,5 @@
 import { Chat, useChat } from "@ai-sdk/react"
-import { DefaultChatTransport, generateId, type UIMessage } from "ai"
+import { DefaultChatTransport, generateId, type FileUIPart, type UIMessage } from "ai"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useLocation } from "react-router-dom"
 import { useStickToBottom } from "./useStickToBottom"
@@ -21,6 +21,8 @@ import { PART_SEPARATOR, pendingRequestText } from "@/api/pendingRequests"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
 import { ChatComposer } from "./ChatComposer"
 import { QuoteSelectionAction } from "./QuoteSelectionAction"
+import { ChatDropZone } from "./attachments/ChatDropZone"
+import { useChatAttachments } from "./attachments/useChatAttachments"
 import { splitQuotedMessage } from "@/components/ChatMessage/quotes"
 import { ChatCanvasPanel } from "./ChatCanvasPanel"
 import { ChatThreadHeader, type ThreadPanelMode } from "./ChatThreadHeader"
@@ -161,6 +163,7 @@ export function ChatPanel() {
   const [quotesByThread, setQuotesByThread] = useState<Record<string, string[]>>({})
   const quotes = quotesByThread[threadId] ?? NO_QUOTES
   const [quoteFocusRequest, setQuoteFocusRequest] = useState(0)
+  const attachments = useChatAttachments(activeDomainId, threadId)
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const [threadPanelOpen, setThreadPanelOpen] = useState(false)
   const [threadPanelMode, setThreadPanelMode] = useState<ThreadPanelMode>("files")
@@ -940,7 +943,7 @@ export function ChatPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, status, busyError])
 
-  function sendText(text: string) {
+  function sendText(text: string, files: FileUIPart[] = []) {
     // A held send left behind its busy notice is replaced by this turn, which
     // carries the held text itself; only the text typed with it would be lost.
     const stale = heldSends.get(threadId)
@@ -953,8 +956,8 @@ export function ChatPanel() {
     }
     resetOverloadState()
     setStoppedNotice(false)
-    const settle = listSendingThread(text)
-    void sendMessage({ text }).finally(settle)
+    const settle = listSendingThread(text || files[0]?.filename || "")
+    void sendMessage({ text, files }).finally(settle)
   }
 
   /** A new chat's first message goes out: list it now, not when its turn ends (#859). */
@@ -971,7 +974,7 @@ export function ChatPanel() {
   }
 
   /** Send the held request as this turn, with ``extra`` after it. */
-  function sendHeld(pending: PendingRequest, extra?: string) {
+  function sendHeld(pending: PendingRequest, extra?: string, files: FileUIPart[] = []) {
     const text = extra
       ? `${pendingRequestText(pending)}${PART_SEPARATOR}${extra}`
       : pendingRequestText(pending)
@@ -988,7 +991,7 @@ export function ChatPanel() {
     resetOverloadState()
     setStoppedNotice(false)
     const settle = listSendingThread(text)
-    void sendMessage({ id: messageId, role: "user", parts: [{ type: "text", text }] })
+    void sendMessage({ id: messageId, role: "user", parts: [{ type: "text", text }, ...files] })
       .finally(settle)
   }
 
@@ -1056,9 +1059,11 @@ export function ChatPanel() {
       }
     }
     setAddFailed(null)
+    const files = attachments.take()
+    if (!text.trim() && !files.length) return
     const unanswered = held.phase === "unanswered" ? held.takeForSend() : null
-    if (unanswered) sendHeld(unanswered, text)
-    else sendText(text)
+    if (unanswered) sendHeld(unanswered, text || undefined, files)
+    else sendText(text, files)
   }
 
   async function handleEditHeld(text: string, baseVersion: number): Promise<EditOutcome> {
@@ -1122,7 +1127,7 @@ export function ChatPanel() {
     && !remoteTurnRunning
   ) {
     return (
-      <div className="flex h-full min-w-0 flex-col">
+      <ChatDropZone onFiles={attachments.add} className="flex h-full min-w-0 flex-col">
         {loadBanners}
         {staleBanner}
         <div className="min-h-0 flex-1">
@@ -1131,6 +1136,7 @@ export function ChatPanel() {
             setInput={setInput}
             onSend={handleSend}
             disabled={isStreaming}
+            attachments={attachments}
           />
         </div>
         {/* ChatEmptyState already says when the data was last synced. */}
@@ -1141,12 +1147,12 @@ export function ChatPanel() {
           justLoaded={loadSummary.justLoaded}
           summaryOnly
         />
-      </div>
+      </ChatDropZone>
     )
   }
 
   return (
-    <div className="flex h-full min-w-0">
+    <ChatDropZone onFiles={attachments.add} className="flex h-full min-w-0">
       <div className="flex min-w-0 flex-1 flex-col">
         <ChatThreadHeader
           title={threadTitle}
@@ -1317,6 +1323,7 @@ export function ChatPanel() {
               setThreadQuotes(threadId, (current) => current.filter((_, i) => i !== index))}
             onQuotesSent={() => setThreadQuotes(threadId, () => NO_QUOTES)}
             focusRequest={quoteFocusRequest}
+            attachments={attachments}
           />
         </div>
       </div>
@@ -1333,6 +1340,6 @@ export function ChatPanel() {
           <ChatCanvasPanel workspaceId={activeDomainId} threadId={threadId} />
         ) : null}
       />
-    </div>
+    </ChatDropZone>
   )
 }

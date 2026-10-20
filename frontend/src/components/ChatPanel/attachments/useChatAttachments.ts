@@ -1,0 +1,238 @@
+import { useCallback, useEffect, useRef, useState } from "react"
+import type { FileUIPart } from "ai"
+
+import { uploadChatAttachment, type UploadedAttachment } from "@/api/chatAttachments"
+import { downscaleImage } from "./downscale"
+import { MAX_ATTACHMENTS, checkFileType, sizeError, type AttachmentKind } from "./rules"
+
+export interface ComposerAttachment {
+  localId: string
+  filename: string
+  kind: AttachmentKind | null
+  size: number
+  status: "processing" | "uploading" | "ready" | "error"
+  /** 0..1 while uploading. */
+  progress: number
+  error?: string
+  /** Object URL of the image for its chip. */
+  previewUrl?: string
+  uploaded?: UploadedAttachment
+}
+
+export interface ChatAttachments {
+  items: ComposerAttachment[]
+  /** A file is still being prepared or uploaded: sending must wait. */
+  busy: boolean
+  /** A file failed; it must be removed before sending, so it isn't silently dropped. */
+  failed: boolean
+  /** Why files were turned away, e.g. over the per-message limit. */
+  notice: string | null
+  add: (files: File[]) => void
+  remove: (localId: string) => void
+  /** Uploaded files can go out with a message. */
+  ready: boolean
+  /** The uploaded files as message parts; they leave the composer. */
+  take: () => FileUIPart[]
+}
+
+/** Why the attached files hold up a send, if they do. */
+export function attachmentsBlockReason(attachments: ChatAttachments | undefined): string | null {
+  if (attachments?.busy) return "Waiting for files to finish uploading…"
+  if (attachments?.failed) return "Remove the files that couldn't be attached to send"
+  return null
+}
+
+let nextLocalId = 0
+
+const NONE: ComposerAttachment[] = []
+
+/**
+ * Files attached in the composer, kept per chat like its draft: an upload that
+ * finishes after a switch lands in the chat it was added to.
+ */
+export function useChatAttachments(workspaceId: string | null, threadId: string): ChatAttachments {
+  const scope = `${workspaceId ?? ""}:${threadId}`
+  const [byScope, setByScope] = useState<Record<string, ComposerAttachment[]>>({})
+  const [notice, setNotice] = useState<{ scope: string; text: string } | null>(null)
+  const controllers = useRef(new Map<string, AbortController>())
+  // Read by add(), which may run several times before a render.
+  const byScopeRef = useRef(byScope)
+  byScopeRef.current = byScope
+
+  useEffect(() => {
+    const live = controllers.current
+    return () => {
+      for (const controller of live.values()) controller.abort()
+      live.clear()
+      for (const items of Object.values(byScopeRef.current)) {
+        for (const item of items) if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
+      }
+    }
+  }, [])
+
+  const items = byScope[scope] ?? NONE
+
+  const update = useCallback(
+    (inScope: string, localId: string, patch: Partial<ComposerAttachment>) => {
+      setByScope((current) => {
+        const list = current[inScope]
+        if (!list?.some((item) => item.localId === localId)) return current
+        const next = list.map((item) => (item.localId === localId ? { ...item, ...patch } : item))
+        byScopeRef.current = { ...current, [inScope]: next }
+        return byScopeRef.current
+      })
+    },
+    [],
+  )
+
+  const setList = useCallback(
+    (inScope: string, change: (list: ComposerAttachment[]) => ComposerAttachment[]) => {
+      setByScope((current) => {
+        const rest = { ...current }
+        delete rest[inScope]
+        const next = change(current[inScope] ?? NONE)
+        byScopeRef.current = next.length ? { ...rest, [inScope]: next } : rest
+        return byScopeRef.current
+      })
+    },
+    [],
+  )
+
+  const process = useCallback(
+    async (inScope: string, item: ComposerAttachment, file: File, kind: AttachmentKind) => {
+      const controller = new AbortController()
+      controllers.current.set(item.localId, controller)
+      try {
+        let prepared = file
+        if (kind === "image") {
+          try {
+            prepared = await downscaleImage(file)
+          } catch {
+            update(inScope, item.localId, { status: "error", error: "Couldn't read this image." })
+            return
+          }
+        }
+        if (controller.signal.aborted) return
+        const tooBig = sizeError(kind, prepared.size)
+        if (tooBig) {
+          update(inScope, item.localId, { status: "error", error: tooBig, size: prepared.size })
+          return
+        }
+        update(inScope, item.localId, { status: "uploading", size: prepared.size })
+        const uploaded = await uploadChatAttachment(
+          prepared,
+          workspaceId ?? "",
+          (progress) => update(inScope, item.localId, { progress }),
+          controller.signal,
+        )
+        update(inScope, item.localId, { status: "ready", progress: 1, uploaded })
+      } catch (error) {
+        if (controller.signal.aborted) return
+        update(inScope, item.localId, {
+          status: "error",
+          error: error instanceof Error ? error.message : "Upload failed.",
+        })
+      } finally {
+        controllers.current.delete(item.localId)
+      }
+    },
+    [update, workspaceId],
+  )
+
+  const add = useCallback(
+    (files: File[]) => {
+      if (!files.length || !workspaceId) return
+      const existing = byScopeRef.current[scope]?.length ?? 0
+      const room = Math.max(0, MAX_ATTACHMENTS - existing)
+      const accepted = files.slice(0, room)
+      setNotice(
+        accepted.length < files.length
+          ? { scope, text: `You can attach up to ${MAX_ATTACHMENTS} files to a message.` }
+          : null,
+      )
+      if (!accepted.length) return
+      const added = accepted.map((file) => {
+        const check = checkFileType(file)
+        const item: ComposerAttachment = {
+          localId: `attachment-${++nextLocalId}`,
+          filename: file.name || "pasted-image.png",
+          kind: check.ok ? check.kind : null,
+          size: file.size,
+          status: check.ok ? "processing" : "error",
+          progress: 0,
+          error: check.ok ? undefined : check.error,
+          previewUrl: check.ok && check.kind === "image" ? URL.createObjectURL(file) : undefined,
+        }
+        return { item, file, kind: check.ok ? check.kind : null }
+      })
+      const addedItems = added.map(({ item }) => item)
+      // Counted now, not at the next render: a drop and a paste can land before it.
+      byScopeRef.current = {
+        ...byScopeRef.current,
+        [scope]: [...(byScopeRef.current[scope] ?? NONE), ...addedItems],
+      }
+      setList(scope, (list) => [...list, ...addedItems])
+      for (const { item, file, kind } of added) {
+        if (!kind) continue
+        // A pasted screenshot is often unnamed ("image.png"); keep the chip's name for it.
+        const named = file.name ? file : new File([file], item.filename, { type: file.type })
+        void process(scope, item, named, kind)
+      }
+    },
+    [process, scope, setList, workspaceId],
+  )
+
+  const remove = useCallback(
+    (localId: string) => {
+      controllers.current.get(localId)?.abort()
+      controllers.current.delete(localId)
+      setNotice(null)
+      setList(scope, (list) =>
+        list.filter((item) => {
+          if (item.localId !== localId) return true
+          if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
+          return false
+        }),
+      )
+    },
+    [scope, setList],
+  )
+
+  const take = useCallback((): FileUIPart[] => {
+    const list = byScopeRef.current[scope] ?? NONE
+    const parts = list.flatMap((item): FileUIPart[] =>
+      item.status === "ready" && item.uploaded
+        ? [{
+            type: "file",
+            mediaType: item.uploaded.mediaType,
+            filename: item.uploaded.filename,
+            url: item.uploaded.url,
+          }]
+        : [],
+    )
+    if (!parts.length) return parts
+    // Only what is sent leaves; a file still uploading (or failed) stays for the next message.
+    const sent = new Set(list.filter((item) => item.status === "ready").map((item) => item.localId))
+    for (const item of list) {
+      if (sent.has(item.localId) && item.previewUrl) URL.revokeObjectURL(item.previewUrl)
+    }
+    setNotice(null)
+    byScopeRef.current = {
+      ...byScopeRef.current,
+      [scope]: list.filter((item) => !sent.has(item.localId)),
+    }
+    setList(scope, (current) => current.filter((item) => !sent.has(item.localId)))
+    return parts
+  }, [scope, setList])
+
+  return {
+    items,
+    busy: items.some((item) => item.status === "processing" || item.status === "uploading"),
+    failed: items.some((item) => item.status === "error"),
+    ready: items.some((item) => item.status === "ready"),
+    notice: notice?.scope === scope ? notice.text : null,
+    add,
+    remove,
+    take,
+  }
+}

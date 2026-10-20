@@ -21,6 +21,8 @@ import { ChatEmptyPrompt } from "@/components/ChatEmptyState"
 import { MaterializationFailure } from "@/components/MaterializationStatus/MaterializationFailure"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { SlashCommandMenu } from "@/components/ChatPanel/SlashCommandMenu"
+import { ChatDropZone } from "@/components/ChatPanel/attachments/ChatDropZone"
+import { useChatAttachments } from "@/components/ChatPanel/attachments/useChatAttachments"
 import type { ActiveJob, RecentTermination } from "@/api/jobs"
 
 const queryPart = {
@@ -374,6 +376,28 @@ export const EmptyChatPrompt: Story = {
           />
         </div>
       </div>
+    )
+  },
+}
+
+export const EmptyChatPromptWithAttachments: Story = {
+  parameters: {
+    layout: "fullscreen",
+  },
+  render: function EmptyChatPromptWithAttachmentsStory() {
+    const [input, setInput] = useState("")
+    const attachments = useChatAttachments("workspace-story", "thread-story")
+    return (
+      <ChatDropZone onFiles={attachments.add} className="min-h-[320px] bg-background px-6 py-10">
+        <div className="mx-auto max-w-3xl">
+          <ChatEmptyPrompt
+            input={input}
+            setInput={setInput}
+            onSend={() => attachments.take()}
+            attachments={attachments}
+          />
+        </div>
+      </ChatDropZone>
     )
   },
 }

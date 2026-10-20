@@ -4,6 +4,9 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 
 import { ChatMessage } from "@/components/ChatMessage"
 import { ChatComposer, QuoteSelectionAction } from "@/components/ChatPanel"
+import { ChatThreadHeader } from "@/components/ChatPanel/ChatThreadHeader"
+import { ChatDropZone } from "@/components/ChatPanel/attachments/ChatDropZone"
+import { useChatAttachments } from "@/components/ChatPanel/attachments/useChatAttachments"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import type { ActiveJob } from "@/api/jobs"
 
@@ -229,6 +232,88 @@ export const TranscriptWithToolsAndPrompt: Story = {
           </div>
         </div>
       </div>
+    )
+  },
+}
+
+const attachmentMessages: UIMessage[] = [
+  {
+    id: "user-with-files",
+    role: "user",
+    parts: [
+      { type: "text", text: "Here's the dashboard screenshot and the registry export. Why don't they match?" },
+      {
+        type: "file",
+        mediaType: "image/png",
+        filename: "dashboard.png",
+        url: "/api/chat/attachments/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/",
+      },
+      {
+        type: "file",
+        mediaType: "application/json",
+        filename: "registry.json",
+        url: "/api/chat/attachments/cccccccc-cccc-cccc-cccc-cccccccccccc/",
+      },
+    ],
+  } as UIMessage,
+  {
+    id: "assistant-files",
+    role: "assistant",
+    parts: [{ type: "text", text: "The registry lists 412 sites; the dashboard counts only the 388 active ones." }],
+  } as UIMessage,
+]
+
+/**
+ * Drop files anywhere on the panel, header included, paste a screenshot, or use the
+ * paperclip. Uploads go to /api/chat/attachments/, so outside the app they need a mock.
+ */
+export const ChatWithAttachments: Story = {
+  render: function ChatWithAttachmentsStory() {
+    const [messages, setMessages] = useState<UIMessage[]>(attachmentMessages)
+    const [input, setInput] = useState("")
+    const attachments = useChatAttachments("workspace-story", "thread-story")
+
+    function send(text: string) {
+      const files = attachments.take()
+      setMessages((current) => [
+        ...current,
+        {
+          id: `user-${current.length + 1}`,
+          role: "user",
+          parts: [{ type: "text", text }, ...files],
+        } as UIMessage,
+      ])
+    }
+
+    return (
+      <ChatDropZone onFiles={attachments.add} className="flex h-[760px] flex-col bg-background">
+        <ChatThreadHeader
+          title="Registry vs dashboard"
+          panelOpen={false}
+          panelMode="files"
+          onTitleChange={() => undefined}
+          onOpenFiles={() => undefined}
+          onOpenCanvas={() => undefined}
+        />
+        <div className="flex-1 overflow-y-auto p-5">
+          <div className="mx-auto max-w-4xl space-y-5">
+            {messages.map((message) => (
+              <ChatMessage
+                key={message.id}
+                message={message}
+                isActiveMessage={false}
+                workspaceId="workspace-story"
+                threadId="thread-story"
+              />
+            ))}
+          </div>
+        </div>
+        <div className="border-t p-4">
+          <div className="mx-auto max-w-4xl">
+            <ChatComposer input={input} setInput={setInput} onSend={send} attachments={attachments} />
+          </div>
+        </div>
+      </ChatDropZone>
     )
   },
 }

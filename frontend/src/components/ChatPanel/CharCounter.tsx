@@ -2,11 +2,12 @@ import { cn } from "@/lib/utils"
 
 import { CHAR_COUNT_VISIBLE_FROM, MAX_MESSAGE_LENGTH, isOverLimit } from "./messageLimit"
 
-function hintText(excess: number, includesHeld: boolean): string {
+function hintText(excess: number, includesHeld: boolean, suggestAttach: boolean): string {
   const amount = `${excess.toLocaleString()} ${excess === 1 ? "character" : "characters"}`
-  return includesHeld
-    ? `Together with your held request this is ${amount} too long. Shorten it, or discard the request.`
-    : `Too long to send. Shorten it by ${amount}.`
+  if (includesHeld) {
+    return `Together with your held request this is ${amount} too long. Shorten it, or discard the request.`
+  }
+  return `Too long to send. Shorten it by ${amount}${suggestAttach ? ", or attach the text as a file" : ""}.`
 }
 
 /**
@@ -19,17 +20,20 @@ export function CharCounter({
   id,
   length,
   includesHeld = false,
+  suggestAttach = false,
   className,
 }: {
   id: string
   length: number
   /** The count includes a held request's text that this message joins. */
   includesHeld?: boolean
+  /** Files can be attached here, so long text can go as one. */
+  suggestAttach?: boolean
   className?: string
 }) {
   const visible = length >= CHAR_COUNT_VISIBLE_FROM
   const over = isOverLimit(length)
-  const hint = over ? hintText(length - MAX_MESSAGE_LENGTH, includesHeld) : ""
+  const hint = over ? hintText(length - MAX_MESSAGE_LENGTH, includesHeld, suggestAttach) : ""
   // Without the count, so it is said once on crossing the limit, not on each keystroke.
   const announcement = !over
     ? ""
