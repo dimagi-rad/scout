@@ -8,10 +8,11 @@ workspace's ``W`` while holding it; sibling rebuilds are deferred tasks.
 A ``T`` region must not fan out into work that takes ``W``: child tasks inherit
 the held-tenant context, and ``W`` is refused whenever it shows tenant keys.
 A child shares its parent's locks only when started with
-``create_task_sharing_data_locks``. Threads that may enter a lock region must be started with ``run_data_thread``,
-which is what lets them reuse their task's locks. The guard against other thread
-starts is best-effort: it catches context-copying ones (``asyncio.to_thread``,
-``sync_to_async``) but cannot see a plain ``threading.Thread``.
+``create_task_sharing_data_locks``. Threads that may enter a lock region must be
+started with ``run_data_thread``, which is what lets them reuse their task's
+locks. The guard against other thread starts is best-effort: it catches
+context-copying ones (``asyncio.to_thread``, ``sync_to_async``) but cannot see a
+plain ``threading.Thread``.
 """
 
 import asyncio
@@ -65,9 +66,10 @@ async def run_data_thread(function, /, *args, **kwargs):
     Drain a shielded thread before propagating cancellation so another repair
     cannot overlap its still-running load or Cube publication.
 
-    Await these one at a time within a job: the managed-pool cap
-    (``mcp_server.services.pool._MAX_POOLS``) is sized on one live data thread,
-    and so one ``async_to_sync`` loop, per worker job.
+    Await these one at a time within a job when they can reach the managed pool:
+    its cap (``mcp_server.services.pool._MAX_POOLS``) is sized on one such data
+    thread, and so one ``async_to_sync`` loop, per worker job. A job's source
+    loads run concurrently (#927) because pipelines never open a managed pool.
     """
     owner = asyncio.current_task()
 
