@@ -3,11 +3,25 @@ import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { api } from "@/api/client"
 import type { WorkspaceListItem } from "@/api/workspaces"
+import type { UserTenant } from "@/api/auth"
+import { getUserTenantsCached } from "@/api/userTenantsCache"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 import { useAppStore } from "@/store/store"
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher"
 
 vi.mock("@/components/CreateWorkspaceModal", () => ({ CreateWorkspaceModal: vi.fn(() => null) }))
+vi.mock("@/api/userTenantsCache", () => ({ getUserTenantsCached: vi.fn() }))
+
+function tenant(id: string, name: string, provider = "commcare_connect"): UserTenant {
+  return {
+    id: `membership-${id}`,
+    tenant_uuid: `tenant-${id}`,
+    provider,
+    tenant_id: id,
+    tenant_name: name,
+    last_selected_at: null,
+  }
+}
 
 const LAST_LOAD = "2026-04-16T12:00:00Z"
 const AVAILABILITY_NOTE = "Current availability is checked when opening an artifact."
@@ -260,62 +274,166 @@ describe("workspace sources", () => {
   })
 })
 
-describe("combining search matches", () => {
+describe("combining sources", () => {
   beforeEach(() => {
     localStorage.clear()
     useAppStore.setState(useAppStore.getInitialState(), true)
+    useAppStore.setState({ user: { id: "user-1" } as never })
     vi.mocked(CreateWorkspaceModal).mockClear()
+    vi.mocked(getUserTenantsCached).mockResolvedValue([
+      tenant("k", "CHC Nutrition Kenya"),
+      tenant("u", "CHC Nutrition Uganda"),
+    ])
   })
 
-  function opp(id: string, name: string): WorkspaceListItem {
-    return workspace({
-      id,
-      display_name: name,
-      tenants: [{ id: `tenant-${id}`, tenant_name: name, provider: "commcare_connect" }],
+  it("is a separate mode, so plain switching stays one click", async () => {
+    openSwitcher()
+    expect(screen.queryByTestId("workspace-basket-option-tenant-k")).toBeNull()
+
+    fireEvent.click(screen.getByTestId("workspace-combine-toggle"))
+    expect(screen.queryByTestId("workspace-list")).toBeNull()
+    fireEvent.change(await screen.findByTestId("workspace-basket-search"), {
+      target: { value: "CHC" },
     })
-  }
+    fireEvent.click(await screen.findByTestId("workspace-basket-option-tenant-k"))
+    fireEvent.click(screen.getByTestId("workspace-basket-option-tenant-u"))
 
-  it("offers a workspace spanning every source the search matches", async () => {
     vi.useFakeTimers()
-    openSwitcher([opp("k", "CHC Kenya"), opp("u", "CHC Uganda"), opp("x", "Other")])
-    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
-
-    fireEvent.click(screen.getByTestId("workspace-combine-matches"))
+    fireEvent.click(screen.getByTestId("workspace-basket-combine"))
     await act(async () => vi.runAllTimers())
     vi.useRealTimers()
 
     expect(vi.mocked(CreateWorkspaceModal).mock.lastCall?.[0]).toMatchObject({
-      initialName: "CHC",
+      initialName: "CHC Nutrition (2 sources)",
       initialSourceIds: ["tenant-k", "tenant-u"],
     })
   })
 
-  it("leaves out the non-matching sources of a matched multi-source workspace", async () => {
-    vi.useFakeTimers()
-    const mixed = workspace({
-      id: "m",
-      display_name: "East Africa",
-      tenants: [
-        { id: "tenant-mk", tenant_name: "CHC Kenya 2", provider: "commcare_connect" },
-        { id: "tenant-mo", tenant_name: "Other Program", provider: "commcare_connect" },
-      ],
-    })
-    openSwitcher([opp("k", "CHC Kenya"), mixed])
-    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
+  it("leaves Enter on the toggle to the button instead of switching workspace", () => {
+    openSwitcher([workspace({ id: "a", display_name: "A" }), workspace({ id: "b", display_name: "B" })])
+    const before = useAppStore.getState().activeDomainId
 
-    fireEvent.click(screen.getByTestId("workspace-combine-matches"))
-    await act(async () => vi.runAllTimers())
-    vi.useRealTimers()
+    // jsdom does not turn Enter into a click; the browser does, which opens the panel.
+    fireEvent.keyDown(screen.getByTestId("workspace-combine-toggle"), { key: "Enter" })
 
-    expect(vi.mocked(CreateWorkspaceModal).mock.lastCall?.[0]).toMatchObject({
-      initialSourceIds: ["tenant-k", "tenant-mk"],
-    })
+    expect(useAppStore.getState().activeDomainId).toBe(before)
   })
 
-  it("does not offer to combine a single match", () => {
-    openSwitcher([opp("k", "CHC Kenya"), opp("x", "Other")])
-    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
+  it("still arrows through the list after a footer button takes focus", () => {
+    const ws = [workspace({ id: "a", display_name: "A" }), workspace({ id: "b", display_name: "B" })]
+    openSwitcher(ws)
+    const toggle = screen.getByTestId("workspace-combine-toggle")
 
-    expect(screen.queryByTestId("workspace-combine-matches")).toBeNull()
+    fireEvent.keyDown(toggle, { key: "ArrowDown" })
+    expect(screen.getByTestId("workspace-search")).toHaveFocus()
+    fireEvent.keyDown(screen.getByTestId("workspace-search"), { key: "Enter" })
+
+    expect(useAppStore.getState().activeDomainId).toBe("b")
+  })
+
+  it("does not switch workspace on Enter inside the panel, and Escape goes back", async () => {
+    openSwitcher([workspace({ id: "a", display_name: "A" }), workspace({ id: "b", display_name: "B" })])
+    const before = useAppStore.getState().activeDomainId
+    fireEvent.click(screen.getByTestId("workspace-combine-toggle"))
+    const search = await screen.findByTestId("workspace-basket-search")
+
+    fireEvent.keyDown(search, { key: "Enter" })
+    expect(useAppStore.getState().activeDomainId).toBe(before)
+
+    fireEvent.keyDown(search, { key: "Escape" })
+    expect(screen.getByTestId("workspace-list")).toBeInTheDocument()
+  })
+
+  it("goes back to the workspace list, keeping the ticks until the switcher closes", async () => {
+    openSwitcher()
+    fireEvent.click(screen.getByTestId("workspace-combine-toggle"))
+    fireEvent.change(await screen.findByTestId("workspace-basket-search"), {
+      target: { value: "Kenya" },
+    })
+    fireEvent.click(await screen.findByTestId("workspace-basket-option-tenant-k"))
+    fireEvent.click(screen.getByTestId("workspace-combine-back"))
+
+    expect(screen.getByTestId("workspace-list")).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId("workspace-combine-toggle"))
+    expect(await screen.findByTestId("workspace-basket-chip-tenant-k")).toBeInTheDocument()
+  })
+})
+
+describe("switcher at scale", () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useAppStore.setState(useAppStore.getInitialState(), true)
+  })
+
+  function many(count: number): WorkspaceListItem[] {
+    return Array.from({ length: count }, (_, i) =>
+      workspace({
+        id: `auto-${i}`,
+        display_name: `Auto ${String(i).padStart(4, "0")}`,
+        is_auto_created: true,
+      }),
+    )
+  }
+
+  it("opens on recent and hand-made workspaces, not every auto-created one", () => {
+    localStorage.setItem("scout.recentWorkspaces", JSON.stringify(["auto-7"]))
+    const handMade = workspace({ id: "mine", display_name: "My program", is_auto_created: false })
+    openSwitcher([handMade, ...many(1000)])
+
+    const rows = screen
+      .getByTestId("workspace-list")
+      .querySelectorAll("[data-switcher-row]")
+    expect([...rows].map((r) => r.getAttribute("data-testid"))).toEqual([
+      "domain-item-auto-7",
+      "domain-item-mine",
+    ])
+    expect(screen.getByText("Recent")).toBeInTheDocument()
+    expect(screen.getByText("Your workspaces")).toBeInTheDocument()
+    expect(screen.getByTestId("workspace-list-search-hint")).toHaveTextContent("1001")
+  })
+
+  it("arrows across the section headings to the right workspace", () => {
+    localStorage.setItem("scout.recentWorkspaces", JSON.stringify(["auto-1"]))
+    const handMade = workspace({ id: "mine", display_name: "My program", is_auto_created: false })
+    openSwitcher([handMade, ...many(3)])
+    const search = screen.getByTestId("workspace-search")
+
+    fireEvent.keyDown(search, { key: "ArrowDown" })
+    fireEvent.keyDown(search, { key: "Enter" })
+
+    expect(useAppStore.getState().activeDomainId).toBe("mine")
+  })
+
+  it("previews only a few no-access workspaces in the default view", () => {
+    const lost = Array.from({ length: 200 }, (_, i) =>
+      workspace({ id: `lost-${i}`, display_name: `Lost ${i}`, has_access: false }),
+    )
+    localStorage.setItem("scout.recentWorkspaces", JSON.stringify(["auto-0"]))
+    openSwitcher([...many(2), ...lost])
+
+    expect(screen.getAllByTestId(/^domain-item-lost-/)).toHaveLength(5)
+    expect(screen.getByTestId("workspace-list-lost-more")).toHaveTextContent("195 more")
+  })
+
+  it("picks the default view once a list that loads after opening arrives", () => {
+    localStorage.setItem("scout.recentWorkspaces", JSON.stringify(["auto-1"]))
+    openSwitcher([])
+
+    act(() => useAppStore.setState({ domains: many(3) }))
+    expect(screen.getByTestId("workspace-list").querySelectorAll("[data-switcher-row]")).toHaveLength(3)
+
+    act(() => useAppStore.setState({ domains: many(100) }))
+    expect(screen.getByTestId("workspace-seg-recent")).toHaveClass("bg-primary")
+    expect(screen.getByTestId("workspace-list").querySelectorAll("[data-switcher-row]")).toHaveLength(1)
+  })
+
+  it("never renders more than 50 rows and asks for a narrower search", () => {
+    openSwitcher(many(1000))
+    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "Auto" } })
+
+    expect(screen.getByTestId("workspace-list").querySelectorAll("[data-switcher-row]")).toHaveLength(50)
+    expect(screen.getByTestId("workspace-list-more")).toHaveTextContent(
+      "950 more — refine your search",
+    )
   })
 })
