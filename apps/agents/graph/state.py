@@ -11,6 +11,8 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from apps.chat.constants import SYSTEM_RESUME_MARKER
+
 DEFAULT_MAX_MESSAGES = 20
 
 
@@ -36,13 +38,62 @@ def prune_messages(
     if len(conversation_messages) <= max_messages:
         return system_messages + conversation_messages
 
-    pruned_conversation = conversation_messages[-max_messages:]
+    # A turn of parallel tool calls passes the window within a few rounds; without
+    # its request the model saw an "empty message" and answered with a menu (#919).
+    request = _current_request(conversation_messages)
+    start = len(conversation_messages) - max_messages
+    if request and request[0] < start:
+        start = len(conversation_messages) - max(max_messages - len(request), 1)
+    else:
+        request = []
+    pinned = [conversation_messages[i] for i in request if i < start]
+    pruned_conversation = conversation_messages[start:]
 
     # Drop leading ToolMessages orphaned from their (now-pruned) parent AIMessage.
     while pruned_conversation and hasattr(pruned_conversation[0], "tool_call_id"):
         pruned_conversation = pruned_conversation[1:]
 
-    return system_messages + pruned_conversation
+    return system_messages + pinned + pruned_conversation
+
+
+def _is_resume_marker(message: BaseMessage) -> bool:
+    content = message.content
+    return isinstance(content, str) and content.startswith(SYSTEM_RESUME_MARKER)
+
+
+def _current_request(conversation: list[BaseMessage]) -> list[int]:
+    """Indices of the human messages that state what the current turn must answer.
+
+    That is the latest run of consecutive HumanMessages. A resume marker alone
+    states nothing, so the user's own message before it is kept too.
+    """
+    last = next(
+        (
+            i
+            for i in range(len(conversation) - 1, -1, -1)
+            if isinstance(conversation[i], HumanMessage)
+        ),
+        None,
+    )
+    if last is None:
+        return []
+    first = last
+    while first > 0 and isinstance(conversation[first - 1], HumanMessage):
+        first -= 1
+    request = list(range(first, last + 1))
+    if all(_is_resume_marker(conversation[i]) for i in request):
+        asked = next(
+            (
+                i
+                for i in range(first - 1, -1, -1)
+                if isinstance(conversation[i], HumanMessage)
+                and not _is_resume_marker(conversation[i])
+            ),
+            None,
+        )
+        if asked is not None:
+            request.insert(0, asked)
+    return request
 
 
 def all_tool_calls(message: AIMessage) -> list[dict]:
