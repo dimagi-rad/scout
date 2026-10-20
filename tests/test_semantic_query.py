@@ -1080,6 +1080,8 @@ def test_same_yaml_publication_advances_revision_but_failed_rebuild_does_not(
     monkeypatch.setattr(
         cube_schema_service.timezone, "now", lambda: next_publication + timedelta(seconds=1)
     )
+    # Unchanged serving content is not revalidated (#918), so change it.
+    SemanticDataset.objects.filter(semantic_model=semantic_model).update(description="Changed")
     with pytest.raises(RuntimeError, match="Synthetic validator unavailable"):
         cube_schema_service.build_and_promote_cube_schema(workspace, model=semantic_model)
 

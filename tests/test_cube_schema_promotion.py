@@ -50,6 +50,8 @@ def test_failed_identical_rebuild_keeps_the_serving_schema_active(
     workspace, model, validator, settings, validation_required
 ):
     settings.CUBE_SCHEMA_VALIDATION_REQUIRED = validation_required
+    # Promoted without a validator, so identical content is validated again.
+    validator.return_value = {"valid": True, "skipped": True}
     serving = build_and_promote_cube_schema(workspace, model=model)
 
     validator.return_value = {"valid": False, "errors": ["Validator unavailable"]}
@@ -566,3 +568,120 @@ def test_refresh_deadlocked_twice_fails_and_keeps_serving(
     assert CubeSchema.objects.filter(semantic_model=model, status=CubeSchema.Status.ACTIVE).exists()
     model.refresh_from_db()
     assert model.metadata["last_build"]["ok"] is False
+
+
+@pytest.mark.django_db(transaction=True)
+def test_unchanged_serving_schema_is_not_validated_again(workspace, model, validator):
+    serving = build_and_promote_cube_schema(workspace, model=model)
+    assert validator.await_count == 1
+
+    again = build_and_promote_cube_schema(workspace, model=model)
+
+    assert validator.await_count == 1
+    assert again.id == serving.id
+    assert again.status == CubeSchema.Status.ACTIVE
+    model.refresh_from_db()
+    assert model.metadata["last_build"]["ok"] is True
+    assert model.metadata["last_build"]["content_hash"] == serving.content_hash
+
+
+@pytest.mark.django_db(transaction=True)
+def test_changed_schema_is_validated(workspace, model, validator):
+    build_and_promote_cube_schema(workspace, model=model)
+    SemanticDataset.objects.filter(name="visits").update(description="Changed")
+
+    build_and_promote_cube_schema(workspace, model=model)
+
+    assert validator.await_count == 2
+
+
+@pytest.mark.django_db(transaction=True)
+def test_content_that_failed_validation_is_validated_again(workspace, model, validator):
+    build_and_promote_cube_schema(workspace, model=model)
+    SemanticDataset.objects.filter(name="visits").update(description="Changed")
+    validator.return_value = {"valid": False, "errors": ["Cube compiler failure"]}
+    with pytest.raises(CubeSchemaBuildError):
+        build_and_promote_cube_schema(workspace, model=model)
+
+    # The same failing content again: its ERROR row must not count as validated.
+    with pytest.raises(CubeSchemaBuildError):
+        build_and_promote_cube_schema(workspace, model=model)
+
+    assert validator.await_count == 3
+    model.refresh_from_db()
+    assert model.metadata["last_build"]["ok"] is False
+
+
+@pytest.mark.django_db(transaction=True)
+def test_returning_to_the_serving_content_after_a_failure_skips_validation(
+    workspace, model, validator
+):
+    serving = build_and_promote_cube_schema(workspace, model=model)
+    SemanticDataset.objects.filter(name="visits").update(description="Changed")
+    validator.return_value = {"valid": False, "errors": ["Cube compiler failure"]}
+    with pytest.raises(CubeSchemaBuildError):
+        build_and_promote_cube_schema(workspace, model=model)
+    SemanticDataset.objects.filter(name="visits").update(description="")
+
+    promoted = build_and_promote_cube_schema(workspace, model=model)
+
+    assert validator.await_count == 2
+    assert promoted.id == serving.id
+    model.refresh_from_db()
+    # The failure is cleared: what serves is what was generated, and it passed.
+    assert model.metadata["last_build"]["ok"] is True
+
+
+@pytest.mark.django_db(transaction=True)
+def test_schema_promoted_without_a_validator_is_validated_once_one_exists(
+    workspace, model, validator
+):
+    validator.return_value = {"valid": True, "skipped": True}
+    build_and_promote_cube_schema(workspace, model=model)
+    validator.return_value = {"valid": True, "errors": []}
+
+    build_and_promote_cube_schema(workspace, model=model)
+    build_and_promote_cube_schema(workspace, model=model)
+
+    assert validator.await_count == 2
+
+
+@pytest.mark.django_db(transaction=True)
+def test_unchanged_refresh_needs_no_validator_slot(
+    workspace, model, cube_http, raw_holder, monkeypatch
+):
+    monkeypatch.setattr(cube_schema, "ensure_semantic_model", lambda ws: model)
+    build_and_promote_cube_schema(workspace)
+    raw_holder.execute("SELECT pg_advisory_lock(%s, 0)", [cube_schema.VALIDATOR_LOCK_CLASS])
+    attempts = _record_slot_attempts(monkeypatch)
+
+    promoted = build_and_promote_cube_schema(workspace, slot_wait_seconds=0)
+
+    assert promoted.status == CubeSchema.Status.ACTIVE
+    assert attempts == []
+    assert cube_http.calls["validate"] == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_skipping_validation_releases_a_slot_it_was_handed(workspace, model, validator):
+    build_and_promote_cube_schema(workspace, model=model)
+
+    with cube_schema._validator_slot(0) as slot:
+        cube_schema._build_validate_and_promote(workspace, model, slot=slot)
+        # Released before promotion, not held until the caller's block ends.
+        assert slot._slot is None
+
+    assert validator.await_count == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_row_marked_only_by_the_legacy_skip_message_is_validated_again(
+    workspace, model, validator
+):
+    serving = build_and_promote_cube_schema(workspace, model=model)
+    serving.diagnostics = [{"level": "warning", "message": cube_schema.VALIDATION_SKIPPED_MESSAGE}]
+    serving.save(update_fields=["diagnostics"])
+
+    build_and_promote_cube_schema(workspace, model=model)
+
+    assert validator.await_count == 2
