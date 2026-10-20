@@ -97,11 +97,15 @@ async def test_orm_call_fails_on_dead_connection_without_recovery():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_task_recovers_from_dead_connection():
-    """A job succeeds even when the worker's connection died since the
-    previous job."""
+    """A job never inherits the worker thread's dead connection: it runs on
+    its own thread (config/task_threads.py) with a fresh one."""
     await sync_to_async(_kill_default_connection)()
+    killed = await sync_to_async(lambda: connections["default"])()
+    _job_connections.clear()
     try:
-        assert await _run_one_job() == "succeeded"
+        assert await _run_one_job(connection_recording_task) == "succeeded"
+        [job_connection] = _job_connections
+        assert job_connection is not killed
     finally:
         # The job ran on its own thread, so the dead connection killed above is
         # still on this one; later tests share it.

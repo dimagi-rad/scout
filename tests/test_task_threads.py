@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import time
 
 import pytest
 from asgiref.sync import sync_to_async
@@ -27,9 +28,35 @@ async def test_concurrent_jobs_do_not_share_the_thread_sensitive_thread():
     async def run():
         return await isolate_job_thread(job, context=None, worker=None)
 
-    (a1, a2), (b1, b2) = await asyncio.gather(run(), run())
+    async with asyncio.timeout(5):
+        (a1, a2), (b1, b2) = await asyncio.gather(run(), run())
 
     assert a1 == a2
     assert b1 == b2
     assert a1 != b1
     assert shared not in {a1, b1}
+
+
+@pytest.mark.asyncio
+async def test_job_exit_does_not_wait_for_a_sync_call_still_running():
+    release = threading.Event()
+    started = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def slow():
+        loop.call_soon_threadsafe(started.set)
+        release.wait(3)
+
+    async def job():
+        call = asyncio.ensure_future(sync_to_async(slow)())
+        await started.wait()
+        call.cancel()
+
+    # A blocked loop can't time itself out, so measure instead of wait_for.
+    began = time.monotonic()
+    try:
+        await isolate_job_thread(job, context=None, worker=None)
+    finally:
+        elapsed = time.monotonic() - began
+        release.set()
+    assert elapsed < 1
