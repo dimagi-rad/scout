@@ -60,3 +60,12 @@ def test_non_images_are_not_claimed():
     assert read_image_header(b"<svg xmlns='http://www.w3.org/2000/svg'/>") is None
     assert read_image_header(b"RIFF\x00\x00\x00\x00WAVEfmt ") is None
     assert read_image_header(b'{"a": 1}') is None
+
+
+def test_jpeg_skips_extraneous_bytes_between_segments():
+    content = images.jpeg(10, 20)
+    # Two stray zero bytes after APP0, as some camera firmware writes; libjpeg skips them.
+    app0_end = 2 + 2 + 16
+    content = content[:app0_end] + b"\x00\x00" + content[app0_end:]
+    header = read_image_header(content)
+    assert (header.width, header.height) == (10, 20)

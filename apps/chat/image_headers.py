@@ -95,10 +95,18 @@ def _jpeg(content: bytes) -> ImageHeader:
     position = 2
     while position + 4 <= len(content):
         if content[position] != 0xFF:
-            raise MalformedImage("JPEG segment does not start with a marker")
+            # Like libjpeg's next_marker: skip extraneous bytes some camera firmware
+            # writes between segments, up to the next marker.
+            position = content.find(b"\xff", position)
+            if position == -1:
+                break
+            continue
         marker = content[position + 1]
         if marker == 0xFF:  # fill byte before a marker
             position += 1
+            continue
+        if marker == 0x00:  # a stuffed 0xFF is data, not a marker
+            position += 2
             continue
         if marker in _JPEG_STANDALONE:
             position += 2
