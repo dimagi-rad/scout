@@ -58,8 +58,9 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
     const picked = e.target.files?.[0] ?? null
     setFile(picked)
     setError(null)
-    // Keep a title the user typed; replace only the empty or file-derived one.
-    if (picked) {
+    // Keep a title the user typed; replace only the empty or file-derived one, and
+    // only with the name of a file that can actually be uploaded.
+    if (picked && !fileProblem(picked)) {
       setTitle((current) =>
         !current.trim() || (file && current === titleFromFilename(file.name))
           ? titleFromFilename(picked.name)

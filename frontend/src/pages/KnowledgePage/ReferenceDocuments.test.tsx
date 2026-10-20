@@ -199,6 +199,9 @@ describe("referenceFilename", () => {
     expect(referenceFilename({ title: "Notes", source_format: "" })).toBe("Notes.txt")
     expect(referenceFilename({ title: "指标登记表", source_format: "json" })).toBe("指标登记表.json")
     expect(referenceFilename({ title: "***", source_format: "csv" })).toBe("document.csv")
+    expect(referenceFilename({ title: "report\u202Egnp", source_format: "json" })).toBe(
+      "report_gnp.json",
+    )
   })
 })
 

@@ -164,6 +164,7 @@ export function KnowledgePage() {
 
   const handleDownload = async (item: KnowledgeItem) => {
     const full = await fullReference(item, fetchKnowledgeItem)
+    // null: the workspace changed while the document loaded, so it isn't this one's.
     if (!full || !isCurrentAccount()) return
     downloadText(full)
   }

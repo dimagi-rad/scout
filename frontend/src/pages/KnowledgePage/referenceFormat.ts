@@ -26,10 +26,11 @@ const MIME_TYPES: Record<string, string> = {
 }
 
 export function referenceFilename(item: Pick<KnowledgeEntryItem, "title" | "source_format">): string {
-  // Only characters a file system rejects are replaced, so non-Latin titles survive.
+  // Only characters a file system rejects, controls and bidi overrides (which can disguise
+  // the extension) are replaced, so non-Latin titles survive.
   const base = item.title
     // eslint-disable-next-line no-control-regex
-    .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "_")
+    .replace(/[\\/:*?"<>|\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, "_")
     .replace(/^[_\s.]+|[_\s.]+$/g, "")
   return `${base || "document"}.${item.source_format || "txt"}`
 }
