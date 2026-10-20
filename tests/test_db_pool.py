@@ -164,6 +164,19 @@ def test_a_timeout_after_a_slot_refusal_is_busy(refusal, make_pooled_wrapper, mo
     assert isinstance(raised, DjangoPoolExhausted)
 
 
+@pytest.mark.django_db(transaction=True)
+def test_a_served_checkout_retires_an_old_refusal(make_pooled_wrapper, monkeypatch):
+    refusal = (None, "connection failed: FATAL:  sorry, too many clients already")
+    wrapper = make_pooled_wrapper()
+    wrapper.connect()
+    wrapper.close()
+    monkeypatch.setattr(RefusalRecordingConnection, "last_connect_failure", refusal)
+
+    wrapper.connect()
+
+    assert RefusalRecordingConnection.last_connect_failure is None
+
+
 def test_a_timeout_on_an_unreachable_database_stays_an_outage(make_pooled_wrapper, monkeypatch):
     down = (None, "connection failed: Connection refused")
     raised = _timeout_after(down, make_pooled_wrapper, monkeypatch)

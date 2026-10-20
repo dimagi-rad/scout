@@ -26,11 +26,14 @@ class DjangoPoolExhausted(PoolTimeout):
 class DatabaseWrapper(PostgresDatabaseWrapper):
     def get_new_connection(self, conn_params):
         try:
-            return super().get_new_connection(conn_params)
+            conn = super().get_new_connection(conn_params)
         except PoolTimeout as exc:
             if self._pool_is_busy():
                 raise DjangoPoolExhausted(str(exc)) from exc
             raise
+        # A served checkout retires an old refusal, or a later outage would read as busy.
+        RefusalRecordingConnection.last_connect_failure = None
+        return conn
 
     def _pool_is_busy(self) -> bool:
         if self.pool.get_stats().get("pool_size", 0) >= self.pool.max_size:
