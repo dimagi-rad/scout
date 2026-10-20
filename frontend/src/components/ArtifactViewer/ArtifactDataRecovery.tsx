@@ -69,7 +69,7 @@ export function ArtifactDataRecovery({
         {readable && <p>Your artifact remains available while recovery runs.</p>}
         <div className="w-full max-w-sm" role="status" aria-live="polite">
           <div className="mb-1.5 flex items-center justify-between gap-3 text-xs text-muted-foreground">
-            <span>{source ? `Loading ${source}` : progress?.message || "Preparing workspace data"}</span>
+            <span>{source ? `Importing ${source}…` : progress?.message || "Preparing workspace data"}</span>
             {percent != null && <span className="font-medium text-foreground">{percent}%</span>}
           </div>
           <div className="relative h-1.5 overflow-hidden rounded-full bg-muted">

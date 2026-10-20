@@ -45,7 +45,7 @@ describe("post-load phases", () => {
       progress: { ...baseProgress, step: 3, source: "cases", rows_loaded: 50, rows_total: 100, percent: 50 },
     })
 
-    expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent("Loading cases into Scout")
+    expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent("Importing cases…")
     expect(screen.getByTestId("materialization-banner-step")).toHaveTextContent("Step 3 of 10")
     expect(screen.getByTestId("materialization-banner-percent")).toHaveTextContent("50%")
   })
@@ -64,9 +64,18 @@ describe("post-load phases", () => {
     renderJob({ progress: baseProgress })
 
     expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent(
-      "Loading data into Scout",
+      "Importing data…",
     )
     expect(screen.getByTestId("materialization-banner-rows")).toHaveTextContent("Preparing…")
+  })
+
+  it("names the provider being imported from, and the source below it", () => {
+    renderJob({ provider: "commcare_connect", progress: { ...baseProgress, source: "visits" } })
+
+    expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent(
+      "Importing from Connect…",
+    )
+    expect(screen.getByTestId("materialization-banner-rows")).toHaveTextContent("Importing visits…")
   })
 })
 

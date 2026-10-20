@@ -6,10 +6,10 @@ import { useAppStore } from "@/store/store"
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher"
 
 const baseWorkspaces: WorkspaceListItem[] = [
-  { id: "recorded", display_name: "Example — recorded load", schema_status: "available" },
+  { id: "recorded", display_name: "Example — recorded import", schema_status: "available" },
   { id: "loading", display_name: "Example — loading data", schema_status: "provisioning" },
   { id: "failed", display_name: "Example — setup failed", schema_status: "failed" },
-  { id: "not-loaded", display_name: "Example — no data loaded", schema_status: "not_loaded" },
+  { id: "not-loaded", display_name: "Example — no data imported", schema_status: "not_loaded" },
   { id: "undated", display_name: "Example — no load time recorded", schema_status: "available" },
 ].map((state, index) => ({
   ...state,

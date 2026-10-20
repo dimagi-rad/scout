@@ -26,6 +26,17 @@ export function getProviderMeta(provider: string | undefined): ProviderMeta {
   return META[provider] ?? FALLBACK
 }
 
+const SHORT_LABELS: Record<string, string> = {
+  commcare: "CommCare",
+  commcare_connect: "Connect",
+  ocs: "OCS",
+}
+
+/** The name users call a provider by in running copy ("Importing from Connect…"). */
+export function providerShortLabel(provider: string): string | null {
+  return SHORT_LABELS[canonicalProvider(provider)] ?? null
+}
+
 /**
  * The data provider an OAuth app id belongs to ("commcare_eu" -> "commcare"),
  * matching the backend's canonical_provider: Connect is checked before CommCare.

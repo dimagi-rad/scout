@@ -74,7 +74,7 @@ describe("ChatPanel load summary", () => {
     rerender(<MemoryRouter><ChatPanel /></MemoryRouter>)
 
     const summary = await screen.findByTestId("load-summary")
-    expect(summary).toHaveTextContent("Data load ended")
+    expect(summary).toHaveTextContent("Import ended")
     expect(screen.getByTestId("load-summary-table-Alpha-forms")).toHaveTextContent("42")
   })
 
@@ -107,7 +107,7 @@ describe("ChatPanel load summary", () => {
 
     fireEvent.click(screen.getByTestId("source-freshness-details"))
 
-    expect(screen.getByTestId("load-summary")).toHaveTextContent("What's loaded")
+    expect(screen.getByTestId("load-summary")).toHaveTextContent("What's imported")
     expect(screen.queryByTestId("source-freshness-Alpha")).toBeNull()
   })
 

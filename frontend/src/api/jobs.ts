@@ -52,6 +52,8 @@ export interface ActiveJob {
   source_index: number | null
   source_total: number | null
   tenant_name: string | null
+  /** The provider being imported from; null when the job spans several or none is known. */
+  provider?: string | null
   created_at: string
 }
 
@@ -59,6 +61,7 @@ export interface ActiveJob {
 export interface WorkspaceLoad {
   tenant_id: string
   tenant_name: string
+  provider?: string | null
   source_index: number
   source_total: number
   state: "started" | "discovering" | "loading" | "transforming"

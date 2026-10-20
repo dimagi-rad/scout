@@ -14,7 +14,7 @@ interface Props {
 const STATE_LABELS: Record<string, string> = {
   failed: "failed",
   cancelled: "cancelled",
-  skipped: "not loaded",
+  skipped: "not imported",
   in_progress: "incomplete",
 }
 
@@ -48,19 +48,19 @@ export function LoadSummary({ sources, justLoaded, onClose }: Props) {
   return (
     <section
       className="mx-4 mb-2 rounded-lg border bg-muted/30 p-3 text-sm"
-      aria-label="Loaded data summary"
+      aria-label="Imported data summary"
       data-testid="load-summary"
     >
       <div className="mb-2 flex items-center justify-between gap-2">
         <p className="font-medium">
-          {justLoaded ? "Data load ended: here is what's loaded now" : "What's loaded"}
+          {justLoaded ? "Import ended: here is what's imported now" : "What's imported"}
         </p>
         <Button
           variant="ghost"
           size="sm"
           className="h-7 w-7 p-0 text-muted-foreground"
           onClick={onClose}
-          aria-label="Close loaded data summary"
+          aria-label="Close imported data summary"
           data-testid="load-summary-close"
         >
           <X className="h-4 w-4" />
@@ -77,17 +77,17 @@ export function LoadSummary({ sources, justLoaded, onClose }: Props) {
                 <span className="text-xs text-muted-foreground">{source.provider_label}</span>
               </div>
               {!source.last_fetched_at ? (
-                <p className="text-xs text-muted-foreground">Not loaded yet.</p>
+                <p className="text-xs text-muted-foreground">Not imported yet.</p>
               ) : !summary ? (
                 <p className="text-xs text-muted-foreground">
-                  Loaded {formatRelativeTime(source.last_fetched_at)}; no per-table detail for
-                  this load.
+                  Imported {formatRelativeTime(source.last_fetched_at)}; no per-table detail for
+                  this import.
                 </p>
               ) : (
                 <>
                   <p className="text-xs text-muted-foreground">
                     {plural(summary.total_rows, "row")} in {plural(completed.length, "table")} ·
-                    loaded {formatRelativeTime(source.last_fetched_at)}
+                    imported {formatRelativeTime(source.last_fetched_at)}
                     {!source.serving && " · not in use by this workspace"}
                   </p>
                   <table className="mt-1 w-full text-xs">
