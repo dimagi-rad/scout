@@ -1307,6 +1307,11 @@ export function ChatPanel() {
             }
             onStop={handleStop}
             mode={held.adding ? "add" : "send"}
+            heldText={
+              held.pending && (held.adding || held.phase === "unanswered")
+                ? pendingRequestText(held.pending)
+                : undefined
+            }
             quotes={quotes}
             onRemoveQuote={(index) =>
               setThreadQuotes(threadId, (current) => current.filter((_, i) => i !== index))}
