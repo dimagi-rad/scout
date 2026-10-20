@@ -12,6 +12,7 @@ import html
 import re
 from dataclasses import dataclass
 
+import anthropic
 from langchain_core.messages import BaseMessage, HumanMessage
 
 from apps.chat.attachments import message_attachments
@@ -21,8 +22,10 @@ INLINE_TEXT_MAX_CHARS = 100_000
 TRUNCATED_TEXT_CHARS = 20_000
 MIN_SHOWN_TEXT_CHARS = 2_000
 # Per model request, newest attachments first. Anthropic caps a request at 32 MB,
-# and base64 adds a third to every image.
-TEXT_BUDGET_CHARS = 200_000
+# and base64 adds a third to every image. Text is budgeted conservatively: numeric
+# CSV runs near 2 characters a token, so 100k characters stays under ~50k tokens of
+# a window it shares with the history and tool results.
+TEXT_BUDGET_CHARS = 100_000
 IMAGE_BUDGET_BYTES = 15 * 1024 * 1024
 MAX_IMAGES_PER_REQUEST = 20
 
@@ -57,6 +60,16 @@ class AttachmentLoader:
         self.thread_id = thread_id
         self._cache: dict[str, LoadedAttachment | None] = {}
         self._base64: dict[str, str] = {}
+        # Images the API refused this run, and those the latest expansion sent.
+        self.rejected_images: set[str] = set()
+        self.sent_images: set[str] = set()
+
+    def reject_sent_images(self) -> bool:
+        """Mark every image the latest request carried as unusable; False if none."""
+        if not self.sent_images:
+            return False
+        self.rejected_images |= self.sent_images
+        return True
 
     def base64_of(self, attachment: LoadedAttachment) -> str:
         """The image's base64, encoded once per run rather than on every model call."""
@@ -139,8 +152,10 @@ async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budg
     known_size = entry.get("size") if isinstance(entry.get("size"), int) else 0
     if is_image and (budget.images <= 0 or known_size > budget.image_bytes):
         return _image_omitted(entry)
-    if not is_image and budget.text_chars <= 0:
+    if not is_image and budget.text_chars < MIN_SHOWN_TEXT_CHARS:
         return _text_omitted(entry)
+    if is_image and entry["id"] in loader.rejected_images:
+        return _text_block(f"[Image {_label(entry)} could not be processed.]")
 
     attachment = (await loader.aload([entry["id"]]))[entry["id"]]
     if attachment is None:
@@ -151,6 +166,7 @@ async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budg
             return _image_omitted(entry)
         budget.images -= 1
         budget.image_bytes -= size
+        loader.sent_images.add(attachment.id)
         return {
             "type": "image",
             "source": {
@@ -187,6 +203,7 @@ async def aexpand_attachments(
         for index, message in enumerate(messages)
         if isinstance(message, HumanMessage) and (entries := message_attachments(message))
     ]
+    loader.sent_images = set()
     if not carrying:
         return messages
     budget = _Budget()
@@ -200,3 +217,8 @@ async def aexpand_attachments(
             blocks.append(_text_block(message.content))
         expanded[index] = message.model_copy(update={"content": blocks, "additional_kwargs": {}})
     return expanded
+
+
+def is_image_rejection(exc: BaseException) -> bool:
+    """Whether the API refused the request over an image block (a 400 naming it)."""
+    return isinstance(exc, anthropic.BadRequestError) and "image" in str(exc).lower()
