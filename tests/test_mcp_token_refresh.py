@@ -143,6 +143,7 @@ class TestSyncTokenRefresh:
         preflight.refresh_token = "old-refresh"
         preflight.expires_at = None
         mocker.patch("apps.users.services.token_refresh._persist_refresh_failure")
+        mocker.patch("apps.users.services.token_refresh._adopt_rotated_token", return_value=None)
 
     def test_refresh_oauth_token_sync_updates_and_persists(self):
 

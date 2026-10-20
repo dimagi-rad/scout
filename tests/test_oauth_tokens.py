@@ -140,6 +140,7 @@ class TestTokenRefresh:
             "apps.users.services.token_refresh._arecord_refresh_failure",
             new_callable=AsyncMock,
         )
+        mocker.patch("apps.users.services.token_refresh._adopt_rotated_token", return_value=None)
 
     @pytest.mark.asyncio
     async def test_refresh_updates_token(self, httpx_mock):

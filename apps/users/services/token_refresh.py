@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -1142,6 +1143,47 @@ async def refresh_oauth_token(
     return result.snapshot.access_token
 
 
+_sync_refresh_locks: dict[int, threading.Lock] = {}
+_sync_refresh_locks_guard = threading.Lock()
+
+
+def _sync_refresh_lock(token_id) -> threading.Lock:
+    with _sync_refresh_locks_guard:
+        return _sync_refresh_locks.setdefault(token_id, threading.Lock())
+
+
+def _adopt_rotated_token(social_token, *, deadline, clock) -> TokenRefreshResult | None:
+    """Take the token another refresh stored after this copy was read.
+
+    Refresh tokens rotate, so posting this copy's spent one is refused and reads as
+    a revoked sign-in. Sources sharing a connection load at once (#927), each with
+    its own copy. Only a fresh stored token is taken; anything else refreshes this
+    copy as before, so its failure never marks a credential it did not try.
+    """
+    try:
+        with transaction.atomic(), preserve_transaction_timeouts():
+            _configure_transaction_deadline(deadline, clock)
+            stored = SocialToken.objects.filter(pk=social_token.pk).first()
+    except (DatabaseError, _RefreshDeadlineExceeded) as exc:
+        if _is_deadline_error(exc):
+            raise TokenRefreshDeadlineExceeded(
+                "Timed out waiting on the database before refreshing OAuth credentials."
+            ) from exc
+        raise TokenRefreshUnavailable("Failed to read OAuth refresh state.") from exc
+    if (
+        stored is None
+        or stored.account_id != social_token.account_id
+        or stored.app_id != social_token.app_id
+        or (stored.token, stored.token_secret) == (social_token.token, social_token.token_secret)
+    ):
+        return None
+    if token_needs_refresh(stored.expires_at, can_refresh=bool(stored.token_secret)):
+        return None
+    snapshot = _persisted_snapshot(stored)
+    _apply_persisted_snapshot(social_token, snapshot)
+    return TokenRefreshResult(TokenRefreshStatus.SUPERSEDED, snapshot, credential_advanced=True)
+
+
 def refresh_oauth_token_result_sync(
     social_token,
     token_url: str,
@@ -1162,6 +1204,27 @@ def refresh_oauth_token_result_sync(
     always the owner's to reconnect. ``record_failure=False`` exists for a manager
     renewing someone else's token (1d4b2748); add it here if a caller like that appears.
     """
+    # One refresh per token at a time in this process; a waiter takes what it stored.
+    with _sync_refresh_lock(social_token.pk):
+        adopted = _adopt_rotated_token(
+            social_token, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
+        )
+        if adopted is not None:
+            logger.info("Adopted a concurrently refreshed OAuth token (sync)")
+            return adopted
+        return _refresh_oauth_token_sync(
+            social_token,
+            token_url,
+            timeout=timeout,
+            db_timeout=db_timeout,
+            deadline=deadline,
+            clock=clock,
+        )
+
+
+def _refresh_oauth_token_sync(
+    social_token, token_url: str, *, timeout, db_timeout, deadline, clock
+) -> TokenRefreshResult:
     try:
         preflight = _preflight_token(
             social_token, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock

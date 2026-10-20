@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import threading
 import time
 from datetime import timedelta
 from unittest import mock
@@ -29,6 +30,7 @@ from apps.users.services.token_refresh import (
     _preflight_token,
     refresh_oauth_token_result,
     refresh_oauth_token_result_sync,
+    refresh_oauth_token_sync,
 )
 from tests.clocks import ManualClock
 from tests.row_locks import LOCK_SAFETY_SECONDS, row_locked, user_row
@@ -1010,3 +1012,50 @@ async def test_slow_provider_does_not_spend_the_budget_meant_for_the_write(
     persisted = await SocialToken.objects.aget(pk=token.pk)
     assert persisted.token == "new-access"
     assert persisted.token_secret == "rotated-refresh"
+
+
+_ROTATED = {"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 900}
+# Refresh tokens rotate: the provider refuses the spent one.
+_SPENT = {"status_code": 400, "json": {"error": "invalid_grant"}}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_stale_copy_adopts_the_token_another_refresh_stored(oauth_identity, requests_mock):
+    token, _ = oauth_identity
+    stale_copy = SocialToken.objects.get(pk=token.pk)
+    requests_mock.post(URL, [{"json": _ROTATED}, _SPENT])
+
+    assert refresh_oauth_token_sync(token, URL) == "new-access"
+    assert refresh_oauth_token_sync(stale_copy, URL) == "new-access"
+
+    assert requests_mock.call_count == 1
+    assert stale_copy.token_secret == "new-refresh"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_refreshes_of_one_token_mint_once(oauth_identity, requests_mock):
+    """Sources sharing a connection load at once (#927), each 401ing on its own copy."""
+    token, _ = oauth_identity
+    copies = [SocialToken.objects.get(pk=token.pk) for _ in range(2)]
+    requests_mock.post(URL, [{"json": _ROTATED}, _SPENT])
+    together = threading.Barrier(2, timeout=5)
+    values, errors = [], []
+
+    def refresh(copy):
+        try:
+            together.wait()
+            values.append(refresh_oauth_token_sync(copy, URL))
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            django_connection.close()
+
+    threads = [threading.Thread(target=refresh, args=(copy,)) for copy in copies]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert errors == []
+    assert values == ["new-access", "new-access"]
+    assert requests_mock.call_count == 1
