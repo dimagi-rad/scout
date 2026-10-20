@@ -64,19 +64,30 @@ class KnowledgeEntrySerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
-        kind = attrs.get("kind") or (self.instance.kind if self.instance else None)
+        instance = self.instance
+        if (
+            instance is not None
+            and instance.kind == KnowledgeEntry.Kind.REFERENCE
+            and "content" in attrs
+        ):
+            # Clients are served a preview, so any content they send back may be a
+            # truncated copy: an unchanged echo is a no-op and anything else is refused,
+            # never written over the stored document.
+            if attrs["content"] not in (instance.content, _shown_content(instance, full=False)):
+                raise serializers.ValidationError(
+                    {
+                        "content": (
+                            "A reference document's content can't be edited. "
+                            "Upload a new version instead."
+                        )
+                    }
+                )
+            del attrs["content"]
+        kind = attrs.get("kind") or (instance.kind if instance else None)
         if "content" in attrs and kind != KnowledgeEntry.Kind.REFERENCE:
             attrs["content"] = attrs["content"].strip()
             if not attrs["content"]:
                 raise serializers.ValidationError({"content": "This field may not be blank."})
-        if (
-            self.instance is not None
-            and self.instance.kind == KnowledgeEntry.Kind.REFERENCE
-            and attrs.get("content") == _shown_content(self.instance, full=False)
-        ):
-            # A client echoing back the preview it was served must not truncate the
-            # stored document to that preview.
-            del attrs["content"]
         return attrs
 
     def get_type(self, obj) -> str:

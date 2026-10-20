@@ -222,11 +222,15 @@ async def aresolve_reference_document(
         if doc is not None:
             return doc, []
     for lookup in ("title__iexact", "title__icontains"):
+        # Scan without the bodies (up to 2 MB each); fetch the one match in full.
         matches = [
-            doc async for doc in documents.filter(**{lookup: needle}).order_by("title", "pk")[:10]
+            doc
+            async for doc in documents.only("id", "title")
+            .filter(**{lookup: needle})
+            .order_by("title", "pk")[:10]
         ]
         if len(matches) == 1:
-            return matches[0], []
+            return await documents.aget(pk=matches[0].pk), []
         if matches:
             return None, matches
     return None, []

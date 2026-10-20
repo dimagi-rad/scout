@@ -125,6 +125,19 @@ class TestUploadView:
         doc.refresh_from_db()
         assert (doc.title, doc.content) == ("Renamed", REGISTRY_TEXT)
 
+    def test_edited_preview_is_refused_not_written(self, api_client, workspace):
+        doc = _reference(workspace)
+        url = reverse("knowledge:detail", kwargs={"workspace_id": workspace.id, "item_id": doc.id})
+
+        resp = api_client.put(
+            url, {"title": "Renamed", "content": REGISTRY_TEXT[:500] + " edited"}, format="json"
+        )
+
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert "Upload a new version" in str(resp.data["content"])
+        doc.refresh_from_db()
+        assert (doc.title, doc.content) == ("Indicator registry", REGISTRY_TEXT)
+
     def test_upload_keeps_the_file_byte_for_byte(self, api_client, workspace):
         resp = _upload(api_client, workspace, "notes.md", b"\n# Codes\n\nA: Alpha\n")
         assert resp.status_code == status.HTTP_201_CREATED, resp.data
