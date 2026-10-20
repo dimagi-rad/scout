@@ -118,11 +118,11 @@ async def adefer_materialize_workspace(
     )
 
 
-def view_rebuild_lock(workspace_id: str) -> str:
+def _view_rebuild_lock(workspace_id: str) -> str:
     return f"view-rebuild:{workspace_id}"
 
 
-def semantic_rebuild_lock(workspace_id: str) -> str:
+def _semantic_rebuild_lock(workspace_id: str) -> str:
     return f"semantic-rebuild:{workspace_id}"
 
 
@@ -161,20 +161,20 @@ async def _adefer_once(name: str, queueing_lock: str, **args: Any) -> int | None
 
 def defer_rebuild_workspace_view_schema(*, workspace_id: str) -> int | None:
     return _defer_once(
-        REBUILD_WORKSPACE_VIEW_SCHEMA, view_rebuild_lock(workspace_id), workspace_id=workspace_id
+        REBUILD_WORKSPACE_VIEW_SCHEMA, _view_rebuild_lock(workspace_id), workspace_id=workspace_id
     )
 
 
 async def adefer_rebuild_workspace_view_schema(*, workspace_id: str) -> int | None:
     return await _adefer_once(
-        REBUILD_WORKSPACE_VIEW_SCHEMA, view_rebuild_lock(workspace_id), workspace_id=workspace_id
+        REBUILD_WORKSPACE_VIEW_SCHEMA, _view_rebuild_lock(workspace_id), workspace_id=workspace_id
     )
 
 
 async def adefer_rebuild_workspace_semantic_model(*, workspace_id: str) -> int | None:
     return await _adefer_once(
         REBUILD_WORKSPACE_SEMANTIC_MODEL,
-        semantic_rebuild_lock(workspace_id),
+        _semantic_rebuild_lock(workspace_id),
         workspace_id=workspace_id,
     )
 

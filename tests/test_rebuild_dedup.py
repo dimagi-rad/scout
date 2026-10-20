@@ -21,6 +21,17 @@ from apps.workspaces.task_dispatch import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _drop_queued_rows(django_db_blocker):
+    # procrastinate_jobs is unmanaged: rows committed by transactional tests outlive them.
+    with django_db_blocker.unblock(), connection.cursor() as cursor:
+        cursor.execute("SELECT COALESCE(MAX(id), 0) FROM procrastinate_jobs")
+        (start,) = cursor.fetchone()
+    yield
+    with django_db_blocker.unblock(), connection.cursor() as cursor:
+        cursor.execute("DELETE FROM procrastinate_jobs WHERE id > %s", [start])
+
+
 def _jobs(task_name: str, workspace_id: str) -> list[ProcrastinateJob]:
     return list(
         ProcrastinateJob.objects.filter(
