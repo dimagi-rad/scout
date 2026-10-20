@@ -151,6 +151,8 @@ def _defer_once(name: str, queueing_lock: str, **args: Any) -> int | None:
 
 
 async def _adefer_once(name: str, queueing_lock: str, **args: Any) -> int | None:
+    """``_defer_once`` for async callers, whose writes must already be committed:
+    no async caller holds a Django transaction, so there is no commit to wait for."""
     try:
         return await _task(name, queueing_lock=queueing_lock).defer_async(**args)
     except AlreadyEnqueued:
