@@ -62,14 +62,13 @@ from apps.transformations.services.commcare_staging import upsert_system_assets
 from apps.transformations.services.connect_staging import upsert_connect_assets
 from apps.transformations.services.executor import PhaseCallback, run_transformation_pipeline
 from apps.transformations.services.staging_identity import StagingModelMigrationRequired
-from apps.users.models import Tenant
+from apps.users.models import Tenant, provider_label
 from apps.users.services.source_descriptions import connect_description
 from apps.users.services.upstream_denial import record_upstream_denial
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
 from apps.workspaces.services.load_generations import pipeline_fingerprint
 from apps.workspaces.services.load_phases import LoadPhase
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
-from apps.workspaces.services.source_freshness import provider_label
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from mcp_server.event_time import DATE_RANGE_COLUMNS, event_time_sql, normalize_event_time
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader

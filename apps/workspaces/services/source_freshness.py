@@ -18,7 +18,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from apps.common.error_codes import ErrorCode
-from apps.users.models import PROVIDER_CHOICES
+from apps.users.models import provider_label
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant, WorkspaceViewSchema
 from apps.workspaces.services.query_state import synced_runs
 from apps.workspaces.services.status import serving_excluded_tenant_ids
@@ -29,8 +29,6 @@ logger = logging.getLogger(__name__)
 REFRESHED = "refreshed"
 REUSED = "reused"
 SKIPPED = "skipped"
-
-_PROVIDER_LABELS = dict(PROVIDER_CHOICES)
 
 # A new sign-in by the member who ran the load fixes these; any member whose own
 # sign-in works can also refresh. Everything else is not about a credential.
@@ -44,10 +42,6 @@ REQUESTER_CODES = CREDENTIAL_CODES | {
     ErrorCode.AUTH_ACCESS_DENIED,
     ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
 }
-
-
-def provider_label(provider: str) -> str:
-    return _PROVIDER_LABELS.get(provider, provider or "the provider")
 
 
 def load_outcome(entry: dict) -> dict:
