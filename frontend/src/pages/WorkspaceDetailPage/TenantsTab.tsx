@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react"
+import { useState, useEffect, useCallback, useMemo, useRef, type MouseEvent } from "react"
 import { workspaceApi } from "@/api/workspaces"
 import {
   getUserTenantsCached,
@@ -66,6 +66,8 @@ export function TenantsTab({
   const addButtonRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const tabRef = useRef<HTMLDivElement>(null)
+  // Whichever trigger opened the panel (header or empty-state button) gets focus back.
+  const openerRef = useRef<HTMLElement | null>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
   // The workspace's last source: removing it deletes the whole workspace (#381).
@@ -171,10 +173,21 @@ export function TenantsTab({
     if (!showAdd) setSearch("")
   }, [showAdd, setSearch])
 
+  function toggleAdd(event: MouseEvent<HTMLElement>) {
+    openerRef.current = event.currentTarget
+    setShowAdd((v) => !v)
+  }
+
+  function openAdd(event: MouseEvent<HTMLElement>) {
+    openerRef.current = event.currentTarget
+    setShowAdd(true)
+  }
+
   const closeAdd = useCallback(() => {
     setShowAdd(false)
-    // The add button is gone once every source is connected; keep focus in the tab.
-    ;(addButtonRef.current ?? tabRef.current)?.focus()
+    // A trigger can unmount meanwhile (e.g. once every source is connected).
+    const opener = openerRef.current?.isConnected ? openerRef.current : null
+    ;(opener ?? addButtonRef.current ?? tabRef.current)?.focus()
   }, [])
 
   useEffect(() => {
@@ -188,10 +201,11 @@ export function TenantsTab({
         !active ||
         active === document.body ||
         active === addButtonRef.current ||
+        active === openerRef.current ||
         !!panelRef.current?.contains(active)
       if (!inScope) return
       // A pasted id list is costly to retype, so the first Escape only clears it.
-      if (active instanceof HTMLInputElement && active.value) {
+      if (active instanceof HTMLInputElement && active.type === "text" && active.value) {
         event.preventDefault()
         setSearch("")
         return
@@ -283,7 +297,12 @@ export function TenantsTab({
   const canShowAddButton = isManager && (availableStatus !== "ready" || available.length > 0)
 
   return (
-    <div ref={tabRef} tabIndex={-1} className="outline-none" data-testid="tenants-tab">
+    <div
+      ref={tabRef}
+      tabIndex={-1}
+      className="rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      data-testid="tenants-tab"
+    >
       <div className="mb-4 flex items-center justify-between">
         <span className="text-sm text-muted-foreground">
           {connectedLoading
@@ -295,9 +314,9 @@ export function TenantsTab({
             ref={addButtonRef}
             size="sm"
             variant={showAdd ? "secondary" : "outline"}
-            onClick={() => setShowAdd((v) => !v)}
+            onClick={toggleAdd}
             aria-expanded={showAdd}
-            aria-controls="add-tenant-panel"
+            aria-controls={showAdd ? "add-tenant-panel" : undefined}
             data-testid="add-tenant-btn"
           >
             <Plus className="mr-1 h-4 w-4" />
@@ -495,7 +514,9 @@ export function TenantsTab({
               size="sm"
               variant="outline"
               className="mt-4"
-              onClick={() => setShowAdd(true)}
+              onClick={openAdd}
+              aria-expanded={showAdd}
+              aria-controls={showAdd ? "add-tenant-panel" : undefined}
               data-testid="add-tenant-empty-btn"
             >
               <Plus className="mr-1 h-4 w-4" />

@@ -285,4 +285,17 @@ describe("closing the add panel", () => {
     )
     expect(screen.getByTestId("add-tenant-panel")).toBeInTheDocument()
   })
+
+  it("closes on Escape when opened from the empty-state button, returning focus there", async () => {
+    vi.mocked(getUserTenantsCached).mockResolvedValue(userSources)
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-empty-btn"))
+    await screen.findByTestId("add-tenant-panel")
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+    expect(screen.getByTestId("add-tenant-empty-btn")).toHaveFocus()
+  })
 })
