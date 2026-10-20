@@ -3,6 +3,13 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 // Re-attach only at the true bottom; any user scroll away from a pinned view detaches.
 const BOTTOM_THRESHOLD_PX = 8
 
+function insideNestedScroller(target: EventTarget, root: HTMLElement): boolean {
+  for (let n = target as HTMLElement | null; n && n !== root; n = n.parentElement) {
+    if (n.scrollHeight > n.clientHeight && /auto|scroll/.test(getComputedStyle(n).overflowY)) return true
+  }
+  return false
+}
+
 interface Detached {
   content: unknown
   streamingText: unknown
@@ -56,8 +63,9 @@ export function useStickToBottom(
   // Wheel isn't coalesced like scroll events, so it catches a user scroll that a concurrent
   // pin would otherwise swallow. It only detaches, and only when the list can actually move up
   // (otherwise no scroll event follows to re-attach).
-  const onWheel = (e: { deltaY: number }) => {
+  const onWheel = (e: { deltaY: number; target: EventTarget }) => {
     const el = ref.current
+    if (el && insideNestedScroller(e.target, el)) return
     if (e.deltaY < 0 && isStuck && el && el.scrollTop > BOTTOM_THRESHOLD_PX) {
       setDetached({ content, streamingText, resetKey, forceKey })
     }
