@@ -91,7 +91,8 @@ async def trace_job(
         with sentry_sdk.start_span(op="queue.process", name=job.task_name) as span:
             span.set_data("messaging.system", "procrastinate")
             span.set_data("messaging.destination.name", job.queue)
-            span.set_data("messaging.message.id", str(job.id))
+            if job.id is not None:
+                span.set_data("messaging.message.id", str(job.id))
             span.set_data("messaging.message.retry.count", job.attempts)
             if wait is not None:
                 span.set_data("messaging.message.receive.latency", round(wait * 1000))

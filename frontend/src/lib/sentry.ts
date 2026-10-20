@@ -148,7 +148,8 @@ function exceptionValue(value: Exception, hint: EventHint): string | undefined {
 }
 
 /** Removes request bodies, cookies, headers, query strings, email and raw values from an event. */
-export function scrubEvent(event: ErrorEvent, hint: EventHint = {}): ErrorEvent {
+/** The request, user, extra, context and breadcrumb scrubbing every event type gets. */
+function scrubCommon<T extends ErrorEvent | TransactionEvent>(event: T, keptContexts: Set<string>): T {
   if (event.request) {
     const userAgent = event.request.headers?.["User-Agent"]
     event.request = {
@@ -162,9 +163,20 @@ export function scrubEvent(event: ErrorEvent, hint: EventHint = {}): ErrorEvent 
 
   if (event.contexts) {
     event.contexts = Object.fromEntries(
-      Object.entries(event.contexts).filter(([key]) => KEPT_CONTEXTS.has(key)),
+      Object.entries(event.contexts).filter(([key]) => keptContexts.has(key)),
     )
   }
+
+  if (event.breadcrumbs) {
+    event.breadcrumbs = event.breadcrumbs
+      .map(scrubBreadcrumb)
+      .filter((breadcrumb): breadcrumb is Breadcrumb => breadcrumb !== null)
+  }
+  return event
+}
+
+export function scrubEvent(event: ErrorEvent, hint: EventHint = {}): ErrorEvent {
+  scrubCommon(event, KEPT_CONTEXTS)
 
   // Error text can echo customer values, such as SQL literals or chat text an API quotes back.
   if (event.message) event.message = safeText(event.message)
@@ -177,11 +189,6 @@ export function scrubEvent(event: ErrorEvent, hint: EventHint = {}): ErrorEvent 
     }
   }
 
-  if (event.breadcrumbs) {
-    event.breadcrumbs = event.breadcrumbs
-      .map(scrubBreadcrumb)
-      .filter((breadcrumb): breadcrumb is Breadcrumb => breadcrumb !== null)
-  }
   return event
 }
 
@@ -234,23 +241,20 @@ export function scrubSpan(span: SpanJSON): SpanJSON {
   }
 }
 
-/** Sentry `beforeSendTransaction` hook: the event-level scrubbing errors get. Spans go through scrubSpan. */
+// A transaction's own timing lives in the trace context.
+const KEPT_TRANSACTION_CONTEXTS = new Set([...KEPT_CONTEXTS, "trace"])
+
+/**
+ * Sentry `beforeSendTransaction` hook: the event-level scrubbing errors get. The
+ * SDK already ran every span through scrubSpan; doing it again here keeps that
+ * guarantee from resting on SDK internals.
+ */
 export function scrubTransaction(event: TransactionEvent): TransactionEvent {
+  scrubCommon(event, KEPT_TRANSACTION_CONTEXTS)
   if (event.transaction) event.transaction = stripUrl(event.transaction)
-  if (event.request) event.request = { url: stripUrl(event.request.url) }
-  event.user = event.user?.id !== undefined ? { id: event.user.id } : undefined
-  delete event.extra
-  if (event.contexts) {
-    // A transaction's own timing lives in the trace context.
-    event.contexts = Object.fromEntries(
-      Object.entries(event.contexts).filter(([key]) => key === "trace" || KEPT_CONTEXTS.has(key)),
-    )
-  }
-  if (event.breadcrumbs) {
-    event.breadcrumbs = event.breadcrumbs
-      .map(scrubBreadcrumb)
-      .filter((breadcrumb): breadcrumb is Breadcrumb => breadcrumb !== null)
-  }
+  const trace = event.contexts?.trace
+  if (trace?.data) trace.data = scrubSpanData(trace.data)
+  if (event.spans) event.spans = event.spans.map(scrubSpan)
   return event
 }
 

@@ -403,9 +403,20 @@ describe("tracing", () => {
       user: { id: "u", email: "a@example.com" },
       extra: { body: "raw" },
       contexts: {
-        trace: { trace_id: "t", span_id: "s", op: "pageload" },
+        trace: { trace_id: "t", span_id: "s", op: "pageload", data: { url: "/x?token=abc" } },
         custom: { secret: "x" },
       },
+      spans: [
+        {
+          op: "ui.interaction.click",
+          description: 'body > button[title="show me patient names"]',
+          span_id: "2",
+          trace_id: "t",
+          start_timestamp: 0,
+          data: {},
+          origin: "auto",
+        },
+      ],
     } as TransactionEvent)
 
     expect(event.transaction).toBe(`/workspaces/:slug/${id}/chat`)
@@ -413,6 +424,9 @@ describe("tracing", () => {
     expect(event.user).toEqual({ id: "u" })
     expect(event.extra).toBeUndefined()
     expect(Object.keys(event.contexts ?? {})).toEqual(["trace"])
+    expect(event.contexts?.trace?.data).toEqual({ url: "/x" })
+    // Scrubbed here too, not only by the SDK's beforeSendSpan pass.
+    expect(event.spans?.[0].description).toBe("body > button[title]")
   })
 })
 
