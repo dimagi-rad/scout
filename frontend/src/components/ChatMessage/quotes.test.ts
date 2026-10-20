@@ -22,6 +22,16 @@ describe("quote-reply message format", () => {
     expect(splitQuotedMessage(composeQuotedMessage(quotes, reply))).toEqual({ quotes, body: reply })
   })
 
+  it("round-trips a reply that itself starts with >", () => {
+    const text = composeQuotedMessage(["Visits fell"], "> 50% is a lot")
+    expect(text).toBe("> Visits fell\n\n\\> 50% is a lot")
+    expect(splitQuotedMessage(text)).toEqual({ quotes: ["Visits fell"], body: "> 50% is a lot" })
+    expect(messageSegments(text)).toEqual([
+      { kind: "quote", text: "Visits fell" },
+      { kind: "text", text: "> 50% is a lot" },
+    ])
+  })
+
   it("does not take a message that merely starts with > for a quote", () => {
     for (const text of [">50% coverage sites last month?", "> just this", "> 5 visits\n\n> more"]) {
       expect(splitQuotedMessage(text)).toEqual({ quotes: [], body: text })
