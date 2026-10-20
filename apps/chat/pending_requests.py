@@ -31,6 +31,7 @@ from langchain_core.messages import HumanMessage
 from apps.chat.attachments import (
     MAX_ATTACHMENTS_PER_MESSAGE,
     merge_attachments,
+    unbind_sync,
     with_attachments,
 )
 from apps.chat.checkpointer import ensure_checkpointer
@@ -55,7 +56,8 @@ REFUSAL_MESSAGES = {
     "too_long": REQUEST_TOO_LONG_MESSAGE,
     "too_many_parts": TOO_MANY_PARTS_MESSAGE,
     "too_many_attachments": (
-        f"One request can carry at most {MAX_ATTACHMENTS_PER_MESSAGE} attachments"
+        f"One request can carry at most {MAX_ATTACHMENTS_PER_MESSAGE} attachments — "
+        "remove a later part or discard the request"
     ),
     "empty": "The request can't be empty — discard it instead",
     "first_part": "The first part can't be removed — edit it instead",
@@ -338,7 +340,9 @@ def aedit(
                 raise PendingRequestConflict("version")
             if index == 0:
                 raise PendingRequestInvalidEdit("first_part")
+            removed = pending.parts[index]
             pending.parts = [part for i, part in enumerate(pending.parts) if i != index]
+            _release_attachments([removed], keep=pending.parts, thread_id=thread_id)
         pending.version += 1
         if text is not None:
             # A rewrite is a new request to try sending; a removal only shortens it.
@@ -362,7 +366,17 @@ def adiscard(thread_id, *, version: int) -> None:
             raise PendingRequestConflict("claimed")
         if pending.version != version:
             raise PendingRequestConflict("version")
+        _release_attachments(pending.parts, keep=[], thread_id=thread_id)
         pending.delete()
+
+
+def _release_attachments(dropped: list[dict], *, keep: list[dict], thread_id) -> None:
+    """Unbind the attachments of dropped parts, so GC reclaims what no message carries."""
+    kept = {entry["id"] for entry in combined_attachments(keep)}
+    unbind_sync(
+        [e["id"] for e in combined_attachments(dropped) if e["id"] not in kept],
+        thread_id=thread_id,
+    )
 
 
 @sync_to_async

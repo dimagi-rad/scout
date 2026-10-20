@@ -28,6 +28,7 @@ from apps.chat.attachments import (
     abind_to_thread,
     aresolve_for_send,
     attachment_ids_from_parts,
+    aunbind,
     merge_attachments,
     with_attachments,
 )
@@ -139,7 +140,7 @@ THREAD_BUSY_MESSAGE = (
 )
 
 
-def _last_message_text(message) -> tuple[str | None, JsonResponse | None]:
+def _last_message_text(message) -> tuple[str, JsonResponse | None]:
     """The text of the turn's last message, or a 400 when its shape isn't one the AI SDK sends.
 
     AI SDK v6 sends ``{parts: [{type: "text", text: "..."}]}`` instead of ``{content: "..."}``.
@@ -189,6 +190,28 @@ async def chat_view(request):
     Accepts Vercel AI SDK useChat request format, returns a
     StreamingHttpResponse in the Data Stream Protocol.
     """
+    bound: dict = {}
+    try:
+        response = await _chat_view(request, bound)
+    except BaseException:
+        await _unbind_unaccepted(bound)
+        raise
+    # Only a stream (a turn or a hold) took the message; anything else refused it,
+    # so its attachments go back to unsent and GC can still reclaim them.
+    if not isinstance(response, StreamingHttpResponse):
+        await _unbind_unaccepted(bound)
+    return response
+
+
+async def _unbind_unaccepted(bound: dict) -> None:
+    if bound.get("ids"):
+        try:
+            await aunbind(bound["ids"], thread=bound["thread"])
+        except Exception:
+            logger.warning("Could not unbind attachments of a refused message", exc_info=True)
+
+
+async def _chat_view(request, bound: dict):
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
     # The turn's clock: time to first token counts what the user waits through.
@@ -279,8 +302,12 @@ async def chat_view(request):
         thread = await _upsert_thread(thread_id, user, user_content, workspace=workspace)
     except ForeignThreadError as e:
         return _foreign_thread_response(e.thread, user, workspace)
-    if not await abind_to_thread(attachment_ids, user=user, thread=thread):
+    newly_bound = await abind_to_thread(
+        attachment_ids, user=user, workspace=workspace, thread=thread
+    )
+    if newly_bound is None:
         return _attachment_invalid_response(ATTACHMENT_UNAVAILABLE_MESSAGE)
+    bound.update(ids=newly_bound, thread=thread)
 
     pending_version, err = _pending_request_version(data)
     if err:

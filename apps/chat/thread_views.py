@@ -17,6 +17,7 @@ from apps.chat.attachments import (
     abind_to_thread,
     aresolve_for_send,
     attachment_ids_from_parts,
+    aunbind,
 )
 from apps.chat.checkpointer import athread_has_checkpoint, ensure_checkpointer
 from apps.chat.helpers import (
@@ -339,7 +340,12 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
     attachments = await aresolve_for_send(
         attachment_ids, user=user, workspace=workspace, thread_id=thread.id
     )
-    if attachments is None or not await abind_to_thread(attachment_ids, user=user, thread=thread):
+    newly_bound = None
+    if attachments is not None:
+        newly_bound = await abind_to_thread(
+            attachment_ids, user=user, workspace=workspace, thread=thread
+        )
+    if newly_bound is None:
         return JsonResponse(
             {"error": "An attachment is no longer available.", "reason": "attachment_invalid"},
             status=400,
@@ -349,8 +355,11 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
             thread.id, part_id=part_id, text=text, attachments=attachments
         )
     except pending_requests.PendingRequestConflict as e:
+        # The client sends it as a message instead, which binds them again.
+        await aunbind(newly_bound, thread=thread)
         return _pending_conflict(e)
     except pending_requests.PendingRequestTooLong as e:
+        await aunbind(newly_bound, thread=thread)
         return JsonResponse(
             {
                 "error": e.user_message,

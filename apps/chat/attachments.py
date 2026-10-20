@@ -356,15 +356,32 @@ async def aresolve_for_send(ids: list[str], *, user, workspace, thread_id) -> li
     ]
 
 
-async def abind_to_thread(ids, *, user, thread) -> bool:
+async def abind_to_thread(ids, *, user, workspace, thread) -> list[str] | None:
     """Tie the attachments to the thread their message is sent in, so GC keeps them.
 
-    False when one vanished since it was resolved (its unsent TTL ran out meanwhile).
+    Returns the ids this call bound (those still unsent), for ``aunbind`` should the
+    message not be accepted after all; None, binding nothing, when one vanished
+    since it was resolved (its unsent TTL ran out meanwhile).
     """
     ids = list(ids)
     if not ids:
-        return True
-    bound = await ChatAttachment.objects.filter(
-        Q(thread__isnull=True) | Q(thread=thread), id__in=ids, user=user
-    ).aupdate(thread=thread)
-    return bound == len(ids)
+        return []
+    mine = ChatAttachment.objects.filter(id__in=ids, user=user, workspace=workspace)
+    unsent = [str(i) async for i in mine.filter(thread__isnull=True).values_list("id", flat=True)]
+    bound = await mine.filter(Q(thread__isnull=True) | Q(thread=thread)).aupdate(thread=thread)
+    if bound != len(ids):
+        await aunbind(unsent, thread=thread)
+        return None
+    return unsent
+
+
+async def aunbind(ids, *, thread) -> None:
+    """Return attachments bound for a message that was never accepted to unsent, for GC."""
+    if ids:
+        await ChatAttachment.objects.filter(id__in=list(ids), thread=thread).aupdate(thread=None)
+
+
+def unbind_sync(ids, *, thread_id) -> None:
+    """``aunbind`` for a caller already inside a transaction."""
+    if ids:
+        ChatAttachment.objects.filter(id__in=list(ids), thread_id=thread_id).update(thread=None)
