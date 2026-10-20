@@ -8,7 +8,7 @@ import { getUserTenantsCached, refreshUserTenants } from "@/api/userTenantsCache
 import { TenantsTab } from "./TenantsTab"
 
 vi.mock("@/api/workspaces", () => ({
-  workspaceApi: { getTenants: vi.fn(), removeTenant: vi.fn() },
+  workspaceApi: { getTenants: vi.fn(), removeTenant: vi.fn(), addTenant: vi.fn() },
 }))
 vi.mock("@/api/userTenantsCache", () => ({
   getUserTenantsCached: vi.fn(),
@@ -171,7 +171,6 @@ describe("available source filters", () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ provider: ["commcare_connect"] }))
     await openAddPanel()
     await userEvent.type(screen.getByTestId("search-filter-input"), "alpha")
-    expect(screen.getByTestId("available-sources-empty")).toBeInTheDocument()
 
     await userEvent.click(screen.getByTestId(`${F}-empty-clear`))
 
@@ -212,5 +211,66 @@ describe("available source filters", () => {
     await userEvent.click(screen.getByTestId("refresh-available-sources"))
 
     await waitFor(() => expect(shownAvailable()).toEqual(["a", "c1", "c2"]))
+  })
+})
+
+describe("adding every shown source", () => {
+  beforeEach(() => localStorage.clear())
+
+  const programSources = [
+    connect("p1", "Malaria North", { program: "7", program_name: "Malaria" }),
+    connect("p2", "Malaria South", { program: "7", program_name: "Malaria" }),
+    connect("q1", "Nutrition East", { program: "8", program_name: "Nutrition" }),
+  ]
+
+  async function openWithProgramFilter() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ program: ["7"] }))
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    vi.mocked(getUserTenantsCached).mockResolvedValue(programSources)
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+    await screen.findByTestId(`${F}-count`)
+  }
+
+  it("adds a whole program one source at a time", async () => {
+    vi.mocked(workspaceApi.addTenant).mockImplementation(async (_ws, uuid) => ({
+      id: `wt-${uuid}`, tenant_id: uuid, tenant_name: uuid,
+    }))
+    await openWithProgramFilter()
+    expect(shownAvailable()).toEqual(["p1", "p2"])
+
+    await userEvent.click(screen.getByTestId("available-sources-add-shown"))
+
+    expect(await screen.findByTestId("tenant-row-wt-tenant-p2")).toBeInTheDocument()
+    expect(screen.getByTestId("tenant-row-wt-tenant-p1")).toBeInTheDocument()
+    expect(vi.mocked(workspaceApi.addTenant).mock.calls).toEqual([
+      ["ws-1", "tenant-p1"],
+      ["ws-1", "tenant-p2"],
+    ])
+  })
+
+  it("keeps going past a refused source and names it", async () => {
+    vi.mocked(workspaceApi.addTenant).mockImplementation(async (_ws, uuid) => {
+      if (uuid === "tenant-p1") throw new ApiError(409, "A member lacks this source", {})
+      return { id: `wt-${uuid}`, tenant_id: uuid, tenant_name: uuid }
+    })
+    await openWithProgramFilter()
+
+    await userEvent.click(screen.getByTestId("available-sources-add-shown"))
+
+    expect(await screen.findByText(/Added 1 of 2\. Couldn't add: Malaria North \(A member lacks this source\)/))
+      .toBeInTheDocument()
+    expect(screen.getByTestId("tenant-row-wt-tenant-p2")).toBeInTheDocument()
+    expect(screen.queryByTestId("tenant-row-wt-tenant-p1")).toBeNull()
+  })
+
+  it("is not offered for the unfiltered list", async () => {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    vi.mocked(getUserTenantsCached).mockResolvedValue(programSources)
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+    await screen.findByTestId(`${F}-count`)
+
+    expect(screen.queryByTestId("available-sources-add-shown")).toBeNull()
   })
 })

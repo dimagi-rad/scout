@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react"
+import { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import { workspaceApi } from "@/api/workspaces"
 import {
   getUserTenantsCached,
@@ -61,6 +61,13 @@ export function TenantsTab({
   const [refreshing, setRefreshing] = useState(false)
 
   const [addingId, setAddingId] = useState<string | null>(null)
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null)
+  // A bulk add outliving this workspace's tab must not write into the next one's list.
+  const currentWorkspaceRef = useRef<string | null>(workspaceId)
+  useEffect(() => {
+    currentWorkspaceRef.current = workspaceId
+    return () => { currentWorkspaceRef.current = null }
+  }, [workspaceId])
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
@@ -168,25 +175,67 @@ export function TenantsTab({
     if (!showAdd) setSearch("")
   }, [showAdd, setSearch])
 
+  async function addOne(tenant: UserTenant) {
+    const created = await workspaceApi.addTenant(workspaceId, tenant.tenant_uuid)
+    if (currentWorkspaceRef.current !== workspaceId) return
+    // Optimistic update; backend returns the internal tenant UUID as `tenant_id`.
+    setTenants((prev) =>
+      prev.some((t) => t.tenant_id === tenant.tenant_uuid)
+        ? prev
+        : [
+            ...prev,
+            {
+              id: created.id,
+              tenant_id: tenant.tenant_uuid,
+              tenant_name: tenant.tenant_name,
+              provider: tenant.provider,
+            },
+          ],
+    )
+  }
+
   async function handleAdd(tenant: UserTenant) {
     setAddingId(tenant.tenant_uuid)
     setMutationError(null)
     try {
-      const created = await workspaceApi.addTenant(workspaceId, tenant.tenant_uuid)
-      // Optimistic update; backend returns the internal tenant UUID as `tenant_id`.
-      setTenants((prev) => [
-        ...prev,
-        {
-          id: created.id,
-          tenant_id: tenant.tenant_uuid,
-          tenant_name: tenant.tenant_name,
-          provider: tenant.provider,
-        },
-      ])
+      await addOne(tenant)
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to add data source")
     } finally {
       setAddingId(null)
+    }
+  }
+
+  // One at a time: the server checks the adder's and every member's access per source,
+  // and one refusal (say, a member without that opportunity) must not stop the rest.
+  async function handleAddShown() {
+    const batch = [...filteredAvailable]
+    const failures: string[] = []
+    setMutationError(null)
+    const stillHere = () => currentWorkspaceRef.current === workspaceId && isCurrentAccount()
+    setBulkProgress({ done: 0, total: batch.length })
+    try {
+      for (const [index, tenant] of batch.entries()) {
+        if (!stillHere()) return
+        setAddingId(tenant.tenant_uuid)
+        try {
+          await addOne(tenant)
+        } catch (err) {
+          failures.push(
+            `${tenant.tenant_name} (${err instanceof ApiError ? err.message : "failed to add"})`,
+          )
+        }
+        setBulkProgress({ done: index + 1, total: batch.length })
+      }
+    } finally {
+      setAddingId(null)
+      setBulkProgress(null)
+    }
+    if (!stillHere()) return
+    if (failures.length > 0) {
+      setMutationError(
+        `Added ${batch.length - failures.length} of ${batch.length}. Couldn't add: ${failures.join("; ")}`,
+      )
     }
   }
 
@@ -330,7 +379,27 @@ export function TenantsTab({
           ) : (
             <>
               <div className="mb-3">
-                <FacetFilterBar testIdPrefix="available-sources-filter" {...sourceFilters.barProps} />
+                <FacetFilterBar
+                  testIdPrefix="available-sources-filter"
+                  {...sourceFilters.barProps}
+                  bulkAction={
+                    // Only a narrowed list: one click must not add every source the user has.
+                    filteredAvailable.length > 0
+                    && filteredAvailable.length < available.length && (
+                      <button
+                        type="button"
+                        onClick={() => void handleAddShown()}
+                        disabled={bulkProgress !== null || addingId !== null}
+                        className="font-medium text-foreground underline-offset-2 hover:underline disabled:opacity-50"
+                        data-testid="available-sources-add-shown"
+                      >
+                        {bulkProgress
+                          ? `Adding ${Math.min(bulkProgress.done + 1, bulkProgress.total)} of ${bulkProgress.total}…`
+                          : `Add ${filteredAvailable.length} shown`}
+                      </button>
+                    )
+                  }
+                />
                 {idReport && (
                   <div className="mt-2">
                     <IdListSummary
@@ -384,7 +453,7 @@ export function TenantsTab({
                         <Button
                           size="sm"
                           onClick={() => handleAdd(t)}
-                          disabled={addingId === t.tenant_uuid}
+                          disabled={addingId === t.tenant_uuid || bulkProgress !== null}
                           data-testid={`add-tenant-${t.tenant_uuid}`}
                         >
                           {addingId === t.tenant_uuid ? "Adding…" : "Add"}
