@@ -19,6 +19,7 @@ import type { PendingRequest } from "@/api/jobs"
 import { PART_SEPARATOR, pendingRequestText } from "@/api/pendingRequests"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
 import { ChatComposer } from "./ChatComposer"
+import { QuoteSelectionAction } from "./QuoteSelectionAction"
 import { ChatCanvasPanel } from "./ChatCanvasPanel"
 import { ChatThreadHeader, type ThreadPanelMode } from "./ChatThreadHeader"
 import {
@@ -152,6 +153,12 @@ export function ChatPanel() {
   const inputRef = useRef(input)
   inputRef.current = input
   const [addFailed, setAddFailed] = useState<string | null>(null)
+  // Keyed by thread so quotes picked in one chat never ride along into another.
+  const [quoteState, setQuoteState] = useState<{ threadId: string; quotes: string[] }>({
+    threadId,
+    quotes: [],
+  })
+  const quotes = quoteState.threadId === threadId ? quoteState.quotes : []
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const [threadPanelOpen, setThreadPanelOpen] = useState(false)
   const [threadPanelMode, setThreadPanelMode] = useState<ThreadPanelMode>("files")
@@ -950,6 +957,21 @@ export function ChatPanel() {
     writeDraft(scope, draft.trim() ? `${draft}\n${text}` : text)
   }
 
+  function addQuote(text: string) {
+    setQuoteState((current) => {
+      const existing = current.threadId === threadId ? current.quotes : []
+      if (existing.includes(text)) return current
+      return { threadId, quotes: [...existing, text] }
+    })
+  }
+
+  function removeQuote(index: number) {
+    setQuoteState((current) => ({
+      threadId,
+      quotes: (current.threadId === threadId ? current.quotes : []).filter((_, i) => i !== index),
+    }))
+  }
+
   async function handleSend(text: string) {
     // Defensive: the composer blocks this; keep the typed text rather than drop it.
     if ((historyLoading || remoteTurnRunning) && !held.adding) {
@@ -1088,6 +1110,7 @@ export function ChatPanel() {
               onRetryDispatched={notifyJobLikelyStarted}
             />
           ))}
+          <QuoteSelectionAction containerRef={scrollRef} onQuote={addQuote} />
           {historyLoading && (
             <div
               className="flex items-center gap-2 text-sm text-muted-foreground"
@@ -1197,6 +1220,9 @@ export function ChatPanel() {
             }
             onStop={handleStop}
             mode={held.adding ? "add" : "send"}
+            quotes={quotes}
+            onRemoveQuote={removeQuote}
+            onQuotesSent={() => setQuoteState({ threadId, quotes: [] })}
           />
         </div>
       </div>

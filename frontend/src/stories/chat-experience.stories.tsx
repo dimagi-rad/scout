@@ -1,9 +1,10 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import type { UIMessage } from "ai"
 import type { Meta, StoryObj } from "@storybook/react-vite"
 
 import { ChatMessage } from "@/components/ChatMessage"
 import { ChatComposer } from "@/components/ChatPanel"
+import { QuoteSelectionAction } from "@/components/ChatPanel/QuoteSelectionAction"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import type { ActiveJob } from "@/api/jobs"
 
@@ -159,6 +160,8 @@ export const TranscriptWithToolsAndPrompt: Story = {
   render: function TranscriptWithToolsAndPromptStory() {
     const [messages, setMessages] = useState<UIMessage[]>(initialMessages)
     const [input, setInput] = useState("")
+    const [quotes, setQuotes] = useState<string[]>([])
+    const transcriptRef = useRef<HTMLDivElement>(null)
 
     function appendUserMessage(text: string) {
       setMessages((current) => [
@@ -189,7 +192,11 @@ export const TranscriptWithToolsAndPrompt: Story = {
           <div className="text-xs text-muted-foreground">Modeled Scout chat transcript</div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-5">
+        <div ref={transcriptRef} className="flex-1 overflow-y-auto p-5">
+          <QuoteSelectionAction
+            containerRef={transcriptRef}
+            onQuote={(text) => setQuotes((current) => [...current, text])}
+          />
           <div className="mx-auto max-w-4xl space-y-5">
             {messages.map((message, index) => (
               <ChatMessage
@@ -211,7 +218,14 @@ export const TranscriptWithToolsAndPrompt: Story = {
 
         <div className="border-t p-4">
           <div className="mx-auto max-w-4xl">
-            <ChatComposer input={input} setInput={setInput} onSend={appendUserMessage} />
+            <ChatComposer
+              input={input}
+              setInput={setInput}
+              onSend={appendUserMessage}
+              quotes={quotes}
+              onRemoveQuote={(index) => setQuotes((current) => current.filter((_, i) => i !== index))}
+              onQuotesSent={() => setQuotes([])}
+            />
           </div>
         </div>
       </div>
