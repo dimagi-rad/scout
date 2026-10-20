@@ -1,7 +1,9 @@
 import logging
+import threading
 from types import SimpleNamespace
 from unittest import mock
 
+import psycopg
 import pytest
 from django.db import connection
 
@@ -170,6 +172,38 @@ def test_db_size_matches_postgres():
     assert 0 < len(largest) <= 5
     sizes = [size for _, size in largest]
     assert sizes == sorted(sizes, reverse=True)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_locked_table_skips_the_table_list_but_keeps_the_size():
+    with connection.cursor() as cursor:
+        cursor.execute("CREATE TABLE storage_lock_probe (id int)")
+    params = connection.get_connection_params()
+    params.pop("cursor_factory", None)
+    locked, release = threading.Event(), threading.Event()
+
+    def hold_lock():
+        with psycopg.connect(**params) as other:
+            other.execute("LOCK TABLE storage_lock_probe IN ACCESS EXCLUSIVE MODE")
+            locked.set()
+            release.wait(30)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    try:
+        assert locked.wait(10)
+        total, largest = storage._platform_db_sizes()
+    finally:
+        release.set()
+        holder.join()
+        with connection.cursor() as cursor:
+            cursor.execute("DROP TABLE storage_lock_probe")
+
+    assert total > 0
+    assert largest is None
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT current_setting('lock_timeout')")
+        assert cursor.fetchone()[0] == "0"
 
 
 @pytest.mark.asyncio

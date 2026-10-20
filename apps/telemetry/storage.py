@@ -20,9 +20,11 @@ import shutil
 from dataclasses import dataclass
 
 import sentry_sdk
-from asgiref.sync import sync_to_async
 from django.conf import settings
-from django.db import connection
+from django.db import DatabaseError, connection, transaction
+
+from apps.common.db_deadline import preserve_transaction_timeouts
+from apps.workspaces.services.data_operation import to_thread_fresh_db
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +34,7 @@ CRITICAL = "critical"
 _LARGEST_TABLES = 5
 
 _LARGEST_TABLES_SQL = """
-    SELECT n.nspname || '.' || c.relname, pg_total_relation_size(c.oid)
+    SELECT n.nspname || '.' || c.relname, COALESCE(pg_total_relation_size(c.oid), 0)
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE c.relkind IN ('r', 'm', 'p')
@@ -113,13 +115,32 @@ def report_low_disk(reading: DiskReading, severity: str) -> None:
         sentry_sdk.capture_message(message, level="error" if severity == CRITICAL else "warning")
 
 
-def _platform_db_sizes() -> tuple[int, list[tuple[str, int]]]:
-    # Django has no async raw-cursor API.
+def _platform_db_sizes() -> tuple[int, list[tuple[str, int]] | None]:
+    """The database's size, and its largest tables or ``None`` if they could not be read.
+
+    In production the managed (tenant) database is this database, so the table scan
+    meets tenant schemas that a load or teardown holds ACCESS EXCLUSIVE. Sizing
+    takes ACCESS SHARE, so the scan is bounded, as in ``snapshots._schema_sizes``.
+    ``pg_database_size`` takes no relation locks.
+    """
     with connection.cursor() as cursor:
         cursor.execute("SELECT pg_database_size(current_database())")
         (total,) = cursor.fetchone()
-        cursor.execute(_LARGEST_TABLES_SQL, [_LARGEST_TABLES])
-        largest = [(name, int(size)) for name, size in cursor.fetchall()]
+    try:
+        with (
+            transaction.atomic(),
+            preserve_transaction_timeouts(),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                "SELECT set_config('lock_timeout', '2s', true), "
+                "set_config('statement_timeout', '10s', true)"
+            )
+            cursor.execute(_LARGEST_TABLES_SQL, [_LARGEST_TABLES])
+            largest = [(name, int(size)) for name, size in cursor.fetchall()]
+    except DatabaseError:
+        logger.info("Storage headroom: largest tables skipped (locked or slow)", exc_info=True)
+        largest = None
     return int(total), largest
 
 
@@ -145,16 +166,20 @@ async def check_storage_headroom() -> dict:
     # A database that will not answer is reported by every request that uses it;
     # it must not stop the disk alert above, which has already gone.
     try:
-        db_bytes, largest = await sync_to_async(_platform_db_sizes)()
+        # A pool thread, not the async ORM's shared one: a slow scan must not hold
+        # up every other job's queries.
+        db_bytes, largest = await to_thread_fresh_db(_platform_db_sizes)
     except Exception:
         logger.warning("Storage headroom: could not read the platform DB size", exc_info=True)
         return result
-    # The largest tables show which one is growing (chat attachments, checkpoints,
-    # telemetry) without this check knowing their names.
+    # The largest tables show which one is growing (a tenant's data, chat
+    # attachments, checkpoints) without this check knowing their names.
     logger.info(
         "Storage headroom: platform DB %s; largest tables: %s",
         _size(db_bytes),
-        ", ".join(f"{name}={_size(size)}" for name, size in largest),
+        ", ".join(f"{name}={_size(size)}" for name, size in largest)
+        if largest is not None
+        else "unavailable",
     )
     result["db_bytes"] = db_bytes
     return result

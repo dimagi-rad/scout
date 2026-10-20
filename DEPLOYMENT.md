@@ -248,8 +248,12 @@ and before it nothing watched the host disk (see [Host disk full](#host-disk-ful
 - **Platform database.** `pg_database_size(current_database())` and the five
   largest tables, logged at INFO in `/scout/worker` (`Storage headroom: platform
   DB …`). It sends no alert: RDS free storage is visible only in CloudWatch
-  (`scout-rds-low-storage`). Use these lines to see which table grows, for
-  example chat attachments.
+  (`scout-rds-low-storage`). In production the tenant data shares this
+  database (`MANAGED_DATABASE_URL` is `DATABASE_URL`), so the size includes
+  every workspace's loaded data, and the largest tables are usually tenant
+  tables. Use these lines to see which table grows: tenant data, chat
+  attachments, or checkpoints. The table list is skipped, and logged as
+  `unavailable`, when a load or teardown holds a lock for more than 2 seconds.
 
 The worker reads these from its environment. Kamal passes only the variables
 listed in `config/deploy-worker.yml`, so to change one, add it under `env.clear`
