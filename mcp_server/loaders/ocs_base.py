@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections.abc import Iterator
 
 import requests
@@ -32,6 +34,12 @@ HTTP_TIMEOUT: tuple[int, int] = (10, 300)
 # the max cuts list-request volume ~10-15x versus the upstream default — the
 # loaders' Connect/CommCare mental model is 1000/page (arch #254, finding 13#1).
 OCS_MAX_PAGE_SIZE = 1500
+
+# Concurrent requests sent with the same expired token all 401 together. A
+# 401 this soon after a refresh was almost certainly sent with the old token,
+# so it reuses the fresh one instead of spending the rotated refresh token
+# again (#918).
+REFRESH_REUSE_SECONDS = 30
 
 
 class OCSExportError(Exception):
@@ -69,7 +77,10 @@ class OCSBaseLoader:
         self.base_url = base_url.rstrip("/")
         # A mid-run token refresher (OAuth only); None for API keys (arch #252,
         # finding 14#3).
-        self._refresh = credential.get("refresh")
+        self._mint_token = credential.get("refresh")
+        self._refresh = self._coalesced_refresh if self._mint_token else None
+        self._refresh_lock = threading.Lock()
+        self._fresh_token: tuple[float, str] | None = None
         self._session = requests.Session()
         if credential.get("type") == "api_key":
             self._session.headers.update({"X-api-key": credential["value"]})
@@ -78,6 +89,17 @@ class OCSBaseLoader:
         adapter = HTTPAdapter(max_retries=build_retry())
         self._session.mount("https://", adapter)
         self._session.mount("http://", adapter)
+
+    def _coalesced_refresh(self) -> str | None:
+        with self._refresh_lock:
+            if self._fresh_token is not None:
+                minted_at, token = self._fresh_token
+                if time.monotonic() - minted_at < REFRESH_REUSE_SECONDS:
+                    return token
+            token = self._mint_token()
+            if token:
+                self._fresh_token = (time.monotonic(), token)
+            return token
 
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
         """GET a URL, raising on auth failure or an unrecoverable status.
