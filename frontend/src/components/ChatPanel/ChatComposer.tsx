@@ -54,8 +54,13 @@ export function ChatComposer({
   const { canWrite } = useWorkspaceRole()
   const inputRef = useRef<HTMLInputElement>(null)
 
+  // Latched so a remount (e.g. back from the empty state) doesn't refocus for an old pick.
+  const handledFocusRef = useRef(focusRequest)
+
   useEffect(() => {
-    if (focusRequest) inputRef.current?.focus()
+    if (focusRequest === handledFocusRef.current) return
+    handledFocusRef.current = focusRequest
+    inputRef.current?.focus()
   }, [focusRequest])
 
   const showSlashMenu = input.startsWith("/") && !input.slice(1).includes(" ")

@@ -195,4 +195,9 @@ describe("ChatComposer quotes (#920)", () => {
     rerender(<ChatComposer {...props} quotes={["a point", "another"]} focusRequest={1} />)
     expect(screen.getByTestId("chat-input")).toHaveFocus()
   })
+
+  it("does not refocus on a remount for a pick it already handled", () => {
+    render(<ChatComposer input="" setInput={vi.fn()} onSend={vi.fn()} focusRequest={3} />)
+    expect(screen.getByTestId("chat-input")).not.toHaveFocus()
+  })
 })

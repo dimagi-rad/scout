@@ -61,7 +61,10 @@ export function QuoteSelectionAction({ containerRef, onQuote }: QuoteSelectionAc
       const selection = window.getSelection()
       if (!selection || selection.isCollapsed) setAnchor(null)
     }
-    const reposition = () => setAnchor((current) => (current ? readSelection(containerRef.current) : null))
+    const reposition = () => {
+      const next = readSelection(containerRef.current)
+      setAnchor((current) => (current ? next : null))
+    }
     document.addEventListener("mouseup", show)
     document.addEventListener("touchend", show)
     document.addEventListener("keyup", show)

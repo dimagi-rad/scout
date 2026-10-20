@@ -874,7 +874,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
       <div className="max-w-[90%]">
         {message.parts.map((part, i) => {
           if (part.type === "text") {
-            return <ChatTextPart key={i} role={isUser ? "user" : "assistant"} text={part.text} quotable />
+            return <ChatTextPart key={i} role={isUser ? "user" : "assistant"} text={part.text} quotable={!isUser} />
           }
 
           if (part.type === "reasoning") {

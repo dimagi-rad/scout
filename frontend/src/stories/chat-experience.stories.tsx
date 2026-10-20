@@ -3,8 +3,7 @@ import type { UIMessage } from "ai"
 import type { Meta, StoryObj } from "@storybook/react-vite"
 
 import { ChatMessage } from "@/components/ChatMessage"
-import { ChatComposer } from "@/components/ChatPanel"
-import { QuoteSelectionAction } from "@/components/ChatPanel/QuoteSelectionAction"
+import { ChatComposer, QuoteSelectionAction } from "@/components/ChatPanel"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import type { ActiveJob } from "@/api/jobs"
 
