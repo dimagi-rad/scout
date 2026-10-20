@@ -232,11 +232,15 @@ async def acollect_garbage(now=None) -> dict:
         ~Exists(ChatAttachment.objects.filter(blob=OuterRef("pk"))),
         created_at__lt=now - ORPHAN_BLOB_GRACE,
     )
-    try:
-        # defer: the delete collector loads each row, and content can be megabytes.
-        blobs_deleted, _ = await orphans.defer("content").adelete()
-    except (IntegrityError, ProtectedError):
-        # An upload reused a blob mid-sweep; the next run collects the rest.
-        logger.info("attachment GC: a blob gained a reference during the sweep", exc_info=True)
-        blobs_deleted = 0
+    orphan_ids = [blob_id async for blob_id in orphans.values_list("id", flat=True)]
+    blobs_deleted = 0
+    # One at a time, so a blob an upload reuses mid-sweep spares only itself.
+    for blob_id in orphan_ids:
+        try:
+            # defer: the delete collector loads the row, and content can be megabytes.
+            deleted, _ = await orphans.filter(pk=blob_id).defer("content").adelete()
+        except (IntegrityError, ProtectedError):
+            logger.info("attachment GC: blob %s gained a reference mid-sweep", blob_id)
+            continue
+        blobs_deleted += deleted
     return {"attachments": unsent_deleted, "blobs": blobs_deleted}
