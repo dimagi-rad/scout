@@ -16,33 +16,33 @@ READ_ATTACHMENT_TOOL_NAME = "read_attachment"
 DEFAULT_LIMIT = 20_000
 MAX_LIMIT = 50_000
 MAX_SEARCH_MATCHES = 50
-MAX_MATCH_LINE_CHARS = 300
+# Characters shown either side of each match.
+SEARCH_CONTEXT_CHARS = 120
 
 
 def _search(text: str, needle: str, offset: int) -> str:
-    lowered = needle.lower()
+    # Offsets are the match's own, not its line's: a minified JSON file is one line.
+    haystack, lowered = text.lower(), needle.lower()
     matches = []
     total = 0
-    position = 0
-    for number, line in enumerate(text.splitlines(keepends=True), start=1):
-        start = position
-        position += len(line)
-        if start + len(line) <= offset or lowered not in line.lower():
-            continue
+    position = haystack.find(lowered, offset)
+    while position != -1:
         total += 1
         if len(matches) < MAX_SEARCH_MATCHES:
-            shown = line.rstrip("\r\n")
-            if len(shown) > MAX_MATCH_LINE_CHARS:
-                shown = shown[:MAX_MATCH_LINE_CHARS] + "…"
-            matches.append(f"line {number} (offset {start}): {shown}")
+            start = max(0, position - SEARCH_CONTEXT_CHARS)
+            end = min(len(text), position + len(needle) + SEARCH_CONTEXT_CHARS)
+            snippet = text[start:end].replace("\r", "").replace("\n", "\\n")
+            line = text.count("\n", 0, position) + 1
+            matches.append(f"offset {position} (line {line}): …{snippet}…")
+        position = haystack.find(lowered, position + max(1, len(lowered)))
     if not total:
-        return f"No lines contain {needle!r}."
+        return f"No matches for {needle!r}."
     more = (
         f"\n[{total - MAX_SEARCH_MATCHES} more matches; search again with a larger offset.]"
         if total > MAX_SEARCH_MATCHES
         else ""
     )
-    return f"{total} matching lines:\n" + "\n".join(matches) + more
+    return f"{total} matches:\n" + "\n".join(matches) + more
 
 
 def create_read_attachment_tool(conversation_id: str):
@@ -59,9 +59,9 @@ def create_read_attachment_tool(conversation_id: str):
 
         Use it when an attachment was shown only in part, or was attached in a message
         no longer in view. ``offset`` is a character offset and ``limit`` the number of
-        characters to return (at most 50,000). With ``search``, returns the lines that
-        contain it (case-insensitive) from ``offset`` on, with each line's offset, so you
-        can read around a match. Images cannot be read with this tool.
+        characters to return (at most 50,000). With ``search``, returns each
+        case-insensitive match from ``offset`` on, with its offset, line number and
+        surrounding text, so you can read around it. Images cannot be read with this tool.
         """
         try:
             canonical_id = str(uuid.UUID(attachment_id))

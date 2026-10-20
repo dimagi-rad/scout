@@ -61,14 +61,29 @@ async def test_caps_the_limit(user, workspace, thread, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_search_returns_matching_lines_with_offsets(user, workspace, thread):
+async def test_search_returns_each_match_with_its_offset(user, workspace, thread):
     attachment = await _attachment(user, workspace, thread, TEXT.encode(), "rows.txt", "text/plain")
 
     result = await _read(thread, attachment_id=str(attachment.id), search="ROW 99:")
 
     offset = TEXT.index("row 99:")
-    assert f"line 100 (offset {offset}): row 99: value 693" in result
-    assert result.count("\nline ") == 1
+    assert f"offset {offset} (line 100): …" in result
+    assert result.count("\noffset ") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_search_finds_matches_inside_a_single_line_file(user, workspace, thread):
+    minified = '{"items": [' + ",".join(f'{{"id": {i}}}' for i in range(2000)) + "]}"
+    attachment = await _attachment(
+        user, workspace, thread, minified.encode(), "m.json", "application/json"
+    )
+
+    result = await _read(thread, attachment_id=str(attachment.id), search='"id": 1500}')
+
+    offset = minified.index('"id": 1500}')
+    assert f"offset {offset} (line 1)" in result
+    assert '"id": 1500}' in result
 
 
 @pytest.mark.asyncio
@@ -76,7 +91,7 @@ async def test_search_returns_matching_lines_with_offsets(user, workspace, threa
 async def test_search_caps_matches(user, workspace, thread):
     attachment = await _attachment(user, workspace, thread, TEXT.encode(), "rows.txt", "text/plain")
     result = await _read(thread, attachment_id=str(attachment.id), search="row")
-    assert result.count("\nline ") == attachment_tool.MAX_SEARCH_MATCHES
+    assert result.count("\noffset ") == attachment_tool.MAX_SEARCH_MATCHES
     assert "950 more matches" in result
 
 
