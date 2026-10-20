@@ -2,8 +2,8 @@
 (arch #253, finding 08#0).
 
 ``build_view_schema`` (heavy sync ORM) and ``run_pipeline`` (the whole
-ORM-writing materialization) run via ``asyncio.to_thread`` on default-executor
-pool threads. Those threads have their own thread-local Django connection that
+ORM-writing materialization) run on pool threads: the default executor, and the
+source-load pool for workspace loads (#927). Those threads have their own thread-local Django connection that
 the worker task decorator's cleanup (which only reaches the async-ORM thread)
 cannot reach — so a pool thread holding a connection that died since the last
 run poisons view-schema rebuilds and refreshes. ``to_thread_fresh_db`` runs

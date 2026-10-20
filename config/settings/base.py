@@ -160,6 +160,10 @@ if DJANGO_DB_POOL_MAX_SIZE:
 # Separate from the application DB to allow future migration to Snowflake etc.
 MANAGED_DATABASE_URL = env("MANAGED_DATABASE_URL", default="")
 
+# Source loads a process runs beyond each job's first, shared by its jobs (#927). Each
+# holds a source-load thread and about two DB connections for the whole load.
+MATERIALIZATION_SHARED_LOAD_SLOTS = env.int("MATERIALIZATION_SHARED_LOAD_SLOTS", default=2)
+
 # In-app usage and performance events (#862); off stops every write, never a request.
 TELEMETRY_ENABLED = env.bool("TELEMETRY_ENABLED", default=True)
 
