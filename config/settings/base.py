@@ -11,6 +11,7 @@ from pathlib import Path
 import environ
 import sentry_sdk
 
+from apps.common.db_pool import pooled_database
 from apps.common.db_urls import enforce_django_db_tls
 from config.sentry import before_send, ignore_noisy_loggers
 from config.task_threads import isolate_job_thread
@@ -142,6 +143,19 @@ DATABASES = {
         env.db("DATABASE_URL", default="postgresql://localhost/scout")
     ),
 }
+
+# Per-process Django connection pool (#934); 0 leaves it off. Only the web deploy
+# enables it: a pooled connection goes back only on close(), and the worker's and
+# MCP's executor threads keep theirs between jobs, so there it would pin slots.
+# Size it against the RDS connection budget alongside the checkpointer pools.
+DJANGO_DB_POOL_MAX_SIZE = env.int("DJANGO_DB_POOL_MAX_SIZE", default=0)
+if DJANGO_DB_POOL_MAX_SIZE:
+    DATABASES["default"] = pooled_database(
+        DATABASES["default"],
+        min_size=env.int("DJANGO_DB_POOL_MIN_SIZE", default=1),
+        max_size=DJANGO_DB_POOL_MAX_SIZE,
+        timeout=env.float("DJANGO_DB_POOL_TIMEOUT_S", default=3.0),
+    )
 
 # Separate from the application DB to allow future migration to Snowflake etc.
 MANAGED_DATABASE_URL = env("MANAGED_DATABASE_URL", default="")
