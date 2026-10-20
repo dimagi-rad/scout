@@ -1180,6 +1180,33 @@ async def test_a_failed_adoption_read_keeps_the_providers_verdict(
 
 
 @pytest.mark.django_db(transaction=True)
+def test_sync_refresh_spent_after_its_check_takes_the_stored_token(
+    oauth_identity, requests_mock, monkeypatch
+):
+    """Another process rotated the grant between the adoption read and the post."""
+    token, _ = oauth_identity
+    real_adopt = token_refresh._adopt_rotated_token
+    reads = []
+
+    def adopt(*args, **kwargs):
+        reads.append(None)
+        if len(reads) == 1:
+            SocialToken.objects.filter(pk=token.pk).update(
+                token="stored-access",
+                token_secret="stored-refresh",
+                expires_at=timezone.now() + timedelta(minutes=15),
+            )
+            return None, False
+        return real_adopt(*args, **kwargs)
+
+    monkeypatch.setattr(token_refresh, "_adopt_rotated_token", adopt)
+    requests_mock.post(URL, status_code=400, json=_SPENT["json"])
+
+    assert refresh_oauth_token_sync(token, URL) == "stored-access"
+    assert len(reads) == 2
+
+
+@pytest.mark.django_db(transaction=True)
 def test_waiting_for_another_refresh_honours_the_callers_deadline(oauth_identity):
     token, _ = oauth_identity
     lock = token_refresh._sync_refresh_lock(token.pk)

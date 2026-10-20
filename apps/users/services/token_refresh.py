@@ -1340,6 +1340,32 @@ def _refresh_oauth_token_sync(
         )
         response.raise_for_status()
     except requests.HTTPError as e:
+        if e.response is not None and _is_invalid_grant(e.response):
+            # Spent between the adoption read above and the post (#927), or that read
+            # failed; check again, as the async refresh does.
+            try:
+                adopted, advanced = _adopt_rotated_token(
+                    social_token,
+                    preflight,
+                    deadline=_phase_deadline(None, db_timeout, clock),
+                    clock=clock,
+                )
+            except TokenRefreshError:
+                logger.warning("Could not check for a concurrently refreshed token", exc_info=True)
+                adopted, advanced = None, False
+            if adopted is not None:
+                logger.info("Adopted a concurrently refreshed OAuth token (sync)")
+                return adopted
+            if advanced:
+                # Not the public entry point: this thread already holds the token's lock.
+                return _refresh_oauth_token_sync(
+                    social_token,
+                    token_url,
+                    timeout=timeout,
+                    db_timeout=db_timeout,
+                    deadline=deadline,
+                    clock=clock,
+                )
         # Keep provider response bodies out of logs.
         status = e.response.status_code if e.response is not None else None
         verdict = classify_http_failure(
