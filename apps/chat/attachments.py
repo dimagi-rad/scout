@@ -49,7 +49,6 @@ _TEXT_MEDIA_TYPE_ALIASES = {
     "text/markdown": "text/markdown",
     "text/x-markdown": "text/markdown",
 }
-TEXT_MEDIA_TYPES = frozenset(TEXT_MEDIA_TYPES_BY_EXTENSION.values())
 
 ATTACHMENT_URL_PREFIX = "/api/chat/attachments/"
 
@@ -88,9 +87,10 @@ def sniff_image_type(head: bytes) -> str | None:
 
 
 def clean_filename(raw: str | None) -> str:
-    name = PurePath((raw or "").replace("\\", "/")).name
-    name = "".join(ch for ch in name if unicodedata.category(ch)[0] != "C").strip()
-    if not name:
+    # Control characters first, so one cannot hide a ".." from PurePath.
+    raw = "".join(ch for ch in raw or "" if unicodedata.category(ch)[0] != "C")
+    name = PurePath(raw.replace("\\", "/")).name.strip()
+    if not name or name in {".", ".."}:
         return "attachment"
     if len(name) > MAX_FILENAME_LENGTH:
         suffix = PurePath(name).suffix[:16]
@@ -198,8 +198,9 @@ def attachment_url(attachment_id) -> str:
     return f"{ATTACHMENT_URL_PREFIX}{attachment_id}/"
 
 
+# The base path must not start with "//": that is a protocol-relative URL to another host.
 _ATTACHMENT_URL_RE = re.compile(
-    r"^(?:/[A-Za-z0-9._~\-/]*)?/api/chat/attachments/"
+    r"^(?:/(?!/)[A-Za-z0-9._~\-/]*)?/api/chat/attachments/"
     r"(?P<id>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/$"
 )
 
@@ -232,15 +233,23 @@ async def acollect_garbage(now=None) -> dict:
         ~Exists(ChatAttachment.objects.filter(blob=OuterRef("pk"))),
         created_at__lt=now - ORPHAN_BLOB_GRACE,
     )
+    try:
+        # defer: the delete collector loads each row, and content can be megabytes.
+        blobs_deleted, _ = await orphans.defer("content").adelete()
+    except (IntegrityError, ProtectedError):
+        # An upload reused a blob mid-sweep; one at a time, it spares only itself.
+        blobs_deleted = await _acollect_orphans_one_by_one(orphans)
+    return {"attachments": unsent_deleted, "blobs": blobs_deleted}
+
+
+async def _acollect_orphans_one_by_one(orphans) -> int:
     orphan_ids = [blob_id async for blob_id in orphans.values_list("id", flat=True)]
     blobs_deleted = 0
-    # One at a time, so a blob an upload reuses mid-sweep spares only itself.
     for blob_id in orphan_ids:
         try:
-            # defer: the delete collector loads the row, and content can be megabytes.
             deleted, _ = await orphans.filter(pk=blob_id).defer("content").adelete()
         except (IntegrityError, ProtectedError):
             logger.info("attachment GC: blob %s gained a reference mid-sweep", blob_id)
             continue
         blobs_deleted += deleted
-    return {"attachments": unsent_deleted, "blobs": blobs_deleted}
+    return blobs_deleted

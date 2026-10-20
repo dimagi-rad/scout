@@ -6,6 +6,7 @@ in-memory JSON body limit, while uploaded files stream to disk.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 from django.http import HttpResponse, JsonResponse
@@ -24,7 +25,7 @@ from apps.chat.attachments import (
 from apps.chat.helpers import _resolve_chat_access, async_login_required
 from apps.chat.models import ChatAttachment
 from apps.chat.rate_limiting import attachment_upload_rate_limit
-from apps.workspaces.access import access_denied_response
+from apps.workspaces.access import access_denied_response, aresolve_workspace_access_ex
 
 
 def _rejected(reason: str, message: str) -> JsonResponse:
@@ -43,6 +44,10 @@ async def attachment_upload_view(request):
     workspace_id = request.POST.get("workspaceId")
     if not workspace_id:
         return JsonResponse({"error": "workspaceId is required"}, status=400)
+    try:
+        uuid.UUID(workspace_id)
+    except ValueError:
+        return JsonResponse({"error": "workspaceId must be a UUID"}, status=400)
     upload = request.FILES.get("file")
     if upload is None:
         return _rejected("attachment_invalid", "No file was uploaded.")
@@ -73,9 +78,9 @@ async def attachment_upload_view(request):
         )
 
     try:
-        validated = validate_upload(
-            upload.read(), filename=upload.name, claimed_type=upload.content_type
-        )
+        # A large upload is spooled to disk; read it off the event loop.
+        content = await asyncio.to_thread(upload.read)
+        validated = validate_upload(content, filename=upload.name, claimed_type=upload.content_type)
     except AttachmentRejected as e:
         return _rejected(e.reason, e.message)
 
@@ -95,6 +100,10 @@ async def attachment_detail_view(request, attachment_id: uuid.UUID):
         .afirst()
     )
     if attachment is None:
+        return JsonResponse({"error": "Attachment not found"}, status=404)
+    # Owning the upload is not enough: like every workspace read, it needs access now.
+    access = await aresolve_workspace_access_ex(user, attachment.workspace_id)
+    if access.workspace is None:
         return JsonResponse({"error": "Attachment not found"}, status=404)
 
     is_image = attachment.media_type.startswith("image/")

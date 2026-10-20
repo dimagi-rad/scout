@@ -21,6 +21,7 @@ from apps.chat.attachments import (
 )
 from apps.chat.models import AttachmentBlob, ChatAttachment, Thread
 from apps.chat.rate_limiting import check_and_record
+from apps.workspaces.models import WorkspaceMembership
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
@@ -115,6 +116,7 @@ def test_validate_strips_path_and_control_characters():
         ("/scout/api/chat/attachments/0b6f7a5e-1c1d-4a7e-9d43-3f1f2b0c9a11/", True),
         ("data:image/png;base64,AAAA", False),
         ("https://evil.example/api/chat/attachments/0b6f7a5e-1c1d-4a7e-9d43-3f1f2b0c9a11/", False),
+        ("//evil.example/api/chat/attachments/0b6f7a5e-1c1d-4a7e-9d43-3f1f2b0c9a11/", False),
         ("/api/chat/attachments/not-a-uuid/", False),
         ("/api/chat/attachments/0b6f7a5e-1c1d-4a7e-9d43-3f1f2b0c9a11/../x", False),
         (None, False),
@@ -378,14 +380,42 @@ async def test_gc_skips_a_blob_that_gains_a_reference_and_collects_the_rest(gc_r
 
     async def adelete(queryset):
         pks = [pk async for pk in queryset.values_list("pk", flat=True)]
-        if pks == [contended] and not raised:
-            raised.append(contended)
+        if queryset.model is AttachmentBlob and contended in pks:
+            raised.append(len(pks))
             raise ProtectedError("referenced", set())
         return await real_adelete(queryset)
 
     monkeypatch.setattr(QuerySet, "adelete", adelete)
     result = await acollect_garbage()
-    assert raised == [contended]
+    # The bulk delete fails on the contended blob; the fallback spares only it.
+    assert raised == [2, 1]
     assert await AttachmentBlob.objects.filter(pk=contended).aexists()
     assert not await AttachmentBlob.objects.filter(pk=gc_rows["blobs"]["stale"].pk).aexists()
     assert result["blobs"] == 1
+
+
+def test_validate_does_not_let_control_characters_hide_a_parent_dir():
+    assert validate_upload(b"hi", filename="..\x00", claimed_type="text/plain").filename == (
+        "attachment"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_upload_rejects_a_malformed_workspace_id(user):
+    client = await _client(user.email)
+    resp = await client.post(
+        UPLOAD_URL,
+        data={"file": SimpleUploadedFile("a.png", PNG), "workspaceId": "nope"},
+        headers=client.csrf_headers,
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_download_needs_current_workspace_access(user, workspace):
+    client = await _client(user.email)
+    url = (await _upload(client, workspace, PNG, "shot.png", "image/png")).json()["url"]
+    await WorkspaceMembership.objects.filter(user=user, workspace=workspace).adelete()
+    assert (await client.get(url)).status_code == 404
