@@ -4,6 +4,7 @@ import logging
 
 from procrastinate.exceptions import AlreadyEnqueued
 
+from apps.chat.attachments import acollect_garbage
 from apps.chat.models import Thread
 from apps.chat.titles import agenerate_thread_title
 from config.procrastinate import app
@@ -38,3 +39,10 @@ async def aschedule_thread_title(thread: Thread) -> None:
         pass
     except Exception:
         logger.warning("Could not queue title generation for thread %s", thread.id, exc_info=True)
+
+
+@app.periodic(cron="41 * * * *")
+@app.task(queueing_lock="collect_chat_attachments")
+async def collect_chat_attachments(timestamp: int = 0) -> dict:
+    """Drop uploads never sent with a message, and blobs no attachment references."""
+    return await acollect_garbage()
