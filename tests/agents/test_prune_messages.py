@@ -99,8 +99,55 @@ def test_earlier_turns_still_age_out():
 
     pruned = prune_messages(history)
 
-    assert _texts(pruned) == ["latest"]
+    assert _texts(pruned) == ["q29", "latest"]
     assert len(pruned) <= DEFAULT_MAX_MESSAGES
+
+
+def test_short_reply_keeps_the_question_it_answers():
+    """Agreeing to a reload: question, "yes", load, then the resume marker."""
+    question = HumanMessage(content=KK_QUESTION)
+    marker = HumanMessage(content=f"{SYSTEM_RESUME_MARKER} Materialization just completed.")
+    history = [
+        question,
+        AIMessage(content="The data isn't loaded. Load it now?"),
+        HumanMessage(content="yes"),
+        AIMessage(content="", tool_calls=[{"name": "run_materialization", "args": {}, "id": "l"}]),
+        ToolMessage(content="started", tool_call_id="l", name="run_materialization"),
+        AIMessage(content="Loading."),
+        marker,
+        *_parallel_tool_rounds(10),
+    ]
+
+    pruned = prune_messages(history)
+
+    assert _texts(pruned) == [KK_QUESTION, "yes", marker.content]
+    _assert_tool_pairs_intact(pruned)
+
+
+def test_continue_after_step_limit_keeps_the_question():
+    history = [
+        HumanMessage(content=KK_QUESTION),
+        *_parallel_tool_rounds(3),
+        AIMessage(content="I ran out of steps. Ask me to continue."),
+        HumanMessage(content="continue"),
+        *_parallel_tool_rounds(10),
+    ]
+
+    pruned = prune_messages(history)
+
+    assert _texts(pruned) == [KK_QUESTION, "continue"]
+    assert len(pruned) <= DEFAULT_MAX_MESSAGES
+
+
+def test_round_wider_than_window_keeps_its_results():
+    history = [HumanMessage(content=KK_QUESTION), *_parallel_tool_rounds(2, calls_per_round=25)]
+
+    pruned = prune_messages(history)
+
+    last_round = history[-26:]
+    assert pruned[-26:] == last_round
+    assert _texts(pruned) == [KK_QUESTION]
+    _assert_tool_pairs_intact(pruned)
 
 
 def test_request_inside_window_changes_nothing():

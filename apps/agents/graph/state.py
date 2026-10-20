@@ -40,20 +40,27 @@ def prune_messages(
 
     # A turn of parallel tool calls passes the window within a few rounds; without
     # its request the model saw an "empty message" and answered with a menu (#919).
-    request = _current_request(conversation_messages)
+    request = _current_request(conversation_messages)[-(max_messages // 2) :]
     start = len(conversation_messages) - max_messages
     if request and request[0] < start:
         start = len(conversation_messages) - max(max_messages - len(request), 1)
-    else:
-        request = []
+    # Start on the tool round's AIMessage rather than drop its results: a round
+    # wider than the window would otherwise lose every result and restart silently.
+    while start > 0 and isinstance(conversation_messages[start], ToolMessage):
+        start -= 1
     pinned = [conversation_messages[i] for i in request if i < start]
     pruned_conversation = conversation_messages[start:]
 
-    # Drop leading ToolMessages orphaned from their (now-pruned) parent AIMessage.
-    while pruned_conversation and hasattr(pruned_conversation[0], "tool_call_id"):
+    # A history that opens on ToolMessages has lost their parent AIMessage already.
+    while pruned_conversation and isinstance(pruned_conversation[0], ToolMessage):
         pruned_conversation = pruned_conversation[1:]
 
     return system_messages + pinned + pruned_conversation
+
+
+# A reply like "yes" or "continue" says nothing on its own, so the user's message
+# before it is kept too.
+PINNED_USER_MESSAGES = 2
 
 
 def _is_resume_marker(message: BaseMessage) -> bool:
@@ -64,36 +71,17 @@ def _is_resume_marker(message: BaseMessage) -> bool:
 def _current_request(conversation: list[BaseMessage]) -> list[int]:
     """Indices of the human messages that state what the current turn must answer.
 
-    That is the latest run of consecutive HumanMessages. A resume marker alone
-    states nothing, so the user's own message before it is kept too.
+    That is the latest run of consecutive HumanMessages plus the user's last
+    ``PINNED_USER_MESSAGES`` own messages (a resume marker is not one).
     """
-    last = next(
-        (
-            i
-            for i in range(len(conversation) - 1, -1, -1)
-            if isinstance(conversation[i], HumanMessage)
-        ),
-        None,
-    )
-    if last is None:
+    humans = [i for i, m in enumerate(conversation) if isinstance(m, HumanMessage)]
+    if not humans:
         return []
-    first = last
+    first = humans[-1]
     while first > 0 and isinstance(conversation[first - 1], HumanMessage):
         first -= 1
-    request = list(range(first, last + 1))
-    if all(_is_resume_marker(conversation[i]) for i in request):
-        asked = next(
-            (
-                i
-                for i in range(first - 1, -1, -1)
-                if isinstance(conversation[i], HumanMessage)
-                and not _is_resume_marker(conversation[i])
-            ),
-            None,
-        )
-        if asked is not None:
-            request.insert(0, asked)
-    return request
+    asked = [i for i in humans if not _is_resume_marker(conversation[i])]
+    return sorted({*range(first, humans[-1] + 1), *asked[-PINNED_USER_MESSAGES:]})
 
 
 def all_tool_calls(message: AIMessage) -> list[dict]:
