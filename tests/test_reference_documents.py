@@ -59,6 +59,8 @@ class TestDecodeUpload:
             ("big.txt", b"a" * (MAX_UPLOAD_BYTES + 1), "too large"),
             ("deep.json", b"[" * 100_000 + b"]" * 100_000, "nested too deeply"),
         ],
+        # Named, so the multi-megabyte payloads never become test ids.
+        ids=["type", "encoding", "nul", "empty", "json", "size", "depth"],
     )
     def test_rejects(self, name, data, message):
         with pytest.raises(ReferenceDocumentError, match=message):
