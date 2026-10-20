@@ -23,6 +23,7 @@ import { Plus, RefreshCw, X } from "lucide-react"
 import { FacetFilterBar } from "@/components/FacetFilterBar/FacetFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { IdListSummary } from "@/components/IdListSummary/IdListSummary"
+import { SourceDescription } from "@/components/SourceDescription/SourceDescription"
 import { CONNECT_PROVIDER } from "@/lib/filters/tenantFacets"
 import { compareUserTenantsByName } from "@/lib/userTenantOrder"
 import { useTenantFacetFilters } from "@/lib/filters/useTenantFacetFilters"
@@ -569,6 +570,10 @@ export function TenantsTab({
                             <div className="truncate text-xs text-muted-foreground">
                               #{t.tenant_id} · {label}
                             </div>
+                            <SourceDescription
+                              description={t.description}
+                              testId={`available-source-description-${t.tenant_uuid}`}
+                            />
                           </div>
                         </div>
                         <Button

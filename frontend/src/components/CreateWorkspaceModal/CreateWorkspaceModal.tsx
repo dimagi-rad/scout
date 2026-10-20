@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { AlertTriangle, Check, RefreshCw } from "lucide-react"
+import { SourceDescription } from "@/components/SourceDescription/SourceDescription"
 import { FacetFilterBar } from "@/components/FacetFilterBar/FacetFilterBar"
 import { IdListSummary } from "@/components/IdListSummary/IdListSummary"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
@@ -378,6 +379,10 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                               <div className="truncate text-xs text-muted-foreground">
                                 #{t.tenant_id} · {getProviderMeta(t.provider).label}
                               </div>
+                              <SourceDescription
+                                description={t.description}
+                                testId={`create-source-description-${t.tenant_uuid}`}
+                              />
                             </div>
                             <span
                               className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${

@@ -506,3 +506,19 @@ describe("large Connect workspaces", () => {
     expect(screen.getByTestId("available-sources-add-shown")).toBeEnabled()
   })
 })
+
+it("shows each available source's own description", async () => {
+  vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+  vi.mocked(getUserTenantsCached).mockResolvedValue([
+    { id: "m-a", tenant_uuid: "tenant-a", provider: "ocs", tenant_id: "a", tenant_name: "Alpha", last_selected_at: null, description: "Answers maternal health FAQs" },
+    { id: "m-b", tenant_uuid: "tenant-b", provider: "commcare", tenant_id: "b", tenant_name: "Bravo", last_selected_at: null, description: "" },
+  ])
+  render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+
+  await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+
+  expect(await screen.findByTestId("available-source-description-tenant-a")).toHaveTextContent(
+    "Answers maternal health FAQs",
+  )
+  expect(screen.queryByTestId("available-source-description-tenant-b")).toBeNull()
+})
