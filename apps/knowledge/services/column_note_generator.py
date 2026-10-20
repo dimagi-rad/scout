@@ -12,6 +12,9 @@ the final deduped column names always match the staging columns produced by
 _generate_stg_visits — including collision-suffixed names like ``status_2``.
 """
 
+from asgiref.sync import sync_to_async
+from django.db import transaction
+
 from apps.knowledge.models import TableKnowledge
 from apps.transformations.services.connect_staging import (
     folded_visit_aliases,
@@ -47,26 +50,31 @@ async def sync_column_notes(workspace, table_name: str, form_definitions: dict) 
 
         column_notes[col_name] = note
 
-    existing = await TableKnowledge.objects.filter(
-        workspace=workspace, table_name=table_name
-    ).afirst()
     # A sync before #712 noted every field, including ones now folded into form_json;
     # the agent would be told about columns that do not exist.
     folded = folded_visit_aliases(form_definitions)
-    kept_existing = {
-        name: note
-        for name, note in (existing.column_notes if existing else {}).items()
-        if name not in folded
-    }
-    merged_notes = {**kept_existing, **column_notes}
+    return await _merge_column_notes(workspace, table_name, column_notes, folded)
 
-    tk, _created = await TableKnowledge.objects.aupdate_or_create(
+
+@sync_to_async
+def _merge_column_notes(workspace, table_name, column_notes, folded) -> TableKnowledge:
+    # Connect sources sharing a workspace can load at once; without the row lock
+    # one source's merge would overwrite the other's notes.
+    TableKnowledge.objects.get_or_create(
         workspace=workspace,
         table_name=table_name,
-        defaults={"column_notes": merged_notes},
-        create_defaults={
-            "column_notes": merged_notes,
+        defaults={
+            "column_notes": {},
             "description": f"Auto-generated column notes for {table_name}.",
         },
     )
+    with transaction.atomic():
+        tk = TableKnowledge.objects.select_for_update().get(
+            workspace=workspace, table_name=table_name
+        )
+        kept_existing = {
+            name: note for name, note in (tk.column_notes or {}).items() if name not in folded
+        }
+        tk.column_notes = {**kept_existing, **column_notes}
+        tk.save(update_fields=["column_notes", "updated_at"])
     return tk

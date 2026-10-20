@@ -1,4 +1,8 @@
+import asyncio
+import threading
+
 import pytest
+from django.db import connection, transaction
 
 from apps.knowledge.models import TableKnowledge
 from apps.knowledge.services.column_note_generator import sync_column_notes
@@ -73,3 +77,41 @@ async def test_sync_column_notes_drops_notes_for_folded_fields(workspace):
     assert tk.column_notes["q0000"] == "Q0 — Text"
     assert tk.column_notes["supervisor_note"] == "Added by human"
     assert len(tk.column_notes) == MAX_STAGING_COLUMNS - 7 + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_sync_column_notes_keeps_a_concurrent_sources_notes(workspace):
+    await TableKnowledge.objects.acreate(
+        workspace=workspace, table_name="stg_visits", column_notes={}
+    )
+    locked = threading.Event()
+    release = threading.Event()
+
+    def other_source_merge():
+        try:
+            with transaction.atomic():
+                tk = TableKnowledge.objects.select_for_update().get(
+                    workspace=workspace, table_name="stg_visits"
+                )
+                locked.set()
+                release.wait(5)
+                tk.column_notes = {**tk.column_notes, "other_field": "From another opportunity"}
+                tk.save()
+        finally:
+            connection.close()
+
+    other = threading.Thread(target=other_source_merge)
+    other.start()
+    try:
+        assert await asyncio.to_thread(locked.wait, 5)
+        sync = asyncio.create_task(sync_column_notes(workspace, "stg_visits", FORM_DEFS))
+        await asyncio.sleep(0.2)
+        assert not sync.done()
+    finally:
+        release.set()
+    tk = await asyncio.wait_for(sync, 10)
+    await asyncio.to_thread(other.join, 5)
+
+    assert tk.column_notes["other_field"] == "From another opportunity"
+    assert "muac" in tk.column_notes
