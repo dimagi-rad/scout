@@ -496,22 +496,24 @@ def _django_wrapped_pool_timeout(timeout: PoolTimeout) -> OperationalError:
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
-    ("checkout_error", "status", "database"),
+    ("checkout_error_class", "status", "database"),
     [
-        (DjangoPoolExhausted("couldn't get a connection"), "busy", "busy"),
-        (PoolTimeout("couldn't get a connection"), "unhealthy", "error"),
+        (DjangoPoolExhausted, "busy", "busy"),
+        (PoolTimeout, "unhealthy", "error"),
     ],
     ids=["busy", "outage"],
 )
 async def test_health_skips_the_queue_probe_after_a_pool_checkout_timeout(
-    sentry, checkout_error, status, database
+    sentry, checkout_error_class, status, database
 ):
     """Both probes share the pooled connection; a second wait would outlast the 4s probe."""
     queue_probe = AsyncMock()
     with (
         patch(
             "apps.workspaces.views._check_database",
-            side_effect=_django_wrapped_pool_timeout(checkout_error),
+            side_effect=_django_wrapped_pool_timeout(
+                checkout_error_class("couldn't get a connection")
+            ),
         ),
         patch("apps.workspaces.views._check_queue", queue_probe),
     ):

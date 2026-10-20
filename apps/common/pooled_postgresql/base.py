@@ -19,10 +19,6 @@ from apps.common.capacity import (
 )
 from apps.common.db_pool import RefusalRecordingConnection
 
-# Outlasts the pool's reconnect backoff during a sustained refusal, so a live one
-# never ages out mid-incident; an hours-old one can't mislabel a later outage.
-CONNECT_FAILURE_FRESH_SECONDS = 60.0
-
 
 class DjangoPoolExhausted(PoolTimeout):
     """No Django connection came free, or the server refused new ones, within the timeout."""
@@ -42,10 +38,11 @@ class DatabaseWrapper(PostgresDatabaseWrapper):
     def _pool_is_busy(self) -> bool:
         # A recent connect failure decides first: pool_size counts connections
         # created, not healthy ones, so a pool that grew under load reads as full
-        # through an outage.
+        # through an outage. "Recent" spans the pool's whole retry budget, whose
+        # backoff gaps between attempts grow past a minute; older ones expire.
         failure = RefusalRecordingConnection.last_connect_failure
         if failure is not None:
             failed_at, sqlstate, message = failure
-            if time.monotonic() - failed_at <= CONNECT_FAILURE_FRESH_SECONDS:
+            if time.monotonic() - failed_at <= self.pool.reconnect_timeout:
                 return sqlstate == TOO_MANY_CONNECTIONS_SQLSTATE or is_capacity_message(message)
         return self.pool.get_stats().get("pool_size", 0) >= self.pool.max_size

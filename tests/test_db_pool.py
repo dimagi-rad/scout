@@ -20,7 +20,6 @@ from apps.common.db_pool import (
     reset_pooled_connection,
 )
 from apps.common.pooled_postgresql.base import (
-    CONNECT_FAILURE_FRESH_SECONDS,
     DatabaseWrapper,
     DjangoPoolExhausted,
 )
@@ -168,10 +167,12 @@ TOO_MANY_CLIENTS = "connection failed: FATAL:  sorry, too many clients already"
 
 
 @pytest.mark.parametrize(
-    "refusal", [_failed(None, TOO_MANY_CLIENTS), _failed("53300", "")], ids=["text", "sqlstate"]
+    ("sqlstate", "message"), [(None, TOO_MANY_CLIENTS), ("53300", "")], ids=["text", "sqlstate"]
 )
-def test_a_timeout_after_a_slot_refusal_is_busy(refusal, make_pooled_wrapper, monkeypatch):
-    raised = _timeout_after(refusal, make_pooled_wrapper, monkeypatch)
+def test_a_timeout_after_a_slot_refusal_is_busy(
+    sqlstate, message, make_pooled_wrapper, monkeypatch
+):
+    raised = _timeout_after(_failed(sqlstate, message), make_pooled_wrapper, monkeypatch)
     assert isinstance(raised, DjangoPoolExhausted)
 
 
@@ -190,7 +191,8 @@ def test_a_served_checkout_keeps_a_live_refusal(make_pooled_wrapper, monkeypatch
 
 
 def test_a_stale_refusal_no_longer_decides(make_pooled_wrapper, monkeypatch):
-    stale = _failed(None, TOO_MANY_CLIENTS, seconds_ago=CONNECT_FAILURE_FRESH_SECONDS + 1)
+    # psycopg_pool's default reconnect_timeout: the pool has stopped retrying by then.
+    stale = _failed(None, TOO_MANY_CLIENTS, seconds_ago=300 + 1)
     raised = _timeout_after(stale, make_pooled_wrapper, monkeypatch, pool_size=1)
     assert not isinstance(raised, DjangoPoolExhausted)
 
