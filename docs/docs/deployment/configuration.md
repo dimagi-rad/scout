@@ -46,6 +46,8 @@ OAuth client IDs and secrets live in allauth social application records. `manage
 | `CONNECT_API_URL` | `https://connect.dimagi.com` | CommCare Connect API and OAuth host. |
 | `OCS_URL` | `https://www.openchatstudio.com` | Open Chat Studio API and OAuth host. |
 | `OCS_REQUEST_TEAMS_SCOPE` | `true` | Request the OCS `teams` scope, which lists a user's teams so they can connect them all at once. Set to `false` for an OCS that predates it, which otherwise rejects every OCS sign-in with `invalid_scope`. |
+| `OCS_DETAIL_FETCH_CONCURRENCY` | `8` | Concurrent OCS session-detail requests per messages load (capped at 10 and at the process limit). |
+| `OCS_DETAIL_FETCH_PROCESS_LIMIT` | `10` | Concurrent OCS session-detail requests across every load in one process. The worker runs several loads at once, so this is what bounds the load on your OCS. |
 
 ### CommCare HQ on EU
 
@@ -105,6 +107,7 @@ These are staged-rollout switches.
 | `THREAD_TITLE_LLM_MODEL` | `claude-haiku-4-5-20251001` | Claude model that writes the short chat thread title after a thread's first successful turn. Runs in the background worker. |
 | `LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE` | `1` (`0` in development) | Minimum size of each process's connection pool for conversation checkpoints. |
 | `LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE` | `20` (`4` in development) | Maximum size of that pool. The pool is per process, so multiply by the number of API and worker processes when sizing PostgreSQL `max_connections`. |
+| Worker `--concurrency` | `3` in the shipped commands | Background jobs run at once. Each running job can hold up to two advisory-lock sessions and a few more connections, and `_MAX_POOLS` in `mcp_server/services/pool.py` must be at least concurrency + 2, so raise both together and recheck `max_connections`. |
 | `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_BASE_URL` | (empty) | Langfuse tracing for agent runs. Leave blank to disable. |
 | `TELEMETRY_ENABLED` | `True` | In-app usage and performance events (#862), stored in the platform database: ids, durations, counts, outcomes and tool names, never message or query text. Raw events are deleted after 400 days by a nightly task. Set it to `False` to stop every write; requests and chat turns behave the same either way. |
 

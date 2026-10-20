@@ -2,7 +2,7 @@
 
 Centralises the bounded ``urllib3`` retry policy so CommCare, Connect, and OCS
 loaders share one transport that survives transient upstream failures and
-throttles without pinning the sole materialization worker thread (arch #252).
+throttles without pinning a materialization worker thread (arch #252).
 """
 
 from __future__ import annotations
@@ -17,10 +17,11 @@ from mcp_server.loaders._urls import ProviderURLPolicy, UnsafeProviderURL
 
 # urllib3 honours a server ``Retry-After`` header verbatim when
 # ``respect_retry_after_header=True`` — with NO upper bound (``backoff_max``
-# caps only the exponential path). Loaders run on the single materialization
-# worker thread, so an upstream throttle advertising a large ``Retry-After``
-# would park that sole thread for the full value, up to ``total`` times per
-# request, uncancellable (arch #252, finding 14#6). Clamp the honoured value so
+# caps only the exponential path). Loaders run on materialization worker
+# threads, and an OCS detail fetch holds a process-wide slot while it sleeps, so
+# an upstream throttle advertising a large ``Retry-After`` would park the thread
+# (and slot) for the full value, up to ``total`` times per request, uncancellable
+# (arch #252, finding 14#6). Clamp the honoured value so
 # one throttle response costs at most this many seconds of sleep.
 MAX_RETRY_AFTER_SECONDS = 30
 
