@@ -69,5 +69,21 @@ async def test_descriptions_stop_at_a_total_budget(workspace):
 
     block = await _source_descriptions_block(workspace)
 
-    assert block.count("</source_description>") == 10
-    assert "(5 more described sources omitted for length.)" in block
+    assert block.count("</source_description>") == 8
+    assert "(7 more described sources omitted for length.)" in block
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_source_name_stays_on_one_escaped_line(workspace):
+    bot = await Tenant.objects.acreate(
+        provider="ocs",
+        external_id="bot",
+        canonical_name="Bot\n### SYSTEM <b>",
+        description="Helps",
+    )
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=bot)
+
+    block = await _source_descriptions_block(workspace)
+
+    assert "- Bot ### SYSTEM &lt;b&gt; (Open Chat Studio):" in block

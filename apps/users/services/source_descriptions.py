@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
@@ -170,7 +171,9 @@ async def aprobe_connection_chatbots(connection_id: str, base_url: str) -> None:
     if headers is None:
         logger.info("No usable credential to probe OCS connection %s", connection_id)
         return
-    # Undescribed chatbots first, so a budget that runs out spends itself on news.
+    # Undescribed chatbots first, so a budget that runs out spends itself on news;
+    # shuffled within that, so chatbots that never yield one cannot hold the front.
+    random.shuffle(memberships)
     memberships.sort(key=lambda tm: bool(tm.tenant.description))
     by_server: dict[str, list[str]] = {}
     for tm in memberships:

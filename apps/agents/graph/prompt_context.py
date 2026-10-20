@@ -581,15 +581,17 @@ async def _asource_descriptions_block(workspace: Workspace) -> str:
         text = " ".join(tenant.description.split())
         if len(text) > _PROMPT_DESCRIPTION_CHARS:
             text = text[: _PROMPT_DESCRIPTION_CHARS - 1].rstrip() + "…"
-        if len(text) > budget:
-            omitted += 1
-            continue
-        budget -= len(text)
-        name = _untrusted_text(tenant.canonical_name or tenant.external_id)
-        lines.append(
+        # The name is provider text too: one line, escaped, and charged to the budget.
+        name = _untrusted_text(" ".join((tenant.canonical_name or tenant.external_id).split()))
+        line = (
             f"- {name} ({provider_label(tenant.provider)}): "
             f"<source_description>{_untrusted_text(text)}</source_description>"
         )
+        if len(line) > budget:
+            omitted += 1
+            continue
+        budget -= len(line)
+        lines.append(line)
     if not lines:
         return ""
     if omitted:
