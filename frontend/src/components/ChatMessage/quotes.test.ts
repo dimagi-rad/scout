@@ -32,6 +32,14 @@ describe("quote-reply message format", () => {
     ])
   })
 
+  it("keeps an escaped reply as text when more parts follow it", () => {
+    const joined = `${composeQuotedMessage(["a"], "> b")}\n\ny`
+    expect(messageSegments(joined)).toEqual([
+      { kind: "quote", text: "a" },
+      { kind: "text", text: "> b\n\ny" },
+    ])
+  })
+
   it("does not take a message that merely starts with > for a quote", () => {
     for (const text of [">50% coverage sites last month?", "> just this", "> 5 visits\n\n> more"]) {
       expect(splitQuotedMessage(text)).toEqual({ quotes: [], body: text })

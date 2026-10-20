@@ -12,11 +12,11 @@ function quoteBlock(quote: string): string {
 }
 
 // A reply starting with ">" would read as one more quote; markdown's escape keeps it the reply.
-const ESCAPED_REPLY = "\\>"
+const ESCAPE = "\\"
 
 export function composeQuotedMessage(quotes: string[], reply: string): string {
   if (quotes.length === 0) return reply
-  const safeReply = reply.startsWith(">") ? `\\${reply}` : reply
+  const safeReply = reply.startsWith(">") ? `${ESCAPE}${reply}` : reply
   return [...quotes.map(quoteBlock), safeReply].join("\n\n")
 }
 
@@ -54,7 +54,11 @@ export function messageSegments(text: string): MessageSegment[] {
           text: lines.slice(i, end).map((line) => line.replace(/^> ?/, "")).join("\n"),
         })
         i = end + 1
-        if (lines[i]?.startsWith(ESCAPED_REPLY)) lines[i] = lines[i].slice(1)
+        // Taken as text here: re-scanned, the unescaped line would read as another quote.
+        if (lines[i]?.startsWith(`${ESCAPE}>`)) {
+          textLines.push(lines[i].slice(ESCAPE.length))
+          i++
+        }
         continue
       }
     }
