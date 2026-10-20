@@ -298,4 +298,13 @@ describe("closing the add panel", () => {
     expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
     expect(screen.getByTestId("add-tenant-empty-btn")).toHaveFocus()
   })
+
+  it("closes on Escape after a click on the panel's plain text", async () => {
+    await openAddPanel()
+    screen.getByTestId("tenants-tab").focus()
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.queryByTestId("add-tenant-panel")).not.toBeInTheDocument()
+  })
 })

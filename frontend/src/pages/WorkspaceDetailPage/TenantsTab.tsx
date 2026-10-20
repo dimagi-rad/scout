@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef, type MouseEvent } from "react"
+import { useState, useEffect, useCallback, useMemo, useRef, useId, type MouseEvent } from "react"
 import { workspaceApi } from "@/api/workspaces"
 import {
   getUserTenantsCached,
@@ -65,6 +65,7 @@ export function TenantsTab({
   const [showAdd, setShowAdd] = useState(false)
   const addButtonRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
+  const panelId = useId()
   const tabRef = useRef<HTMLDivElement>(null)
   // Whichever trigger opened the panel (header or empty-state button) gets focus back.
   const openerRef = useRef<HTMLElement | null>(null)
@@ -197,12 +198,16 @@ export function TenantsTab({
       // Escape they consume, so this only fires when nothing else claimed it.
       if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return
       const active = document.activeElement
+      const panel = panelRef.current
+      // A click on the panel's plain text focuses an ancestor (body, the tab), so
+      // anything containing the panel counts as in it.
       const inScope =
         !active ||
-        active === document.body ||
+        !panel ||
+        active.contains(panel) ||
+        panel.contains(active) ||
         active === addButtonRef.current ||
-        active === openerRef.current ||
-        !!panelRef.current?.contains(active)
+        active === openerRef.current
       if (!inScope) return
       // A pasted id list is costly to retype, so the first Escape only clears it.
       if (active instanceof HTMLInputElement && active.type === "text" && active.value) {
@@ -316,7 +321,7 @@ export function TenantsTab({
             variant={showAdd ? "secondary" : "outline"}
             onClick={toggleAdd}
             aria-expanded={showAdd}
-            aria-controls={showAdd ? "add-tenant-panel" : undefined}
+            aria-controls={showAdd ? panelId : undefined}
             data-testid="add-tenant-btn"
           >
             <Plus className="mr-1 h-4 w-4" />
@@ -328,7 +333,7 @@ export function TenantsTab({
       {showAdd && isManager && (
         <div
           ref={panelRef}
-          id="add-tenant-panel"
+          id={panelId}
           role="region"
           aria-label="Add data source"
           className="mb-4 rounded-lg border bg-muted/30 p-4"
@@ -516,7 +521,7 @@ export function TenantsTab({
               className="mt-4"
               onClick={openAdd}
               aria-expanded={showAdd}
-              aria-controls={showAdd ? "add-tenant-panel" : undefined}
+              aria-controls={showAdd ? panelId : undefined}
               data-testid="add-tenant-empty-btn"
             >
               <Plus className="mr-1 h-4 w-4" />
