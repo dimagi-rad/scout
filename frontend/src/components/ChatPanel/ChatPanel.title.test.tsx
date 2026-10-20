@@ -149,11 +149,15 @@ describe("workspace scope strip", () => {
     mockApi()
     renderChat()
     expect(await screen.findByTestId("chat-empty-state")).toBeInTheDocument()
-    expect(screen.getByTestId("chat-workspace-scope")).toHaveTextContent("Workspace")
+    expect(screen.getByTestId("chat-workspace-scope-count")).toHaveTextContent(
+      `${workspace.tenants.length} source`,
+    )
 
     await send(QUESTION)
     await screen.findByText("Here are the rates.")
-    expect(screen.getByTestId("chat-workspace-scope")).toHaveTextContent("Workspace")
+    expect(screen.getByTestId("chat-workspace-scope-count")).toHaveTextContent(
+      `${workspace.tenants.length} source`,
+    )
   })
 })
 
