@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react"
+import { act, fireEvent, render, screen } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { api } from "@/api/client"
@@ -184,5 +184,52 @@ describe("provider tabs", () => {
     expect(screen.getByTestId("workspace-lost-connections")).toHaveTextContent(
       "Check Connected Accounts",
     )
+  })
+})
+
+describe("workspace sources", () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useAppStore.setState(useAppStore.getInitialState(), true)
+  })
+
+  const multiSource = workspace({
+    id: "program",
+    display_name: "CHC program",
+    tenants: [
+      { id: "t-a", tenant_name: "CHC Kenya", provider: "commcare_connect" },
+      { id: "t-b", tenant_name: "CHC Uganda", provider: "commcare_connect" },
+    ],
+  })
+
+  it("names every source of the active workspace on the trigger", () => {
+    openSwitcher([multiSource])
+
+    expect(screen.getByTestId("domain-selector")).toHaveAttribute(
+      "title",
+      "2 data sources: CHC Kenya, CHC Uganda",
+    )
+  })
+
+  it("marks multi-source rows with their source count", () => {
+    openSwitcher([workspace(), multiSource])
+    fireEvent.click(screen.getByTestId("workspace-seg-all"))
+
+    expect(screen.getByTestId("workspace-source-count-program")).toHaveTextContent("2 sources")
+    expect(screen.queryByTestId("workspace-source-count-workspace-recorded")).toBeNull()
+  })
+
+  it("opens when another part of the app asks for it", () => {
+    useAppStore.setState({ domains: [workspace()], activeDomainId: "workspace-recorded" })
+    render(
+      <MemoryRouter>
+        <WorkspaceSwitcher />
+      </MemoryRouter>,
+    )
+    expect(screen.queryByTestId("workspace-search")).toBeNull()
+
+    act(() => useAppStore.getState().uiActions.openWorkspaceSwitcher())
+
+    expect(screen.getByTestId("workspace-search")).toBeInTheDocument()
   })
 })

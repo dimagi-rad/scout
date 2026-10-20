@@ -4,6 +4,7 @@ import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { formatRelativeTime } from "@/lib/relativeTime"
+import { workspaceSourcesLabel, workspaceSourcesShortLabel } from "@/lib/workspaceSources"
 import { cn } from "@/lib/utils"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { matchSlashCommands, resolveSlashCommand } from "@/components/ChatPanel/slashCommands"
@@ -144,6 +145,8 @@ export function ChatEmptyState({
     s.domains.find((d) => d.id === s.activeDomainId),
   )
 
+  const openWorkspaceSwitcher = useAppStore((s) => s.uiActions.openWorkspaceSwitcher)
+
   const provider = workspace?.tenants[0]?.provider
   const starters = getStarterQuestions(provider)
   const lastSyncedAt = workspace?.last_synced_at ?? null
@@ -186,13 +189,36 @@ export function ChatEmptyState({
           ))}
         </div>
 
+        {workspace && (
+          <p
+            className="mt-10 text-center text-sm text-muted-foreground"
+            data-testid="chat-workspace-context"
+          >
+            Asking about{" "}
+            <span className="font-medium text-foreground">{workspace.display_name}</span>
+            {" · "}
+            <span title={workspaceSourcesLabel(workspace)} data-testid="chat-workspace-sources">
+              {workspace.tenants.length === 1 ? "Source" : "Sources"}:{" "}
+              {workspaceSourcesShortLabel(workspace)}
+            </span>{" "}
+            <button
+              type="button"
+              onClick={openWorkspaceSwitcher}
+              className="underline underline-offset-2 hover:text-foreground"
+              data-testid="chat-workspace-change"
+            >
+              Change
+            </button>
+          </p>
+        )}
+
         <ChatEmptyPrompt
           input={input}
           setInput={setInput}
           onSend={onSend}
           disabled={disabled}
           lastSyncedAt={lastSyncedAt}
-          className="mt-10"
+          className={workspace ? "mt-3" : "mt-10"}
         />
       </div>
     </div>
