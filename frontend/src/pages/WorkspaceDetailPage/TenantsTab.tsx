@@ -64,6 +64,8 @@ export function TenantsTab({
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const addButtonRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const tabRef = useRef<HTMLDivElement>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
   // The workspace's last source: removing it deletes the whole workspace (#381).
@@ -171,7 +173,8 @@ export function TenantsTab({
 
   const closeAdd = useCallback(() => {
     setShowAdd(false)
-    addButtonRef.current?.focus()
+    // The add button is gone once every source is connected; keep focus in the tab.
+    ;(addButtonRef.current ?? tabRef.current)?.focus()
   }, [])
 
   useEffect(() => {
@@ -179,12 +182,25 @@ export function TenantsTab({
     function onKeyDown(event: KeyboardEvent) {
       // Open facet menus and dialogs are Radix layers, which preventDefault the
       // Escape they consume, so this only fires when nothing else claimed it.
-      if (event.key !== "Escape" || event.defaultPrevented) return
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return
+      const active = document.activeElement
+      const inScope =
+        !active ||
+        active === document.body ||
+        active === addButtonRef.current ||
+        !!panelRef.current?.contains(active)
+      if (!inScope) return
+      // A pasted id list is costly to retype, so the first Escape only clears it.
+      if (active instanceof HTMLInputElement && active.value) {
+        event.preventDefault()
+        setSearch("")
+        return
+      }
       closeAdd()
     }
     document.addEventListener("keydown", onKeyDown)
     return () => document.removeEventListener("keydown", onKeyDown)
-  }, [showAdd, closeAdd])
+  }, [showAdd, closeAdd, setSearch])
 
   async function handleAdd(tenant: UserTenant) {
     setAddingId(tenant.tenant_uuid)
@@ -267,7 +283,7 @@ export function TenantsTab({
   const canShowAddButton = isManager && (availableStatus !== "ready" || available.length > 0)
 
   return (
-    <div data-testid="tenants-tab">
+    <div ref={tabRef} tabIndex={-1} className="outline-none" data-testid="tenants-tab">
       <div className="mb-4 flex items-center justify-between">
         <span className="text-sm text-muted-foreground">
           {connectedLoading
@@ -280,6 +296,8 @@ export function TenantsTab({
             size="sm"
             variant={showAdd ? "secondary" : "outline"}
             onClick={() => setShowAdd((v) => !v)}
+            aria-expanded={showAdd}
+            aria-controls="add-tenant-panel"
             data-testid="add-tenant-btn"
           >
             <Plus className="mr-1 h-4 w-4" />
@@ -289,7 +307,14 @@ export function TenantsTab({
       </div>
 
       {showAdd && isManager && (
-        <div className="mb-4 rounded-lg border bg-muted/30 p-4" data-testid="add-tenant-panel">
+        <div
+          ref={panelRef}
+          id="add-tenant-panel"
+          role="region"
+          aria-label="Add data source"
+          className="mb-4 rounded-lg border bg-muted/30 p-4"
+          data-testid="add-tenant-panel"
+        >
           <div className="mb-3 flex items-center justify-between">
             <p className="text-sm font-medium">Available data sources</p>
             <div className="flex items-center gap-3">
