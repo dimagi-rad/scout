@@ -2,8 +2,7 @@
 
 OCS does not expose a direct messages endpoint — messages are embedded in
 the session detail response. This loader walks the session list and fetches
-each session's detail (N+1). Acceptable given typical chatbot volumes per
-the design spec.
+each session's detail (N+1), a bounded number at a time (#918).
 """
 
 from __future__ import annotations
@@ -11,11 +10,23 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections import deque
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
+
+from django.db import connections
 
 from mcp_server.loaders.ocs_base import OCS_MAX_PAGE_SIZE, OCSBaseLoader, OCSExportError
 
 logger = logging.getLogger(__name__)
+
+# Serial detail fetches made a 5k-session chatbot a ~25 min load (#918). Kept
+# under the session adapter's default pool of 10 connections so no request
+# waits on a socket, and low enough that the shared 429/Retry-After policy
+# still governs how hard OCS is pushed.
+DETAIL_FETCH_CONCURRENCY = 8
+# Fetched-but-unyielded details are held in memory; cap the read-ahead.
+DETAIL_FETCH_WINDOW = DETAIL_FETCH_CONCURRENCY * 2
 
 
 class OCSMessageLoader(OCSBaseLoader):
@@ -56,12 +67,7 @@ class OCSMessageLoader(OCSBaseLoader):
         session_ids = list(dict.fromkeys(session_ids))
         total_sessions = len(session_ids)
         total_messages = 0
-        for session_id in session_ids:
-            detail_url = f"{self.base_url}/api/sessions/{session_id}/"
-            # A session with no messages legitimately omits/empties the key, so
-            # a missing ``messages`` is treated as empty (not an error) — but the
-            # JSON parse itself is validated via _get_json (finding 03#6).
-            messages = self._get_json(detail_url).get("messages") or []
+        for session_id, messages in self._fetch_session_messages(session_ids):
             rows = map_session_messages(session_id, messages)
             total_messages += sum(not row["is_synthetic_summary"] for row in rows)
             yield rows, total_sessions
@@ -71,6 +77,47 @@ class OCSMessageLoader(OCSBaseLoader):
             total_sessions,
             self.experiment_id,
         )
+
+    def _fetch_session_messages(self, session_ids: list[str]) -> Iterator[tuple[str, list]]:
+        """Yield ``(session_id, messages)`` in ``session_ids`` order.
+
+        Details are fetched concurrently but yielded in list order, so the
+        output (and the writer's progress) is identical to a serial walk. The
+        first failure in list order propagates; when the consumer stops early
+        (an error or a cancel raised from progress), queued fetches are
+        cancelled and the in-flight ones are abandoned rather than awaited.
+        """
+        pending: deque[tuple[str, Future]] = deque()
+        remaining = iter(session_ids)
+        executor = ThreadPoolExecutor(
+            max_workers=DETAIL_FETCH_CONCURRENCY, thread_name_prefix="ocs-session-detail"
+        )
+        try:
+            for session_id in remaining:
+                pending.append((session_id, executor.submit(self._session_messages, session_id)))
+                if len(pending) >= DETAIL_FETCH_WINDOW:
+                    break
+            while pending:
+                session_id, future = pending.popleft()
+                messages = future.result()
+                next_id = next(remaining, None)
+                if next_id is not None:
+                    pending.append((next_id, executor.submit(self._session_messages, next_id)))
+                yield session_id, messages
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _session_messages(self, session_id: str) -> list:
+        # A session with no messages legitimately omits/empties the key, so a
+        # missing ``messages`` is treated as empty (not an error) — but the JSON
+        # parse itself is validated via _get_json (finding 03#6).
+        try:
+            detail = self._get_json(f"{self.base_url}/api/sessions/{session_id}/")
+        finally:
+            # A mid-run token refresh persists through the ORM; without this the
+            # pool thread's DB connection would outlive the load (shared RDS).
+            connections.close_all()
+        return detail.get("messages") or []
 
     def load(self) -> list[dict]:
         return [row for page, _ in self.load_pages() for row in page]

@@ -44,6 +44,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Iterator
+from contextlib import closing
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
@@ -1032,7 +1033,10 @@ def _load_ocs_source(
 
     loader_cls, writer_fn = loader_map[source_name]
     loader = loader_cls(experiment_id=experiment_id, credential=credential)
-    return writer_fn(loader.load_pages(), schema_name, conn, on_page=on_page)
+    # Close explicitly: the messages loader's fetch pool stops only when its
+    # generator closes, and a propagating cancel would otherwise hold it open.
+    with closing(loader.load_pages()) as pages:
+        return writer_fn(pages, schema_name, conn, on_page=on_page)
 
 
 def _write_ocs_experiments(
@@ -1141,6 +1145,9 @@ def _write_ocs_sessions(
     return total
 
 
+OCS_MESSAGES_PROGRESS_INTERVAL_SECONDS = 1.0
+
+
 def _write_ocs_messages(
     pages: Iterator[tuple[list[dict], int | None]],
     schema_name: str,
@@ -1182,6 +1189,7 @@ def _write_ocs_messages(
     ins_sql = _OCS_MESSAGES_INSERT.format(schema=sid)
     total = 0
     sessions_total: int | None = None
+    last_reported: float | None = None
     for sessions_done, (page, page_total) in enumerate(pages, start=1):
         if sessions_total is None and page_total is not None:
             sessions_total = page_total
@@ -1204,8 +1212,18 @@ def _write_ocs_messages(
             ]
             cur.executemany(ins_sql, rows)
             total += sum(not r.get("is_synthetic_summary", False) for r in page)
-        if on_page is not None:
+        if on_page is None:
+            continue
+        # Each report is a progress UPDATE plus a cancel-check SELECT; per
+        # session that is two queries per detail fetch (#918).
+        now = time.monotonic()
+        if (
+            last_reported is None
+            or now - last_reported >= OCS_MESSAGES_PROGRESS_INTERVAL_SECONDS
+            or sessions_done == sessions_total
+        ):
             on_page(sessions_done, sessions_total)
+            last_reported = now
 
     return total
 
