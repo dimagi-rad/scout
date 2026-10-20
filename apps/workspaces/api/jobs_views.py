@@ -67,7 +67,7 @@ def _job_to_dict(
         "source_index": load["source_index"] if load else None,
         "source_total": load["source_total"] if load else None,
         "tenant_name": load["tenant_name"] if load else None,
-        # The UI says "Importing from Connect…"; a job between runs falls back to
+        # The UI says "Importing from CommCare Connect…"; a job between runs falls back to
         # the workspace's provider, which is None when its sources are mixed.
         "provider": load["provider"] if load else workspace_provider,
         "created_at": job.created_at.isoformat(),
