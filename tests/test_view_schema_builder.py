@@ -1256,3 +1256,15 @@ def test_teardown_view_schema_drops_role_despite_table_acl_from_stale_default_ac
         if vs:
             vs.delete()
         ts.delete()
+
+
+def test_view_prefixes_separate_same_slug_tenants_on_two_servers(db):
+    """www and EU CommCare can hold one domain slug as two tenants (#719)."""
+    t1 = Tenant.objects.create(provider="commcare", external_id="chc", canonical_name="chc")
+    t2 = Tenant.objects.create(
+        provider="commcare", server="eu", external_id="chc", canonical_name="chc"
+    )
+
+    prefixes = SchemaManager()._view_prefixes([t1, t2])
+
+    assert len(set(prefixes.values())) == 2

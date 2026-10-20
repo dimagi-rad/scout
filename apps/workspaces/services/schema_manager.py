@@ -680,12 +680,15 @@ class SchemaManager:
         sanitized = self._sanitize_schema_name(tenant.canonical_name)
         if len(sanitized) <= _MAX_VIEW_PREFIX_LEN:
             return sanitized
-        return self._digested_view_prefix(tenant, sanitized)
-
-    @staticmethod
-    def _digested_view_prefix(tenant, sanitized: str) -> str:
         digest = hashlib.sha256(str(tenant.external_id).encode("utf-8")).hexdigest()[:8]
         # 23 (head) + 1 ("_") + 8 (digest) = 32
+        return f"{sanitized[:23]}_{digest}"
+
+    def _collision_view_prefix(self, tenant) -> str:
+        # Digest the tenant id, not external_id: www and EU CommCare can hold the same
+        # domain slug as two tenants (#719), and no published view uses this form yet.
+        sanitized = self._sanitize_schema_name(tenant.canonical_name)
+        digest = hashlib.sha256(str(tenant.id).encode("utf-8")).hexdigest()[:8]
         return f"{sanitized[:23]}_{digest}"
 
     def _view_prefixes(self, tenants) -> dict:
@@ -704,9 +707,7 @@ class SchemaManager:
         counts = Counter(plain.values())
         return {
             tenant: (
-                self._digested_view_prefix(
-                    tenant, self._sanitize_schema_name(tenant.canonical_name)
-                )
+                self._collision_view_prefix(tenant)
                 if counts[prefix] > 1 and oldest[prefix] != tenant
                 else prefix
             )
