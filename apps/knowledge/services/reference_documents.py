@@ -451,18 +451,25 @@ def search_document(
             result["header"] = _line_snippet(lines[0], terms)
     kept: list[dict[str, Any]] = []
     used = 0
+    clipped = False
     for match in found[:max_matches]:
         size = len(_dumps(match))
         if used + size > limit:
             if not kept:
                 kept.append(_clip_match(match, limit))
+                clipped = True
             break
         kept.append(match)
         used += size
     result["total_matches"] = total
     result["matches"] = kept
     shown = sum(covered[: len(kept)])
-    if shown < total:
+    if clipped:
+        result["note"] = (
+            f"The first of {total} matches was cut to fit the limit. Add words to narrow "
+            "the search, raise limit, or page through the document with offset instead."
+        )
+    elif shown < total:
         result["note"] = (
             f"Showing {shown} of {total} matches. Add words to narrow the search, "
             "or page through the document with offset instead."

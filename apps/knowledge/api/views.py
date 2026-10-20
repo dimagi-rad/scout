@@ -398,7 +398,7 @@ class KnowledgeImportView(APIView):
                         continue
                     fields = {"content": body, "tags": tags, **_reference_fields(meta)}
                     # Postgres can't store NUL, and would fail the whole batch on it.
-                    if "\x00" in body:
+                    if "\x00" in raw:
                         errors.append({"file": name, "error": "File contains binary data."})
                         continue
                     if (
@@ -406,7 +406,12 @@ class KnowledgeImportView(APIView):
                         and len(body.encode()) > MAX_UPLOAD_BYTES
                     ):
                         errors.append(
-                            {"file": name, "error": "Reference document is larger than 2 MB."}
+                            {
+                                "file": name,
+                                "error": (
+                                    f"Reference document is larger than {MAX_UPLOAD_BYTES:,} bytes."
+                                ),
+                            }
                         )
                         continue
 
@@ -442,7 +447,7 @@ def _reference_meta(entry: KnowledgeEntry) -> dict:
         meta["kind"] = entry.kind
     if entry.description:
         meta["description"] = entry.description
-    if entry.source_format:
+    if entry.kind == KnowledgeEntry.Kind.REFERENCE and entry.source_format:
         meta["source_format"] = entry.source_format
     return meta
 
@@ -513,7 +518,7 @@ class KnowledgeUploadView(APIView):
             workspace=workspace,
             created_by=request.user,
             title=title,
-            description=" ".join(description.split())[:DESCRIPTION_MAX_CHARS],
+            description=description[:DESCRIPTION_MAX_CHARS],
             content=decoded.content,
             kind=KnowledgeEntry.Kind.REFERENCE,
             source_format=decoded.source_format,

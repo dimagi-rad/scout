@@ -251,6 +251,7 @@ class TestReadReferenceDocumentTool:
         [match] = result["matches"]
         assert match["path"] == "$.note"
         assert len(match["entry"]) <= 1000
+        assert "cut to fit the limit" in result["note"]
 
     @pytest.mark.asyncio
     async def test_search_output_respects_limit(self, workspace):
