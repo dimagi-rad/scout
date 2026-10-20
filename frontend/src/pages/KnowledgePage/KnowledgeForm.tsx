@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import {
+  KNOWLEDGE_TITLE_MAX_LENGTH,
   REFERENCE_DESCRIPTION_MAX_LENGTH,
   type KnowledgeItem,
   type KnowledgeType,
@@ -177,6 +178,7 @@ export function KnowledgeForm({
                 value={form.title}
                 onChange={handleChange}
                 placeholder="Enter a title"
+                maxLength={KNOWLEDGE_TITLE_MAX_LENGTH}
                 required
               />
             </div>
