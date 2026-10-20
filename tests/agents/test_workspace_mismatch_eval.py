@@ -49,6 +49,13 @@ def test_prompt_flags_sources_missing_from_workspace(prompt):
 
 
 @pytest.mark.parametrize("prompt", ALL_PROMPTS)
+def test_prompt_asks_about_missing_assumptions(prompt):
+    assert "only partly launched" in prompt
+    assert "Ask about the specific assumption" in prompt
+    assert "never reply with a generic menu" in prompt
+
+
+@pytest.mark.parametrize("prompt", ALL_PROMPTS)
 def test_prompt_names_sources_behind_an_answer(prompt):
     assert "name the source(s) from Workspace Sources the answer covers" in prompt
 

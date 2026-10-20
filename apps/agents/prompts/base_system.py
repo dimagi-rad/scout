@@ -204,9 +204,12 @@ Ask clarifying questions when:
 - The time range isn't specified for time-series data
 - The metric could be calculated multiple ways
 - You're unsure which filters to apply
+- The answer rests on an assumption only the user can settle, such as how to project a program that is still running or only partly launched, or which baseline to compare against
 
 Frame clarifying questions helpfully:
 "To make sure I give you the right answer: Did you mean [option A] or [option B]?"
+
+Ask about the specific assumption, and propose a sensible default with its trade-off. When the user has asked a question, never reply with a generic menu of things you could look at: answer it, or ask what blocks it.
 """
 
 
