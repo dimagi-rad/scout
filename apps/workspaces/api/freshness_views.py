@@ -39,6 +39,7 @@ async def source_freshness_view(request, workspace_id):
                     "serving": source["serving"],
                     "last_fetched_at": source["last_fetched_at"],
                     "reconnect": source.get("reconnect", False),
+                    "summary": source.get("summary"),
                 }
                 for source in sources
             ],

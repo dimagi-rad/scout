@@ -125,6 +125,53 @@ async def _last_fetched(tenant_ids: Iterable) -> dict[str, datetime]:
     return {str(row["tenant_schema__tenant_id"]): row["fetched"] async for row in rows}
 
 
+def _load_summary(result) -> dict | None:
+    """What a run put in each of its tables: rows and, where known, the date range."""
+    sources = (result or {}).get("sources") if isinstance(result, dict) else None
+    if not isinstance(sources, dict):
+        return None
+    tables = []
+    # jsonb does not keep the pipeline's order, so sort for a stable display.
+    for name, entry in sorted(sources.items()):
+        if not isinstance(entry, dict):
+            continue
+        rows = entry.get("rows")
+        table = {
+            "name": str(name),
+            "state": str(entry.get("state") or ""),
+            "rows": rows if isinstance(rows, int) and not isinstance(rows, bool) else None,
+        }
+        date_range = entry.get("date_range")
+        if isinstance(date_range, dict):
+            table["earliest"] = date_range.get("earliest")
+            table["latest"] = date_range.get("latest")
+        tables.append(table)
+    return {
+        "tables": tables,
+        "total_rows": sum(t["rows"] or 0 for t in tables if t["state"] == "completed"),
+    }
+
+
+async def _load_summaries(tenant_ids: Iterable) -> dict[str, dict]:
+    """Each tenant's serving snapshot summary, from the same run ``_last_fetched`` dates."""
+    rows = (
+        synced_runs()
+        .filter(
+            tenant_schema__tenant_id__in=list(tenant_ids),
+            tenant_schema__state=SchemaState.ACTIVE,
+        )
+        .order_by("tenant_schema__tenant_id", "-completed_at")
+        .distinct("tenant_schema__tenant_id")
+        .values("tenant_schema__tenant_id", "result")
+    )
+    summaries = {}
+    async for row in rows:
+        summary = _load_summary(row["result"])
+        if summary is not None:
+            summaries[str(row["tenant_schema__tenant_id"])] = summary
+    return summaries
+
+
 async def arecord_load_outcomes(
     workspace_id, tenant_results: list[dict], user_id="", *, partial: bool = False
 ) -> list:
@@ -238,6 +285,7 @@ async def _source_freshness(workspace_id, viewer_id: str) -> list[dict]:
     ]
     tenant_ids = [wt.tenant_id for wt in rows]
     fetched = await _last_fetched(tenant_ids)
+    summaries = await _load_summaries(tenant_ids)
     active = {
         str(tenant_id)
         async for tenant_id in TenantSchema.objects.filter(
@@ -264,6 +312,7 @@ async def _source_freshness(workspace_id, viewer_id: str) -> list[dict]:
             "last_fetched_at": last.isoformat() if last else None,
             "last_load": outcome.get("refresh"),
             "not_refreshed": not_refreshed,
+            "summary": summaries.get(tenant_id),
         }
         if not_refreshed:
             loader = outcome.get("by") or ""
