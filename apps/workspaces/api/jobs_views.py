@@ -16,7 +16,7 @@ from apps.workspaces.access import (
     role_satisfies,
 )
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
-from apps.workspaces.models import MaterializationRun, WorkspaceRole
+from apps.workspaces.models import MaterializationRun, WorkspaceRole, WorkspaceTenant
 from apps.workspaces.services import reconciliation
 from apps.workspaces.services.failure_guidance import (
     BLOCKS_IMMEDIATE_RETRY,
@@ -44,6 +44,7 @@ def _job_to_dict(
     run_progress: dict | None,
     load: dict | None = None,
     time_estimate: dict | None = None,
+    workspace_provider: str | None = None,
 ) -> dict:
     if job.state == ThreadJob.State.RUNNING:
         # RUNNING means the resume claimed the job: loading is over and the agent
@@ -66,6 +67,9 @@ def _job_to_dict(
         "source_index": load["source_index"] if load else None,
         "source_total": load["source_total"] if load else None,
         "tenant_name": load["tenant_name"] if load else None,
+        # The UI says "Importing from Connect…"; a job between runs falls back to
+        # the workspace's provider, which is None when its sources are mixed.
+        "provider": load["provider"] if load else workspace_provider,
         "created_at": job.created_at.isoformat(),
     }
 
@@ -218,6 +222,18 @@ async def active_jobs_view(request, workspace_id):
     for load in workspace_loads:
         load["time_estimate"] = estimates.get(load["procrastinate_job_id"])
 
+    workspace_providers = (
+        {
+            provider
+            async for provider in WorkspaceTenant.objects.filter(workspace=workspace).values_list(
+                "tenant__provider", flat=True
+            )
+        }
+        if jobs
+        else set()
+    )
+    workspace_provider = next(iter(workspace_providers)) if len(workspace_providers) == 1 else None
+
     cutoff = timezone.now() - RECENT_TERMINATION_WINDOW
     terminated_jobs = [
         j
@@ -256,6 +272,7 @@ async def active_jobs_view(request, workspace_id):
                     runs_by_job.get(j.procrastinate_job_id),
                     loads_by_job.get(j.procrastinate_job_id),
                     estimates.get(j.procrastinate_job_id),
+                    workspace_provider,
                 )
                 for j in jobs
             ],

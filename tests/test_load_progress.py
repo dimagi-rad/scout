@@ -89,6 +89,7 @@ async def test_member_sees_another_members_load():
     assert body["jobs"] == []
     [load] = body["workspace_loads"]
     assert load["tenant_name"] == "Source 0"
+    assert load["provider"] == "commcare"
     assert load["progress"]["step"] == 2
 
 
@@ -143,6 +144,34 @@ async def test_four_source_load_reports_source_position():
     assert (load["source_index"], load["source_total"]) == (3, 4)
     [job] = body["jobs"]
     assert (job["source_index"], job["source_total"], job["tenant_name"]) == (3, 4, "Source 2")
+    assert job["provider"] == "commcare"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(("mixed", "provider"), [(False, "commcare"), (True, None)])
+async def test_job_without_a_run_names_the_workspace_provider_unless_mixed(mixed, provider):
+    user = await User.objects.acreate_user(email="a@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
+        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
+    )
+    await _sources(ws, [user], 2)
+    if mixed:
+        bot = await Tenant.objects.acreate(external_id="bot", provider="ocs", canonical_name="Bot")
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=bot)
+        await TenantMembership.objects.acreate(
+            user=user, tenant=bot, connection=await ausable_connection(user, "ocs")
+        )
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread, job_type="materialization", procrastinate_job_id=4001, tool_call_id="tc"
+    )
+
+    body = await _active_jobs("a@b.c", ws)
+
+    [job] = body["jobs"]
+    assert job["provider"] == provider
 
 
 def _insert_job(args_json):
