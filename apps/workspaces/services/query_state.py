@@ -8,6 +8,7 @@ from django.db.models import Exists, OuterRef, Q, Subquery
 
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.workspaces.models import (
+    VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER,
     MaterializationRun,
     SchemaState,
     TenantSchema,
@@ -203,7 +204,15 @@ async def workspace_query_surface(workspace) -> dict[str, Any]:
                 if view_only
                 else "The workspace data is no longer available. Restore it to use this artifact again."
             ),
-            **({"detail": view.last_error[:500]} if view and view.last_error else {}),
+            **(
+                {
+                    "detail": view.last_error.replace(
+                        VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER, ""
+                    ).strip()[:500]
+                }
+                if view and view.last_error
+                else {}
+            ),
         }
     if semantic_status in {"unknown", "unavailable"}:
         snapshot = await included_tenant_snapshot_state(workspace, coverage)

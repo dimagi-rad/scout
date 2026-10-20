@@ -1501,6 +1501,33 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun(current_state):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_resume_with_an_unfinished_source_keeps_the_cascade_marker_from_the_user():
+    """A partial run takes the mixed-failure summary, which quotes the view error."""
+    tj = await _make_multi_tenant_job(
+        email="vscp@b.c",
+        ws_name="W-vscp",
+        pj_id=20013,
+        view_schema_state=SchemaState.FAILED,
+        last_error=VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+    )
+    await MaterializationRun.objects.filter(tenant_schema__schema_name="W_vscp_s2").aupdate(
+        state=MaterializationRun.RunState.LOADING
+    )
+
+    with patch(
+        "apps.chat.services.continuation.build_agent_for_resume",
+        AsyncMock(return_value=FakeAgent()),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["terminal_state"] == ThreadJob.State.FAILED
+    await tj.arefresh_from_db()
+    assert VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER not in tj.error_summary
+    assert "was torn down" in tj.error_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("current_state", [SchemaState.EXPIRED, SchemaState.FAILED])
 async def test_resume_missing_tenant_data_allows_refresh_without_cascade_marker(current_state):
     tj = await _make_multi_tenant_job(

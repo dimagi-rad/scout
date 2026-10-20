@@ -303,6 +303,9 @@ async def _resume_claimed_job(
                 view_schema_error = (vs.last_error if vs else "") or (
                     "the workspace query layer (view schema) is missing or was never built"
                 )
+    # The marker is a machine tag for the branches below; users see only the text after it.
+    cascade_teardown = VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error
+    view_schema_error = view_schema_error.replace(VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER, "").strip()
 
     # The agent answers through the semantic model, so a data load whose Cube
     # schema build failed leaves it with nothing to query even though every run
@@ -333,7 +336,7 @@ async def _resume_claimed_job(
         missing_data_guidance = (
             f"These sources no longer have active data: {', '.join(missing_active_tenants)}. "
         )
-        if VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
+        if cascade_teardown:
             missing_data_guidance += (
                 "The data and dependent views expired or were torn down. "
                 "Re-running the import rebuilds them."
@@ -363,7 +366,7 @@ async def _resume_claimed_job(
                 f"refresh successfully, an administrator must investigate the build error."
                 f"{guidance_text} Per-tenant: {summary}"
             )
-        elif VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
+        elif cascade_teardown:
             # 07#9: FAILED from a cascade teardown, not a build defect — re-running
             # materialization IS the fix, so the advice must invite a re-run.
             body = (
@@ -722,11 +725,11 @@ async def _resume_claimed_job(
                 "layer (view schema) "
                 f"is unavailable: {view_schema_error}. {' '.join(guidance_lines)}"
             )
-        elif view_schema_failed and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
-            # 07#9: cascade teardown — re-running materialization IS the fix.
-            # The marker is for code, and the error already says what was torn down.
-            cascade = view_schema_error.replace(VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER, "").strip()
-            error_summary = f"The workspace query layer (view schema) is unavailable. {cascade}"
+        elif view_schema_failed and cascade_teardown:
+            # 07#9: cascade teardown — re-running the import IS the fix.
+            error_summary = (
+                f"The workspace query layer (view schema) is unavailable. {view_schema_error}"
+            )
         elif view_schema_failed:
             error_summary = (
                 "Per-tenant data imported, but the workspace query layer (view "
@@ -788,7 +791,7 @@ async def _resume_claimed_job(
             status == "completed"
             and not missing_active_tenants
             and view_schema_failed
-            and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER not in view_schema_error
+            and not cascade_teardown
         )
         failure_phase = (
             ThreadJob.FailurePhase.QUERY_BUILD
