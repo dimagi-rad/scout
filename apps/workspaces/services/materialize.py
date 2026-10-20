@@ -440,6 +440,7 @@ async def _already_loaded(tm, served) -> dict:
 # (min(32, cpu + 4): 6 threads on the worker host) a job's loads would starve every
 # other job's short thread work, so they get their own. ``_LoadLanes`` bounds how
 # many run; past this size a load just waits for a thread.
+# tests/test_worker_concurrency_deploy.py pins it above the worker's lane ceiling.
 _SOURCE_LOAD_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="source-load")
 
 
@@ -460,8 +461,9 @@ class _LoadLanes:
     Each job has its own lane, so its first load never waits on another job and
     no job loads slower than one source at a time. Further loads take a slot
     shared by every job on the loop; a worker runs all its jobs on one loop, so
-    the process runs at most (jobs + ``MATERIALIZATION_SHARED_LOAD_SLOTS``)
-    pipelines, each holding a source-load thread and its DB connections.
+    it runs at most (jobs + ``MATERIALIZATION_SHARED_LOAD_SLOTS``) pipelines, each
+    holding a source-load thread and its DB connections. Every call takes its own
+    lane, so in a process serving requests "jobs" means concurrent callers.
     """
 
     def __init__(self):
@@ -1205,8 +1207,8 @@ def _run_pipeline_with_progress(
     Builds the ``progress_updater`` closure (mirrors progress to the DB and
     surfaces cancellation), then runs the pipeline.
     """
-    # Pool thread's connection is unreachable by the worker's async-ORM cleanup
-    # and may have died since the last job here — close it so the first use reopens.
+    # A pool thread's connection is unreachable by the worker's async-ORM cleanup;
+    # load threads close theirs on the way out, but a caller on another thread may not.
     close_old_connections()
     previous_phase = None
 
@@ -1241,8 +1243,12 @@ def _on_load_thread(function, *args):
     try:
         return function(*args)
     finally:
-        # An idle load thread would otherwise keep its connection until its next load.
-        connections.close_all()
+        # Best effort: an idle load thread would otherwise keep its connection until its
+        # next load, but a failed close must not discard a finished load.
+        try:
+            connections.close_all()
+        except Exception:
+            logger.warning("Could not close a load thread's DB connections", exc_info=True)
 
 
 async def _load_tenant(

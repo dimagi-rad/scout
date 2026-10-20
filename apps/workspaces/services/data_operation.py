@@ -9,8 +9,8 @@ A ``T`` region must not fan out into work that takes ``W``: child tasks inherit
 the held-tenant context, and ``W`` is refused whenever it shows tenant keys.
 A child shares its parent's locks only when started with
 ``create_task_sharing_data_locks``. Threads that may enter a lock region must be
-started with ``run_data_thread``, which is what lets them reuse their task's
-locks. The guard against other thread starts is best-effort: it catches
+started with ``run_data_thread`` (or ``run_data_thread_on`` for another executor),
+which is what lets them reuse their task's locks. The guard against other thread starts is best-effort: it catches
 context-copying ones (``asyncio.to_thread``, ``sync_to_async``) but cannot see a
 plain ``threading.Thread``.
 """
@@ -41,7 +41,8 @@ class DataLockTimeout(Exception):
 _EXPAND_TENANTS = "Cannot expand held tenant locks; collect every tenant before acquiring"
 _WORKSPACE_AFTER_TENANT = "Cannot acquire a workspace lock while tenant locks are held"
 _UNBRIDGED_THREAD = (
-    "A thread entered its task's data-lock region without run_data_thread; it would wait "
+    "A thread entered its task's data-lock region without run_data_thread or "
+    "run_data_thread_on; it would wait "
     "on locks its own task holds"
 )
 
@@ -75,7 +76,11 @@ async def run_data_thread(function, /, *args, **kwargs):
 
 
 async def run_data_thread_on(executor, function, /, *args, **kwargs):
-    """``run_data_thread`` on ``executor`` instead of the loop's default one."""
+    """``run_data_thread`` on ``executor`` instead of the loop's default one.
+
+    Source loads use this to run several at once, so ``function`` must not reach
+    the managed pool, whose cap counts one pool-reaching data thread per job.
+    """
     loop = asyncio.get_running_loop()
 
     def start(invoke):

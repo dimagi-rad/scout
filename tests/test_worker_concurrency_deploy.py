@@ -4,7 +4,9 @@ import re
 from pathlib import Path
 
 import pytest
+from django.conf import settings
 
+from apps.workspaces.services.materialize import _SOURCE_LOAD_EXECUTOR
 from mcp_server.services.pool import _MAX_POOLS
 from tests.kamal_config import load_config
 
@@ -51,3 +53,11 @@ def test_worker_concurrency_fits_managed_pool_cap(read_cmd):
 @WORKER_CMDS
 def test_worker_runs_more_than_one_job(read_cmd):
     assert _concurrency(read_cmd()) >= 2
+
+
+@WORKER_CMDS
+def test_worker_load_lanes_fit_the_source_load_pool(read_cmd):
+    # Each job's own lane plus the shared slots (#927). Past the pool size a load that
+    # has its lane would wait for a thread while holding the run's locks.
+    lanes = _concurrency(read_cmd()) + settings.MATERIALIZATION_SHARED_LOAD_SLOTS
+    assert lanes <= _SOURCE_LOAD_EXECUTOR._max_workers
