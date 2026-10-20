@@ -313,3 +313,56 @@ async def test_a_statement_timeout_while_waiting_is_a_lock_timeout(probe):
                 pass
     finally:
         probe.execute("SELECT pg_advisory_unlock(%s, %s)", (_TENANT_LOCK_NAMESPACE, key))
+
+
+async def test_co_owner_child_reuses_parent_locks_in_task_and_thread():
+    workspace, tenant = uuid.uuid4(), uuid.uuid4()
+
+    def nested():
+        data_operation.assert_tenant_lock_held(tenant)
+        with data_operation.sync_workspace_data_lock(workspace):
+            with data_operation.sync_tenant_data_lock([tenant]):
+                return True
+
+    async def child():
+        async with tenant_data_lock([tenant]):
+            return await data_operation.run_data_thread(nested)
+
+    # A regression must fail fast, not wait out the production lock timeout.
+    with patch.object(data_operation, "_LOCK_TIMEOUT", "2s"):
+        async with workspace_data_lock(workspace), tenant_data_lock([tenant]):
+            async with asyncio.timeout(5), asyncio.TaskGroup() as group:
+                shared = data_operation.create_task_sharing_data_locks(group, child)
+            assert shared.result() is True
+            # The parent keeps its own ownership alongside the child's.
+            data_operation.assert_tenant_lock_held(tenant)
+
+
+async def test_co_owner_child_cannot_expand_parent_tenant_locks():
+    tenant = uuid.uuid4()
+
+    async def child():
+        async with tenant_data_lock([tenant, uuid.uuid4()]):
+            pass
+
+    async with tenant_data_lock([tenant]):
+        with pytest.raises(ExceptionGroup) as raised:
+            async with asyncio.TaskGroup() as group:
+                data_operation.create_task_sharing_data_locks(group, child)
+    assert raised.group_contains(LockOrderError)
+
+
+async def test_plain_task_of_a_co_owner_does_not_inherit_ownership():
+    tenant = uuid.uuid4()
+
+    async def grandchild():
+        data_operation.assert_tenant_lock_held(tenant)
+
+    async def child():
+        await asyncio.create_task(grandchild())
+
+    async with tenant_data_lock([tenant]):
+        with pytest.raises(ExceptionGroup) as raised:
+            async with asyncio.TaskGroup() as group:
+                data_operation.create_task_sharing_data_locks(group, child)
+    assert raised.group_contains(LockOrderError)

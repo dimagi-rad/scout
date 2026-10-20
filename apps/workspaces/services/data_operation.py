@@ -7,7 +7,8 @@ workspace's ``W`` while holding it; sibling rebuilds are deferred tasks.
 
 A ``T`` region must not fan out into work that takes ``W``: child tasks inherit
 the held-tenant context, and ``W`` is refused whenever it shows tenant keys.
-Threads that may enter a lock region must be started with ``run_data_thread``,
+A child shares its parent's locks only when started with
+``create_task_sharing_data_locks``. Threads that may enter a lock region must be started with ``run_data_thread``,
 which is what lets them reuse their task's locks. The guard against other thread
 starts is best-effort: it catches context-copying ones (``asyncio.to_thread``,
 ``sync_to_async``) but cannot see a plain ``threading.Thread``.
@@ -105,6 +106,30 @@ async def to_thread_fresh_db(func, /, *args, **kwargs):
         return func(*args, **kwargs)
 
     return await run_data_thread(_guarded)
+
+
+def create_task_sharing_data_locks(task_group: asyncio.TaskGroup, function, /, *args):
+    """Start ``function(*args)`` in ``task_group`` as a co-owner of this task's W and T.
+
+    Ownership is per task so a child never borrows its parent's locks by accident;
+    this is the deliberate exception. It is safe only because the group exits
+    inside the caller's lock regions, so the locks outlive every child. T keeps
+    out other writers, not siblings: give each child a distinct tenant.
+    """
+    parent = asyncio.current_task()
+    workspace_owner, workspace_keys = _held_workspaces.get()
+    tenant_owner, tenant_keys = _held_tenants.get()
+
+    async def co_owner():
+        child = asyncio.current_task()
+        # The child runs in a copy of the parent's context, so these sets stay its own.
+        if workspace_owner is parent:
+            _held_workspaces.set((child, workspace_keys))
+        if tenant_owner is parent:
+            _held_tenants.set((child, tenant_keys))
+        return await function(*args)
+
+    return task_group.create_task(co_owner())
 
 
 def _lock_key(value) -> int:
