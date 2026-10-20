@@ -59,7 +59,12 @@ def read_disk(path: str) -> DiskReading:
 
 
 def disk_severity(reading: DiskReading) -> str | None:
-    if reading.free_percent < settings.STORAGE_DISK_CRITICAL_FREE_PERCENT:
+    # The absolute floor is the deploy guard's limit: below it deploys are refused,
+    # whatever percentage that is on a resized volume.
+    if (
+        reading.free_percent < settings.STORAGE_DISK_CRITICAL_FREE_PERCENT
+        or reading.free_bytes < settings.STORAGE_DISK_CRITICAL_FREE_GIB * 2**30
+    ):
         return CRITICAL
     if reading.free_percent < settings.STORAGE_DISK_WARNING_FREE_PERCENT:
         return WARNING
@@ -81,14 +86,9 @@ def report_low_disk(reading: DiskReading, severity: str) -> None:
     critical are separate issues so that crossing into critical is a new issue,
     which is what the first-seen ``#scout-ops`` rule pages on.
     """
-    threshold = (
-        settings.STORAGE_DISK_CRITICAL_FREE_PERCENT
-        if severity == CRITICAL
-        else settings.STORAGE_DISK_WARNING_FREE_PERCENT
-    )
     message = (
         f"Host disk low: {reading.free_percent:.1f}% free "
-        f"({_size(reading.free_bytes)} of {_size(reading.total_bytes)}), below {threshold:g}%"
+        f"({_size(reading.free_bytes)} of {_size(reading.total_bytes)})"
     )
     with sentry_sdk.new_scope() as scope:
         scope.fingerprint = ["storage-headroom", "host-disk", severity]
@@ -100,7 +100,9 @@ def report_low_disk(reading: DiskReading, severity: str) -> None:
                 "total_bytes": reading.total_bytes,
                 "free_bytes": reading.free_bytes,
                 "free_percent": round(reading.free_percent, 2),
-                "threshold_percent": threshold,
+                "warning_free_percent": settings.STORAGE_DISK_WARNING_FREE_PERCENT,
+                "critical_free_percent": settings.STORAGE_DISK_CRITICAL_FREE_PERCENT,
+                "critical_free_gib": settings.STORAGE_DISK_CRITICAL_FREE_GIB,
             },
         )
         sentry_sdk.capture_message(message, level="error" if severity == CRITICAL else "warning")

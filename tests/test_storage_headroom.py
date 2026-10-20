@@ -32,7 +32,7 @@ def _scope(sentry):
 
 @pytest.mark.parametrize(
     ("free_gib", "expected"),
-    [(25, None), (10, None), (9.9, storage.WARNING), (5, storage.WARNING), (4.9, storage.CRITICAL)],
+    [(25, None), (10, None), (9.9, storage.WARNING), (8, storage.WARNING), (7.9, storage.CRITICAL)],
 )
 def test_severity_follows_the_thresholds(free_gib, expected):
     reading = storage.DiskReading("/", total_bytes=50 * GIB, free_bytes=int(free_gib * GIB))
@@ -42,8 +42,20 @@ def test_severity_follows_the_thresholds(free_gib, expected):
 def test_thresholds_are_settings(settings):
     settings.STORAGE_DISK_WARNING_FREE_PERCENT = 50
     settings.STORAGE_DISK_CRITICAL_FREE_PERCENT = 30
+    settings.STORAGE_DISK_CRITICAL_FREE_GIB = 0
     reading = storage.DiskReading("/", total_bytes=100, free_bytes=40)
     assert storage.disk_severity(reading) == storage.WARNING
+
+
+def test_the_percent_threshold_applies_on_a_large_volume():
+    reading = storage.DiskReading("/", total_bytes=500 * GIB, free_bytes=45 * GIB)
+    assert storage.disk_severity(reading) == storage.CRITICAL
+
+
+def test_below_the_deploy_guard_floor_is_critical_on_a_small_volume():
+    # 7 GiB of 20 GiB is 35% free, but the deploy guard already refuses to deploy.
+    reading = storage.DiskReading("/", total_bytes=20 * GIB, free_bytes=7 * GIB)
+    assert storage.disk_severity(reading) == storage.CRITICAL
 
 
 def test_an_empty_filesystem_reading_is_critical_not_a_crash():
@@ -64,26 +76,29 @@ async def test_plenty_of_disk_sends_nothing_and_logs_both_readings(sentry, disk,
     messages = [r.getMessage() for r in caplog.records]
     assert any("host disk 30.0 GiB free of 50.0 GiB (60.0%)" in m for m in messages)
     assert any("platform DB" in m and "largest tables:" in m for m in messages)
-    assert all(r.levelno == logging.INFO for r in caplog.records)
+    own = [r for r in caplog.records if r.name == "apps.telemetry.storage"]
+    assert own
+    assert all(r.levelno == logging.INFO for r in own)
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_low_disk_is_a_sentry_warning_with_numbers(sentry, disk):
-    disk.return_value = _usage(free_gib=7.5)
+    disk.return_value = _usage(free_gib=8.5)
     await storage.check_storage_headroom()
 
     sentry.capture_message.assert_called_once()
     message = sentry.capture_message.call_args.args[0]
-    assert message == "Host disk low: 15.0% free (7.5 GiB of 50.0 GiB), below 20%"
+    assert message == "Host disk low: 17.0% free (8.5 GiB of 50.0 GiB)"
     assert sentry.capture_message.call_args.kwargs["level"] == "warning"
     scope = _scope(sentry)
     assert scope.fingerprint == ["storage-headroom", "host-disk", "warning"]
     context = scope.set_context.call_args.args
     assert context[0] == "storage"
-    assert context[1]["free_bytes"] == int(7.5 * GIB)
+    assert context[1]["free_bytes"] == int(8.5 * GIB)
     assert context[1]["total_bytes"] == 50 * GIB
-    assert context[1]["threshold_percent"] == 20.0
+    assert context[1]["warning_free_percent"] == 20.0
+    assert context[1]["critical_free_gib"] == 8.0
 
 
 @pytest.mark.asyncio
@@ -100,7 +115,7 @@ async def test_critical_disk_is_a_sentry_error_in_its_own_issue(sentry, disk):
 @pytest.mark.django_db(transaction=True)
 async def test_the_fingerprint_does_not_change_with_the_numbers(sentry, disk):
     fingerprints = []
-    for free_gib in (9, 8, 6.2):
+    for free_gib in (9.5, 9, 8.2):
         disk.return_value = _usage(free_gib=free_gib)
         await storage.check_storage_headroom()
         fingerprints.append(list(_scope(sentry).fingerprint))

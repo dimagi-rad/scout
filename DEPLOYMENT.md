@@ -231,13 +231,16 @@ and before it nothing watched the host disk (see [Host disk full](#host-disk-ful
   container root is an overlay2 mount, which reports the free space of the
   filesystem that holds Docker's data root on the host. That is the filesystem
   that image pulls fill and the deploy guard checks. Below 20% free it sends a
-  Sentry **warning**, `Host disk low: …`. Below 10% free it sends an **error**.
+  Sentry **warning**, `Host disk low: …`. It sends an **error** below 10% free
+  or below 8 GiB free, whichever comes first. 8 GiB is the deploy guard's
+  `HOST_MIN_FREE_GB`, so the error means deploys are now refused; change the
+  two together. On the 50 GB host the warning starts at 10 GB free.
   Each severity is one issue under a fixed fingerprint
   (`storage-headroom / host-disk / warning|critical`). Each run while the disk is
   low adds an event to that issue; it does not open a new one. Going from
   warning to critical opens a new issue, so the first-seen alert fires again.
-  On the 50 GB host, 20% (10 GB) is just above the deploy guard's 8 GB limit,
-  so the warning comes before deploys start to fail.
+  A low disk after someone resolved the issue reopens it as a regression, which
+  pages only if the Sentry alert rule also covers regressions.
 - **Platform database.** `pg_database_size(current_database())` and the five
   largest tables, logged at INFO in `/scout/worker` (`Storage headroom: platform
   DB …`). It sends no alert: RDS free storage is visible only in CloudWatch
@@ -249,6 +252,7 @@ and before it nothing watched the host disk (see [Host disk full](#host-disk-ful
 | `STORAGE_DISK_PATH` | `/` | Path whose filesystem is checked. |
 | `STORAGE_DISK_WARNING_FREE_PERCENT` | `20` | Sentry warning below this percent free. |
 | `STORAGE_DISK_CRITICAL_FREE_PERCENT` | `10` | Sentry error below this percent free. |
+| `STORAGE_DISK_CRITICAL_FREE_GIB` | `8` | Sentry error below this many GiB free. Keep equal to `HOST_MIN_FREE_GB`. |
 
 If the worker stops, the check stops too. There is no Sentry Cron monitor for it.
 

@@ -73,6 +73,7 @@ jobs:
       WORKER_TAG: production-worker-${{ github.sha }}
       CUBE_TAG: cube-${{ github.sha }}
       # A deploy pulls several ~1 GB images; below this the pull itself can fail.
+      # The worker alerts at the same floor (STORAGE_DISK_CRITICAL_FREE_GIB).
       HOST_MIN_FREE_GB: 8
     steps:
       - uses: actions/checkout@v4

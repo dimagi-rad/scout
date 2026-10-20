@@ -149,11 +149,12 @@ MANAGED_DATABASE_URL = env("MANAGED_DATABASE_URL", default="")
 TELEMETRY_ENABLED = env.bool("TELEMETRY_ENABLED", default=True)
 
 # Host disk headroom alerts from the worker's storage check (apps/telemetry/storage.py).
-# The deploy guard refuses to deploy below 8 GB free; on the 50 GB host, 20% warns
-# before that and 10% is an error.
+# Below CRITICAL_FREE_GIB the deploy guard (HOST_MIN_FREE_GB in deploy.yml) refuses
+# to deploy, so that is an error whatever the percentage; keep the two in step.
 STORAGE_DISK_PATH = env("STORAGE_DISK_PATH", default="/")
 STORAGE_DISK_WARNING_FREE_PERCENT = env.float("STORAGE_DISK_WARNING_FREE_PERCENT", default=20.0)
 STORAGE_DISK_CRITICAL_FREE_PERCENT = env.float("STORAGE_DISK_CRITICAL_FREE_PERCENT", default=10.0)
+STORAGE_DISK_CRITICAL_FREE_GIB = env.float("STORAGE_DISK_CRITICAL_FREE_GIB", default=8.0)
 
 # Cube semantic-query runtime. Leave empty to disable live Cube calls in tests
 # and local setups that have not started the cube service yet.
