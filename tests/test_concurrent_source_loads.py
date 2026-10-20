@@ -154,15 +154,18 @@ async def test_a_cancelled_load_stops_sources_not_yet_started(
     three_source_workspace, user, membership_order
 ):
     first, second, third = membership_order
+    second_started = threading.Event()
     first_cancelled = threading.Event()
     calls = []
 
     def pipeline(membership, *args, **kwargs):
         calls.append(membership.tenant.external_id)
         if membership.tenant.external_id == first:
+            # Cancelled once both lanes are busy, so only the third has not started.
+            second_started.wait(5)
             first_cancelled.set()
             raise MaterializationCancelled()
-        # Still running when the first load's slot frees for the third source.
+        second_started.set()
         first_cancelled.wait(5)
         time.sleep(0.2)
         return completed_pipeline_run(membership, *args, **kwargs)
