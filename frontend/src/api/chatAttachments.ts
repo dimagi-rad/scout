@@ -1,4 +1,5 @@
 import { withBasePath } from "@/config"
+import { BUSY_MESSAGE, isBusyBody } from "./busy"
 import { asRecord, getCsrfToken } from "./client"
 
 export interface UploadedAttachment {
@@ -19,6 +20,14 @@ function isUploadedAttachment(body: Record<string, unknown> | undefined): body i
     && typeof body.size === "number"
     && typeof body.url === "string"
   )
+}
+
+function uploadErrorMessage(body: Record<string, unknown> | undefined, status: number): string {
+  // A capacity 503's ``error`` is the machine code "busy"; its prose is ``message``.
+  if (isBusyBody(body)) return typeof body?.message === "string" ? body.message : BUSY_MESSAGE
+  if (typeof body?.error === "string" && body.error.trim()) return body.error
+  if (status === 413) return "Too large to upload."
+  return `Upload failed (HTTP ${status}).`
 }
 
 export class AttachmentUploadError extends Error {
@@ -78,13 +87,7 @@ export function uploadChatAttachment(
         return
       }
       const reason = typeof body?.reason === "string" ? body.reason : null
-      const message =
-        typeof body?.error === "string" && body.error.trim()
-          ? body.error
-          : xhr.status === 413
-            ? "Too large to upload."
-            : `Upload failed (HTTP ${xhr.status}).`
-      reject(new AttachmentUploadError(message, reason))
+      reject(new AttachmentUploadError(uploadErrorMessage(body, xhr.status), reason))
     }
     const form = new FormData()
     form.append("file", file, file.name)

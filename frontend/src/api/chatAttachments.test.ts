@@ -86,6 +86,12 @@ describe("uploadChatAttachment", () => {
     await expect(result).rejects.toBeInstanceOf(AttachmentUploadError)
   })
 
+  it("shows the busy prose, not its machine code, when Scout is at capacity", async () => {
+    const result = uploadChatAttachment(file, "ws-1", vi.fn(), new AbortController().signal)
+    FakeXHR.last.respond(503, { error: "busy", message: "Scout is busy, try again shortly." })
+    await expect(result).rejects.toMatchObject({ message: "Scout is busy, try again shortly." })
+  })
+
   it("aborts with its signal", async () => {
     const controller = new AbortController()
     const result = uploadChatAttachment(file, "ws-1", vi.fn(), controller.signal)

@@ -1162,7 +1162,12 @@ export function ChatPanel() {
   }
 
   return (
-    <ChatDropZone onFiles={attachments.add} className="flex h-full min-w-0">
+    <ChatDropZone
+      onFiles={attachments.add}
+      // A message joining a held request takes text only.
+      disabled={held.adding}
+      className="flex h-full min-w-0"
+    >
       <div className="flex min-w-0 flex-1 flex-col">
         <ChatThreadHeader
           title={threadTitle}

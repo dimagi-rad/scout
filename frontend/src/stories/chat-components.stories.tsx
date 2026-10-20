@@ -380,6 +380,7 @@ export const EmptyChatPrompt: Story = {
   },
 }
 
+/** Uploads go to /api/chat/attachments/; without a mock for it every chip ends in an error. */
 export const EmptyChatPromptWithAttachments: Story = {
   parameters: {
     layout: "fullscreen",

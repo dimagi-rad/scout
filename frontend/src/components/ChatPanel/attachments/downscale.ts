@@ -1,4 +1,4 @@
-import { IMAGE_MAX_EDGE_PX, PNG_KEEP_MAX_BYTES } from "./rules"
+import { IMAGE_MAX_EDGE_PX, MAX_IMAGE_BYTES, PNG_KEEP_MAX_BYTES } from "./rules"
 
 const EXTENSIONS: Record<string, string> = {
   "image/png": "png",
@@ -26,12 +26,11 @@ function encode(canvas: HTMLCanvasElement, type: string): Promise<Blob | null> {
  */
 export async function downscaleImage(file: File): Promise<File> {
   if (file.type === "image/gif") return file
-  const bitmap = await createImageBitmap(file)
+  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" })
   try {
     const longEdge = Math.max(bitmap.width, bitmap.height)
-    if (longEdge <= IMAGE_MAX_EDGE_PX && !(file.type === "image/png" && file.size > PNG_KEEP_MAX_BYTES)) {
-      return file
-    }
+    const tooHeavy = file.type === "image/png" ? file.size > PNG_KEEP_MAX_BYTES : file.size > MAX_IMAGE_BYTES
+    if (longEdge <= IMAGE_MAX_EDGE_PX && !tooHeavy) return file
     const scale = Math.min(1, IMAGE_MAX_EDGE_PX / longEdge)
     const canvas = document.createElement("canvas")
     canvas.width = Math.max(1, Math.round(bitmap.width * scale))

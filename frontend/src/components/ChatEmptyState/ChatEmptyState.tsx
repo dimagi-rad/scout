@@ -143,7 +143,11 @@ export function ChatEmptyPrompt({
           )}
         />
         {attachments && (
-          <AttachButton onFiles={attachments.add} className="absolute bottom-2 left-2" />
+          <AttachButton
+            onFiles={attachments.add}
+            disabled={disabled}
+            className="absolute bottom-2 left-2"
+          />
         )}
         {/* The title sits on a wrapper: a disabled button shows no tooltip. */}
         <span className="absolute bottom-2 right-3 flex" title={holdReason ?? undefined}>
@@ -198,7 +202,8 @@ export function ChatEmptyState({
   const starters = getStarterQuestions(provider)
   const lastSyncedAt = workspace?.last_synced_at ?? null
   // A starter question goes out with the files attached so far, so it waits for them too.
-  const startersBlocked = disabled || attachmentsBlockReason(attachments) !== null
+  const startersHoldReason = attachmentsBlockReason(attachments)
+  const startersBlocked = disabled || startersHoldReason !== null
 
   function submit(text: string) {
     const trimmed = text.trim()
@@ -226,6 +231,7 @@ export function ChatEmptyState({
               type="button"
               onClick={() => submit(question)}
               disabled={startersBlocked}
+              title={startersHoldReason ?? undefined}
               className="group flex items-start justify-between gap-2 rounded-lg border bg-card p-4 text-left text-sm transition hover:bg-accent disabled:opacity-50"
               data-testid={`starter-question-${idx}`}
             >

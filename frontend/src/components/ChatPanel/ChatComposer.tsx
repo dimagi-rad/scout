@@ -203,7 +203,7 @@ export function ChatComposer({
             setSlashMenuIndex(0)
           }}
           onKeyDown={handleKeyDown}
-          onPaste={(e) => attachPastedFiles(e, attachments)}
+          onPaste={(e) => attachPastedFiles(e, adding ? undefined : attachments)}
           placeholder={adding ? "Add to your request…" : placeholder}
           className="field-sizing-fixed min-h-9 flex-1 resize-none py-1.5"
         />
@@ -239,7 +239,10 @@ export function ChatComposer({
           </span>
         )}
       </form>
-      <CharCounter id={counterId} length={length} includesHeld={Boolean(message && heldText)}
+      <CharCounter
+        id={counterId}
+        length={length}
+        includesHeld={Boolean(message && heldText)}
         suggestAttach={Boolean(attachments) && !adding}
       />
     </div>

@@ -40,6 +40,11 @@ export function ChatDropZone({
     const onDragStart = () => {
       internalDrag.current = true
     }
+    // A drag source that unmounts mid-drag never fires dragend; the pointer moving
+    // over the page again means that drag is over.
+    const endInternalDrag = () => {
+      internalDrag.current = false
+    }
     // Bubbles up after the zone's own handlers: a drag the zone took is already
     // defaultPrevented. Anywhere else, cancelling dragover with dropEffect "none"
     // is what stops the browser from opening the file.
@@ -52,28 +57,32 @@ export function ChatDropZone({
       if (e.type === "drop") reset()
     }
     window.addEventListener("dragstart", onDragStart)
+    window.addEventListener("pointermove", endInternalDrag, { passive: true })
     window.addEventListener("dragend", reset)
     window.addEventListener("dragover", swallowFileDrop)
     window.addEventListener("drop", swallowFileDrop)
     return () => {
       window.removeEventListener("dragstart", onDragStart)
+      window.removeEventListener("pointermove", endInternalDrag)
       window.removeEventListener("dragend", reset)
       window.removeEventListener("dragover", swallowFileDrop)
       window.removeEventListener("drop", swallowFileDrop)
     }
   }, [])
 
-  const accepts = (e: DragEvent) => !disabled && !internalDrag.current && carriesFiles(e.dataTransfer)
+  // Disabling only stops a new drag being taken: a drag already under way must still
+  // be able to leave (or drop), or the overlay would stick.
+  const accepts = (e: DragEvent) => !internalDrag.current && carriesFiles(e.dataTransfer)
 
   function handleDragEnter(e: DragEvent) {
-    if (!accepts(e)) return
+    if (disabled || !accepts(e)) return
     e.preventDefault()
     depth.current += 1
     setDragging(true)
   }
 
   function handleDragOver(e: DragEvent) {
-    if (!accepts(e)) return
+    if (disabled || !accepts(e)) return
     e.preventDefault()
     e.dataTransfer.dropEffect = "copy"
   }
@@ -89,6 +98,7 @@ export function ChatDropZone({
     e.preventDefault()
     depth.current = 0
     setDragging(false)
+    if (disabled) return
     const files = Array.from(e.dataTransfer.files)
     if (files.length) onFiles(files)
   }

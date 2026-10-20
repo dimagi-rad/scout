@@ -52,6 +52,8 @@ export function attachmentsBlockReason(attachments: ChatAttachments | undefined)
 
 let nextLocalId = 0
 
+const TOO_MANY = `You can attach up to ${MAX_ATTACHMENTS} files to a message.`
+
 function pastedName(mediaType: string): string {
   const ext = { "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" }[mediaType] ?? "png"
   return `pasted-image.${ext}`
@@ -68,9 +70,9 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
   const [byScope, setByScope] = useState<Record<string, ComposerAttachment[]>>({})
   const [notice, setNotice] = useState<{ scope: string; text: string } | null>(null)
   const controllers = useRef(new Map<string, AbortController>())
-  // Read by add(), which may run several times before a render.
+  // The latest state, written by every change before React renders it: a drop and a
+  // paste (or a remove and an add) can land in one tick, and each must see the other.
   const byScopeRef = useRef(byScope)
-  byScopeRef.current = byScope
 
   useEffect(() => {
     const live = controllers.current
@@ -85,29 +87,31 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
 
   const items = byScope[scope] ?? NONE
 
-  const update = useCallback(
-    (inScope: string, localId: string, patch: Partial<ComposerAttachment>) => {
-      setByScope((current) => {
-        const list = current[inScope]
-        if (!list?.some((item) => item.localId === localId)) return current
-        const next = list.map((item) => (item.localId === localId ? { ...item, ...patch } : item))
-        byScopeRef.current = { ...current, [inScope]: next }
-        return byScopeRef.current
-      })
+  const setList = useCallback(
+    (inScope: string, change: (list: ComposerAttachment[]) => ComposerAttachment[]) => {
+      const current = byScopeRef.current
+      const rest = { ...current }
+      delete rest[inScope]
+      const next = change(current[inScope] ?? NONE)
+      byScopeRef.current = next.length ? { ...rest, [inScope]: next } : rest
+      setByScope(byScopeRef.current)
     },
     [],
   )
 
-  const setList = useCallback(
-    (inScope: string, change: (list: ComposerAttachment[]) => ComposerAttachment[]) => {
-      setByScope((current) => {
-        const rest = { ...current }
-        delete rest[inScope]
-        const next = change(current[inScope] ?? NONE)
-        byScopeRef.current = next.length ? { ...rest, [inScope]: next } : rest
-        return byScopeRef.current
-      })
+  const update = useCallback(
+    (inScope: string, localId: string, patch: Partial<ComposerAttachment>) => {
+      const list = byScopeRef.current[inScope]
+      if (!list?.some((item) => item.localId === localId)) return
+      setList(inScope, (items) =>
+        items.map((item) => (item.localId === localId ? { ...item, ...patch } : item)),
+      )
     },
+    [setList],
+  )
+
+  const clearNotice = useCallback(
+    (inScope: string) => setNotice((current) => (current?.scope === inScope ? null : current)),
     [],
   )
 
@@ -135,7 +139,12 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
         const uploaded = await uploadChatAttachment(
           prepared,
           workspaceId ?? "",
-          (progress) => update(inScope, item.localId, { progress }),
+          (progress) => {
+            // Each render redraws the transcript; only the whole percent is shown.
+            const shown = byScopeRef.current[inScope]?.find((i) => i.localId === item.localId)
+            if (shown && Math.round(shown.progress * 100) === Math.round(progress * 100)) return
+            update(inScope, item.localId, { progress })
+          },
           controller.signal,
         )
         update(inScope, item.localId, { status: "ready", progress: 1, uploaded })
@@ -154,15 +163,16 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
 
   const add = useCallback(
     (files: File[]) => {
+      // No workspace means no chat to attach to; the panel shows no composer then.
       if (!files.length || !workspaceId) return
       const existing = byScopeRef.current[scope]?.length ?? 0
       const room = Math.max(0, MAX_ATTACHMENTS - existing)
       const accepted = files.slice(0, room)
-      setNotice(
-        accepted.length < files.length
-          ? { scope, text: `You can attach up to ${MAX_ATTACHMENTS} files to a message.` }
-          : null,
-      )
+      if (accepted.length < files.length) {
+        setNotice({ scope, text: TOO_MANY })
+      } else {
+        clearNotice(scope)
+      }
       if (!accepted.length) return
       const added = accepted.map((file) => {
         const check = checkFileType(file)
@@ -179,11 +189,6 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
         return { item, file, kind: check.ok ? check.kind : null }
       })
       const addedItems = added.map(({ item }) => item)
-      // Counted now, not at the next render: a drop and a paste can land before it.
-      byScopeRef.current = {
-        ...byScopeRef.current,
-        [scope]: [...(byScopeRef.current[scope] ?? NONE), ...addedItems],
-      }
       setList(scope, (list) => [...list, ...addedItems])
       for (const { item, file, kind } of added) {
         if (!kind) continue
@@ -192,23 +197,19 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
         void process(scope, item, named, kind)
       }
     },
-    [process, scope, setList, workspaceId],
+    [clearNotice, process, scope, setList, workspaceId],
   )
 
   const remove = useCallback(
     (localId: string) => {
       controllers.current.get(localId)?.abort()
       controllers.current.delete(localId)
-      setNotice(null)
-      setList(scope, (list) =>
-        list.filter((item) => {
-          if (item.localId !== localId) return true
-          if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
-          return false
-        }),
-      )
+      clearNotice(scope)
+      const removed = byScopeRef.current[scope]?.find((item) => item.localId === localId)
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl)
+      setList(scope, (list) => list.filter((item) => item.localId !== localId))
     },
-    [scope, setList],
+    [clearNotice, scope, setList],
   )
 
   const take = useCallback((): FileUIPart[] => {
@@ -226,14 +227,10 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
     for (const item of list) {
       if (sent.has(item.localId) && item.previewUrl) URL.revokeObjectURL(item.previewUrl)
     }
-    setNotice(null)
-    byScopeRef.current = {
-      ...byScopeRef.current,
-      [scope]: list.filter((item) => !sent.has(item.localId)),
-    }
+    clearNotice(scope)
     setList(scope, (current) => current.filter((item) => !sent.has(item.localId)))
     return parts
-  }, [scope, setList])
+  }, [clearNotice, scope, setList])
 
   const restore = useCallback(
     (inWorkspace: string | null, inThread: string, parts: FileUIPart[]) => {
@@ -246,14 +243,18 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
         status: "ready",
         progress: 1,
         uploaded: {
-          id: part.url.split("/").at(-2) ?? "",
+          id: "",
           filename: part.filename ?? "attachment",
           mediaType: part.mediaType,
           size: 0,
           url: part.url,
         },
       }))
-      setList(inScope, (list) => [...restored, ...list].slice(0, MAX_ATTACHMENTS))
+      // Files added since the send keep their place; what does not fit is said, not lost.
+      const room = MAX_ATTACHMENTS - (byScopeRef.current[inScope]?.length ?? 0)
+      if (room < restored.length) setNotice({ scope: inScope, text: TOO_MANY })
+      if (room <= 0) return
+      setList(inScope, (list) => [...list, ...restored.slice(0, room)])
     },
     [setList],
   )
