@@ -155,3 +155,9 @@ def test_summary_survives_a_failure_record_with_no_code():
     )
     assert _EXPIRED_ERROR in summary
     assert "reconnect" not in summary.lower()
+
+
+def test_summary_calls_a_run_level_failure_the_import():
+    run = SimpleNamespace(state="failed", result={"error": "Worker stopped responding"})
+
+    assert compose_failure_summary([run]) == "the import failed: Worker stopped responding."
