@@ -39,7 +39,10 @@ from apps.users.services.access_verification import (
     fresh_proof_verified_at,
     grace_proof_tenant_ids,
 )
-from apps.users.services.access_verification_providers import PROVIDER_BUDGET_SECONDS
+from apps.users.services.access_verification_providers import (
+    PROVIDER_BUDGET_SECONDS,
+    RENEWAL_LIMITER,
+)
 from apps.users.services.access_verification_service import (
     schedule_background_verification,
     verify_connection_access,
@@ -196,6 +199,7 @@ async def acheck_freshness_many(user_id, tenant_ids_by_key: dict) -> dict:
 
     One binding read and one proof read per connection, however many sets share
     it, so a listing's cost follows the user's connections, not its workspaces.
+    It never fills ``renewable``: a listing is not an admission and renews nothing.
     """
     all_tenant_ids = {tenant_id for ids in tenant_ids_by_key.values() for tenant_id in ids}
     rows = [row async for row in _live_bindings_queryset(user_id, list(all_tenant_ids))]
@@ -398,21 +402,17 @@ def _renewal_due(check: FreshnessCheck, budget: VerificationBudget) -> bool:
 
 
 # A renewal that could not reach the provider leaves the proofs due; without this every
-# request until they expire would retry it, each taking a provider-limiter permit.
+# request until they expire would retry it, each taking a RENEWAL_LIMITER permit.
 RENEWAL_COOLDOWN_SECONDS = 60.0
 _RENEWAL_ATTEMPTS: dict[tuple, float] = {}
 
 
-def _renewal_cooling_down(key) -> bool:
-    now = time.monotonic()
+def _renewal_cooling_down(key, now) -> bool:
     for stale_key in [
         k for k, at in _RENEWAL_ATTEMPTS.items() if now - at >= RENEWAL_COOLDOWN_SECONDS
     ]:
         del _RENEWAL_ATTEMPTS[stale_key]
-    if key in _RENEWAL_ATTEMPTS:
-        return True
-    _RENEWAL_ATTEMPTS[key] = now
-    return False
+    return key in _RENEWAL_ATTEMPTS
 
 
 def _schedule_renewals(user_id, check: FreshnessCheck) -> None:
@@ -422,11 +422,18 @@ def _schedule_renewals(user_id, check: FreshnessCheck) -> None:
     ``RENEWAL_COOLDOWN_SECONDS`` in each process.
     """
     for connection_id, tenant_ids in check.renewable.items():
-        if _renewal_cooling_down((user_id, connection_id, tenant_ids)):
+        key = (user_id, connection_id, tenant_ids)
+        now = time.monotonic()
+        if _renewal_cooling_down(key, now):
             continue
         if schedule_background_verification(
-            user_id, connection_id, tenant_ids, fresh_max_age=PROOF_RENEW_AFTER
+            user_id,
+            connection_id,
+            tenant_ids,
+            fresh_max_age=PROOF_RENEW_AFTER,
+            limiter=RENEWAL_LIMITER,
         ):
+            _RENEWAL_ATTEMPTS[key] = now
             logger.info(
                 "upstream_proof_renewal user_id=%s connection_id=%s tenants=%d",
                 user_id,
@@ -476,6 +483,8 @@ def admit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) -> Upstre
         # proofs invisible to other verifiers until commit. Recheck outside.
         return UpstreamAdmission(admitted=False, reason=VERIFICATION_IN_PROGRESS)
     # Grace and renewal both leave a task behind, which only the server loop keeps.
+    # Past the atomic-block guard only when nothing is stale: that branch must stay
+    # free of ORM awaits, and the renewal's own ORM work runs on a detached pool.
     on_server_loop = _on_server_loop_thread()
     if not recheck and not (on_server_loop and _renewal_due(check, budget)):
         return _admission_from(check, None)

@@ -70,6 +70,9 @@ class ProcessNetworkLimiter:
 # Bounds provider checks, not sockets: one Connect check holds a single permit for
 # up to CONNECT_LIGHT_CONCURRENCY requests.
 NETWORK_LIMITER = ProcessNetworkLimiter(4)
+# Background proof renewals get their own permits so they never queue ahead of, or
+# take a permit from, a check a person is waiting on.
+RENEWAL_LIMITER = ProcessNetworkLimiter(2)
 
 logger = logging.getLogger(__name__)
 

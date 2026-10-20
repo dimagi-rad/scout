@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
+from functools import partial
 
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import SyncToAsync, ThreadSensitiveContext
@@ -983,7 +984,12 @@ _BACKGROUND_RECHECKS: dict[tuple, asyncio.Task] = {}
 
 
 def schedule_background_verification(
-    actor_user_id, connection_id, tenant_ids, *, fresh_max_age=PROOF_MAX_AGE
+    actor_user_id,
+    connection_id,
+    tenant_ids,
+    *,
+    fresh_max_age=PROOF_MAX_AGE,
+    limiter=NETWORK_LIMITER,
 ) -> bool:
     """Re-run a verification in the background, at most one per tenant set per process.
 
@@ -1010,6 +1016,9 @@ def schedule_background_verification(
             frozenset(tenant_ids),
             deadline=time.monotonic() + PROVIDER_BUDGET_SECONDS,
             fresh_max_age=fresh_max_age,
+            # The provider call takes its own permit, separately from the token refresh.
+            provider_verifier=partial(verify_provider, limiter=limiter),
+            limiter=limiter,
         )
     )
     _BACKGROUND_RECHECKS[key] = task

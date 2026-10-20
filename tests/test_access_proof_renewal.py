@@ -16,6 +16,7 @@ from django.utils import timezone
 from apps.users.models import Tenant, TenantMembership, UpstreamAccessProof
 from apps.users.services import access_verification_service
 from apps.users.services.access_verification import PROOF_MAX_AGE, PROOF_RENEW_AFTER
+from apps.users.services.access_verification_providers import NETWORK_LIMITER
 from apps.users.services.access_verification_service import verify_connection_access
 from apps.users.services.access_verification_types import AccessVerificationStatus
 from apps.workspaces.access import (
@@ -187,6 +188,28 @@ async def test_one_due_proof_renews_the_whole_connection(
     assert (await aresolve_workspace_access_ex(user, workspace.id)).granted
     await _drain_background()
 
+    assert len(upstream_provider.requests) == 1
+    assert await _proof_age(user, tenant) < timedelta(minutes=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_renewal_takes_no_permit_from_interactive_checks(
+    user, workspace, tenant, upstream_provider
+):
+    await _aage_proof(user, tenant, DUE)
+    upstream_provider.domains = [tenant.external_id]
+    held = 0
+    while NETWORK_LIMITER._permits.acquire(blocking=False):
+        held += 1
+    try:
+        assert (await aresolve_workspace_access_ex(user, workspace.id)).granted
+        await _drain_background()
+    finally:
+        for _ in range(held):
+            NETWORK_LIMITER.release()
+
+    assert held == 4
     assert len(upstream_provider.requests) == 1
     assert await _proof_age(user, tenant) < timedelta(minutes=1)
 
