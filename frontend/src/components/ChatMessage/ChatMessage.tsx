@@ -849,7 +849,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
       />
     ))
 
-  type RenderedPart = { node: React.ReactNode; step: boolean; key?: string; label?: string; pending?: boolean; failed?: boolean }
+  type RenderedPart = { node: React.ReactNode; step: boolean; label?: string; pending?: boolean; failed?: boolean }
   const rendered: RenderedPart[] = message.parts.map((part, i): RenderedPart => {
     if (part.type === "text") {
       if (!part.text.trim()) return { node: null, step: false }
@@ -863,7 +863,6 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
           ? <ChatReasoningPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} />
           : null,
         step: hasText,
-        key: `reasoning-${i}`,
         label: "Thinking",
         pending: part.state === "streaming",
       }
@@ -905,7 +904,6 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
         // Materialization carries a live progress card and Stop button the user must see.
         // A failed helper stays visible: its error and retry path must not hide.
         step: toolName !== "run_materialization" && !buttons.length && !helperFailedOutcome && toolPart.state !== "output-error",
-        key: toolCallId ?? `tool-${i}`,
         label: displayToolName(toolName),
         pending: toolPart.state === "input-streaming" || toolPart.state === "input-available",
         failed: toolPart.state === "output-error",

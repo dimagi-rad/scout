@@ -857,7 +857,7 @@ export function ChatPanel() {
     () => messages.filter((m) => m.role === "user").length,
     [messages],
   )
-  const { onScroll: onMessagesScroll, hasNewBelow, jumpToBottom } = useStickToBottom(
+  const { onScroll: onMessagesScroll, onWheel: onMessagesWheel, onTouchMove: onMessagesTouchMove, hasNewBelow, jumpToBottom } = useStickToBottom(
     scrollRef,
     messages,
     resumeStream.text,
@@ -1082,7 +1082,7 @@ export function ChatPanel() {
         />
         {/* Message list */}
         <div className="relative flex min-h-0 flex-1 flex-col">
-        <div ref={scrollRef} onScroll={onMessagesScroll} className="flex-1 overflow-y-auto p-4 space-y-4">
+        <div ref={scrollRef} onScroll={onMessagesScroll} onWheel={onMessagesWheel} onTouchMove={onMessagesTouchMove} className="flex-1 overflow-y-auto p-4 space-y-4">
           {visibleMessages.map((msg: UIMessage, msgIdx: number) => (
             <ChatMessage
               key={msg.id}

@@ -5,10 +5,10 @@ import { useStickToBottom } from "./useStickToBottom"
 
 function Harness({ content, resetKey = "a", forceKey = "x" }: { content: string; resetKey?: string; forceKey?: string }) {
   const ref = useRef<HTMLDivElement>(null)
-  const { onScroll, hasNewBelow, jumpToBottom } = useStickToBottom(ref, content, "", resetKey, forceKey)
+  const { onScroll, onWheel, hasNewBelow, jumpToBottom } = useStickToBottom(ref, content, "", resetKey, forceKey)
   return (
     <div>
-      <div ref={ref} onScroll={onScroll} data-testid="scroller">{content}</div>
+      <div ref={ref} onScroll={onScroll} onWheel={onWheel} data-testid="scroller">{content}</div>
       {hasNewBelow && <button onClick={jumpToBottom} data-testid="jump">jump</button>}
     </div>
   )
@@ -53,6 +53,16 @@ describe("useStickToBottom", () => {
     act(() => layout(el, 560))
     rerender(<Harness content="three" />)
     expect(el.scrollTop).toBe(560)
+    expect(screen.getByTestId("jump")).toBeInTheDocument()
+  })
+
+  it("detaches on an upward wheel before any scroll event arrives", () => {
+    const { rerender } = render(<Harness content="one" />)
+    const el = screen.getByTestId("scroller")
+    layout(el, 600)
+    fireEvent.wheel(el, { deltaY: -20 })
+    rerender(<Harness content="two" />)
+    expect(el.scrollTop).toBe(600)
     expect(screen.getByTestId("jump")).toBeInTheDocument()
   })
 
