@@ -701,6 +701,7 @@ class SchemaManager:
         published under the plain prefix (``published_views``, the last build's
         ``view_sources["views"]``) keeps it, else the oldest source does.
         """
+        tenants = list(tenants)
         plain = {tenant: self._view_prefix(tenant) for tenant in tenants}
         published_plain = {
             source.get("tenant_id")
