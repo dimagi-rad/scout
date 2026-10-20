@@ -167,6 +167,7 @@ export function WorkspaceDetailPage() {
 
         <TabsContent value="tenants">
           <TenantsTab
+            key={workspace.id}
             workspaceId={workspace.id}
             isManager={isManager}
             onWorkspaceDeleted={handleDelete}

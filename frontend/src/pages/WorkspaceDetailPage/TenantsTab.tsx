@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react"
+import { useState, useEffect, useCallback, useMemo } from "react"
 import { workspaceApi } from "@/api/workspaces"
 import {
   getUserTenantsCached,
@@ -37,6 +37,15 @@ function requiresWorkspaceDelete(err: unknown): boolean {
   )
 }
 
+const LISTED_REFUSALS = 5
+
+function describeRefusals(refused: { name: string; reason: string }[]): string {
+  const names = refused.slice(0, LISTED_REFUSALS).map((r) => r.name).join(", ")
+  const more =
+    refused.length > LISTED_REFUSALS ? ` and ${refused.length - LISTED_REFUSALS} more` : ""
+  return `Couldn't add ${names}${more}. ${refused[0].name}: ${refused[0].reason}`
+}
+
 export function TenantsTab({
   workspaceId,
   isManager,
@@ -64,12 +73,6 @@ export function TenantsTab({
   const [addingId, setAddingId] = useState<string | null>(null)
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null)
   const [bulkNotice, setBulkNotice] = useState<string | null>(null)
-  // This component is reused across workspaces: a bulk add for one must stop, and not
-  // write into the next one's list. Unmounting (another tab) lets it finish.
-  const currentWorkspaceRef = useRef(workspaceId)
-  useEffect(() => {
-    currentWorkspaceRef.current = workspaceId
-  }, [workspaceId])
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
@@ -179,7 +182,6 @@ export function TenantsTab({
 
   async function addOne(tenant: UserTenant) {
     const created = await workspaceApi.addTenant(workspaceId, tenant.tenant_uuid)
-    if (currentWorkspaceRef.current !== workspaceId) return
     // Optimistic update; backend returns the internal tenant UUID as `tenant_id`.
     setTenants((prev) =>
       prev.some((t) => t.tenant_id === tenant.tenant_uuid)
@@ -199,6 +201,7 @@ export function TenantsTab({
   async function handleAdd(tenant: UserTenant) {
     setAddingId(tenant.tenant_uuid)
     setMutationError(null)
+    setBulkNotice(null)
     try {
       await addOne(tenant)
     } catch (err) {
@@ -211,7 +214,9 @@ export function TenantsTab({
   // One at a time: the server checks the adder's and every member's access per source.
   // A refusal of one source (400/409, say a member without that opportunity) must not
   // stop the rest; any other error (signed out, no longer a manager, server down) would
-  // fail every remaining source the same way, so it ends the run.
+  // fail every remaining source the same way, so it ends the run. The tab is keyed by
+  // workspace, so a run always belongs to the workspace it started in, and leaving the
+  // tab lets it finish.
   async function handleAddShown() {
     const batch = [...filteredAvailable]
     const refused: { name: string; reason: string }[] = []
@@ -219,14 +224,12 @@ export function TenantsTab({
     let stoppedBy: string | null = null
     setMutationError(null)
     setBulkNotice(null)
-    // Not isCurrentAccount(): that is false once unmounted, and leaving the tab must not
-    // cut the run short.
+    // Not isCurrentAccount(): that turns false on unmount, which must not end the run.
     const session = accountSession
-    const stillHere = () => currentWorkspaceRef.current === workspaceId && session.isCurrent()
     setBulkProgress({ done: 0, total: batch.length })
     try {
       for (const [index, tenant] of batch.entries()) {
-        if (!stillHere()) return
+        if (!session.isCurrent()) return
         setAddingId(tenant.tenant_uuid)
         try {
           await addOne(tenant)
@@ -243,28 +246,21 @@ export function TenantsTab({
         setBulkProgress({ done: index + 1, total: batch.length })
       }
     } finally {
-      if (currentWorkspaceRef.current === workspaceId) {
-        setAddingId(null)
-        setBulkProgress(null)
-      }
+      setAddingId(null)
+      setBulkProgress(null)
     }
-    if (!stillHere()) return
-    const summary = `Added ${added} of ${batch.length}.`
-    if (stoppedBy) {
-      setMutationError(`${summary} Stopped: ${stoppedBy}`)
-    } else if (refused.length > 0) {
-      // The server's reason already names the source, so one example is enough.
-      const names = refused.map((r) => r.name).join(", ")
-      const more = refused.length > 1 ? ` (first of ${refused.length})` : ""
-      setMutationError(`${summary} Couldn't add ${names}. Reason${more}: ${refused[0].reason}`)
-    } else {
-      setBulkNotice(`${summary}`)
-    }
+    if (!session.isCurrent()) return
+    const parts = [`Added ${added} of ${batch.length}.`]
+    if (refused.length > 0) parts.push(describeRefusals(refused))
+    if (stoppedBy) parts.push(`Stopped: ${stoppedBy}`)
+    if (refused.length > 0 || stoppedBy) setMutationError(parts.join(" "))
+    else setBulkNotice(parts[0])
   }
 
   async function handleRemove(wt: WorkspaceTenant) {
     setRemovingId(wt.id)
     setMutationError(null)
+    setBulkNotice(null)
     try {
       await workspaceApi.removeTenant(workspaceId, wt.id)
       setTenants((prev) => prev.filter((t) => t.id !== wt.id))
@@ -317,6 +313,10 @@ export function TenantsTab({
       setDeletingWorkspace(false)
     }
   }
+
+  const bulkAddOffered =
+    filteredAvailable.length > 0
+    && (idReport !== null || filteredAvailable.length < available.length)
 
   const canShowAddButton = isManager && (availableStatus !== "ready" || available.length > 0)
 
@@ -406,9 +406,9 @@ export function TenantsTab({
                   testIdPrefix="available-sources-filter"
                   {...sourceFilters.barProps}
                   bulkAction={
-                    // Only a narrowed list: one click must not add every source the user has.
-                    filteredAvailable.length > 0
-                    && filteredAvailable.length < available.length && (
+                    // Only a narrowed or pasted list: one click must not add every source
+                    // the user has by accident.
+                    bulkAddOffered && (
                       <button
                         type="button"
                         onClick={() => void handleAddShown()}
