@@ -2,7 +2,7 @@ import { useLayoutEffect, type KeyboardEvent, type RefObject } from "react"
 
 /** apps/chat/constants.py MAX_MESSAGE_LENGTH; the server refuses longer messages. */
 export const MAX_MESSAGE_LENGTH = 10_000
-export const CHAR_COUNT_VISIBLE_FROM = MAX_MESSAGE_LENGTH * 0.8
+export const CHAR_COUNT_VISIBLE_FROM = Math.round(MAX_MESSAGE_LENGTH * 0.8)
 
 /** Characters as the server counts them: Python's len() counts code points, not UTF-16 units. */
 export function messageLength(text: string): number {

@@ -297,17 +297,25 @@ describe("ChatComposer multi-line input and length limit (#913)", () => {
     )
     // held + "\n\n" + typed
     expect(screen.getByTestId("chat-char-count")).toHaveTextContent("11,002 / 10,000")
-    expect(screen.getByTestId("chat-char-count-hint")).toHaveTextContent("Edit or send that request first")
+    expect(screen.getByTestId("chat-char-count-hint")).toHaveTextContent(
+      "Together with your waiting request this is 1,002 characters too long. Shorten it, or discard the request.",
+    )
     expect(screen.getByTestId("chat-add-to-request")).toBeDisabled()
   })
 
-  it("describes the field with the counter, which stays mounted for screen readers", () => {
-    const { rerender } = render(<ChatComposer input="hi" setInput={vi.fn()} onSend={vi.fn()} />)
+  it("describes the field with the counter, and announces only the over-limit hint", () => {
+    const { container, rerender } = render(
+      <ChatComposer input={"a".repeat(9_000)} setInput={vi.fn()} onSend={vi.fn()} />,
+    )
     const field = screen.getByTestId("chat-input")
-    const region = document.getElementById(field.getAttribute("aria-describedby")!)
-    expect(region).toHaveAttribute("aria-live", "polite")
+    const described = document.getElementById(field.getAttribute("aria-describedby")!)
+    expect(described).toContainElement(screen.getByTestId("chat-char-count"))
+    const live = container.querySelector("[aria-live=polite]")!
+    expect(live).toHaveTextContent(/^$/)
+
     rerender(<ChatComposer input={"a".repeat(10_001)} setInput={vi.fn()} onSend={vi.fn()} />)
-    expect(region).toContainElement(screen.getByTestId("chat-char-count-hint"))
+    expect(described).toContainElement(screen.getByTestId("chat-char-count-hint"))
+    expect(live).toHaveTextContent("Too long to send. Shorten it by 1 character.")
   })
 
   it("counts characters as the server does, not UTF-16 units", () => {
