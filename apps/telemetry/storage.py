@@ -14,6 +14,7 @@ one ``scripts/host-disk-guard.sh`` checks before each deploy.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from dataclasses import dataclass
@@ -126,7 +127,8 @@ async def check_storage_headroom() -> dict:
     """Alert on low host disk; log both readings at INFO for trends."""
     result: dict = {}
 
-    disk = read_disk(settings.STORAGE_DISK_PATH)
+    # statfs on a hung mount blocks; keep it off the worker's event loop.
+    disk = await asyncio.to_thread(read_disk, settings.STORAGE_DISK_PATH)
     severity = disk_severity(disk)
     logger.info(
         "Storage headroom: host disk %s free of %s (%.1f%%) at %s",
