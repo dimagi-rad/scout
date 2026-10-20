@@ -127,12 +127,14 @@ function UserMessageText({ text }: { text: string }) {
 
 export function ChatTextPart({ role, text, quotable = false }: ChatTextPartProps) {
   const isUser = role === "user"
+  // A whitespace-only chunk (common before a tool call) would otherwise leave an empty padded block.
+  if (!text.trim()) return null
   return (
     <div
       className={`rounded-lg text-sm ${
         isUser
           ? "bg-primary px-4 py-2 text-primary-foreground"
-          : "prose prose-sm max-w-none py-1"
+          : "prose prose-sm max-w-none py-1 [&>:first-child]:mt-0 [&>:last-child]:mb-0"
       }`}
       data-quotable={quotable && !isUser ? "true" : undefined}
     >
@@ -869,50 +871,141 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
       />
     ))
 
+  type RenderedPart = { node: React.ReactNode; step: boolean; label?: string; pending?: boolean; failed?: boolean }
+  const rendered: RenderedPart[] = message.parts.map((part, i): RenderedPart => {
+    if (part.type === "text") {
+      if (!part.text.trim()) return { node: null, step: false }
+      return { node: <ChatTextPart key={i} role={isUser ? "user" : "assistant"} text={part.text} quotable={!isUser} />, step: false }
+    }
+
+    if (part.type === "reasoning") {
+      const hasText = !!((part as { reasoning?: string; text?: string }).reasoning || (part as { text?: string }).text)
+      return {
+        node: hasText
+          ? <ChatReasoningPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} />
+          : null,
+        step: hasText,
+        label: "Thinking",
+        pending: part.state === "streaming",
+      }
+    }
+
+    if (isToolUIPart(part)) {
+      const toolPart = part as ChatToolPartShape
+      const parentToolCallId = toolPart.parentToolCallId
+      if (typeof parentToolCallId === "string" && parentToolCallId) {
+        return { node: null, step: false }
+      }
+      const toolName = getToolName(part)
+      const buttons = renderArtifacts(i)
+      if (!(toolName in SUBAGENT_TOOL_LABELS)) {
+        if (buttons.length) return { node: <Fragment key={i}>{buttons}</Fragment>, step: false }
+      }
+
+      const saved = toolPart.state === "output-available"
+        ? savedMemory(toolName, toolPart.output)
+        : null
+      if (saved) return { node: <MemorySavedChip key={i} {...saved} workspaceId={workspaceId} />, step: false }
+
+      const toolCallId = toolPart.toolCallId
+      const recentTermination =
+        toolCallId && recentTerminationsByToolCallId
+          ? recentTerminationsByToolCallId[toolCallId] ?? null
+          : null
+      const helperFailedOutcome =
+        toolName in SUBAGENT_TOOL_LABELS
+        && (toolPart.state === "output-error"
+          || (toolPart.state === "output-available" && isUnsuccessfulHelperOutcome(parseOutput(toolPart.output))))
+      return {
+        node: (
+          <Fragment key={i}>
+            <ChatToolCallPart part={toolPart} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} childParts={toolCallId ? childToolPartsByParent.get(toolCallId) ?? [] : []} subagentEvents={toolCallId ? subagentEventsByParent.get(toolCallId) ?? [] : []} subagentTimeline={toolCallId ? subagentTimelineByParent.get(toolCallId) ?? [] : []} />
+            {buttons}
+          </Fragment>
+        ),
+        // Materialization carries a live progress card and Stop button the user must see.
+        // A failed helper stays visible: its error and retry path must not hide.
+        step: toolName !== "run_materialization" && !buttons.length && !helperFailedOutcome && toolPart.state !== "output-error",
+        label: displayToolName(toolName),
+        pending: toolPart.state === "input-streaming" || toolPart.state === "input-available",
+        failed: toolPart.state === "output-error",
+      }
+    }
+
+    return { node: null, step: false }
+  })
+
+  const blocks: React.ReactNode[] = []
+  let run: { key: string; items: RenderedPart[] } | null = null
+  const flushRun = (isTrailing: boolean) => {
+    if (!run) return
+    blocks.push(
+      <ChatStepsGroup
+        key={`steps-${run.key}`}
+        steps={run.items}
+        isLive={isActiveMessage && isTrailing}
+      />,
+    )
+    run = null
+  }
+  // Keyed by the preceding visible part so a step leaving the run mid-stream keeps the group mounted.
+  let lastVisible = -1
+  rendered.forEach((item, i) => {
+    if (item.step) {
+      run ??= { key: `after-${lastVisible}`, items: [] }
+      run.items.push(item)
+      return
+    }
+    if (item.node === null) return
+    flushRun(false)
+    lastVisible = i
+    blocks.push(item.node)
+  })
+  flushRun(true)
+
+  // No visible output yet: skip the wrapper so it doesn't add a gap in the message list.
+  if (blocks.length === 0) return null
+
   return (
     <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className="max-w-[90%]">
-        {message.parts.map((part, i) => {
-          if (part.type === "text") {
-            return <ChatTextPart key={i} role={isUser ? "user" : "assistant"} text={part.text} quotable={!isUser} />
-          }
+      <div className="max-w-[90%]">{blocks}</div>
+    </div>
+  )
+}
 
-          if (part.type === "reasoning") {
-            return <ChatReasoningPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} />
-          }
+function ChatStepsGroup({
+  steps,
+  isLive,
+}: {
+  steps: { node: React.ReactNode; label?: string; pending?: boolean; failed?: boolean }[]
+  isLive: boolean
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const failedCount = steps.filter((s) => s.failed).length
+  const current = isLive ? [...steps].reverse().find((s) => s.pending) : undefined
 
-          if (isToolUIPart(part)) {
-            const toolPart = part as ChatToolPartShape
-            const parentToolCallId = toolPart.parentToolCallId
-            if (typeof parentToolCallId === "string" && parentToolCallId) {
-              return null
-            }
-            if (!(getToolName(part) in SUBAGENT_TOOL_LABELS)) {
-              const buttons = renderArtifacts(i)
-              if (buttons.length) return <Fragment key={i}>{buttons}</Fragment>
-            }
-
-            const saved = toolPart.state === "output-available"
-              ? savedMemory(getToolName(part), toolPart.output)
-              : null
-            if (saved) return <MemorySavedChip key={i} {...saved} workspaceId={workspaceId} />
-
-            const toolCallId = toolPart.toolCallId
-            const recentTermination =
-              toolCallId && recentTerminationsByToolCallId
-                ? recentTerminationsByToolCallId[toolCallId] ?? null
-                : null
-            return (
-              <Fragment key={i}>
-                <ChatToolCallPart part={toolPart} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} childParts={toolCallId ? childToolPartsByParent.get(toolCallId) ?? [] : []} subagentEvents={toolCallId ? subagentEventsByParent.get(toolCallId) ?? [] : []} subagentTimeline={toolCallId ? subagentTimelineByParent.get(toolCallId) ?? [] : []} />
-                {renderArtifacts(i)}
-              </Fragment>
-            )
-          }
-
-          return null
-        })}
-      </div>
+  return (
+    <div className="my-1" data-testid="chat-steps">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="flex items-center gap-2 rounded px-1 py-0.5 text-xs text-muted-foreground hover:bg-muted/50 transition-colors"
+        data-testid="chat-steps-toggle"
+      >
+        {expanded ? (
+          <ChevronDown className="w-3 h-3 shrink-0" />
+        ) : (
+          <ChevronRight className="w-3 h-3 shrink-0" />
+        )}
+        <Wrench className="w-3 h-3 shrink-0" />
+        <span>{steps.length} {steps.length === 1 ? "step" : "steps"}</span>
+        {failedCount > 0 && <span className="text-destructive">· {failedCount} failed</span>}
+        {current && !expanded && (
+          <span className="truncate" data-testid="chat-steps-current">· {current.label}...</span>
+        )}
+      </button>
+      {expanded && <div className="mt-1">{steps.map((s) => s.node)}</div>}
     </div>
   )
 }

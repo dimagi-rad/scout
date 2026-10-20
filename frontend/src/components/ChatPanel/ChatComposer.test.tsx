@@ -86,6 +86,27 @@ describe("ChatComposer", () => {
     expect(onSend).not.toHaveBeenCalled()
   })
 
+  it("does not send on Enter while an IME composition is active", () => {
+    const onSend = vi.fn()
+    render(<ChatComposer input="こんにちは" setInput={vi.fn()} onSend={onSend} />)
+
+    fireEvent.keyDown(screen.getByTestId("chat-input"), { key: "Enter", isComposing: true })
+
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it("leaves Shift+Enter's default newline insertion alone", () => {
+    render(<ChatComposer input="First line" setInput={vi.fn()} onSend={vi.fn()} />)
+
+    const notPrevented = fireEvent.keyDown(screen.getByTestId("chat-input"), {
+      key: "Enter",
+      shiftKey: true,
+    })
+
+    expect(notPrevented).toBe(true)
+    expect(screen.getByTestId("chat-input").tagName).toBe("TEXTAREA")
+  })
+
   it("names the send and stop controls for assistive technology", () => {
     const { rerender } = render(
       <ChatComposer input="Hi" setInput={vi.fn()} onSend={vi.fn()} />,

@@ -43,3 +43,9 @@ describe("save-recipe command", () => {
     expect(prompt).toContain("requires write access to this workspace")
   })
 })
+
+describe("resolveSlashCommand with newlines", () => {
+  it("treats a newline like a space after the command name", () => {
+    expect(resolveSlashCommand("/save-recipe\nmy notes")).toBe(resolveSlashCommand("/save-recipe my notes"))
+  })
+})

@@ -58,7 +58,7 @@ export function matchSlashCommands(query: string, canWrite: boolean): SlashComma
  */
 export function resolveSlashCommand(text: string): string {
   if (!text.startsWith("/")) return text
-  const spaceIdx = text.indexOf(" ")
+  const spaceIdx = text.search(/\s/)
   const cmdName = spaceIdx === -1 ? text.slice(1) : text.slice(1, spaceIdx)
   const args = spaceIdx === -1 ? "" : text.slice(spaceIdx + 1).trim()
   const cmd = SLASH_COMMANDS.find((c) => c.name === cmdName)
