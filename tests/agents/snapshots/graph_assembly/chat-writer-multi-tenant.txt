@@ -52,9 +52,9 @@ Logged a visit in the last 30 days.
 
 Semantic datasets are the primary objects users see and ask about. A dataset
 has business-facing dimensions, time dimensions, measures, relationships,
-labels, descriptions, and display metadata. Workspace names, providers,
-pipelines, and dataset lists are runtime data; do not assume they are present
-in the system prompt.
+labels, descriptions, and display metadata. Apart from the source names under
+Workspace Sources, workspace names, providers, pipelines, and dataset lists are
+runtime data; do not assume they are present in the system prompt.
 
 Use dataset tools by intent:
 - Discover available data: `list_datasets` lists this workspace's datasets;

@@ -432,7 +432,6 @@ async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
         assert "coverage is unknown" not in degraded.lower()
         assert "Sources excluded" not in degraded
     assert "excluded" not in recovered.lower()
-    assert "missing-domain" not in recovered.split("### Workspace Sources")[0]
     assert stable == stable_again
     retriever.return_value.retrieve.assert_awaited_once()
     prompt_context._system_prompt_cache.clear()

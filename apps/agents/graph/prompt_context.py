@@ -489,7 +489,6 @@ async def _build_system_prompt(
             workspace, interactive, write_capable, conversation_id=conversation_id
         )
         volatile = f"\n## Data Availability\n\n{semantic_context}\n"
-        volatile += f"\n{await _workspace_sources_block(workspace)}\n"
         if await workspace.tenants.acount() > 1:
             coverage = (
                 await WorkspaceViewSchema.objects.filter(
@@ -501,6 +500,7 @@ async def _build_system_prompt(
             warning = coverage_warning(coverage)
             if warning:
                 volatile += warning + "\n"
+        volatile += f"\n{await _workspace_sources_block(workspace)}\n"
         freshness = _source_freshness_block(
             await aworkspace_source_freshness(workspace.id, getattr(user, "id", "")),
             write_capable=write_capable,
@@ -511,6 +511,15 @@ async def _build_system_prompt(
 
 
 MAX_LISTED_SOURCES = 50
+MAX_SOURCE_NAME_CHARS = 120
+
+
+def prompt_safe_name(name: str) -> str:
+    """A provider-supplied name on one bounded line, so it cannot forge prompt headings."""
+    flat = " ".join(name.split())
+    if len(flat) > MAX_SOURCE_NAME_CHARS:
+        return flat[: MAX_SOURCE_NAME_CHARS - 1] + "…"
+    return flat
 
 
 async def _workspace_sources_block(workspace: Workspace) -> str:
@@ -521,8 +530,8 @@ async def _workspace_sources_block(workspace: Workspace) -> str:
     for tenant in tenants[:MAX_LISTED_SOURCES]:
         label = provider_label(tenant.provider)
         if tenant.external_id and tenant.external_id != tenant.canonical_name:
-            label += f" {tenant.external_id}"
-        lines.append(f"- {tenant.canonical_name} ({label})")
+            label += f" {prompt_safe_name(tenant.external_id)}"
+        lines.append(f"- {prompt_safe_name(tenant.canonical_name)} ({label})")
     if len(tenants) > MAX_LISTED_SOURCES:
         more = await workspace.tenants.acount() - MAX_LISTED_SOURCES
         lines.append(f"- and {more} more; `list_workspaces` lists them all")
@@ -554,7 +563,7 @@ def _source_freshness_block(sources: list[dict], *, write_capable: bool) -> str:
             age = "data loaded, fetch time unknown"
         else:
             age = "no data fetched yet"
-        line = f"- {source['name']} ({provider_label(source['provider'])}): {age}"
+        line = f"- {prompt_safe_name(source['name'])} ({provider_label(source['provider'])}): {age}"
         if source["not_refreshed"]:
             why = (
                 "the load stopped before this source"
@@ -636,9 +645,9 @@ async def _build_stable_system_prompt(
 
 Semantic datasets are the primary objects users see and ask about. A dataset
 has business-facing dimensions, time dimensions, measures, relationships,
-labels, descriptions, and display metadata. Workspace names, providers,
-pipelines, and dataset lists are runtime data; do not assume they are present
-in the system prompt.
+labels, descriptions, and display metadata. Apart from the source names under
+Workspace Sources, workspace names, providers, pipelines, and dataset lists are
+runtime data; do not assume they are present in the system prompt.
 
 Use dataset tools by intent:
 - Discover available data: `list_datasets` lists this workspace's datasets;
