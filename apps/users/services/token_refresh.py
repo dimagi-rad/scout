@@ -1152,18 +1152,44 @@ def _sync_refresh_lock(token_id) -> threading.Lock:
         return _sync_refresh_locks.setdefault(token_id, threading.Lock())
 
 
-def _adopt_rotated_token(social_token, *, deadline, clock) -> TokenRefreshResult | None:
+def _sync_refresh_lock_wait(timeout, db_timeout, deadline, clock) -> float:
+    """How long to wait for another refresh of the same token; -1 blocks."""
+    if deadline is not None:
+        return max(0.0, deadline - clock())
+    if db_timeout is None:
+        return -1
+    # The holder's provider call plus its database phases and persist retries.
+    return timeout + 4 * db_timeout
+
+
+def _adopt_rotated_token(
+    social_token, preflight: _TokenPreflight, *, deadline, clock
+) -> tuple[TokenRefreshResult | None, bool]:
     """Take the token another refresh stored after this copy was read.
 
     Refresh tokens rotate, so posting this copy's spent one is refused and reads as
     a revoked sign-in. Sources sharing a connection load at once (#927), each with
-    its own copy. Only a fresh stored token is taken; anything else refreshes this
-    copy as before, so its failure never marks a credential it did not try.
+    its own copy. Returns the result to serve, if any, and whether the copy now
+    holds the stored token: an expired one is refreshed with its own live grant.
+    Only a row that still matches the identity preflight validated is taken.
     """
     try:
         with transaction.atomic(), preserve_transaction_timeouts():
             _configure_transaction_deadline(deadline, clock)
-            stored = SocialToken.objects.filter(pk=social_token.pk).first()
+            current = (
+                SocialToken.objects.select_related("account").filter(pk=preflight.token_id).first()
+            )
+            observed_ids = [fence.connection_id for fence in preflight.connection_fences]
+            _configure_transaction_deadline(deadline, clock)
+            connections = list(
+                TenantConnection.objects.filter(
+                    Q(
+                        social_account_id=preflight.account_id,
+                        credential_type=TenantConnection.OAUTH,
+                    )
+                    | Q(pk__in=observed_ids)
+                ).order_by("pk")
+            )
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
         if _is_deadline_error(exc):
             raise TokenRefreshDeadlineExceeded(
@@ -1171,17 +1197,20 @@ def _adopt_rotated_token(social_token, *, deadline, clock) -> TokenRefreshResult
             ) from exc
         raise TokenRefreshUnavailable("Failed to read OAuth refresh state.") from exc
     if (
-        stored is None
-        or stored.account_id != social_token.account_id
-        or stored.app_id != social_token.app_id
-        or (stored.token, stored.token_secret) == (social_token.token, social_token.token_secret)
+        current is None
+        or not current.token_secret
+        or not _identity_matches(preflight, current, connections)
+        or (current.token, current.token_secret)
+        == (preflight.access_token, preflight.refresh_token)
     ):
-        return None
-    if token_needs_refresh(stored.expires_at, can_refresh=bool(stored.token_secret)):
-        return None
-    snapshot = _persisted_snapshot(stored)
+        return None, False
+    snapshot = _persisted_snapshot(current)
     _apply_persisted_snapshot(social_token, snapshot)
-    return TokenRefreshResult(TokenRefreshStatus.SUPERSEDED, snapshot, credential_advanced=True)
+    if current.expires_at is not None and current.expires_at <= timezone.now():
+        return None, True
+    return TokenRefreshResult(
+        TokenRefreshStatus.SUPERSEDED, snapshot, credential_advanced=True
+    ), True
 
 
 def refresh_oauth_token_result_sync(
@@ -1205,13 +1234,12 @@ def refresh_oauth_token_result_sync(
     renewing someone else's token (1d4b2748); add it here if a caller like that appears.
     """
     # One refresh per token at a time in this process; a waiter takes what it stored.
-    with _sync_refresh_lock(social_token.pk):
-        adopted = _adopt_rotated_token(
-            social_token, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
+    lock = _sync_refresh_lock(social_token.pk)
+    if not lock.acquire(timeout=_sync_refresh_lock_wait(timeout, db_timeout, deadline, clock)):
+        raise TokenRefreshDeadlineExceeded(
+            "Timed out waiting for another refresh of these OAuth credentials."
         )
-        if adopted is not None:
-            logger.info("Adopted a concurrently refreshed OAuth token (sync)")
-            return adopted
+    try:
         return _refresh_oauth_token_sync(
             social_token,
             token_url,
@@ -1220,21 +1248,38 @@ def refresh_oauth_token_result_sync(
             deadline=deadline,
             clock=clock,
         )
+    finally:
+        lock.release()
 
 
-def _refresh_oauth_token_sync(
-    social_token, token_url: str, *, timeout, db_timeout, deadline, clock
-) -> TokenRefreshResult:
+def _sync_preflight(social_token, *, deadline, clock) -> _TokenPreflight:
     try:
-        preflight = _preflight_token(
-            social_token, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
-        )
+        return _preflight_token(social_token, deadline=deadline, clock=clock)
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
         if _is_deadline_error(exc):
             raise TokenRefreshDeadlineExceeded(
                 "Timed out waiting on the database before refreshing OAuth credentials."
             ) from exc
         raise TokenRefreshUnavailable("Failed to read OAuth refresh state.") from exc
+
+
+def _refresh_oauth_token_sync(
+    social_token, token_url: str, *, timeout, db_timeout, deadline, clock
+) -> TokenRefreshResult:
+    preflight = _sync_preflight(
+        social_token, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
+    )
+    adopted, advanced = _adopt_rotated_token(
+        social_token, preflight, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
+    )
+    if adopted is not None:
+        logger.info("Adopted a concurrently refreshed OAuth token (sync)")
+        return adopted
+    if advanced:
+        # The copy now holds the stored grant; the refresh below must be checked against it.
+        preflight = _sync_preflight(
+            social_token, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
+        )
     fingerprint = credential_fingerprint(social_token)
     if social_token.app is None:
         raise TokenRefreshError("OAuth application is missing; reconnect this account.")

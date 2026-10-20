@@ -143,10 +143,19 @@ async def test_old_refresh_denial_does_not_revoke_replacement(
     await SocialToken.objects.filter(pk=token.pk).aupdate(
         token="replacement", token_secret="replacement-refresh"
     )
-    with pytest.raises(TokenRefreshError) as caught:
-        await invoke(mode, token, httpx_mock, requests_mock, payload={"error": "invalid_grant"})
-    assert caught.type is TokenRefreshRejected
-    assert caught.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
+    if mode == "sync":
+        # The worker's refresh takes the stored replacement instead of spending the
+        # old grant (#927), so nothing is posted.
+        value = await invoke(
+            mode, token, httpx_mock, requests_mock, payload={"error": "invalid_grant"}
+        )
+        assert value == "replacement"
+        assert requests_mock.call_count == 0
+    else:
+        with pytest.raises(TokenRefreshError) as caught:
+            await invoke(mode, token, httpx_mock, requests_mock, payload={"error": "invalid_grant"})
+        assert caught.type is TokenRefreshRejected
+        assert caught.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
     assert await TenantMembership.objects.filter(pk=member.pk).aexists()
     await connection.arefresh_from_db()
     assert connection.upstream_denial_code == ""

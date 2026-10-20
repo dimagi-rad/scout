@@ -1059,3 +1059,54 @@ def test_concurrent_refreshes_of_one_token_mint_once(oauth_identity, requests_mo
     assert errors == []
     assert values == ["new-access", "new-access"]
     assert requests_mock.call_count == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_an_expired_stored_token_is_refreshed_with_its_own_grant(oauth_identity, requests_mock):
+    """Another refresh stored a token whose expiry is already past (a provider that
+    omits expires_in keeps the old one): refresh with that live grant, not the spent one."""
+    token, _ = oauth_identity
+    SocialToken.objects.filter(pk=token.pk).update(
+        token="stored-access",
+        token_secret="stored-refresh",
+        expires_at=timezone.now() - timedelta(minutes=1),
+    )
+    requests_mock.post(URL, json=_ROTATED)
+
+    assert refresh_oauth_token_sync(token, URL) == "new-access"
+
+    assert requests_mock.last_request.text.count("refresh_token=stored-refresh") == 1
+    persisted = SocialToken.objects.get(pk=token.pk)
+    assert (persisted.token, persisted.token_secret) == ("new-access", "new-refresh")
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_stored_token_for_a_moved_identity_is_not_adopted(oauth_identity, user, requests_mock):
+    token, connection = oauth_identity
+    SocialToken.objects.filter(pk=token.pk).update(
+        token="stored-access",
+        token_secret="stored-refresh",
+        expires_at=timezone.now() + timedelta(minutes=15),
+    )
+    # Re-pointed at another scope while the copy was out: not the binding it validated.
+    TenantConnection.objects.filter(pk=connection.pk).update(scope_key="other-scope")
+    requests_mock.post(URL, json=_SPENT["json"], status_code=400)
+
+    with pytest.raises(TokenRefreshError):
+        refresh_oauth_token_sync(token, URL)
+
+    assert token.token == "old-access"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_waiting_for_another_refresh_honours_the_callers_deadline(oauth_identity):
+    token, _ = oauth_identity
+    lock = token_refresh._sync_refresh_lock(token.pk)
+    lock.acquire()
+    try:
+        started = time.monotonic()
+        with pytest.raises(TokenRefreshDeadlineExceeded):
+            refresh_oauth_token_result_sync(token, URL, deadline=time.monotonic() + 0.2)
+        assert time.monotonic() - started < 2
+    finally:
+        lock.release()
