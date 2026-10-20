@@ -51,6 +51,7 @@ from apps.users.services.tenant_resolution import (
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
+from mcp_server.loaders.ocs_base import OCS_MAX_PAGE_SIZE
 
 pytestmark = pytest.mark.asyncio
 
@@ -195,12 +196,17 @@ def origin(path: EntryPath) -> str:
 def listing_url(path: EntryPath) -> str:
     if path.family == "commcare":
         return COMMCARE_SERVERS[path.server].user_domains_url
-    return f"{OCS_ORIGIN}/api/experiments/" if path.family == "ocs" else CONNECT_LISTING
+    if path.family == "ocs":
+        return f"{OCS_ORIGIN}/api/experiments/?page_size={OCS_MAX_PAGE_SIZE}"
+    return CONNECT_LISTING
 
 
 def page_two_url(path: EntryPath) -> str:
     if path.family == "commcare":
         return f"{listing_url(path)}?limit=2&offset=2"
+    if path.family == "ocs":
+        # The saved page's own next link, which the paginator follows verbatim.
+        return f"{OCS_ORIGIN}/api/experiments/?cursor=cD0yMDI2"
     return f"{listing_url(path)}?cursor=cD0yMDI2"
 
 
@@ -569,7 +575,8 @@ async def test_next_outside_the_origin_is_never_followed(path, target, upstream)
     cases(PAGINATED_PATHS, ("self-loop", "back-to-first"), discovery={"back-to-first"}),
 )
 async def test_pagination_cycle_is_rejected(path, shape, upstream):
-    first_path = urlsplit(listing_url(path)).path
+    first = urlsplit(listing_url(path))
+    first_path = f"{first.path}?{first.query}" if first.query else first.path
     if shape == "self-loop":
         serve_pages(upstream, path, first=with_next(path, first_page(path), first_path))
     else:

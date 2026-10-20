@@ -26,7 +26,7 @@ async def test_verify_and_discover_single_page(httpx_mock, settings):
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/",
+        url="https://ocs.example.com/api/experiments/?page_size=1500",
         json={
             "results": [
                 {"id": "exp-1", "name": "Bot One"},
@@ -51,7 +51,7 @@ async def test_verify_and_discover_paginates(httpx_mock, settings):
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/",
+        url="https://ocs.example.com/api/experiments/?page_size=1500",
         json={
             "results": [{"id": "exp-1", "name": "Bot One"}],
             "next": "https://ocs.example.com/api/experiments/?cursor=xyz",
@@ -72,7 +72,7 @@ async def test_verify_and_discover_unauthorized(httpx_mock, settings):
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/",
+        url="https://ocs.example.com/api/experiments/?page_size=1500",
         status_code=401,
     )
     with pytest.raises(CredentialVerificationError):
@@ -86,7 +86,7 @@ async def test_verify_and_discover_empty_list_raises(httpx_mock, settings):
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/",
+        url="https://ocs.example.com/api/experiments/?page_size=1500",
         json={"results": [], "next": None},
         status_code=200,
     )
@@ -100,7 +100,7 @@ async def test_verify_for_tenant_passes_when_experiment_present(httpx_mock, sett
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/",
+        url="https://ocs.example.com/api/experiments/?page_size=1500",
         json={"results": [{"id": "exp-1", "name": "Bot"}], "next": None},
     )
     await OCSStrategy.verify_for_tenant({"api_key": "k"}, external_id="exp-1")
@@ -112,7 +112,7 @@ async def test_verify_for_tenant_fails_when_experiment_missing(httpx_mock, setti
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/",
+        url="https://ocs.example.com/api/experiments/?page_size=1500",
         json={"results": [{"id": "exp-other", "name": "Other"}], "next": None},
     )
     with pytest.raises(CredentialVerificationError, match="exp-1"):
@@ -131,7 +131,7 @@ async def test_verify_and_discover_rejects_foreign_next(httpx_mock, settings, ne
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/",
+        url="https://ocs.example.com/api/experiments/?page_size=1500",
         json={"results": [{"id": "exp-1", "name": "Bot One"}], "next": next_url},
     )
     with pytest.raises(CredentialVerificationError):
@@ -146,10 +146,10 @@ async def test_verify_and_discover_detects_next_cycle(httpx_mock, settings):
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/",
+        url="https://ocs.example.com/api/experiments/?page_size=1500",
         json={
             "results": [{"id": "exp-1", "name": "Bot One"}],
-            "next": "https://ocs.example.com/api/experiments/",
+            "next": "https://ocs.example.com/api/experiments/?page_size=1500",
         },
     )
     with pytest.raises(CredentialVerificationError):
@@ -162,7 +162,7 @@ async def test_verify_and_discover_follows_relative_next(httpx_mock, settings):
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/",
+        url="https://ocs.example.com/api/experiments/?page_size=1500",
         json={"results": [{"id": "exp-1", "name": "One"}], "next": "?cursor=xyz"},
     )
     httpx_mock.add_response(
