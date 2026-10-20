@@ -51,6 +51,9 @@ VALIDATOR_SLOT_WAIT_SECONDS = 300.0
 # The 110s total is not headroom: commit_canvas's diagnostics and writes come first.
 INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS = 10.0
 VALIDATOR_SLOT_POLL_SECONDS = 1.0
+VALIDATION_SKIPPED_MESSAGE = (
+    "Cube schema validation skipped because CUBE_VALIDATOR_URL is not configured."
+)
 
 
 class CubeSchemaBuildError(RuntimeError):
@@ -342,13 +345,24 @@ def _build_validate_and_promote(
         raise CubeSchemaBuildError(f"Could not generate Cube schema: {exc}") from exc
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     filename = f"workspace_{workspace.id}_{content_hash[:12]}.yaml"
-    with nullcontext(slot) if slot is not None else _validator_slot(slot_wait_seconds) as held:
-        try:
-            validation = async_to_sync(CubeClient().validate_schema)(content)
-        except CubeServiceUnavailable as exc:
-            raise CubeValidatorUnavailableError(str(exc)) from exc
-        finally:
-            held.release()
+    if _serving_validated_content(workspace, model, content_hash):
+        # Validation is one global lane shared by every load and rebuild (#918);
+        # content that already passed it and is serving gains nothing from another pass.
+        logger.info(
+            "Cube schema for workspace %s is unchanged from the serving one; skipping validation",
+            workspace.id,
+        )
+        if slot is not None:
+            slot.release()
+        validation: dict[str, Any] = {"valid": True, "errors": []}
+    else:
+        with nullcontext(slot) if slot is not None else _validator_slot(slot_wait_seconds) as held:
+            try:
+                validation = async_to_sync(CubeClient().validate_schema)(content)
+            except CubeServiceUnavailable as exc:
+                raise CubeValidatorUnavailableError(str(exc)) from exc
+            finally:
+                held.release()
     validation_diagnostics = _diagnostics_from_validation(validation)
     diagnostics = [
         *(model.metadata or {}).get("catalog_diagnostics", []),
@@ -453,6 +467,31 @@ def _build_validate_and_promote(
     return cube_schema
 
 
+def _serving_validated_content(workspace, model: SemanticModel, content_hash: str) -> bool:
+    """Whether ``content_hash`` is the ACTIVE schema's content and the validator passed it.
+
+    Only a schema that passed validation becomes ACTIVE, so a failed one (an ERROR
+    row) never matches. One promoted while no validator was configured did not
+    pass it, and is validated again.
+    """
+    serving = (
+        CubeSchema.objects.filter(
+            workspace=workspace,
+            semantic_model=model,
+            status=CubeSchema.Status.ACTIVE,
+            content_hash=content_hash,
+        )
+        .only("diagnostics")
+        .first()
+    )
+    if serving is None:
+        return False
+    return not any(
+        isinstance(diagnostic, dict) and diagnostic.get("message") == VALIDATION_SKIPPED_MESSAGE
+        for diagnostic in serving.diagnostics or []
+    )
+
+
 def _set_last_build(
     model: SemanticModel, *, ok: bool, error: str = "", content_hash: str = ""
 ) -> None:
@@ -538,7 +577,7 @@ def _diagnostics_from_validation(validation: dict[str, Any]) -> list[dict[str, A
         diagnostics.append(
             {
                 "level": "warning",
-                "message": "Cube schema validation skipped because CUBE_VALIDATOR_URL is not configured.",
+                "message": VALIDATION_SKIPPED_MESSAGE,
             }
         )
     return diagnostics
