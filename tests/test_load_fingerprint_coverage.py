@@ -53,6 +53,9 @@ _NOT_LOAD_SHAPING = {
     "apps/transformations/models.py": "ORM state; its schema changes ship as migrations.",
     "apps/users/models.py": "ORM state; its schema changes ship as migrations.",
     "apps/users/services/upstream_denial.py": "Records an upstream access denial.",
+    "apps/users/services/source_descriptions.py": (
+        "Copies the provider's description onto the tenant; never decides a load's rows."
+    ),
     "apps/workspaces/models.py": "ORM state; its schema changes ship as migrations.",
     "apps/workspaces/services/__init__.py": "Re-exports SchemaManager, excluded below.",
     "apps/workspaces/services/load_generations.py": "The fingerprint itself.",

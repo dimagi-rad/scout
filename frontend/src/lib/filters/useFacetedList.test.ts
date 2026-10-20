@@ -125,3 +125,35 @@ it("follows writes from another tab", () => {
   })
   expect(result.current.selection).toEqual({ org: ["dimagi"] })
 })
+
+it("hides and stops applying a facet while the selection rules it out, but clears it", () => {
+  interface Typed {
+    kind: string
+    tag: string
+  }
+  const typedFacets: FacetDef<Typed>[] = [
+    { key: "kind", label: "Kind", getValue: (r) => r.kind },
+    {
+      key: "tag",
+      label: "Tag",
+      getValue: (r) => (r.kind === "a" ? r.tag : undefined),
+      appliesTo: (selection) => !selection.kind?.length || selection.kind.includes("a"),
+    },
+  ]
+  localStorage.setItem(KEY, JSON.stringify({ kind: ["b"], tag: ["x"] }))
+  const items = [
+    { kind: "a", tag: "x" },
+    { kind: "a", tag: "y" },
+    { kind: "b", tag: "" },
+  ]
+  const { result } = renderHook(() =>
+    useFacetedList({ items, facets: typedFacets, storageKey: KEY, predicate: always }),
+  )
+  expect(result.current.facets.map((f) => f.key)).toEqual(["kind"])
+  expect(result.current.selection).toEqual({ kind: ["b"] })
+
+  act(() => result.current.clearFacets())
+
+  expect(stored()).toEqual({})
+  expect(result.current.filtered).toHaveLength(3)
+})

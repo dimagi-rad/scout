@@ -56,7 +56,7 @@ API has applied its migrations, run a worker in another terminal to process
 materialization and chat-resume jobs:
 
 ```bash
-docker compose run --rm --no-deps api python manage.py procrastinate worker
+docker compose run --rm --no-deps api python manage.py procrastinate worker --concurrency 3
 ```
 
 Keep the worker running while testing jobs. This is not necessary if you are

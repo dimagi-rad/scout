@@ -534,6 +534,79 @@ def test_build_view_schema_long_canonical_name_no_truncation_collision(db, manag
         ts2.delete()
 
 
+def _view_names(conn, schema_name):
+    c = conn.cursor()
+    try:
+        c.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
+            (schema_name,),
+        )
+        return {row[0] for row in c.fetchall()}
+    finally:
+        c.close()
+
+
+def test_build_view_schema_same_named_sources_get_distinct_prefixes(db, managed_db_connection):
+    """Opportunities in one program often share a name; a workspace spanning them
+    must build instead of failing on a prefix collision (#916). The older source's
+    view names must not move when the other source's schema comes and goes."""
+    ws, t1, t2 = _make_long_named_workspace("CHC Nutrition", "opp-1", "CHC Nutrition", "opp-2")
+    Tenant.objects.filter(pk=t1.pk).update(created_at=timezone.now() - timedelta(days=1))
+    t1.refresh_from_db()
+    conn = managed_db_connection
+    c = conn.cursor()
+    try:
+        for schema in ("build_same_a", "build_same_b"):
+            c.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+            c.execute(f"CREATE TABLE IF NOT EXISTS {schema}.visits (id TEXT)")
+    finally:
+        c.close()
+
+    mgr = SchemaManager()
+    assert mgr._view_prefix(t1) == mgr._view_prefix(t2) == "chcnutrition"
+    ts1 = TenantSchema.objects.create(
+        tenant=t1, schema_name="build_same_a", state=SchemaState.ACTIVE
+    )
+    ts2 = None
+    vs = None
+    try:
+        vs = mgr.build_view_schema(ws)
+        assert "chcnutrition__visits" in _view_names(conn, vs.schema_name)
+
+        ts2 = TenantSchema.objects.create(
+            tenant=t2, schema_name="build_same_b", state=SchemaState.ACTIVE
+        )
+        vs = mgr.build_view_schema(ws)
+        assert vs.state == SchemaState.ACTIVE
+
+        prefixes = mgr._view_prefixes([t1, t2])
+        assert prefixes[t1] == "chcnutrition"
+        assert prefixes[t2] != "chcnutrition"
+        assert {"chcnutrition__visits", f"{prefixes[t2]}__visits"} <= _view_names(
+            conn, vs.schema_name
+        )
+    finally:
+        c3 = conn.cursor()
+        try:
+            if vs:
+                c3.execute(f"DROP SCHEMA IF EXISTS {vs.schema_name} CASCADE")
+            c3.execute("DROP SCHEMA IF EXISTS build_same_a CASCADE")
+            c3.execute("DROP SCHEMA IF EXISTS build_same_b CASCADE")
+        finally:
+            c3.close()
+        if vs:
+            vs.delete()
+        ts1.delete()
+        if ts2:
+            ts2.delete()
+
+
+def test_view_prefixes_keep_names_without_a_collision(db):
+    _ws, t1, t2 = _make_long_named_workspace("Alpha", "a-1", "Beta", "b-1")
+
+    assert SchemaManager()._view_prefixes([t1, t2]) == {t1: "alpha", t2: "beta"}
+
+
 def test_build_view_schema_two_long_names_shared_head_get_distinct_prefixes(
     db, managed_db_connection
 ):
@@ -1183,3 +1256,159 @@ def test_teardown_view_schema_drops_role_despite_table_acl_from_stale_default_ac
         if vs:
             vs.delete()
         ts.delete()
+
+
+def test_view_prefixes_separate_same_slug_tenants_on_two_servers(db):
+    """www and EU CommCare can hold one domain slug as two tenants (#719)."""
+    t1 = Tenant.objects.create(provider="commcare", external_id="chc", canonical_name="chc")
+    t2 = Tenant.objects.create(
+        provider="commcare", server="eu", external_id="chc", canonical_name="chc"
+    )
+
+    prefixes = SchemaManager()._view_prefixes([t1, t2])
+
+    assert len(set(prefixes.values())) == 2
+
+
+def test_view_prefixes_keep_the_published_plain_prefix_holder(db):
+    """A younger same-named source that already published plain views keeps them
+    when an older one starts loading, rather than being renamed."""
+    _ws, older, younger = _make_long_named_workspace("CHC", "opp-1", "CHC", "opp-2")
+    Tenant.objects.filter(pk=older.pk).update(created_at=timezone.now() - timedelta(days=1))
+    older.refresh_from_db()
+    mgr = SchemaManager()
+
+    views = {"chc__visits": {"tenant_id": str(younger.id), "source_table_name": "visits"}}
+    prefixes = mgr._view_prefixes([older, younger], {"version": 1, "views": views})
+
+    assert prefixes[younger] == "chc"
+    assert prefixes[older] != "chc"
+    assert mgr._view_prefixes([older, younger])[older] == "chc"
+
+
+def test_view_prefixes_find_a_fitted_multibyte_plain_holder(db):
+    """A long multibyte prefix is cut when its view name is fitted to 63 bytes, so
+    the published holder must be found by its exact name."""
+    amharic = "ፕሮግራም የአመጋገብ ድጋፍ ጤና ክትትል"
+    _ws, older, younger = _make_long_named_workspace(amharic, "opp-1", amharic, "opp-2")
+    Tenant.objects.filter(pk=older.pk).update(created_at=timezone.now() - timedelta(days=1))
+    older.refresh_from_db()
+    mgr = SchemaManager()
+    plain = mgr._view_prefix(younger)
+    fitted = view_name(plain, "visits")
+    assert not fitted.startswith(f"{plain}__")
+
+    views = {fitted: {"tenant_id": str(younger.id), "source_table_name": "visits"}}
+
+    assert mgr._view_prefixes([older, younger], {"views": views})[younger] == plain
+
+
+def test_build_keeps_the_younger_sources_published_names(db, managed_db_connection):
+    """The younger of two same-named sources loaded first keeps its plain view
+    names when the older one loads, and the older keeps its own when it leaves."""
+    ws, older, younger = _make_long_named_workspace("CHC", "opp-1", "CHC", "opp-2")
+    Tenant.objects.filter(pk=older.pk).update(created_at=timezone.now() - timedelta(days=1))
+    older.refresh_from_db()
+    conn = managed_db_connection
+    c = conn.cursor()
+    try:
+        for schema in ("build_young_a", "build_young_b"):
+            c.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+            c.execute(f"CREATE TABLE IF NOT EXISTS {schema}.visits (id TEXT)")
+    finally:
+        c.close()
+
+    mgr = SchemaManager()
+    plain_name = view_name(mgr._view_prefix(younger), "visits")
+    ts_young = TenantSchema.objects.create(
+        tenant=younger, schema_name="build_young_b", state=SchemaState.ACTIVE
+    )
+    ts_old = None
+    vs = None
+    try:
+        # As main published it: the younger source alone, under the plain prefix.
+        WorkspaceTenant.objects.filter(workspace=ws, tenant=older).delete()
+        vs = mgr.build_view_schema(ws)
+        assert vs.view_sources["views"][plain_name]["tenant_id"] == str(younger.id)
+        WorkspaceTenant.objects.create(workspace=ws, tenant=older)
+        vs = mgr.build_view_schema(ws)
+        assert vs.view_sources["views"][plain_name]["tenant_id"] == str(younger.id)
+
+        ts_old = TenantSchema.objects.create(
+            tenant=older, schema_name="build_young_a", state=SchemaState.ACTIVE
+        )
+        vs = mgr.build_view_schema(ws)
+        views = vs.view_sources["views"]
+        assert views[plain_name]["tenant_id"] == str(younger.id)
+        older_name = next(n for n, v in views.items() if v["tenant_id"] == str(older.id))
+        assert older_name != plain_name
+        assert {plain_name, older_name} <= _view_names(conn, vs.schema_name)
+
+        TenantSchema.objects.filter(pk=ts_young.pk).update(state=SchemaState.EXPIRED)
+        vs = mgr.build_view_schema(ws)
+        assert set(vs.view_sources["views"]) == {older_name}
+        # Again with only the older source loaded: it must not take the freed plain name.
+        vs = mgr.build_view_schema(ws)
+        assert set(vs.view_sources["views"]) == {older_name}
+
+        TenantSchema.objects.filter(pk=ts_young.pk).update(state=SchemaState.ACTIVE)
+        vs = mgr.build_view_schema(ws)
+        assert set(vs.view_sources["views"]) == {older_name, plain_name}
+        assert vs.view_sources["views"][plain_name]["tenant_id"] == str(younger.id)
+    finally:
+        c3 = conn.cursor()
+        try:
+            if vs:
+                c3.execute(f"DROP SCHEMA IF EXISTS {vs.schema_name} CASCADE")
+            c3.execute("DROP SCHEMA IF EXISTS build_young_a CASCADE")
+            c3.execute("DROP SCHEMA IF EXISTS build_young_b CASCADE")
+        finally:
+            c3.close()
+        if vs:
+            vs.delete()
+        ts_young.delete()
+        if ts_old:
+            ts_old.delete()
+
+
+def test_view_prefixes_prefer_a_loaded_source_without_a_record(db):
+    """A row from before view provenance has no record; the loaded source is the one
+    that published the plain name on main, so it keeps it."""
+    _ws, older, younger = _make_long_named_workspace("CHC", "opp-1", "CHC", "opp-2")
+    Tenant.objects.filter(pk=older.pk).update(created_at=timezone.now() - timedelta(days=1))
+    older.refresh_from_db()
+    mgr = SchemaManager()
+
+    prefixes = mgr._view_prefixes([older, younger], {}, {younger.id})
+
+    assert prefixes[younger] == "chc"
+    assert prefixes[older] != "chc"
+
+
+def test_view_prefixes_reuse_recorded_assignments(db):
+    _ws, older, younger = _make_long_named_workspace("CHC", "opp-1", "CHC", "opp-2")
+    mgr = SchemaManager()
+    digest = mgr._collision_view_prefix(younger)
+    recorded = {"prefixes": {str(younger.id): digest, str(older.id): "chc"}}
+
+    assert mgr._view_prefixes([younger], recorded) == {younger: digest}
+    assert mgr._view_prefixes([older, younger], recorded) == {older: "chc", younger: digest}
+
+
+def test_unloaded_sources_without_evidence_are_not_pinned(db):
+    """Neither same-named source loaded and nothing recorded: pinning the older one
+    would take the plain name from the other, which published it before records."""
+    _ws, older, younger = _make_long_named_workspace("CHC", "opp-1", "CHC", "opp-2")
+    Tenant.objects.filter(pk=older.pk).update(created_at=timezone.now() - timedelta(days=1))
+    older.refresh_from_db()
+    mgr = SchemaManager()
+
+    prefixes = mgr._view_prefixes([older, younger], {}, set())
+    assert mgr._recordable_prefixes(prefixes, {}, set()) == {}
+
+    # When the younger one reloads, it is the loaded source and takes the plain name.
+    assert mgr._view_prefixes([older, younger], {}, {younger.id})[younger] == "chc"
+    recorded = mgr._recordable_prefixes(
+        mgr._view_prefixes([older, younger], {}, {younger.id}), {}, {younger.id}
+    )
+    assert recorded == {str(younger.id): "chc"}

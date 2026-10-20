@@ -469,7 +469,7 @@ export function Sidebar() {
                       title={
                         job.progress?.source
                           ? `Loading ${job.progress.source}${job.progress.rows_loaded ? ` — ${job.progress.rows_loaded.toLocaleString()} rows` : ""}`
-                          : (job.progress?.message ?? "Materializing...")
+                          : (job.progress?.message ?? "Loading data…")
                       }
                     >
                       <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />

@@ -1,10 +1,13 @@
-import { fireEvent, render, screen } from "@testing-library/react"
+import { act, fireEvent, render, screen } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { api } from "@/api/client"
 import type { WorkspaceListItem } from "@/api/workspaces"
+import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 import { useAppStore } from "@/store/store"
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher"
+
+vi.mock("@/components/CreateWorkspaceModal", () => ({ CreateWorkspaceModal: vi.fn(() => null) }))
 
 const LAST_LOAD = "2026-04-16T12:00:00Z"
 const AVAILABILITY_NOTE = "Current availability is checked when opening an artifact."
@@ -184,5 +187,135 @@ describe("provider tabs", () => {
     expect(screen.getByTestId("workspace-lost-connections")).toHaveTextContent(
       "Check Connected Accounts",
     )
+  })
+})
+
+describe("workspace sources", () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useAppStore.setState(useAppStore.getInitialState(), true)
+  })
+
+  const multiSource = workspace({
+    id: "program",
+    display_name: "CHC program",
+    tenants: [
+      { id: "t-a", tenant_name: "CHC Kenya", provider: "commcare_connect" },
+      { id: "t-b", tenant_name: "CHC Uganda", provider: "commcare_connect" },
+    ],
+  })
+
+  it("names every source of the active workspace on the trigger", () => {
+    openSwitcher([multiSource])
+
+    expect(screen.getByTestId("domain-selector")).toHaveAttribute(
+      "title",
+      "2 data sources: CHC Kenya, CHC Uganda",
+    )
+  })
+
+  it("marks multi-source rows with their source count", () => {
+    openSwitcher([workspace(), multiSource])
+    fireEvent.click(screen.getByTestId("workspace-seg-all"))
+
+    expect(screen.getByTestId("workspace-source-count-program")).toHaveTextContent("2 sources")
+    expect(screen.queryByTestId("workspace-source-count-workspace-recorded")).toBeNull()
+  })
+
+  it("opens when another part of the app asks for it", () => {
+    useAppStore.setState({ domains: [workspace()], activeDomainId: "workspace-recorded" })
+    render(
+      <MemoryRouter>
+        <WorkspaceSwitcher />
+      </MemoryRouter>,
+    )
+    expect(screen.queryByTestId("workspace-search")).toBeNull()
+
+    act(() => useAppStore.getState().uiActions.openWorkspaceSwitcher())
+
+    expect(screen.getByTestId("workspace-search")).toBeInTheDocument()
+  })
+
+  it("keeps an open switcher's search on a repeat request", () => {
+    openSwitcher()
+    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "rec" } })
+
+    act(() => useAppStore.getState().uiActions.openWorkspaceSwitcher())
+
+    expect(screen.getByTestId("workspace-search")).toHaveValue("rec")
+  })
+
+  it("ignores a request made before it mounted", () => {
+    useAppStore.setState({ domains: [workspace()], activeDomainId: "workspace-recorded" })
+    act(() => useAppStore.getState().uiActions.openWorkspaceSwitcher())
+
+    render(
+      <MemoryRouter>
+        <WorkspaceSwitcher />
+      </MemoryRouter>,
+    )
+
+    expect(screen.queryByTestId("workspace-search")).toBeNull()
+    expect(useAppStore.getState().workspaceSwitcherMounts).toBe(1)
+  })
+})
+
+describe("combining search matches", () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useAppStore.setState(useAppStore.getInitialState(), true)
+    vi.mocked(CreateWorkspaceModal).mockClear()
+  })
+
+  function opp(id: string, name: string): WorkspaceListItem {
+    return workspace({
+      id,
+      display_name: name,
+      tenants: [{ id: `tenant-${id}`, tenant_name: name, provider: "commcare_connect" }],
+    })
+  }
+
+  it("offers a workspace spanning every source the search matches", async () => {
+    vi.useFakeTimers()
+    openSwitcher([opp("k", "CHC Kenya"), opp("u", "CHC Uganda"), opp("x", "Other")])
+    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
+
+    fireEvent.click(screen.getByTestId("workspace-combine-matches"))
+    await act(async () => vi.runAllTimers())
+    vi.useRealTimers()
+
+    expect(vi.mocked(CreateWorkspaceModal).mock.lastCall?.[0]).toMatchObject({
+      initialName: "CHC",
+      initialSourceIds: ["tenant-k", "tenant-u"],
+    })
+  })
+
+  it("leaves out the non-matching sources of a matched multi-source workspace", async () => {
+    vi.useFakeTimers()
+    const mixed = workspace({
+      id: "m",
+      display_name: "East Africa",
+      tenants: [
+        { id: "tenant-mk", tenant_name: "CHC Kenya 2", provider: "commcare_connect" },
+        { id: "tenant-mo", tenant_name: "Other Program", provider: "commcare_connect" },
+      ],
+    })
+    openSwitcher([opp("k", "CHC Kenya"), mixed])
+    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
+
+    fireEvent.click(screen.getByTestId("workspace-combine-matches"))
+    await act(async () => vi.runAllTimers())
+    vi.useRealTimers()
+
+    expect(vi.mocked(CreateWorkspaceModal).mock.lastCall?.[0]).toMatchObject({
+      initialSourceIds: ["tenant-k", "tenant-mk"],
+    })
+  })
+
+  it("does not offer to combine a single match", () => {
+    openSwitcher([opp("k", "CHC Kenya"), opp("x", "Other")])
+    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
+
+    expect(screen.queryByTestId("workspace-combine-matches")).toBeNull()
   })
 })

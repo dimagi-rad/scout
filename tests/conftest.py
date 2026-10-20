@@ -9,6 +9,7 @@ from allauth.socialaccount.models import SocialApp
 from django.contrib.auth import get_user_model
 from django.contrib.sites.models import Site
 
+from apps.users import tasks as users_tasks
 from apps.users.models import Tenant, TenantMembership
 from apps.users.providers.ocs.provider import OCSProvider
 from apps.workspaces.models import (
@@ -21,6 +22,17 @@ from tests.pipeline_doubles import no_candidate_ddl  # noqa: F401 (registers the
 from tests.production_settings import PRODUCTION_SETTINGS, load_production_settings
 from tests.tenant_access import grant_tenant_access, record_fresh_proof, usable_connection
 from tests.upstream_proofs import ProviderStub
+
+
+@pytest.fixture(autouse=True)
+def no_queued_ocs_probe(monkeypatch):
+    """OCS discovery queues a chatbot probe; a real queue row would outlive the
+    test's transaction (procrastinate_jobs is unmanaged)."""
+
+    async def not_queued(**_kwargs):
+        return None
+
+    monkeypatch.setattr(users_tasks.probe_ocs_chatbots, "defer_async", not_queued)
 
 
 @pytest.fixture
