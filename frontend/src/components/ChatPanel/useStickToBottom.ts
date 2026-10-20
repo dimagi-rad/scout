@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 
-const BOTTOM_THRESHOLD_PX = 80
+// Re-attach only at the true bottom; any user scroll away from a pinned view detaches.
+const BOTTOM_THRESHOLD_PX = 8
 
 interface Detached {
   content: unknown
@@ -52,18 +53,11 @@ export function useStickToBottom(
     else setDetached((prev) => (prev && current ? prev : { content, streamingText, resetKey, forceKey }))
   }
 
-  // Small upward wheel moves stay inside the bottom threshold, so detach on intent.
-  const onWheel = (e: { deltaY: number }) => {
-    if (e.deltaY < 0 && isStuck) {
-      setDetached({ content, streamingText, resetKey, forceKey })
-    }
-  }
-
   const jumpToBottom = useCallback(() => {
     setDetached(null)
     const el = ref.current
     if (el) el.scrollTop = el.scrollHeight
   }, [ref])
 
-  return { onScroll, onWheel, hasNewBelow, jumpToBottom }
+  return { onScroll, hasNewBelow, jumpToBottom }
 }

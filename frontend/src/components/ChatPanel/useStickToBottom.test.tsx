@@ -45,12 +45,23 @@ describe("useStickToBottom", () => {
     expect(screen.queryByTestId("jump")).not.toBeInTheDocument()
   })
 
+  it("detaches on a small upward scroll from a pinned view", () => {
+    const { rerender } = render(<Harness content="one" />)
+    const el = screen.getByTestId("scroller")
+    layout(el, 600)
+    rerender(<Harness content="two" />)
+    act(() => layout(el, 560))
+    rerender(<Harness content="three" />)
+    expect(el.scrollTop).toBe(560)
+    expect(screen.getByTestId("jump")).toBeInTheDocument()
+  })
+
   it("resumes following when the user scrolls back to the bottom", () => {
     const { rerender } = render(<Harness content="one" />)
     const el = screen.getByTestId("scroller")
     layout(el, 100)
     rerender(<Harness content="two" />)
-    act(() => layout(el, 590))
+    act(() => layout(el, 600))
     expect(screen.queryByTestId("jump")).not.toBeInTheDocument()
     rerender(<Harness content="three" />)
     expect(el.scrollTop).toBe(1000)
