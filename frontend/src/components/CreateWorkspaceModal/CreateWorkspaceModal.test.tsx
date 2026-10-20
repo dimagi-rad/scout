@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { MemoryRouter } from "react-router-dom"
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
 import { beforeEach, expect, it, vi } from "vitest"
 
 import { workspaceApi } from "@/api/workspaces"
@@ -12,11 +12,17 @@ vi.mock("@/api/userTenantsCache", () => ({
   getUserTenantsCached: vi.fn(),
   refreshUserTenants: vi.fn(),
 }))
+const storeActions = vi.hoisted(() => ({
+  fetchDomains: vi.fn(), setActiveDomain: vi.fn(), newThread: vi.fn(),
+}))
 vi.mock("@/store/store", () => {
   const state = {
     user: { id: "user" }, domains: [], domainsStatus: "loaded",
     accountSession: { isCurrent: () => true },
-    domainActions: { fetchDomains: vi.fn(), setActiveDomain: vi.fn() },
+    domainActions: {
+      fetchDomains: storeActions.fetchDomains, setActiveDomain: storeActions.setActiveDomain,
+    },
+    uiActions: { newThread: storeActions.newThread },
   }
   return { useAppStore: (selector: (value: typeof state) => unknown) => selector(state) }
 })
@@ -33,10 +39,19 @@ beforeEach(() => {
   })
 })
 
-async function openModal() {
+function CurrentPath() {
+  return <div data-testid="current-path">{useLocation().pathname}</div>
+}
+
+async function openModal(path = "/workspaces") {
   const user = userEvent.setup()
   const onClose = vi.fn()
-  render(<MemoryRouter><CreateWorkspaceModal onClose={onClose} /></MemoryRouter>)
+  render(
+    <MemoryRouter initialEntries={[path]}>
+      <CreateWorkspaceModal onClose={onClose} />
+      <Routes><Route path="*" element={<CurrentPath />} /></Routes>
+    </MemoryRouter>,
+  )
   await screen.findByTestId("create-sources-list")
   await user.type(screen.getByLabelText("Name"), "Analysis")
   return { user, onClose }
@@ -166,6 +181,30 @@ it("creates with the selected source", async () => {
   await user.click(screen.getByTestId("create-workspace-submit"))
   await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
   expect(workspaceApi.create).toHaveBeenCalledExactlyOnceWith("Analysis", ["tenant-a"])
+})
+
+it("opens a fresh chat in the new workspace", async () => {
+  const { user } = await openModal()
+  await user.click(screen.getByTestId("create-source-tenant-a"))
+  await user.click(screen.getByTestId("create-workspace-submit"))
+
+  await waitFor(() =>
+    expect(screen.getByTestId("current-path")).toHaveTextContent("/workspaces/analysis/workspace/chat"),
+  )
+  expect(storeActions.setActiveDomain).toHaveBeenCalledExactlyOnceWith("workspace")
+  expect(storeActions.newThread).toHaveBeenCalledOnce()
+})
+
+it("keeps the embed prefix when opening the new workspace's chat", async () => {
+  const { user } = await openModal("/embed/workspaces")
+  await user.click(screen.getByTestId("create-source-tenant-a"))
+  await user.click(screen.getByTestId("create-workspace-submit"))
+
+  await waitFor(() =>
+    expect(screen.getByTestId("current-path")).toHaveTextContent(
+      "/embed/workspaces/analysis/workspace/chat",
+    ),
+  )
 })
 
 it("refuses to create a workspace with no source (#381)", async () => {
