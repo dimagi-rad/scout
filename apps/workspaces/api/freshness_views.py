@@ -1,5 +1,7 @@
 """Async API view for per-source data freshness (the chat's stale-data banner, #173)."""
 
+import logging
+
 from django.conf import settings
 from django.http import JsonResponse
 
@@ -11,6 +13,8 @@ from apps.workspaces.services.source_freshness import (
     provider_label,
 )
 from apps.workspaces.workspace_resolver import aresolve_workspace
+
+logger = logging.getLogger(__name__)
 
 
 @async_login_required
@@ -29,7 +33,12 @@ async def source_freshness_view(request, workspace_id):
         return err
 
     sources = await aworkspace_source_freshness(workspace.id, user.id)
-    summaries = await aload_summaries(source["tenant_id"] for source in sources)
+    try:
+        summaries = await aload_summaries(source["tenant_id"] for source in sources)
+    except Exception:
+        # The most optional part of the payload; the banner must still work without it.
+        logger.exception("Could not read load summaries for %s", workspace.id)
+        summaries = {}
     in_progress = await aworkspace_load_pending(workspace.id)
     return JsonResponse(
         {

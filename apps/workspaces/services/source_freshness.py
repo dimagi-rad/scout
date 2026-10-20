@@ -154,7 +154,7 @@ def _load_summary(result) -> dict | None:
         tables.append(table)
     return {
         "tables": tables,
-        "total_rows": sum(t["rows"] or 0 for t in tables if t["state"] == "completed"),
+        "total_rows": sum(t["rows"] or 0 for t in tables),
     }
 
 
