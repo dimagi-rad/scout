@@ -66,12 +66,32 @@ def prune_messages(
     # Only a history that is nothing but ToolMessages still opens on one.
     while pruned_conversation and isinstance(pruned_conversation[0], ToolMessage):
         pruned_conversation = pruned_conversation[1:]
-    # A backed-up round can fill the window; shed the oldest pins, never the latest.
     overflow = len(pinned) + len(pruned_conversation) - max_messages
     if overflow > 0 and pinned:
-        pinned = pinned[min(overflow, len(pinned) - 1) :]
+        pinned = _shed_pins(pinned, overflow)
 
     return system_messages + pinned + pruned_conversation
+
+
+def _shed_pins(pinned: list[BaseMessage], count: int) -> list[BaseMessage]:
+    """Drop up to ``count`` pins when a backed-up round fills the window.
+
+    Markers and assistant text go first, then older user messages; the user's
+    latest own message stays, since without it the turn has no request (#919).
+    """
+
+    def is_user_text(message: BaseMessage) -> bool:
+        return isinstance(message, HumanMessage) and not _is_resume_marker(message)
+
+    keep = max(
+        (k for k, message in enumerate(pinned) if is_user_text(message)),
+        default=len(pinned) - 1,
+    )
+    order = sorted(
+        (k for k in range(len(pinned)) if k != keep), key=lambda k: (is_user_text(pinned[k]), k)
+    )
+    dropped = set(order[:count])
+    return [message for k, message in enumerate(pinned) if k not in dropped]
 
 
 def _is_resume_marker(message: BaseMessage) -> bool:

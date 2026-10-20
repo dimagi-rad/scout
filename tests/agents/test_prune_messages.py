@@ -23,11 +23,11 @@ KK_QUESTION = (
 )
 
 
-def _parallel_tool_rounds(rounds: int, calls_per_round: int = 2) -> list:
+def _parallel_tool_rounds(rounds: int, calls_per_round: int = 2, prefix: str = "t") -> list:
     messages = []
     for r in range(rounds):
         calls = [
-            {"name": "query", "args": {"sql": "SELECT 1"}, "id": f"t{r}-{c}"}
+            {"name": "query", "args": {"sql": "SELECT 1"}, "id": f"{prefix}{r}-{c}"}
             for c in range(calls_per_round)
         ]
         messages.append(AIMessage(content="", tool_calls=calls))
@@ -128,18 +128,37 @@ def test_short_reply_keeps_the_question_it_answers():
 def test_an_earlier_turns_wide_round_still_ages_out():
     history = [
         HumanMessage(content="earlier"),
-        *_parallel_tool_rounds(1, calls_per_round=25),
+        *_parallel_tool_rounds(1, calls_per_round=25, prefix="old"),
         AIMessage(content="Done."),
         HumanMessage(content="next"),
-        *_parallel_tool_rounds(1, calls_per_round=3),
+        *_parallel_tool_rounds(1, calls_per_round=3, prefix="new"),
     ]
 
     pruned = prune_messages(history)
 
     assert len(pruned) <= DEFAULT_MAX_MESSAGES
-    assert not any(
-        isinstance(m, ToolMessage) and m.tool_call_id.startswith("t0-1") for m in pruned[:-3]
-    )
+    assert not any(isinstance(m, ToolMessage) and m.tool_call_id.startswith("old") for m in pruned)
+    _assert_tool_pairs_intact(pruned)
+
+
+def test_resume_into_a_window_filling_round_keeps_the_question_over_the_marker():
+    question = HumanMessage(content=KK_QUESTION)
+    marker = HumanMessage(content=f"{SYSTEM_RESUME_MARKER} Materialization just completed.")
+    history = [
+        question,
+        AIMessage(
+            content="", tool_calls=[{"name": "run_materialization", "args": {}, "id": "load"}]
+        ),
+        ToolMessage(content="started", tool_call_id="load", name="run_materialization"),
+        AIMessage(content="Loading."),
+        marker,
+        *_parallel_tool_rounds(1, calls_per_round=19),
+    ]
+
+    pruned = prune_messages(history)
+
+    # The round alone fills the window; the question outranks the bound and the marker.
+    assert pruned == [question, *history[-20:]]
     _assert_tool_pairs_intact(pruned)
 
 
