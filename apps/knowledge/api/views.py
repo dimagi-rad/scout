@@ -6,7 +6,8 @@ import zipfile
 
 import yaml
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Case, F, Q, TextField, When
+from django.db.models.functions import Length, Substr
 from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser
@@ -16,11 +17,16 @@ from rest_framework.views import APIView
 
 from apps.common.http import string_field
 from apps.knowledge.models import KnowledgeEntry
-from apps.knowledge.utils import parse_frontmatter, render_frontmatter
+from apps.knowledge.services.reference_documents import (
+    MAX_UPLOAD_BYTES,
+    ReferenceDocumentError,
+    decode_upload,
+)
+from apps.knowledge.utils import parse_frontmatter_meta, render_frontmatter
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
-from .serializers import KnowledgeEntrySerializer
+from .serializers import REFERENCE_PREVIEW_CHARS, KnowledgeEntrySerializer
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +37,22 @@ MAX_PAGE_SIZE = 200
 # base, which is re-billed into the system prompt on every LLM call (arch #254, 01#4).
 MAX_IMPORT_DECOMPRESSED_BYTES = 25 * 1024 * 1024
 
+
+def _list_entries(queryset):
+    """Defer ``content`` so a page of multi-megabyte reference documents isn't loaded."""
+    return queryset.defer("content").annotate(
+        content_size=Length("content"),
+        listed_content=Case(
+            When(
+                kind=KnowledgeEntry.Kind.REFERENCE,
+                then=Substr("content", 1, REFERENCE_PREVIEW_CHARS),
+            ),
+            default=F("content"),
+            output_field=TextField(),
+        ),
+    )
+
+
 KNOWLEDGE_TYPES = {
     "entry": {
         "model": KnowledgeEntry,
@@ -38,6 +60,7 @@ KNOWLEDGE_TYPES = {
         "search_fields": ["title", "content"],
         # Join created_by so the page slice doesn't N+1 (arch #254, 05#7).
         "select_related": ["created_by"],
+        "list_queryset": _list_entries,
     },
 }
 # AgentLearning rows are workspace memory now (#849): listed and changed only through
@@ -102,6 +125,9 @@ class KnowledgeListCreateView(APIView):
             total_count += queryset.count()
 
             page_window = queryset.order_by("-created_at")
+            list_queryset = type_config.get("list_queryset")
+            if list_queryset:
+                page_window = list_queryset(page_window)
             select_related = type_config.get("select_related")
             if select_related:
                 page_window = page_window.select_related(*select_related)
@@ -198,7 +224,7 @@ class KnowledgeDetailView(APIView):
                 {"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND
             )
 
-        serializer = serializer_class(item)
+        serializer = serializer_class(item, context={"full_content": True})
         return Response(serializer.data)
 
     def put(self, request, workspace_id, item_id):
@@ -276,7 +302,9 @@ class KnowledgeExportView(APIView):
                     filename = f"{safe_title}_{suffix}.md"
                     suffix += 1
                 used_filenames.add(filename)
-                content = render_frontmatter(entry.title, entry.tags or [], entry.content)
+                content = render_frontmatter(
+                    entry.title, entry.tags or [], entry.content, extra=_reference_meta(entry)
+                )
                 zf.writestr(filename, content)
 
         buf.seek(0)
@@ -362,10 +390,11 @@ class KnowledgeImportView(APIView):
                         errors.append({"file": name, "error": "File is not valid UTF-8."})
                         continue
                     try:
-                        title, tags, body = parse_frontmatter(raw)
+                        title, tags, body, meta = parse_frontmatter_meta(raw)
                     except (ValueError, yaml.YAMLError) as exc:
                         errors.append({"file": name, "error": f"Malformed frontmatter: {exc}"})
                         continue
+                    fields = {"content": body, "tags": tags, **_reference_fields(meta)}
 
                     if not title:
                         skipped += 1
@@ -374,15 +403,11 @@ class KnowledgeImportView(APIView):
                     pool = available_by_title.get(title)
                     if pool:
                         pk = pool.pop(0)
-                        KnowledgeEntry.objects.filter(pk=pk).update(content=body, tags=tags)
+                        KnowledgeEntry.objects.filter(pk=pk).update(**fields)
                         updated += 1
                     else:
                         KnowledgeEntry.objects.create(
-                            workspace=workspace,
-                            title=title,
-                            content=body,
-                            tags=tags,
-                            created_by=request.user,
+                            workspace=workspace, title=title, created_by=request.user, **fields
                         )
                         created += 1
         except Exception:
@@ -395,3 +420,87 @@ class KnowledgeImportView(APIView):
         payload = {"created": created, "updated": updated, "skipped": skipped, "errors": errors}
         http_status = status.HTTP_207_MULTI_STATUS if errors else status.HTTP_200_OK
         return Response(payload, status=http_status)
+
+
+def _reference_meta(entry: KnowledgeEntry) -> dict:
+    if entry.kind != KnowledgeEntry.Kind.REFERENCE:
+        return {}
+    meta = {"kind": entry.kind}
+    if entry.description:
+        meta["description"] = entry.description
+    if entry.source_format:
+        meta["source_format"] = entry.source_format
+    return meta
+
+
+def _reference_fields(meta: dict) -> dict:
+    """An imported entry's kind fields, so a reference document round-trips as one."""
+    if meta.get("kind") != KnowledgeEntry.Kind.REFERENCE:
+        return {"kind": KnowledgeEntry.Kind.NOTE, "description": "", "source_format": ""}
+    source_format = meta.get("source_format", "")
+    return {
+        "kind": KnowledgeEntry.Kind.REFERENCE,
+        "description": " ".join(str(meta.get("description") or "").split())[:500],
+        "source_format": (
+            source_format if source_format in KnowledgeEntry.SourceFormat.values else ""
+        ),
+    }
+
+
+class KnowledgeUploadView(APIView):
+    """
+    POST /api/workspaces/<id>/knowledge/upload/
+
+    Upload one file (JSON, CSV, TSV, Markdown or text; UTF-8; up to 2 MB) as a
+    reference document (#913). ``title`` and ``description`` are optional; the
+    title defaults to the file name.
+    """
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser]
+
+    def post(self, request, workspace_id):
+        workspace, _membership, err = resolve_workspace(
+            request, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+        )
+        if err:
+            return err
+
+        uploaded = request.FILES.get("file")
+        if not uploaded:
+            return Response(
+                {"error": "No file uploaded. Send the document as 'file'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Checked before reading so an oversized upload is never pulled into memory.
+        if uploaded.size > MAX_UPLOAD_BYTES:
+            return Response(
+                {
+                    "error": (
+                        f"File is too large ({uploaded.size:,} bytes); the limit is "
+                        f"{MAX_UPLOAD_BYTES:,} bytes."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            decoded = decode_upload(uploaded.name, uploaded.read())
+        except ReferenceDocumentError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        title = str(request.data.get("title") or "").strip() or decoded.title
+        description = str(request.data.get("description") or "") or decoded.description
+        serializer = KnowledgeEntrySerializer(
+            data={
+                "title": title,
+                "description": " ".join(description.split()),
+                "content": decoded.content,
+                "kind": KnowledgeEntry.Kind.REFERENCE,
+                "source_format": decoded.source_format,
+                "tags": [],
+            }
+        )
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        instance = serializer.save(workspace=workspace, created_by=request.user)
+        return Response(KnowledgeEntrySerializer(instance).data, status=status.HTTP_201_CREATED)
