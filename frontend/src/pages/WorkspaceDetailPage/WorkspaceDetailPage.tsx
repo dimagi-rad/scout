@@ -134,7 +134,7 @@ export function WorkspaceDetailPage() {
     <div className="p-6">
       <div className="mb-6">
         <Link
-          to="/workspaces"
+          to={`${location.pathname.startsWith("/embed") ? "/embed" : ""}/workspaces`}
           className="mb-3 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
           data-testid="back-to-workspaces"
         >
