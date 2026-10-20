@@ -1268,3 +1268,19 @@ def test_view_prefixes_separate_same_slug_tenants_on_two_servers(db):
     prefixes = SchemaManager()._view_prefixes([t1, t2])
 
     assert len(set(prefixes.values())) == 2
+
+
+def test_view_prefixes_keep_the_published_plain_prefix_holder(db):
+    """A younger same-named source that already published plain views keeps them
+    when an older one starts loading, rather than being renamed."""
+    _ws, older, younger = _make_long_named_workspace("CHC", "opp-1", "CHC", "opp-2")
+    Tenant.objects.filter(pk=older.pk).update(created_at=timezone.now() - timedelta(days=1))
+    older.refresh_from_db()
+    mgr = SchemaManager()
+
+    published = {"chc__visits": {"tenant_id": str(younger.id), "source_table_name": "visits"}}
+    prefixes = mgr._view_prefixes([older, younger], published)
+
+    assert prefixes[younger] == "chc"
+    assert prefixes[older] != "chc"
+    assert mgr._view_prefixes([older, younger])[older] == "chc"

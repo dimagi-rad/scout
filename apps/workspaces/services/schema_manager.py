@@ -691,24 +691,34 @@ class SchemaManager:
         digest = hashlib.sha256(str(tenant.id).encode("utf-8")).hexdigest()[:8]
         return f"{sanitized[:23]}_{digest}"
 
-    def _view_prefixes(self, tenants) -> dict:
+    def _view_prefixes(self, tenants, published_views=None) -> dict:
         """Map each tenant to its view prefix, digesting only the prefixes that collide.
 
         Connect opportunities in one program often share a name, so a cross-opportunity
         workspace used to fail its whole build on the collision (#916). Pass every
         workspace tenant, not only the loaded ones, so a source dropping out never
-        renames the others' views. In a colliding group the oldest source keeps the
-        plain prefix, so adding a same-named source leaves the existing views alone.
+        renames the others' views. In a colliding group the source that already
+        published under the plain prefix (``published_views``, the last build's
+        ``view_sources["views"]``) keeps it, else the oldest source does.
         """
         plain = {tenant: self._view_prefix(tenant) for tenant in tenants}
-        oldest: dict[str, object] = {}
-        for tenant in sorted(tenants, key=lambda t: (t.created_at, str(t.id))):
-            oldest.setdefault(plain[tenant], tenant)
+        published_plain = {
+            source.get("tenant_id")
+            for name, source in (published_views or {}).items()
+            for tenant, prefix in plain.items()
+            if source.get("tenant_id") == str(tenant.id) and name.startswith(f"{prefix}__")
+        }
+        holder: dict[str, object] = {}
+        for tenant in sorted(
+            tenants,
+            key=lambda t: (str(t.id) not in published_plain, t.created_at, str(t.id)),
+        ):
+            holder.setdefault(plain[tenant], tenant)
         counts = Counter(plain.values())
         return {
             tenant: (
                 self._collision_view_prefix(tenant)
-                if counts[prefix] > 1 and oldest[prefix] != tenant
+                if counts[prefix] > 1 and holder[prefix] != tenant
                 else prefix
             )
             for tenant, prefix in plain.items()
@@ -854,7 +864,7 @@ class SchemaManager:
             tenant_prefixes: list[tuple[str, Tenant, str]] = []
             # Use the threaded tenant objects, NOT a lookup by external_id —
             # that raises MultipleObjectsReturned across providers (arch #235).
-            view_prefixes = self._view_prefixes(tenants)
+            view_prefixes = self._view_prefixes(tenants, (vs.view_sources or {}).get("views"))
             for schema_name, tenant_obj in tenant_schemas:
                 tenant_external_id = tenant_obj.external_id
                 prefix = view_prefixes[tenant_obj]

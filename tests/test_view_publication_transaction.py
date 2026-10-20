@@ -709,7 +709,9 @@ def test_a_deterministic_plan_failure_on_an_active_row_is_reported_failed(owned,
 
     with (
         patch.object(
-            SchemaManager, "_view_prefixes", lambda _self, tenants: dict.fromkeys(tenants, "same")
+            SchemaManager,
+            "_view_prefixes",
+            lambda _self, tenants, _published=None: dict.fromkeys(tenants, "same"),
         ),
         pytest.raises(ValueError, match="collision"),
     ):
