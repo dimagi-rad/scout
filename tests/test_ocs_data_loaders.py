@@ -573,21 +573,29 @@ def test_message_loader_fetches_details_concurrently():
     assert len(pages) == workers
 
 
+def _peak_tracking_fetch(gate: threading.Barrier):
+    """A fetch that records the peak in flight and waits for ``gate``'s full party."""
+    lock = threading.Lock()
+    state = {"in_flight": 0, "peak": 0}
+
+    def fetch(url):
+        with lock:
+            state["in_flight"] += 1
+            state["peak"] = max(state["peak"], state["in_flight"])
+        try:
+            gate.wait()
+        finally:
+            with lock:
+                state["in_flight"] -= 1
+        return {"messages": []}
+
+    return fetch, state
+
+
 @override_settings(OCS_DETAIL_FETCH_CONCURRENCY=3)
 def test_message_loader_per_load_concurrency_is_a_setting():
     loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
-    lock = threading.Lock()
-    in_flight = peak = 0
-
-    def fetch(url):
-        nonlocal in_flight, peak
-        with lock:
-            in_flight += 1
-            peak = max(peak, in_flight)
-        time.sleep(0.02)
-        with lock:
-            in_flight -= 1
-        return {"messages": []}
+    fetch, state = _peak_tracking_fetch(threading.Barrier(3, timeout=5))
 
     with (
         patch.object(
@@ -596,25 +604,33 @@ def test_message_loader_per_load_concurrency_is_a_setting():
         patch.object(loader, "_get_json", side_effect=fetch),
     ):
         assert len(list(loader.load_pages())) == 12
-    assert peak == 3
+    assert state["peak"] == 3
 
 
 @override_settings(OCS_DETAIL_FETCH_CONCURRENCY=4, OCS_DETAIL_FETCH_PROCESS_LIMIT=5)
 def test_concurrent_loads_share_the_process_wide_fetch_limit():
     """Three worker jobs loading OCS at once must not triple the load on OCS."""
+    # No fetch finishes until five are in flight at once (proving the cap is
+    # reachable); without the cap up to 12 would then be in flight.
     lock = threading.Lock()
-    in_flight = peak = 0
-    all_started = threading.Barrier(3, timeout=5)
+    five_in_flight = threading.Event()
+    state = {"in_flight": 0, "peak": 0}
 
     def fetch(url):
-        nonlocal in_flight, peak
         with lock:
-            in_flight += 1
-            peak = max(peak, in_flight)
-        time.sleep(0.02)
-        with lock:
-            in_flight -= 1
+            state["in_flight"] += 1
+            state["peak"] = max(state["peak"], state["in_flight"])
+            if state["in_flight"] >= 5:
+                five_in_flight.set()
+        try:
+            five_in_flight.wait(5)
+            time.sleep(0.01)
+        finally:
+            with lock:
+                state["in_flight"] -= 1
         return {"messages": []}
+
+    all_started = threading.Barrier(3, timeout=5)
 
     def run_load(results):
         loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
@@ -636,8 +652,16 @@ def test_concurrent_loads_share_the_process_wide_fetch_limit():
     for load in loads:
         load.join(timeout=10)
     assert results == [20, 20, 20]
-    # 3 loads x 4 would be 12 at once without the process cap.
-    assert peak <= 5
+    assert state["peak"] == 5
+
+
+def test_fetch_parked_on_a_process_slot_skips_once_its_load_stopped():
+    loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    stopped = threading.Event()
+    stopped.set()
+    with patch.object(loader, "_get_json") as get_json:
+        assert loader._session_messages("sess-1", stopped) == []
+    get_json.assert_not_called()
 
 
 def test_message_loader_yields_sessions_in_list_order_when_fetches_finish_out_of_order():

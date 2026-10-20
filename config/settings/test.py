@@ -11,6 +11,10 @@ from .base import _build_caches
 
 DEBUG = False
 
+# The OCS loader tests fill a full load's worth of concurrent fetches.
+OCS_DETAIL_FETCH_CONCURRENCY = 8
+OCS_DETAIL_FETCH_PROCESS_LIMIT = 10
+
 PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.MD5PasswordHasher",
 ]

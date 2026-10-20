@@ -27,13 +27,24 @@ logger = logging.getLogger(__name__)
 # under the session adapter's default pool of 10 connections so no request waits
 # on a socket; the per-process limit keeps several concurrent loads from
 # multiplying it against OCS. A slot is held through _get_json's Retry-After
-# sleeps, so a 429 slows every load in the process, not just one.
+# sleeps and its shared 401 token refresh, so a 429 or a refresh slows every load
+# in the process, not just one.
+# requests' HTTPAdapter default pool_maxsize (ocs_base.py mounts it unchanged).
+_ADAPTER_POOL_SIZE = 10
 _process_slots_lock = threading.Lock()
 _process_slots: tuple[int, threading.BoundedSemaphore] | None = None
 
 
 def detail_fetch_concurrency() -> int:
-    return max(1, settings.OCS_DETAIL_FETCH_CONCURRENCY)
+    """Per-load threads; more than the process limit would only sit idle."""
+    return max(
+        1,
+        min(
+            settings.OCS_DETAIL_FETCH_CONCURRENCY,
+            settings.OCS_DETAIL_FETCH_PROCESS_LIMIT,
+            _ADAPTER_POOL_SIZE,
+        ),
+    )
 
 
 def detail_fetch_window() -> int:
@@ -45,6 +56,8 @@ def _process_fetch_slots() -> threading.BoundedSemaphore:
     global _process_slots
     limit = max(1, settings.OCS_DETAIL_FETCH_PROCESS_LIMIT)
     with _process_slots_lock:
+        # Only test settings change the limit; holders of a replaced semaphore
+        # release into it, so the cap is briefly old + new.
         if _process_slots is None or _process_slots[0] != limit:
             _process_slots = (limit, threading.BoundedSemaphore(limit))
         return _process_slots[1]
@@ -111,12 +124,15 @@ class OCSMessageLoader(OCSBaseLoader):
         pending: deque[tuple[str, Future]] = deque()
         remaining = iter(session_ids)
         window = detail_fetch_window()
+        stopped = threading.Event()
         executor = ThreadPoolExecutor(
             max_workers=detail_fetch_concurrency(), thread_name_prefix="ocs-session-detail"
         )
         try:
             for session_id in remaining:
-                pending.append((session_id, executor.submit(self._session_messages, session_id)))
+                pending.append(
+                    (session_id, executor.submit(self._session_messages, session_id, stopped))
+                )
                 if len(pending) >= window:
                     break
             while pending:
@@ -124,17 +140,24 @@ class OCSMessageLoader(OCSBaseLoader):
                 messages = future.result()
                 next_id = next(remaining, None)
                 if next_id is not None:
-                    pending.append((next_id, executor.submit(self._session_messages, next_id)))
+                    pending.append(
+                        (next_id, executor.submit(self._session_messages, next_id, stopped))
+                    )
                 yield session_id, messages
         finally:
+            # A thread already parked on a process slot is past cancel_futures'
+            # reach; this stops it from fetching once it gets the slot.
+            stopped.set()
             executor.shutdown(wait=False, cancel_futures=True)
 
-    def _session_messages(self, session_id: str) -> list:
+    def _session_messages(self, session_id: str, stopped: threading.Event) -> list:
         # A session with no messages legitimately omits/empties the key, so a
         # missing ``messages`` is treated as empty (not an error) — but the JSON
         # parse itself is validated via _get_json (finding 03#6).
         try:
             with _process_fetch_slots():
+                if stopped.is_set():
+                    return []
                 detail = self._get_json(f"{self.base_url}/api/sessions/{session_id}/")
         finally:
             # A mid-run token refresh persists through the ORM; without this the
