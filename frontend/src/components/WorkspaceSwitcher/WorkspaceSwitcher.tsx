@@ -19,6 +19,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
+import { CombineSourcesPanel } from "./CombineSourcesPanel"
 
 const ROW_HEIGHT = 36 // px, matches a single list row
 const LIST_MAX_HEIGHT = 288 // px (max-h-72)
@@ -211,6 +212,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   const [search, setSearch] = useState("")
   const [segment, setSegment] = useState<SegmentKey>("recent")
   const [recordedLoadsOnly, setRecordedLoadsOnly] = useState(false)
+  const [combining, setCombining] = useState(false)
   const [highlight, setHighlight] = useState(0)
   const [createModal, setCreateModal] = useState<{ name: string; sourceIds: string[] } | null>(
     null,
@@ -291,21 +293,6 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     return list
   }, [accessible, recent, handMade, search, segment, recordedLoadsOnly])
 
-  // The switcher picks one workspace, so a cross-opportunity question needs a new one
-  // (#916): offer to combine every source behind the current search's matches.
-  const searchTerm = search.trim()
-  const matchedSourceIds = useMemo(() => {
-    if (!searchTerm || visible.length < 2) return []
-    const q = searchTerm.toLowerCase()
-    // A multi-source workspace matched on one source must not drag in its others.
-    const sourcesOf = (ws: WorkspaceListItem) => {
-      const tenants = ws.tenants ?? []
-      const matching = tenants.filter((t) => t.tenant_name.toLowerCase().includes(q))
-      return (matching.length > 0 ? matching : tenants).map((t) => t.id)
-    }
-    return [...new Set(visible.flatMap(sourcesOf))]
-  }, [searchTerm, visible])
-
   // Lost-access workspaces matching the current search (or provider tab), shown
   // disabled below.
   const lostVisible = useMemo(() => {
@@ -347,6 +334,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   function close() {
     setOpen(false)
     setSearch("")
+    setCombining(false)
   }
 
   function handleOpenChange(o: boolean) {
@@ -357,9 +345,11 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
       const hasSuggestions =
         ids.length > 0 || accessible.some((d) => !d.is_auto_created)
       setSegment(hasSuggestions ? "recent" : "all")
+      setCombining(false)
       resetView()
     } else {
       setSearch("")
+      setCombining(false)
     }
   }
 
@@ -409,6 +399,8 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
+    // The combine panel has its own inputs; Enter there must not switch workspace.
+    if (combining) return
     if (e.key === "ArrowDown") {
       e.preventDefault()
       setHighlight((h) => Math.min(h + 1, shown.length - 1))
@@ -539,6 +531,13 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
           align={variant === "topbar" ? "end" : "start"}
           onKeyDown={onKeyDown}
         >
+          {combining ? (
+            <CombineSourcesPanel
+              onBack={() => setCombining(false)}
+              onCombine={(name, sourceIds) => openCreate(name, sourceIds)}
+            />
+          ) : (
+          <>
           <div className="border-b p-2">
             <div className="relative">
               <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -674,18 +673,14 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
           </div>
 
           <div className="border-t p-1">
-            {matchedSourceIds.length > 1 && (
-              <button
-                data-testid="workspace-combine-matches"
-                onClick={() => openCreate(searchTerm, matchedSourceIds)}
-                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm font-medium text-primary transition-colors hover:bg-accent"
-              >
-                <Layers className="h-3.5 w-3.5 shrink-0" />
-                <span className="truncate">
-                  New workspace from {matchedSourceIds.length} matching sources
-                </span>
-              </button>
-            )}
+            <button
+              data-testid="workspace-combine-toggle"
+              onClick={() => setCombining(true)}
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+            >
+              <Layers className="h-3.5 w-3.5" />
+              Combine sources…
+            </button>
             <button
               data-testid="workspace-manage"
               onClick={() => {
@@ -706,6 +701,8 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
               New workspace from one or more sources
             </button>
           </div>
+          </>
+          )}
         </PopoverContent>
       </Popover>
 

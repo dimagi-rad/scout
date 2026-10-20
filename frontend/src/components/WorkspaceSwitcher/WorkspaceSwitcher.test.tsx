@@ -3,11 +3,26 @@ import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { api } from "@/api/client"
 import type { WorkspaceListItem } from "@/api/workspaces"
+import type { UserTenant } from "@/api/auth"
+import { getUserTenantsCached } from "@/api/userTenantsCache"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 import { useAppStore } from "@/store/store"
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher"
 
 vi.mock("@/components/CreateWorkspaceModal", () => ({ CreateWorkspaceModal: vi.fn(() => null) }))
+vi.mock("@/api/userTenantsCache", () => ({ getUserTenantsCached: vi.fn() }))
+
+function tenant(id: string, name: string, provider = "commcare_connect"): UserTenant {
+  return {
+    id: `membership-${id}`,
+    tenant_uuid: `tenant-${id}`,
+    provider,
+    tenant_id: id,
+    tenant_name: name,
+    last_selected_at: null,
+  }
+}
+
 const LAST_LOAD = "2026-04-16T12:00:00Z"
 const AVAILABILITY_NOTE = "Current availability is checked when opening an artifact."
 
@@ -259,63 +274,47 @@ describe("workspace sources", () => {
   })
 })
 
-describe("combining search matches", () => {
+describe("combining sources", () => {
   beforeEach(() => {
     localStorage.clear()
     useAppStore.setState(useAppStore.getInitialState(), true)
+    useAppStore.setState({ user: { id: "user-1" } as never })
     vi.mocked(CreateWorkspaceModal).mockClear()
+    vi.mocked(getUserTenantsCached).mockResolvedValue([
+      tenant("k", "CHC Nutrition Kenya"),
+      tenant("u", "CHC Nutrition Uganda"),
+    ])
   })
 
-  function opp(id: string, name: string): WorkspaceListItem {
-    return workspace({
-      id,
-      display_name: name,
-      tenants: [{ id: `tenant-${id}`, tenant_name: name, provider: "commcare_connect" }],
+  it("is a separate mode, so plain switching stays one click", async () => {
+    openSwitcher()
+    expect(screen.queryByTestId("workspace-basket-option-tenant-k")).toBeNull()
+
+    fireEvent.click(screen.getByTestId("workspace-combine-toggle"))
+    expect(screen.queryByTestId("workspace-list")).toBeNull()
+    fireEvent.change(await screen.findByTestId("workspace-basket-search"), {
+      target: { value: "CHC" },
     })
-  }
+    fireEvent.click(await screen.findByTestId("workspace-basket-option-tenant-k"))
+    fireEvent.click(screen.getByTestId("workspace-basket-option-tenant-u"))
 
-  it("offers a workspace spanning every source the search matches", async () => {
     vi.useFakeTimers()
-    openSwitcher([opp("k", "CHC Kenya"), opp("u", "CHC Uganda"), opp("x", "Other")])
-    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
-
-    fireEvent.click(screen.getByTestId("workspace-combine-matches"))
+    fireEvent.click(screen.getByTestId("workspace-basket-combine"))
     await act(async () => vi.runAllTimers())
     vi.useRealTimers()
 
     expect(vi.mocked(CreateWorkspaceModal).mock.lastCall?.[0]).toMatchObject({
-      initialName: "CHC",
+      initialName: "CHC Nutrition (2 sources)",
       initialSourceIds: ["tenant-k", "tenant-u"],
     })
   })
 
-  it("leaves out the non-matching sources of a matched multi-source workspace", async () => {
-    vi.useFakeTimers()
-    const mixed = workspace({
-      id: "m",
-      display_name: "East Africa",
-      tenants: [
-        { id: "tenant-mk", tenant_name: "CHC Kenya 2", provider: "commcare_connect" },
-        { id: "tenant-mo", tenant_name: "Other Program", provider: "commcare_connect" },
-      ],
-    })
-    openSwitcher([opp("k", "CHC Kenya"), mixed])
-    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
+  it("goes back to the workspace list", async () => {
+    openSwitcher()
+    fireEvent.click(screen.getByTestId("workspace-combine-toggle"))
+    fireEvent.click(await screen.findByTestId("workspace-combine-back"))
 
-    fireEvent.click(screen.getByTestId("workspace-combine-matches"))
-    await act(async () => vi.runAllTimers())
-    vi.useRealTimers()
-
-    expect(vi.mocked(CreateWorkspaceModal).mock.lastCall?.[0]).toMatchObject({
-      initialSourceIds: ["tenant-k", "tenant-mk"],
-    })
-  })
-
-  it("does not offer to combine a single match", () => {
-    openSwitcher([opp("k", "CHC Kenya"), opp("x", "Other")])
-    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
-
-    expect(screen.queryByTestId("workspace-combine-matches")).toBeNull()
+    expect(screen.getByTestId("workspace-list")).toBeInTheDocument()
   })
 })
 
