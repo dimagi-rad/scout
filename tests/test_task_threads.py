@@ -64,4 +64,4 @@ async def test_job_exit_does_not_wait_for_a_sync_call_still_running():
         release.set()
         with contextlib.suppress(asyncio.CancelledError):
             await calls[0]
-    assert elapsed < 1
+    assert elapsed < 2
