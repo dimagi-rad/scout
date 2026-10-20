@@ -189,11 +189,16 @@ async def active_jobs_view(request, workspace_id):
 
     job_ids = [j.procrastinate_job_id for j in jobs]
     runs_by_job: dict[int, dict] = {}
+    active_runs_by_job: dict[int, dict] = {}
     async for r in MaterializationRun.objects.filter(
         procrastinate_job_id__in=job_ids,
     ).order_by("started_at"):
-        # Last wins — the currently active tenant_schema run.
+        # Last wins: the post-load phases are written to the latest run. Sources
+        # load concurrently, so one that finished must not hide one still loading.
         runs_by_job[r.procrastinate_job_id] = r.progress or {}
+        if r.state in MaterializationRun.ACTIVE_STATES:
+            active_runs_by_job[r.procrastinate_job_id] = r.progress or {}
+    runs_by_job.update(active_runs_by_job)
 
     workspace_loads = await aworkspace_load_progress(workspace)
     loads_by_job = {
