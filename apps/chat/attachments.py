@@ -2,7 +2,10 @@
 
 Bytes live in ``AttachmentBlob`` keyed by (sha256, size), so the same screenshot
 pasted twice is stored once. Callers only ever reach a blob through a
-``ChatAttachment`` row they own.
+``ChatAttachment`` row they own, so no one can read another user's file. Dedup is
+global, though, so an upload of bytes someone else already stored skips one insert
+and returns slightly faster: a timing side channel that could at most confirm a
+guessed file exists. Accepted as low impact; per-workspace keys would close it.
 """
 
 from __future__ import annotations
@@ -19,11 +22,19 @@ from django.db import IntegrityError
 from django.db.models import Exists, OuterRef, ProtectedError
 from django.utils import timezone
 
+from apps.chat.image_headers import MalformedImage, read_image_header
 from apps.chat.models import AttachmentBlob, ChatAttachment
 
 logger = logging.getLogger(__name__)
 
-MAX_IMAGE_BYTES = 5 * 1024 * 1024
+# The Messages API caps an image at 5 MB of base64 on Bedrock and Vertex (10 MB on
+# the direct API); base64 is 4/3 the raw size, so 3.75 MB raw fits everywhere.
+# https://platform.claude.com/docs/en/build-with-claude/vision#request-limits
+MAX_IMAGE_BYTES = 3_932_160
+# The API rejects an image over 8000 px on either side. Requests with more than 20
+# images impose 2000 px; the model-call budget keeps them to 20
+# (apps/agents/graph/attachments.py), so 8000 px is the limit that applies.
+MAX_IMAGE_DIMENSION = 8000
 MAX_TEXT_BYTES = 2 * 1024 * 1024
 MAX_ATTACHMENTS_PER_MESSAGE = 10
 # Unsent uploads a user may hold at once; GC frees them after UNSENT_TTL.
@@ -69,21 +80,32 @@ class ValidatedFile:
     filename: str
 
 
-def sniff_image_type(head: bytes) -> str | None:
-    """The image media type the leading bytes prove, or None.
+def _mb(size: int) -> str:
+    return f"{size / (1024 * 1024):g} MB"
 
-    Magic bytes rather than the client's claim: a renamed file must not reach the
-    model as an image block it cannot decode.
+
+def _validated_image(content: bytes, name: str) -> ValidatedFile | None:
+    """The upload as an image when its header proves one, else None.
+
+    Typed by its header, never the client's claim: a file that only starts like an
+    image would reach the model as a block the API rejects on every later turn.
     """
-    if head.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if head.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if head.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP":
-        return "image/webp"
-    return None
+    try:
+        header = read_image_header(content)
+    except MalformedImage:
+        raise AttachmentRejected("attachment_invalid", "The image file is not readable.") from None
+    if header is None:
+        return None
+    if len(content) > MAX_IMAGE_BYTES:
+        raise AttachmentRejected(
+            "attachment_too_large", f"Images can be at most {_mb(MAX_IMAGE_BYTES)}."
+        )
+    if max(header.width, header.height) > MAX_IMAGE_DIMENSION:
+        raise AttachmentRejected(
+            "attachment_too_large",
+            f"Images can be at most {MAX_IMAGE_DIMENSION} pixels on each side.",
+        )
+    return ValidatedFile(content=content, media_type=header.media_type, filename=name)
 
 
 def clean_filename(raw: str | None) -> str:
@@ -105,26 +127,23 @@ def _base_media_type(claimed: str | None) -> str:
 def validate_upload(content: bytes, *, filename: str | None, claimed_type: str | None):
     """Decide what an upload is, or raise ``AttachmentRejected``.
 
-    Images are recognised by content alone; anything else must be one of the
-    allowed text formats (by extension, or by its claimed type when the name has
-    none) and decode as UTF-8.
+    A file with a text extension is text, whatever its first bytes. Otherwise images
+    are recognised by their header alone; anything else must be one of the allowed
+    text formats (by its claimed type when the name has no extension) and decode as
+    UTF-8.
     """
     name = clean_filename(filename)
     if not content:
         raise AttachmentRejected("attachment_invalid", "The file is empty.")
 
-    image_type = sniff_image_type(content[:16])
-    if image_type is not None:
-        if len(content) > MAX_IMAGE_BYTES:
-            raise AttachmentRejected(
-                "attachment_too_large",
-                f"Images can be at most {MAX_IMAGE_BYTES // (1024 * 1024)} MB.",
-            )
-        return ValidatedFile(content=content, media_type=image_type, filename=name)
-
-    claimed = _base_media_type(claimed_type)
     suffix = PurePath(name).suffix.lower()
     text_type = TEXT_MEDIA_TYPES_BY_EXTENSION.get(suffix)
+    if text_type is None:
+        image = _validated_image(content, name)
+        if image is not None:
+            return image
+
+    claimed = _base_media_type(claimed_type)
     if text_type is None and not suffix:
         text_type = _TEXT_MEDIA_TYPE_ALIASES.get(claimed)
     if text_type is None:
@@ -137,7 +156,7 @@ def validate_upload(content: bytes, *, filename: str | None, claimed_type: str |
     if len(content) > MAX_TEXT_BYTES:
         raise AttachmentRejected(
             "attachment_too_large",
-            f"Text files can be at most {MAX_TEXT_BYTES // (1024 * 1024)} MB.",
+            f"Text files can be at most {_mb(MAX_TEXT_BYTES)}.",
         )
     try:
         content.decode("utf-8")
@@ -148,13 +167,17 @@ def validate_upload(content: bytes, *, filename: str | None, claimed_type: str |
     return ValidatedFile(content=content, media_type=text_type, filename=name)
 
 
-async def _blob_id_for(content: bytes) -> int:
-    sha256 = hashlib.sha256(content).hexdigest()
-    existing = (
-        await AttachmentBlob.objects.filter(sha256=sha256, size=len(content))
+async def _existing_blob_id(sha256: str, size: int) -> int | None:
+    return (
+        await AttachmentBlob.objects.filter(sha256=sha256, size=size)
         .values_list("id", flat=True)
         .afirst()
     )
+
+
+async def _blob_id_for(content: bytes) -> int:
+    sha256 = hashlib.sha256(content).hexdigest()
+    existing = await _existing_blob_id(sha256, len(content))
     if existing is not None:
         return existing
     try:

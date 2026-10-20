@@ -67,7 +67,7 @@ async def attachment_upload_view(request):
     if upload.size > MAX_IMAGE_BYTES:
         return _rejected(
             "attachment_too_large",
-            f"Attachments can be at most {MAX_IMAGE_BYTES // (1024 * 1024)} MB.",
+            f"Attachments can be at most {MAX_IMAGE_BYTES / (1024 * 1024):g} MB.",
         )
     if await acount_unsent(user) >= MAX_UNSENT_PER_USER:
         return JsonResponse(

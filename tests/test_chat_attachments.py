@@ -1,7 +1,6 @@
 """Chat attachment upload, download, dedup and garbage collection (#913)."""
 
 import hashlib
-import struct
 import uuid
 from datetime import timedelta
 
@@ -17,17 +16,14 @@ from apps.chat.attachments import (
     AttachmentRejected,
     acollect_garbage,
     attachment_id_from_url,
-    sniff_image_type,
     validate_upload,
 )
 from apps.chat.models import AttachmentBlob, ChatAttachment, Thread
 from apps.chat.rate_limiting import check_and_record
 from apps.workspaces.models import WorkspaceMembership
+from tests import image_fixtures as images
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
-JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
-GIF = b"GIF89a" + b"\x00" * 64
-WEBP = b"RIFF" + struct.pack("<I", 60) + b"WEBP" + b"\x00" * 56
+PNG = images.png()
 
 UPLOAD_URL = "/api/chat/attachments/"
 
@@ -62,16 +58,46 @@ async def _upload(client, workspace, content, name, content_type):
 
 @pytest.mark.parametrize(
     ("content", "expected"),
-    [(PNG, "image/png"), (JPEG, "image/jpeg"), (GIF, "image/gif"), (WEBP, "image/webp")],
+    [
+        (images.png(), "image/png"),
+        (images.jpeg(), "image/jpeg"),
+        (images.gif(), "image/gif"),
+        (images.webp_vp8x(), "image/webp"),
+    ],
     ids=["png", "jpeg", "gif", "webp"],
 )
-def test_sniff_image_type(content, expected):
-    assert sniff_image_type(content[:16]) == expected
+def test_validate_types_images_by_header(content, expected):
+    assert validate_upload(content, filename="shot", claimed_type="").media_type == expected
 
 
-def test_sniff_rejects_svg_and_text():
-    assert sniff_image_type(b"<svg xmlns='http://www.w3.org/2000/svg'/>") is None
-    assert sniff_image_type(b"RIFF\x00\x00\x00\x00WAVE") is None
+def test_validate_prefers_text_when_the_extension_says_text():
+    validated = validate_upload(b"GIF89a is a format", filename="notes.txt", claimed_type="")
+    assert validated.media_type == "text/plain"
+
+
+def test_validate_rejects_a_text_file_with_jpeg_magic_as_text():
+    with pytest.raises(AttachmentRejected) as excinfo:
+        validate_upload(b"\xff\xd8\xff<html>garbage", filename="a.txt", claimed_type="")
+    assert excinfo.value.reason == "attachment_invalid"
+    assert "UTF-8" in excinfo.value.message
+
+
+def test_validate_rejects_an_image_whose_header_is_malformed():
+    with pytest.raises(AttachmentRejected) as excinfo:
+        validate_upload(b"\xff\xd8\xff<html>garbage", filename="a.jpg", claimed_type="")
+    assert excinfo.value.reason == "attachment_invalid"
+
+
+def test_validate_rejects_images_over_the_api_dimension_limit():
+    validate_upload(images.png(8000, 10), filename="wide.png", claimed_type="")
+    with pytest.raises(AttachmentRejected) as excinfo:
+        validate_upload(images.png(8001, 10), filename="wide.png", claimed_type="")
+    assert excinfo.value.reason == "attachment_too_large"
+
+
+def test_image_cap_fits_the_api_base64_limit():
+    # The API's 5 MB image cap (Bedrock, Vertex) counts base64, 4/3 of the raw size.
+    assert attachments.MAX_IMAGE_BYTES * 4 / 3 <= 5 * 1024 * 1024
 
 
 def test_validate_ignores_claimed_image_type():
@@ -244,6 +270,7 @@ async def test_owner_downloads_image_inline(user, workspace):
     assert resp["X-Content-Type-Options"] == "nosniff"
     assert resp["Content-Disposition"].startswith("inline")
     assert resp["Cache-Control"] == "private, max-age=300"
+    assert resp["Content-Security-Policy"] == "default-src 'none'; sandbox"
 
 
 @pytest.mark.asyncio
@@ -431,3 +458,42 @@ async def test_download_needs_current_workspace_access(user, workspace):
     url = (await _upload(client, workspace, PNG, "shot.png", "image/png")).json()["url"]
     await WorkspaceMembership.objects.filter(user=user, workspace=workspace).adelete()
     assert (await client.get(url)).status_code in (403, 404)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_download_header_survives_unicode_and_crlf_in_the_filename(user, workspace):
+    raw_name = "r\u00e9sum\u00e9\r\nX-Evil: 1.csv"
+    assert attachments.clean_filename(raw_name) == "r\u00e9sum\u00e9X-Evil: 1.csv"
+    blob = await AttachmentBlob.objects.acreate(sha256="c" * 64, size=3, content=b"a,b")
+    stored = await ChatAttachment.objects.acreate(
+        blob=blob,
+        user=user,
+        workspace=workspace,
+        filename=attachments.clean_filename(raw_name),
+        media_type="text/csv",
+    )
+    client = await _client(user.email)
+    resp = await client.get(f"/api/chat/attachments/{stored.id}/")
+    disposition = resp["Content-Disposition"]
+    assert "\r" not in disposition and "\n" not in disposition
+    assert disposition == "attachment; filename*=utf-8''r%C3%A9sum%C3%A9X-Evil%3A%201.csv"
+    assert "X-Evil" not in dict(resp.items())
+    assert resp["Content-Security-Policy"] == "default-src 'none'; sandbox"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_concurrent_identical_upload_reuses_the_winners_blob(monkeypatch):
+    content = images.png(5, 5)
+    winner = await AttachmentBlob.objects.acreate(
+        sha256=hashlib.sha256(content).hexdigest(), size=len(content), content=content
+    )
+
+    async def lost_the_race(sha256, size):
+        # The other upload inserted between this one's lookup and its insert.
+        return None
+
+    monkeypatch.setattr(attachments, "_existing_blob_id", lost_the_race)
+    assert await attachments._blob_id_for(content) == winner.pk
+    assert await AttachmentBlob.objects.acount() == 1
