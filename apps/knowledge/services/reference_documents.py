@@ -47,6 +47,7 @@ MAX_WINDOW_LINES = 25
 
 MAX_PROMPT_LISTED_DOCUMENTS = 25
 _PROMPT_DESCRIPTION_CHARS = 160
+_PROMPT_TITLE_CHARS = 100
 _PROMPT_HEAD_CHARS = 400
 
 REFERENCE_DOCUMENTS_HEADING = "## Reference Documents"
@@ -170,7 +171,8 @@ async def aformat_reference_documents_for_prompt(workspace: Workspace) -> str:
         "",
     ]
     for doc in documents:
-        title = _one_line(doc.title).replace('"', "'")
+        # Cut without an ellipsis, so the shown prefix still resolves as a title fragment.
+        title = _one_line(doc.title).replace('"', "'")[:_PROMPT_TITLE_CHARS]
         fmt = (doc.source_format or "text").upper()
         summary = _one_line(doc.description) or _head_summary(doc.head)
         line = f'- "{title}" ({fmt}, {doc.content_size:,} chars)'

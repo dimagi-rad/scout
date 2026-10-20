@@ -183,6 +183,29 @@ class TestUploadView:
         assert sorted(error["file"] for error in resp.data["errors"]) == ["big.md", "nul.md"]
         assert list(KnowledgeEntry.objects.values_list("title", "kind")) == [("Ok", "reference")]
 
+    def test_import_of_a_note_does_not_replace_a_reference_document(self, api_client, workspace):
+        _reference(workspace)
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("old.md", "---\ntitle: Indicator registry\n---\n\nold note body")
+        archive.seek(0)
+        archive.name = "import.zip"
+
+        resp = api_client.post(
+            reverse("knowledge:import", kwargs={"workspace_id": workspace.id}),
+            {"file": archive},
+            format="multipart",
+        )
+
+        assert resp.status_code == status.HTTP_207_MULTI_STATUS, resp.data
+        entry = KnowledgeEntry.objects.get()
+        assert (entry.kind, entry.content) == ("reference", REGISTRY_TEXT)
+
+    def test_upload_rejects_nul_in_title(self, api_client, workspace):
+        resp = _upload(api_client, workspace, "codes.csv", b"code\nA\n", title="bad\x00title")
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert not KnowledgeEntry.objects.exists()
+
     def test_kind_cannot_be_set_through_the_entry_api(self, api_client, workspace):
         created = api_client.post(
             reverse("knowledge:list_create", kwargs={"workspace_id": workspace.id}),

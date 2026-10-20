@@ -381,10 +381,13 @@ class KnowledgeImportView(APIView):
         # re-import updates in place (idempotent) while N duplicate titles map to
         # N entries instead of collapsing onto one (arch #262, finding 05#8).
         available_by_title: dict[str, list] = {}
-        for pk, title in KnowledgeEntry.objects.filter(workspace=workspace).values_list(
-            "id", "title"
+        reference_pks: set = set()
+        for pk, title, kind in KnowledgeEntry.objects.filter(workspace=workspace).values_list(
+            "id", "title", "kind"
         ):
             available_by_title.setdefault(title, []).append(pk)
+            if kind == KnowledgeEntry.Kind.REFERENCE:
+                reference_pks.add(pk)
 
         # Atomic: a hard DB failure rolls back the whole batch (arch #262, finding
         # 05#8). Per-entry parse/decode errors are collected, not fatal.
@@ -427,6 +430,22 @@ class KnowledgeImportView(APIView):
                         continue
 
                     pool = available_by_title.get(title)
+                    if (
+                        pool
+                        and pool[0] in reference_pks
+                        and fields["kind"] != KnowledgeEntry.Kind.REFERENCE
+                    ):
+                        # A note (or a pre-#913 export) must not replace a document's body.
+                        errors.append(
+                            {
+                                "file": name,
+                                "error": (
+                                    "A reference document already has this title; rename "
+                                    "the entry or delete the document first."
+                                ),
+                            }
+                        )
+                        continue
                     if pool:
                         pk = pool.pop(0)
                         KnowledgeEntry.objects.filter(pk=pk).update(**fields)
@@ -519,6 +538,11 @@ class KnowledgeUploadView(APIView):
         description = (
             " ".join(str(request.data.get("description") or "").split()) or decoded.description
         )
+        if "\x00" in title or "\x00" in description:
+            return Response(
+                {"error": "Title and description cannot contain NUL characters."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         # Built here rather than through the serializer, where kind and format are
         # read-only so only this path (and import) can create a reference document.
         entry = KnowledgeEntry(

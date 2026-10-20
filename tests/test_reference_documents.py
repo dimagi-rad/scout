@@ -95,6 +95,18 @@ class TestPromptListing:
         assert "truncated" not in result
 
     @pytest.mark.asyncio
+    async def test_long_titles_are_cut_to_a_resolvable_prefix(self, workspace):
+        await KnowledgeEntry.objects.acreate(
+            workspace=workspace, title="R" * 250, content="x", kind="reference"
+        )
+        result = await KnowledgeRetriever(workspace).retrieve()
+        assert f'- "{"R" * 100}" (TEXT' in result
+
+        tool = create_reference_document_tool(workspace)
+        read = await tool.ainvoke({"title_or_id": "R" * 100})
+        assert read["status"] == "ok"
+
+    @pytest.mark.asyncio
     async def test_listing_falls_back_to_first_meaningful_line(self, workspace):
         await KnowledgeEntry.objects.acreate(
             workspace=workspace,
