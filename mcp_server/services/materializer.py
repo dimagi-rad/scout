@@ -463,6 +463,7 @@ def run_pipeline(
         current_source = None
 
         # After every source, so a slow scan never holds up the next source's fetch.
+        # A failed or cancelled load raises before this, so its tables get no range.
         for source in sources_list:
             if (source_results.get(source.name) or {}).get("state") != "completed":
                 continue
@@ -1330,7 +1331,9 @@ _DROP_STATEMENTS = {
 # A summary is not worth stalling the load for: an unindexed scan of a very
 # large table gives up and the summary just omits that table's dates.
 _DATE_RANGE_TIMEOUT_MS = 10_000
-_NATIVE_TIME_TYPES = frozenset({"timestamp with time zone", "timestamp without time zone", "date"})
+# Not "timestamp without time zone": its offset-less value would read as local
+# time in the browser; the event-time parser treats it as UTC instead.
+_NATIVE_TIME_TYPES = frozenset({"timestamp with time zone", "date"})
 
 
 def _source_date_range(schema_name: str, provider: str, table: str) -> dict | None:
