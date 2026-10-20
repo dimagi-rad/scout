@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from allauth.socialaccount.models import SocialToken
@@ -46,6 +47,10 @@ from apps.workspaces.models import Workspace
 
 TENANT_REFRESH_TTL = 3600  # seconds (1 hour)
 FORCED_REFRESH_FLOOR = 60  # seconds between user-requested refreshes that hit upstream
+# A failing upstream is retried after this, not on every poll (#918).
+TENANT_REFRESH_FAILURE_TTL = 60  # seconds
+# Bounds a refresh another request is already running; outlives the listing deadline.
+TENANT_REFRESH_INFLIGHT_TTL = 120  # seconds
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +71,10 @@ async def _arefresh_all_identities(user, *, force: bool = False) -> None:
     the first team refreshed cheaply and then suppressed the second for an hour —
     so the second team's chatbots could stay missing indefinitely (#156).
 
-    Each identity is independent: one team's failure must not stop the others, and
-    a raise means "skip refresh" (never revoke on an inconclusive fetch), so the
-    TTL is only written on success.
+    Identities refresh concurrently and independently: one team's failure must not
+    stop the others, and a raise means "skip refresh" (never revoke on an
+    inconclusive fetch). A failure is retried after a short TTL rather than on
+    every poll, so one failing upstream does not slow every page load (#918).
 
     ``force`` bypasses the per-identity TTL so a user can pick up an opportunity or
     domain they were just added to. A per-user floor keeps a spammed button from
@@ -78,27 +84,43 @@ async def _arefresh_all_identities(user, *, force: bool = False) -> None:
         f"tenant_refresh_floor:{user.id}", True, FORCED_REFRESH_FLOOR
     ):
         force = False
-    for provider, resolve in _PROVIDER_RESOLVERS.items():
-        for token_obj in await aiter_social_tokens(user, provider):
-            cache_key = f"tenant_refresh:{user.id}:{provider}:{token_obj.account_id}"
-            if not force and await cache.aget(cache_key):
-                continue
-            try:
-                credential = await _aresolve_oauth_credential(
-                    token_obj, provider, account_scope(token_obj.account)
-                )
-                await resolve(
-                    user, credential["value"], social_account=token_obj.account, allow_replace=False
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to refresh %s tenants for account %s",
-                    provider,
-                    token_obj.account_id,
-                    exc_info=True,
-                )
-                continue
-            await cache.aset(cache_key, True, TENANT_REFRESH_TTL)
+    refreshes = [
+        _arefresh_identity(user, provider, resolve, token_obj, force=force)
+        for provider, resolve in _PROVIDER_RESOLVERS.items()
+        for token_obj in await aiter_social_tokens(user, provider)
+    ]
+    await asyncio.gather(*refreshes)
+
+
+async def _arefresh_identity(user, provider, resolve, token_obj, *, force: bool) -> None:
+    cache_key = f"tenant_refresh:{user.id}:{provider}:{token_obj.account_id}"
+    if not force and await cache.aget(cache_key):
+        return
+    # A concurrent poll for the same identity would repeat the same upstream fetch.
+    inflight_key = f"{cache_key}:inflight"
+    if not await cache.aadd(inflight_key, True, TENANT_REFRESH_INFLIGHT_TTL):
+        return
+    try:
+        try:
+            credential = await _aresolve_oauth_credential(
+                token_obj, provider, account_scope(token_obj.account)
+            )
+            await resolve(
+                user, credential["value"], social_account=token_obj.account, allow_replace=False
+            )
+        except Exception:
+            logger.warning(
+                "Failed to refresh %s tenants for account %s",
+                provider,
+                token_obj.account_id,
+                exc_info=True,
+            )
+            ttl = TENANT_REFRESH_FAILURE_TTL
+        else:
+            ttl = TENANT_REFRESH_TTL
+        await cache.aset(cache_key, True, ttl)
+    finally:
+        await cache.adelete(inflight_key)
 
 
 # Wrap the persistence loop in sync_to_async so transaction.atomic() applies.
