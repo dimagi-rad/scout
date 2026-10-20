@@ -7,6 +7,8 @@ ARG VITE_BASE_PATH=/
 ARG VITE_SENTRY_DSN=
 ARG VITE_SENTRY_ENVIRONMENT=production
 ARG VITE_SENTRY_RELEASE=
+# Fraction of page loads sent as performance traces; empty or 0 sends none.
+ARG VITE_SENTRY_TRACES_SAMPLE_RATE=
 # Sentry source map upload — all three must be set to activate the plugin.
 # SENTRY_AUTH_TOKEN is passed as a BuildKit secret (see --secret below) to
 # avoid leaking into image layers.
@@ -25,6 +27,7 @@ ENV VITE_BASE_PATH=$VITE_BASE_PATH \
     VITE_SENTRY_DSN=$VITE_SENTRY_DSN \
     VITE_SENTRY_ENVIRONMENT=$VITE_SENTRY_ENVIRONMENT \
     VITE_SENTRY_RELEASE=$VITE_SENTRY_RELEASE \
+    VITE_SENTRY_TRACES_SAMPLE_RATE=$VITE_SENTRY_TRACES_SAMPLE_RATE \
     SENTRY_ORG=$SENTRY_ORG \
     SENTRY_PROJECT=$SENTRY_PROJECT \
     SENTRY_RELEASE=$VITE_SENTRY_RELEASE
