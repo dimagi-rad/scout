@@ -74,23 +74,17 @@ def prune_messages(
 
 
 def _shed_pins(pinned: list[BaseMessage], count: int) -> list[BaseMessage]:
-    """Drop up to ``count`` pins when a backed-up round fills the window.
+    """Drop up to ``count`` resume markers and assistant-text pins, oldest first.
 
-    Markers and assistant text go first, then older user messages; the user's
-    latest own message stays, since without it the turn has no request (#919).
+    The user's own messages are never shed: whichever one carries the request,
+    losing it is the #919 failure. ``_current_request``'s cap bounds the overflow.
     """
-
-    def is_user_text(message: BaseMessage) -> bool:
-        return isinstance(message, HumanMessage) and not _is_resume_marker(message)
-
-    keep = max(
-        (k for k, message in enumerate(pinned) if is_user_text(message)),
-        default=len(pinned) - 1,
-    )
-    order = sorted(
-        (k for k in range(len(pinned)) if k != keep), key=lambda k: (is_user_text(pinned[k]), k)
-    )
-    dropped = set(order[:count])
+    droppable = [
+        k
+        for k, message in enumerate(pinned)
+        if not isinstance(message, HumanMessage) or _is_resume_marker(message)
+    ]
+    dropped = set(droppable[:count])
     return [message for k, message in enumerate(pinned) if k not in dropped]
 
 

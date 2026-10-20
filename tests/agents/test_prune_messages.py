@@ -177,21 +177,24 @@ def test_continue_after_step_limit_keeps_the_question():
     assert len(pruned) <= DEFAULT_MAX_MESSAGES
 
 
-def test_round_filling_the_window_sheds_older_pins_first():
+def test_round_filling_the_window_sheds_markers_and_text_but_no_user_message():
+    question = HumanMessage(content=KK_QUESTION)
+    offer = AIMessage(content="The data isn't loaded. Load it now?")
+    marker = HumanMessage(content=f"{SYSTEM_RESUME_MARKER} Materialization just completed.")
     history = [
-        HumanMessage(content="first"),
-        AIMessage(content="Which one?"),
-        HumanMessage(content="a"),
-        HumanMessage(content="b"),
-        HumanMessage(content="c"),
-        *_parallel_tool_rounds(1, calls_per_round=16),
+        question,
+        offer,
+        HumanMessage(content="yes"),
+        AIMessage(content="", tool_calls=[{"name": "run_materialization", "args": {}, "id": "l"}]),
+        ToolMessage(content="started", tool_call_id="l", name="run_materialization"),
+        AIMessage(content="Loading."),
+        marker,
+        *_parallel_tool_rounds(1, calls_per_round=19),
     ]
 
     pruned = prune_messages(history)
 
-    assert len(pruned) <= DEFAULT_MAX_MESSAGES
-    assert pruned[-17:] == history[-17:]
-    assert _texts(pruned)[-1] == "c"
+    assert pruned == [question, history[2], *history[-20:]]
     _assert_tool_pairs_intact(pruned)
 
 
