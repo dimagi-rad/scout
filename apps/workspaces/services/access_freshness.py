@@ -411,7 +411,7 @@ def _renewal_cooling_down(key, now) -> bool:
     for stale_key in [
         k for k, at in _RENEWAL_ATTEMPTS.items() if now - at >= RENEWAL_COOLDOWN_SECONDS
     ]:
-        del _RENEWAL_ATTEMPTS[stale_key]
+        _RENEWAL_ATTEMPTS.pop(stale_key, None)
     return key in _RENEWAL_ATTEMPTS
 
 

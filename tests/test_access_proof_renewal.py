@@ -26,7 +26,11 @@ from apps.workspaces.access import (
 )
 from apps.workspaces.models import WorkspaceTenant
 from apps.workspaces.services import access_freshness
-from apps.workspaces.services.access_freshness import UPSTREAM_ACCESS_LOST, VerificationBudget
+from apps.workspaces.services.access_freshness import (
+    UPSTREAM_ACCESS_LOST,
+    VERIFICATION_UNAVAILABLE,
+    VerificationBudget,
+)
 from tests.tenant_access import agrant_tenant_access
 
 DUE = PROOF_RENEW_AFTER + timedelta(seconds=30)
@@ -212,6 +216,30 @@ async def test_renewal_takes_no_permit_from_interactive_checks(
     assert held == 4
     assert len(upstream_provider.requests) == 1
     assert await _proof_age(user, tenant) < timedelta(minutes=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_indeterminate_renewal_keeps_access_but_withholds_later_grace(
+    settings, user, workspace, tenant, upstream_provider
+):
+    """Deliberate: grace may not stand on a proof an answer called into question,
+    whether a renewal or an expiry recheck got that answer."""
+    settings.UPSTREAM_ACCESS_GRACE_SECONDS = 30 * 60
+    await _aage_proof(user, tenant, DUE)
+    # A CommCare 403 on the domain listing neither proves nor denies access.
+    upstream_provider.failure = 403
+
+    assert (await aresolve_workspace_access_ex(user, workspace.id)).granted
+    await _drain_background()
+    assert (await aresolve_workspace_access_ex(user, workspace.id)).granted
+
+    await _aage_proof(user, tenant, PROOF_MAX_AGE + timedelta(minutes=1))
+    upstream_provider.failure = 503
+    denied = await aresolve_workspace_access_ex(user, workspace.id)
+
+    assert denied.denied_reason == VERIFICATION_UNAVAILABLE
+    assert await TenantMembership.objects.filter(user=user, tenant=tenant).aexists()
 
 
 @pytest.mark.asyncio
