@@ -141,7 +141,11 @@ def test_adding_a_serving_source_queues_a_view_rebuild(workspace, tenant, tenant
     add_workspace_tenant(workspace, tenant2)
 
     assert [_row(job) for job in _queued(workspace_id=str(workspace.id))] == [
-        _expected("rebuild_workspace_view_schema", {"workspace_id": str(workspace.id)})
+        _expected(
+            "rebuild_workspace_view_schema",
+            {"workspace_id": str(workspace.id)},
+            queueing_lock=f"view-rebuild:{workspace.id}",
+        )
     ]
 
 
@@ -158,7 +162,11 @@ def test_adding_an_unloaded_source_queues_the_rebuild_before_its_load(
     add_workspace_tenant(workspace, tenant2, actor_id=user.id)
 
     assert [_row(job) for job in _queued(workspace_id=str(workspace.id))] == [
-        _expected("rebuild_workspace_view_schema", {"workspace_id": str(workspace.id)}),
+        _expected(
+            "rebuild_workspace_view_schema",
+            {"workspace_id": str(workspace.id)},
+            queueing_lock=f"view-rebuild:{workspace.id}",
+        ),
         _expected(
             "materialize_workspace",
             {
@@ -198,7 +206,11 @@ def test_removing_one_of_several_sources_queues_a_view_rebuild(workspace, tenant
     remove_workspace_tenant(workspace, wt3)
 
     assert [_row(job) for job in _queued(workspace_id=str(workspace.id))] == [
-        _expected("rebuild_workspace_view_schema", {"workspace_id": str(workspace.id)})
+        _expected(
+            "rebuild_workspace_view_schema",
+            {"workspace_id": str(workspace.id)},
+            queueing_lock=f"view-rebuild:{workspace.id}",
+        )
     ]
 
 
@@ -249,7 +261,11 @@ async def test_a_reload_queues_view_rebuilds_for_multi_tenant_siblings(workspace
     await publication.rebuild_dependent_view_schemas([tenant.id])
 
     assert [_row(job) for job in await _aqueued(workspace_id=str(workspace.id))] == [
-        _expected("rebuild_workspace_view_schema", {"workspace_id": str(workspace.id)})
+        _expected(
+            "rebuild_workspace_view_schema",
+            {"workspace_id": str(workspace.id)},
+            queueing_lock=f"view-rebuild:{workspace.id}",
+        )
     ]
 
 
@@ -259,7 +275,11 @@ async def test_a_refresh_queues_semantic_rebuilds_for_single_tenant_workspaces(w
     await publication.rebuild_single_tenant_semantic_models([tenant.id])
 
     assert [_row(job) for job in await _aqueued(workspace_id=str(workspace.id))] == [
-        _expected("rebuild_workspace_semantic_model", {"workspace_id": str(workspace.id)})
+        _expected(
+            "rebuild_workspace_semantic_model",
+            {"workspace_id": str(workspace.id)},
+            queueing_lock=f"semantic-rebuild:{workspace.id}",
+        )
     ]
 
 
@@ -590,5 +610,9 @@ async def test_an_unpublished_new_source_load_queues_a_view_rebuild(workspace, t
         )
 
     assert [_row(job) for job in await _aqueued(workspace_id=str(workspace.id))] == [
-        _expected("rebuild_workspace_view_schema", {"workspace_id": str(workspace.id)})
+        _expected(
+            "rebuild_workspace_view_schema",
+            {"workspace_id": str(workspace.id)},
+            queueing_lock=f"view-rebuild:{workspace.id}",
+        )
     ]
