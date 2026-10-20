@@ -32,7 +32,13 @@ def _scope(sentry):
 
 @pytest.mark.parametrize(
     ("free_gib", "expected"),
-    [(25, None), (10, None), (9.9, storage.WARNING), (8, storage.WARNING), (7.9, storage.CRITICAL)],
+    [
+        (25, None),
+        (16, None),
+        (15.9, storage.WARNING),
+        (8, storage.WARNING),
+        (7.9, storage.CRITICAL),
+    ],
 )
 def test_severity_follows_the_thresholds(free_gib, expected):
     reading = storage.DiskReading("/", total_bytes=50 * GIB, free_bytes=int(free_gib * GIB))
@@ -42,6 +48,7 @@ def test_severity_follows_the_thresholds(free_gib, expected):
 def test_thresholds_are_settings(settings):
     settings.STORAGE_DISK_WARNING_FREE_PERCENT = 50
     settings.STORAGE_DISK_CRITICAL_FREE_PERCENT = 30
+    settings.STORAGE_DISK_WARNING_FREE_GIB = 0
     settings.STORAGE_DISK_CRITICAL_FREE_GIB = 0
     reading = storage.DiskReading("/", total_bytes=100, free_bytes=40)
     assert storage.disk_severity(reading) == storage.WARNING
@@ -50,6 +57,16 @@ def test_thresholds_are_settings(settings):
 def test_the_percent_threshold_applies_on_a_large_volume():
     reading = storage.DiskReading("/", total_bytes=500 * GIB, free_bytes=45 * GIB)
     assert storage.disk_severity(reading) == storage.CRITICAL
+
+
+def test_the_percent_warning_applies_on_a_large_volume():
+    reading = storage.DiskReading("/", total_bytes=500 * GIB, free_bytes=95 * GIB)
+    assert storage.disk_severity(reading) == storage.WARNING
+
+
+def test_below_the_deploy_guard_warning_is_a_warning_on_a_small_volume():
+    reading = storage.DiskReading("/", total_bytes=30 * GIB, free_bytes=15 * GIB)
+    assert storage.disk_severity(reading) == storage.WARNING
 
 
 def test_below_the_deploy_guard_floor_is_critical_on_a_small_volume():
@@ -98,6 +115,7 @@ async def test_low_disk_is_a_sentry_warning_with_numbers(sentry, disk):
     assert context[1]["free_bytes"] == int(8.5 * GIB)
     assert context[1]["total_bytes"] == 50 * GIB
     assert context[1]["warning_free_percent"] == 20.0
+    assert context[1]["warning_free_gib"] == 16.0
     assert context[1]["critical_free_gib"] == 8.0
 
 
@@ -115,7 +133,7 @@ async def test_critical_disk_is_a_sentry_error_in_its_own_issue(sentry, disk):
 @pytest.mark.django_db(transaction=True)
 async def test_the_fingerprint_does_not_change_with_the_numbers(sentry, disk):
     fingerprints = []
-    for free_gib in (9.5, 9, 8.2):
+    for free_gib in (15, 11, 8.2):
         disk.return_value = _usage(free_gib=free_gib)
         await storage.check_storage_headroom()
         fingerprints.append(list(_scope(sentry).fingerprint))

@@ -59,14 +59,17 @@ def read_disk(path: str) -> DiskReading:
 
 
 def disk_severity(reading: DiskReading) -> str | None:
-    # The absolute floor is the deploy guard's limit: below it deploys are refused,
-    # whatever percentage that is on a resized volume.
+    # The absolute floors are the deploy guard's error and warning limits, so the
+    # ordering holds whatever percentage they are on a resized volume.
     if (
         reading.free_percent < settings.STORAGE_DISK_CRITICAL_FREE_PERCENT
         or reading.free_bytes < settings.STORAGE_DISK_CRITICAL_FREE_GIB * 2**30
     ):
         return CRITICAL
-    if reading.free_percent < settings.STORAGE_DISK_WARNING_FREE_PERCENT:
+    if (
+        reading.free_percent < settings.STORAGE_DISK_WARNING_FREE_PERCENT
+        or reading.free_bytes < settings.STORAGE_DISK_WARNING_FREE_GIB * 2**30
+    ):
         return WARNING
     return None
 
@@ -102,6 +105,7 @@ def report_low_disk(reading: DiskReading, severity: str) -> None:
                 "free_percent": round(reading.free_percent, 2),
                 "warning_free_percent": settings.STORAGE_DISK_WARNING_FREE_PERCENT,
                 "critical_free_percent": settings.STORAGE_DISK_CRITICAL_FREE_PERCENT,
+                "warning_free_gib": settings.STORAGE_DISK_WARNING_FREE_GIB,
                 "critical_free_gib": settings.STORAGE_DISK_CRITICAL_FREE_GIB,
             },
         )

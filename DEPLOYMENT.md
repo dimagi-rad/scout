@@ -230,11 +230,12 @@ and before it nothing watched the host disk (see [Host disk full](#host-disk-ful
 - **Host disk.** `shutil.disk_usage("/")` inside the worker container. The
   container root is an overlay2 mount, which reports the free space of the
   filesystem that holds Docker's data root on the host. That is the filesystem
-  that image pulls fill and the deploy guard checks. Below 20% free it sends a
-  Sentry **warning**, `Host disk low: …`. It sends an **error** below 10% free
-  or below 8 GiB free, whichever comes first. 8 GiB is the deploy guard's
-  `HOST_MIN_FREE_GB`, so the error means deploys are now refused; change the
-  two together. On the 50 GB host the warning starts at 10 GB free.
+  that image pulls fill and the deploy guard checks. It sends a Sentry
+  **warning**, `Host disk low: …`, below 20% or 16 GiB free, and an **error**
+  below 10% or 8 GiB free, whichever comes first. The GiB floors are the deploy
+  guard's limits: below 8 GiB (`HOST_MIN_FREE_GB`) a deploy is refused unless its
+  prune step frees enough space, and the guard warns below 16 GiB. Change them
+  together. On the 50 GB host the warning starts at 16 GiB free.
   Each severity is one issue under a fixed fingerprint
   (`storage-headroom / host-disk / warning|critical`). Each run while the disk is
   low adds an event to that issue; it does not open a new one. Going from
@@ -252,6 +253,7 @@ and before it nothing watched the host disk (see [Host disk full](#host-disk-ful
 | `STORAGE_DISK_PATH` | `/` | Path whose filesystem is checked. |
 | `STORAGE_DISK_WARNING_FREE_PERCENT` | `20` | Sentry warning below this percent free. |
 | `STORAGE_DISK_CRITICAL_FREE_PERCENT` | `10` | Sentry error below this percent free. |
+| `STORAGE_DISK_WARNING_FREE_GIB` | `16` | Sentry warning below this many GiB free. Keep at twice `HOST_MIN_FREE_GB`. |
 | `STORAGE_DISK_CRITICAL_FREE_GIB` | `8` | Sentry error below this many GiB free. Keep equal to `HOST_MIN_FREE_GB`. |
 
 If the worker stops, the check stops too. There is no Sentry Cron monitor for it.
@@ -608,7 +610,7 @@ pending drain receipt (see [Migration-safe backend handoff](#migration-safe-back
    role keeps `retain_containers: 3`. A single prune failure is a warning; if every
    `kamal prune` fails (for example a stale Kamal lock), the step fails.
 2. `Check host disk space` — fails the deploy with a clear error when Docker's
-   filesystem has less than `HOST_MIN_FREE_GB` (8 GB) free, and warns below twice that.
+   filesystem has less than `HOST_MIN_FREE_GB` (8 GiB) free, and warns below twice that.
 
 Between deploys, the worker's storage check sends a Sentry alert when the disk
 runs low (see [Storage headroom alerts](#storage-headroom-alerts)).
