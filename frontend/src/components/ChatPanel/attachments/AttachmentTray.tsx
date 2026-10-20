@@ -34,6 +34,20 @@ export function AttachmentTray({
   )
 }
 
+function statusText(item: ComposerAttachment): string | undefined {
+  switch (item.status) {
+    case "error":
+      return item.error
+    case "processing":
+      return "Preparing…"
+    case "uploading":
+      return `Uploading ${Math.round(item.progress * 100)}%`
+    case "ready":
+      // A file handed back from a refused send has no size on hand.
+      return item.size ? formatBytes(item.size) : "Attached"
+  }
+}
+
 function AttachmentChip({
   item,
   index,
@@ -45,13 +59,7 @@ function AttachmentChip({
 }) {
   const failed = item.status === "error"
   const working = item.status === "processing" || item.status === "uploading"
-  const status = failed
-    ? item.error
-    : item.status === "processing"
-      ? "Preparing…"
-      : item.status === "uploading"
-        ? `Uploading ${Math.round(item.progress * 100)}%`
-        : formatBytes(item.size)
+  const status = statusText(item)
   return (
     <li
       className={cn(
@@ -78,7 +86,6 @@ function AttachmentChip({
             "flex items-center gap-1",
             failed ? "line-clamp-2 text-destructive" : "text-muted-foreground",
           )}
-          aria-live="polite"
         >
           {working && <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />}
           <span className={failed ? "line-clamp-2" : "truncate"}>{status}</span>
@@ -93,6 +100,10 @@ function AttachmentChip({
       >
         <X className="size-3.5" aria-hidden="true" />
       </button>
+      {/* Only the outcome is announced, not every progress tick. */}
+      <span className="sr-only" aria-live="polite">
+        {failed ? `${item.filename}: ${item.error}` : item.status === "ready" ? `${item.filename} attached` : ""}
+      </span>
       {item.status === "uploading" && (
         <span
           className="absolute inset-x-0 bottom-0 h-0.5 bg-primary transition-[width]"

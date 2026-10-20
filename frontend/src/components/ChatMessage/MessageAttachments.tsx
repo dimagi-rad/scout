@@ -14,8 +14,8 @@ const TYPE_LABELS: Record<string, string> = {
 }
 
 function typeLabel(part: FileUIPart): string {
-  const known = TYPE_LABELS[part.mediaType.split(";")[0]]
-  if (known) return known
+  const base = part.mediaType.split(";")[0]
+  if (Object.hasOwn(TYPE_LABELS, base)) return TYPE_LABELS[base]
   const ext = part.filename?.split(".").pop()
   return ext && ext !== part.filename ? ext.toUpperCase() : "File"
 }

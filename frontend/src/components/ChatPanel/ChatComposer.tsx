@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react"
-import type { ClipboardEvent, FormEvent, KeyboardEvent } from "react"
+import type { FormEvent, KeyboardEvent } from "react"
 import { Plus, Quote, Send, Square, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -12,8 +12,11 @@ import { SlashCommandMenu } from "./SlashCommandMenu"
 import { CharCounter } from "./CharCounter"
 import { isComposingKey, isOverLimit, messageLength, useAutoGrow } from "./messageLimit"
 import { AttachButton, AttachmentTray } from "./attachments/AttachmentTray"
-import { filesToAttachFromPaste } from "./attachments/rules"
-import { attachmentsBlockReason, type ChatAttachments } from "./attachments/useChatAttachments"
+import {
+  attachPastedFiles,
+  attachmentsBlockReason,
+  type ChatAttachments,
+} from "./attachments/useChatAttachments"
 
 interface ChatComposerProps {
   input: string
@@ -119,14 +122,6 @@ export function ChatComposer({
     submit()
   }
 
-  function handlePaste(e: ClipboardEvent<HTMLTextAreaElement>) {
-    if (!attachments) return
-    const files = filesToAttachFromPaste(e.clipboardData)
-    if (!files.length) return
-    e.preventDefault()
-    attachments.add(files)
-  }
-
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (isComposingKey(e)) return
     if (showSlashMenu && filteredCommands.length > 0) {
@@ -208,7 +203,7 @@ export function ChatComposer({
             setSlashMenuIndex(0)
           }}
           onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
+          onPaste={(e) => attachPastedFiles(e, attachments)}
           placeholder={adding ? "Add to your request…" : placeholder}
           className="field-sizing-fixed min-h-9 flex-1 resize-none py-1.5"
         />

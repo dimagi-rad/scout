@@ -18,8 +18,8 @@ import {
   useAutoGrow,
 } from "@/components/ChatPanel/messageLimit"
 import { AttachButton, AttachmentTray } from "@/components/ChatPanel/attachments/AttachmentTray"
-import { filesToAttachFromPaste } from "@/components/ChatPanel/attachments/rules"
 import {
+  attachPastedFiles,
   attachmentsBlockReason,
   type ChatAttachments,
 } from "@/components/ChatPanel/attachments/useChatAttachments"
@@ -134,13 +134,7 @@ export function ChatEmptyPrompt({
             setSlashMenuIndex(0)
           }}
           onKeyDown={handleKeyDown}
-          onPaste={(e) => {
-            if (!attachments) return
-            const files = filesToAttachFromPaste(e.clipboardData)
-            if (!files.length) return
-            e.preventDefault()
-            attachments.add(files)
-          }}
+          onPaste={(e) => attachPastedFiles(e, attachments)}
           placeholder="Ask about your data..."
           rows={1}
           className={cn(
@@ -151,16 +145,12 @@ export function ChatEmptyPrompt({
         {attachments && (
           <AttachButton onFiles={attachments.add} className="absolute bottom-2 left-2" />
         )}
-        <Button
-          type="submit"
-          size="icon"
-          disabled={!canSend}
-          className="absolute bottom-2 right-3"
-          aria-label="Send message"
-          title={holdReason ?? undefined}
-        >
-          <ArrowUp className="h-4 w-4" aria-hidden="true" />
-        </Button>
+        {/* The title sits on a wrapper: a disabled button shows no tooltip. */}
+        <span className="absolute bottom-2 right-3 flex" title={holdReason ?? undefined}>
+          <Button type="submit" size="icon" disabled={!canSend} aria-label="Send message">
+            <ArrowUp className="h-4 w-4" aria-hidden="true" />
+          </Button>
+        </span>
       </form>
       <CharCounter
         id={counterId}

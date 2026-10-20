@@ -505,6 +505,7 @@ const storyAttachments: ChatAttachments = {
   add: () => undefined,
   remove: () => undefined,
   take: () => [],
+  restore: () => undefined,
 }
 
 export const PromptInputWithAttachments: Story = {

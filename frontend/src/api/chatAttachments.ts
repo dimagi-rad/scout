@@ -1,4 +1,4 @@
-import { BASE_PATH } from "@/config"
+import { withBasePath } from "@/config"
 import { asRecord, getCsrfToken } from "./client"
 
 export interface UploadedAttachment {
@@ -8,6 +8,17 @@ export interface UploadedAttachment {
   size: number
   /** Without BASE_PATH, as the chat POST expects it back. */
   url: string
+}
+
+function isUploadedAttachment(body: Record<string, unknown> | undefined): body is Record<string, unknown> & UploadedAttachment {
+  return (
+    body !== undefined
+    && typeof body.id === "string"
+    && typeof body.filename === "string"
+    && typeof body.mediaType === "string"
+    && typeof body.size === "number"
+    && typeof body.url === "string"
+  )
 }
 
 export class AttachmentUploadError extends Error {
@@ -36,7 +47,7 @@ export function uploadChatAttachment(
       return
     }
     const xhr = new XMLHttpRequest()
-    xhr.open("POST", `${BASE_PATH}/api/chat/attachments/`)
+    xhr.open("POST", withBasePath("/api/chat/attachments/"))
     xhr.withCredentials = true
     xhr.setRequestHeader("X-CSRFToken", getCsrfToken())
     xhr.responseType = "text"
@@ -62,8 +73,8 @@ export function uploadChatAttachment(
       } catch {
         body = undefined
       }
-      if (xhr.status === 201 && body && typeof body.url === "string" && typeof body.id === "string") {
-        resolve(body as unknown as UploadedAttachment)
+      if (xhr.status === 201 && isUploadedAttachment(body)) {
+        resolve(body)
         return
       }
       const reason = typeof body?.reason === "string" ? body.reason : null

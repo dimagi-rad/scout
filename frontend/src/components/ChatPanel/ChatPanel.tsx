@@ -76,6 +76,8 @@ interface HeldSend {
   threadId: string
   /** What the user typed with it, which only this message carries. */
   extra?: string
+  /** Files sent with it, which likewise go back to the composer if it is refused. */
+  files: FileUIPart[]
   /** A reply began streaming, so the server took the message: never undo it. */
   streamed: boolean
 }
@@ -395,9 +397,7 @@ export function ChatPanel() {
     }
     target.messages = target.messages.filter((message) => message.id !== sending.messageId)
     restoreHeldRef.current(sending.threadId)
-    if (sending.extra) {
-      returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra)
-    }
+    returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra, sending.files)
   }
 
   /** The shown thread polls for its generated title; a thread finished out of view does it here. */
@@ -546,8 +546,10 @@ export function ChatPanel() {
     if (sending && (busyTimerRef.current || busyNoticeRef.current)) {
       heldSends.delete(threadId)
       settleSendRef.current(sending.threadId)
-      if (!sending.streamed && sending.extra) {
-        returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra)
+      if (!sending.streamed) {
+        returnToComposerRef.current(
+          sending.workspaceId, sending.threadId, sending.extra, sending.files,
+        )
       }
     } else if (sending && !isChatRunning(chat)) {
       // Defensive: a turn that ended in the same commit as the switch would be missed
@@ -950,8 +952,8 @@ export function ChatPanel() {
     if (stale) {
       heldSends.delete(threadId)
       held.settleSend(stale.threadId)
-      if (!stale.streamed && stale.extra) {
-        returnToComposer(stale.workspaceId, stale.threadId, stale.extra)
+      if (!stale.streamed) {
+        returnToComposer(stale.workspaceId, stale.threadId, stale.extra, stale.files)
       }
     }
     resetOverloadState()
@@ -986,6 +988,7 @@ export function ChatPanel() {
       workspaceId: activeDomainId,
       threadId,
       extra,
+      files,
       streamed: false,
     })
     resetOverloadState()
@@ -996,7 +999,14 @@ export function ChatPanel() {
   }
 
   /** Puts text the composer had already cleared back, in the chat it was typed in. */
-  function returnToComposer(workspaceId: string | null, sentFrom: string, sent: string) {
+  function returnToComposer(
+    workspaceId: string | null,
+    sentFrom: string,
+    sent: string | undefined,
+    files: FileUIPart[] = [],
+  ) {
+    if (files.length) attachments.restore(workspaceId, sentFrom, files)
+    if (!sent) return
     // Quotes go back to their chips rather than into the input as raw blockquotes.
     const { quotes: returnedQuotes, body: text } = splitQuotedMessage(sent)
     if (returnedQuotes.length) addQuotes(sentFrom, returnedQuotes)

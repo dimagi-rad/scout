@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { uploadChatAttachment, type UploadedAttachment } from "@/api/chatAttachments"
 import { workspaceApi, type WorkspaceListItem } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
+import { ChatComposer } from "./ChatComposer"
 import { ChatPanel } from "./ChatPanel"
+import type { ChatAttachments } from "./attachments/useChatAttachments"
 
 vi.mock("@/contexts/WorkspaceJobsContext", () => ({
   useWorkspaceJobs: () => ({
@@ -177,6 +179,31 @@ describe("ChatPanel attachments (#913)", () => {
     const parts = posted[0].messages.at(-1)!.parts
     expect(parts).toContainEqual({ type: "text", text: "What's in this?" })
     expect(parts).toContainEqual(expect.objectContaining({ type: "file", filename: "registry.json" }))
+  })
+
+  it("asks for a reply rather than sending quotes with files alone", () => {
+    const attachments: ChatAttachments = {
+      items: [{ localId: "a", filename: "shot.png", kind: "image", size: 4, status: "ready", progress: 1 }],
+      busy: false,
+      failed: false,
+      ready: true,
+      notice: null,
+      add: vi.fn(),
+      remove: vi.fn(),
+      take: vi.fn(() => []),
+      restore: vi.fn(),
+    }
+    const onSend = vi.fn()
+    const { rerender } = render(
+      <ChatComposer input="" setInput={vi.fn()} onSend={onSend} attachments={attachments} quotes={["a point"]} />,
+    )
+    expect(screen.getByTestId("chat-send")).toBeDisabled()
+    expect(screen.getByTestId("chat-send").parentElement).toHaveAttribute(
+      "title",
+      "Type a reply to go with the quotes",
+    )
+    rerender(<ChatComposer input="" setInput={vi.fn()} onSend={onSend} attachments={attachments} />)
+    expect(screen.getByTestId("chat-send")).not.toBeDisabled()
   })
 
   it("ignores a drag that carries no files, such as a text selection", async () => {

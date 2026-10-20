@@ -496,6 +496,41 @@ describe("a message sent while the chat's data loads", () => {
     ])
   })
 
+  it("gives the files back to the composer when a held send is refused (#913)", async () => {
+    const server = mockServer()
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    server.refuseHeldSend = true
+    vi.mocked(uploadChatAttachment).mockResolvedValue({
+      id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      filename: "sites.csv",
+      mediaType: "text/csv",
+      size: 4,
+      url: "/api/chat/attachments/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/",
+    })
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    renderChat()
+    await screen.findByTestId("pending-request-card")
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("chat-attach-input"), {
+        target: { files: [new File(["a,b\n"], "sites.csv", { type: "text/csv" })] },
+      })
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("chat-attachment-chip-0")).toHaveAttribute("data-status", "ready"),
+    )
+
+    await type(FOLLOW_UP, "Send message")
+
+    await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue(FOLLOW_UP))
+    expect(screen.getByTestId("chat-attachment-chip-0")).toHaveTextContent("sites.csv")
+    expect(screen.getByTestId("chat-attachment-chip-0")).toHaveAttribute("data-status", "ready")
+    consoleError.mockRestore()
+  })
+
   it("puts the request and the text typed with it back when its send is refused", async () => {
     const server = mockServer()
     server.pending = request([{ id: "p1", text: QUESTION }], {

@@ -1,9 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState, type ClipboardEvent } from "react"
 import type { FileUIPart } from "ai"
 
 import { uploadChatAttachment, type UploadedAttachment } from "@/api/chatAttachments"
 import { downscaleImage } from "./downscale"
-import { MAX_ATTACHMENTS, checkFileType, sizeError, type AttachmentKind } from "./rules"
+import {
+  MAX_ATTACHMENTS,
+  checkFileType,
+  filesToAttachFromPaste,
+  sizeError,
+  type AttachmentKind,
+} from "./rules"
 
 export interface ComposerAttachment {
   localId: string
@@ -33,6 +39,8 @@ export interface ChatAttachments {
   ready: boolean
   /** The uploaded files as message parts; they leave the composer. */
   take: () => FileUIPart[]
+  /** Puts already-uploaded files back, in the chat they were sent from (a refused send). */
+  restore: (workspaceId: string | null, threadId: string, parts: FileUIPart[]) => void
 }
 
 /** Why the attached files hold up a send, if they do. */
@@ -43,6 +51,11 @@ export function attachmentsBlockReason(attachments: ChatAttachments | undefined)
 }
 
 let nextLocalId = 0
+
+function pastedName(mediaType: string): string {
+  const ext = { "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" }[mediaType] ?? "png"
+  return `pasted-image.${ext}`
+}
 
 const NONE: ComposerAttachment[] = []
 
@@ -155,7 +168,7 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
         const check = checkFileType(file)
         const item: ComposerAttachment = {
           localId: `attachment-${++nextLocalId}`,
-          filename: file.name || "pasted-image.png",
+          filename: file.name || pastedName(file.type),
           kind: check.ok ? check.kind : null,
           size: file.size,
           status: check.ok ? "processing" : "error",
@@ -200,19 +213,16 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
 
   const take = useCallback((): FileUIPart[] => {
     const list = byScopeRef.current[scope] ?? NONE
-    const parts = list.flatMap((item): FileUIPart[] =>
-      item.status === "ready" && item.uploaded
-        ? [{
-            type: "file",
-            mediaType: item.uploaded.mediaType,
-            filename: item.uploaded.filename,
-            url: item.uploaded.url,
-          }]
-        : [],
-    )
+    const sending = list.filter((item) => item.status === "ready" && item.uploaded)
+    const parts = sending.map((item): FileUIPart => ({
+      type: "file",
+      mediaType: item.uploaded!.mediaType,
+      filename: item.uploaded!.filename,
+      url: item.uploaded!.url,
+    }))
     if (!parts.length) return parts
     // Only what is sent leaves; a file still uploading (or failed) stays for the next message.
-    const sent = new Set(list.filter((item) => item.status === "ready").map((item) => item.localId))
+    const sent = new Set(sending.map((item) => item.localId))
     for (const item of list) {
       if (sent.has(item.localId) && item.previewUrl) URL.revokeObjectURL(item.previewUrl)
     }
@@ -225,6 +235,29 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
     return parts
   }, [scope, setList])
 
+  const restore = useCallback(
+    (inWorkspace: string | null, inThread: string, parts: FileUIPart[]) => {
+      const inScope = `${inWorkspace ?? ""}:${inThread}`
+      const restored = parts.map((part): ComposerAttachment => ({
+        localId: `attachment-${++nextLocalId}`,
+        filename: part.filename ?? "attachment",
+        kind: part.mediaType.startsWith("image/") ? "image" : "text",
+        size: 0,
+        status: "ready",
+        progress: 1,
+        uploaded: {
+          id: part.url.split("/").at(-2) ?? "",
+          filename: part.filename ?? "attachment",
+          mediaType: part.mediaType,
+          size: 0,
+          url: part.url,
+        },
+      }))
+      setList(inScope, (list) => [...restored, ...list].slice(0, MAX_ATTACHMENTS))
+    },
+    [setList],
+  )
+
   return {
     items,
     busy: items.some((item) => item.status === "processing" || item.status === "uploading"),
@@ -234,5 +267,15 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
     add,
     remove,
     take,
+    restore,
   }
+}
+
+/** A paste of files (a screenshot) attaches them; any other paste is left alone. */
+export function attachPastedFiles(e: ClipboardEvent, attachments: ChatAttachments | undefined) {
+  if (!attachments) return
+  const files = filesToAttachFromPaste(e.clipboardData)
+  if (!files.length) return
+  e.preventDefault()
+  attachments.add(files)
 }

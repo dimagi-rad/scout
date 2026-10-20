@@ -80,6 +80,12 @@ describe("uploadChatAttachment", () => {
     await expect(result).rejects.toBeInstanceOf(AttachmentUploadError)
   })
 
+  it("treats a success body missing contract fields as a failed upload", async () => {
+    const result = uploadChatAttachment(file, "ws-1", vi.fn(), new AbortController().signal)
+    FakeXHR.last.respond(201, { id: "a", url: "/api/chat/attachments/a/", media_type: "application/json" })
+    await expect(result).rejects.toBeInstanceOf(AttachmentUploadError)
+  })
+
   it("aborts with its signal", async () => {
     const controller = new AbortController()
     const result = uploadChatAttachment(file, "ws-1", vi.fn(), controller.signal)
