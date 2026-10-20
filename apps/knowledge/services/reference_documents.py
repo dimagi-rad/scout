@@ -184,7 +184,7 @@ async def aformat_reference_documents_for_prompt(workspace: Workspace) -> str:
         # Cut without an ellipsis, so the shown prefix still resolves as a title fragment.
         title = _one_line(doc.title).replace('"', "'")[:_PROMPT_TITLE_CHARS]
         fmt = (doc.source_format or "text").upper()
-        summary = _one_line(doc.description) or _head_summary(doc.head)
+        summary = sanitize_prompt_content(_one_line(doc.description)) or _head_summary(doc.head)
         line = f'- "{title}" ({fmt}, {doc.content_size:,} chars)'
         if summary:
             line += f": {_clip(summary, _PROMPT_DESCRIPTION_CHARS)}"
@@ -252,8 +252,25 @@ async def aresolve_reference_document(
 
 
 def _within_bytes(text: str, max_bytes: int) -> str:
-    """The longest prefix of ``text`` that is at most ``max_bytes`` of UTF-8."""
-    return text.encode()[:max_bytes].decode(errors="ignore")
+    """The longest prefix of ``text`` whose JSON string form is at most ``max_bytes``.
+
+    Measured escaped, as the tool-result budget measures it: quotes and newlines
+    cost two bytes there, and a page cut after the fact would desync next_offset.
+    """
+
+    def fits(length: int) -> bool:
+        return len(_dumps(text[:length]).encode()) <= max_bytes
+
+    if fits(len(text)):
+        return text
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits(middle):
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low]
 
 
 def read_page(content: str, offset: int, limit: int) -> dict[str, Any]:

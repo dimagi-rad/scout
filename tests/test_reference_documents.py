@@ -125,6 +125,18 @@ class TestPromptListing:
         assert '- "Queries" (MD' in result
 
     @pytest.mark.asyncio
+    async def test_description_is_sql_redacted(self, workspace):
+        await KnowledgeEntry.objects.acreate(
+            workspace=workspace,
+            title="Queries",
+            content="x",
+            description="SELECT count(*) FROM visits",
+            kind=KnowledgeEntry.Kind.REFERENCE,
+        )
+        result = await KnowledgeRetriever(workspace).retrieve()
+        assert "SELECT" not in result
+
+    @pytest.mark.asyncio
     async def test_listing_falls_back_to_first_meaningful_line(self, workspace):
         await KnowledgeEntry.objects.acreate(
             workspace=workspace,
@@ -201,6 +213,19 @@ class TestReadReferenceDocumentTool:
         page = await tool.ainvoke({"title_or_id": "Accents", "limit": 50_000})
 
         assert len(page["content"].encode()) <= MAX_RESULT_BYTES
+        assert page["next_offset"] == len(page["content"]) < len(content)
+
+    @pytest.mark.asyncio
+    async def test_pages_are_measured_escaped(self, workspace):
+        content = '"' * 40_000
+        await KnowledgeEntry.objects.acreate(
+            workspace=workspace, title="Quotes", content=content, kind="reference"
+        )
+        tool = create_reference_document_tool(workspace)
+
+        page = await tool.ainvoke({"title_or_id": "Quotes", "limit": 50_000})
+
+        assert len(json.dumps(page["content"]).encode()) <= MAX_RESULT_BYTES
         assert page["next_offset"] == len(page["content"]) < len(content)
 
     @pytest.mark.asyncio
