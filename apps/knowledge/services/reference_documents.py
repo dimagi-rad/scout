@@ -13,7 +13,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from django.db.models.functions import Length, Substr
 
@@ -145,8 +145,9 @@ def _head_summary(head: str) -> str:
 async def aformat_reference_documents_for_prompt(workspace: Workspace) -> str:
     """List the workspace's reference documents compactly for the system prompt.
 
-    Only titles, sizes and one-line descriptions: the bodies stay out of the prompt,
-    which is re-billed on every call. The order is stable so the cached prefix is too.
+    Only titles, sizes and one-line descriptions (a document without one shows its
+    first meaningful line, clipped): the bodies stay out of the prompt, which is
+    re-billed on every call. The order is stable so the cached prefix is too.
     """
     references = _reference_documents(workspace)
     documents = [
@@ -267,11 +268,14 @@ def _dumps(value: Any) -> str:
 
 def _terms_in(text: str, terms: list[str]) -> frozenset[str]:
     folded = text.casefold()
-    return frozenset(term for term in terms if term in folded)
+    found = [term for term in terms if term in folded]
+    return frozenset(found) if found else _NO_TERMS
 
 
-@dataclass(frozen=True)
-class _JsonNode:
+_NO_TERMS: frozenset[str] = frozenset()
+
+
+class _JsonNode(NamedTuple):
     size: int
     terms: frozenset[str]
 
@@ -283,7 +287,7 @@ def _index_json(value: Any, terms: list[str], index: dict[int, _JsonNode]) -> _J
     at each, and containers are distinct objects.
     """
     if isinstance(value, dict | list):
-        found: set[str] = set()
+        found = _NO_TERMS
         size = 2
         items = value.items() if isinstance(value, dict) else enumerate(value)
         for key, child in items:
@@ -296,8 +300,8 @@ def _index_json(value: Any, terms: list[str], index: dict[int, _JsonNode]) -> _J
                 size += len(label) + 1
     else:
         text = _dumps(value)
-        found, size = set(_terms_in(text, terms)), len(text)
-    node = _JsonNode(size=size, terms=frozenset(found))
+        found, size = _terms_in(text, terms), len(text)
+    node = _JsonNode(size=size, terms=found)
     index[id(value)] = node
     return node
 
@@ -340,11 +344,11 @@ def _search_json(
                 visit(f"{path}.{key}", _terms_in(_dumps(str(key)), terms), child)
         else:
             for position, child in enumerate(value):
-                visit(f"{path}[{position}]", frozenset(), child)
+                visit(f"{path}[{position}]", _NO_TERMS, child)
         if total == before:
             emit(path, _clip(_dumps(value)[: MAX_JSON_RECORD_CHARS * 2], MAX_JSON_RECORD_CHARS))
 
-    visit("$", frozenset(), data)
+    visit("$", _NO_TERMS, data)
     return results, total
 
 
@@ -359,7 +363,10 @@ def _line_snippet(line: str, terms: list[str]) -> str:
     return f"{'…' if start else ''}{snippet}{'…' if start + len(snippet) < len(line) else ''}"
 
 
-def _search_lines(lines: list[str], terms: list[str], context: int) -> list[dict[str, Any]]:
+def _line_windows(
+    lines: list[str], terms: list[str], context: int
+) -> tuple[list[tuple[int, int]], list[int]]:
+    """Merged context windows around the matching lines, and those line indexes."""
     hits = [index for index, line in enumerate(lines) if _matches(line, terms)]
     windows: list[list[int]] = []
     for index in hits:
@@ -369,18 +376,19 @@ def _search_lines(lines: list[str], terms: list[str], context: int) -> list[dict
             windows[-1][1] = end
         else:
             windows.append([max(start, windows[-1][1] + 1) if windows else start, end])
-    hit_set = set(hits)
-    return [
-        {
-            "lines": f"{start + 1}-{end + 1}",
-            "text": "\n".join(
-                f"{'>' if index in hit_set else ' '}{index + 1}: "
-                f"{_line_snippet(lines[index], terms)}"
-                for index in range(start, end + 1)
-            ),
-        }
-        for start, end in windows
-    ]
+    return [(start, end) for start, end in windows], hits
+
+
+def _render_window(
+    lines: list[str], start: int, end: int, hit_set: set[int], terms: list[str]
+) -> dict[str, Any]:
+    return {
+        "lines": f"{start + 1}-{end + 1}",
+        "text": "\n".join(
+            f"{'>' if index in hit_set else ' '}{index + 1}: {_line_snippet(lines[index], terms)}"
+            for index in range(start, end + 1)
+        ),
+    }
 
 
 def _parse_json(document: KnowledgeEntry) -> tuple[bool, Any]:
@@ -417,17 +425,27 @@ def search_document(
     result: dict[str, Any] = {"search": query, "total_chars": len(document.content)}
     found: list[dict[str, Any]] | None = None
     total = 0
+    # Matches each returned item covers: one per JSON entry, every matching line in a window.
+    covered: list[int] = []
     if is_json:
         try:
             entries, total = _search_json(data, terms, max_matches)
             found = [{"path": path, "entry": value} for path, value in entries]
+            covered = [1] * len(found)
             result["match_mode"] = "json_entries"
         except RecursionError:
             found = None
     if found is None:
         lines = document.content.splitlines()
-        found = _search_lines(lines, terms, SEARCH_CONTEXT_LINES)
-        total = len(found)
+        windows, hits = _line_windows(lines, terms, SEARCH_CONTEXT_LINES)
+        hit_set = set(hits)
+        # Only the windows that can be returned are rendered.
+        found = [_render_window(lines, a, b, hit_set, terms) for a, b in windows[:max_matches]]
+        covered = [
+            sum(1 for index in range(a, b + 1) if index in hit_set)
+            for a, b in windows[:max_matches]
+        ]
+        total = len(hits)
         result["match_mode"] = "lines"
         if document.source_format in ("csv", "tsv") and lines:
             result["header"] = _line_snippet(lines[0], terms)
@@ -443,9 +461,10 @@ def search_document(
         used += size
     result["total_matches"] = total
     result["matches"] = kept
-    if len(kept) < total:
+    shown = sum(covered[: len(kept)])
+    if shown < total:
         result["note"] = (
-            f"Showing {len(kept)} of {total} matches. Add words to narrow the search, "
+            f"Showing {shown} of {total} matches. Add words to narrow the search, "
             "or page through the document with offset instead."
         )
     elif not total:

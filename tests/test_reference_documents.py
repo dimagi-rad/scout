@@ -220,7 +220,7 @@ class TestReadReferenceDocumentTool:
 
     @pytest.mark.asyncio
     async def test_a_term_on_every_line_stays_within_the_limit(self, workspace):
-        content = "\n".join(f"row {index}, value {'y' * 900}" for index in range(2000))
+        content = "\n".join(f"row {index}, value {'y' * 100}" for index in range(2000))
         await KnowledgeEntry.objects.acreate(
             workspace=workspace, title="Rows", content=content, kind="reference"
         )
@@ -228,7 +228,10 @@ class TestReadReferenceDocumentTool:
 
         result = await tool.ainvoke({"title_or_id": "Rows", "search": "row", "limit": 5000})
 
-        assert result["total_matches"] > 1
+        # Counted in matching lines, not in the context windows that group them.
+        assert result["total_matches"] == 2000
+        shown = sum(match["text"].count(">") for match in result["matches"])
+        assert result["note"].startswith(f"Showing {shown} of 2000")
         assert all(match["text"].count("\n") < 25 for match in result["matches"])
         assert len(json.dumps(result["matches"])) < 6000
 

@@ -143,6 +143,33 @@ class TestUploadView:
         assert resp.status_code == status.HTTP_201_CREATED, resp.data
         assert KnowledgeEntry.objects.get().content == "\n# Codes\n\nA: Alpha\n"
 
+    def test_blank_description_keeps_the_json_summary(self, api_client, workspace):
+        resp = _upload(
+            api_client, workspace, "registry.json", REGISTRY_TEXT.encode(), description="   "
+        )
+        assert resp.status_code == status.HTTP_201_CREATED, resp.data
+        assert resp.data["description"].startswith("JSON array of 400 entries")
+
+    def test_import_rejects_binary_and_oversized_reference_documents(self, api_client, workspace):
+        meta = "---\ntitle: {title}\nkind: reference\nsource_format: txt\n---\n\n"
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("nul.md", meta.format(title="Nul") + "a\x00b")
+            zf.writestr("big.md", meta.format(title="Big") + "a" * (MAX_UPLOAD_BYTES + 1))
+            zf.writestr("ok.md", meta.format(title="Ok") + "fine")
+        archive.seek(0)
+        archive.name = "import.zip"
+
+        resp = api_client.post(
+            reverse("knowledge:import", kwargs={"workspace_id": workspace.id}),
+            {"file": archive},
+            format="multipart",
+        )
+
+        assert resp.status_code == status.HTTP_207_MULTI_STATUS, resp.data
+        assert sorted(error["file"] for error in resp.data["errors"]) == ["big.md", "nul.md"]
+        assert list(KnowledgeEntry.objects.values_list("title", "kind")) == [("Ok", "reference")]
+
     def test_kind_cannot_be_set_through_the_entry_api(self, api_client, workspace):
         created = api_client.post(
             reverse("knowledge:list_create", kwargs={"workspace_id": workspace.id}),

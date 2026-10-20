@@ -179,9 +179,9 @@ class KnowledgeRetriever:
         sections are fitted and then take back what they leave unused, each table's column
         notes are capped, and each section is cut at a line boundary where possible.
 
-        Reference documents (#913) sit outside the budget: their bodies never
-        enter the prompt, and only a compact, capped listing of them follows the
-        budgeted knowledge.
+        Reference documents (#913) sit outside the budget: their bodies stay out
+        of the prompt, and only a compact, capped listing of them (title, size and
+        a one-line description) follows the budgeted knowledge.
         """
         knowledge = await self._retrieve_budgeted()
         references = await aformat_reference_documents_for_prompt(self.workspace)

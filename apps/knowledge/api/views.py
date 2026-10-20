@@ -397,6 +397,18 @@ class KnowledgeImportView(APIView):
                         errors.append({"file": name, "error": f"Malformed frontmatter: {exc}"})
                         continue
                     fields = {"content": body, "tags": tags, **_reference_fields(meta)}
+                    # Postgres can't store NUL, and would fail the whole batch on it.
+                    if "\x00" in body:
+                        errors.append({"file": name, "error": "File contains binary data."})
+                        continue
+                    if (
+                        fields["kind"] == KnowledgeEntry.Kind.REFERENCE
+                        and len(body.encode()) > MAX_UPLOAD_BYTES
+                    ):
+                        errors.append(
+                            {"file": name, "error": "Reference document is larger than 2 MB."}
+                        )
+                        continue
 
                     if not title:
                         skipped += 1
@@ -425,9 +437,9 @@ class KnowledgeImportView(APIView):
 
 
 def _reference_meta(entry: KnowledgeEntry) -> dict:
-    if entry.kind != KnowledgeEntry.Kind.REFERENCE:
-        return {}
-    meta = {"kind": entry.kind}
+    meta = {}
+    if entry.kind == KnowledgeEntry.Kind.REFERENCE:
+        meta["kind"] = entry.kind
     if entry.description:
         meta["description"] = entry.description
     if entry.source_format:
@@ -437,14 +449,15 @@ def _reference_meta(entry: KnowledgeEntry) -> dict:
 
 def _reference_fields(meta: dict) -> dict:
     """An imported entry's kind fields, so a reference document round-trips as one."""
-    if meta.get("kind") != KnowledgeEntry.Kind.REFERENCE:
-        return {"kind": KnowledgeEntry.Kind.NOTE, "description": "", "source_format": ""}
+    is_reference = meta.get("kind") == KnowledgeEntry.Kind.REFERENCE
     source_format = meta.get("source_format", "")
     return {
-        "kind": KnowledgeEntry.Kind.REFERENCE,
+        "kind": KnowledgeEntry.Kind.REFERENCE if is_reference else KnowledgeEntry.Kind.NOTE,
         "description": " ".join(str(meta.get("description") or "").split())[:DESCRIPTION_MAX_CHARS],
         "source_format": (
-            source_format if source_format in KnowledgeEntry.SourceFormat.values else ""
+            source_format
+            if is_reference and source_format in KnowledgeEntry.SourceFormat.values
+            else ""
         ),
     }
 
@@ -491,7 +504,9 @@ class KnowledgeUploadView(APIView):
             return Response({"error": exc.user_message}, status=status.HTTP_400_BAD_REQUEST)
 
         title = str(request.data.get("title") or "").strip() or decoded.title
-        description = str(request.data.get("description") or "") or decoded.description
+        description = (
+            " ".join(str(request.data.get("description") or "").split()) or decoded.description
+        )
         # Built here rather than through the serializer, where kind and format are
         # read-only so only this path (and import) can create a reference document.
         entry = KnowledgeEntry(
