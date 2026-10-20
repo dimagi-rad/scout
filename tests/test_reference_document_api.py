@@ -225,6 +225,30 @@ class TestUploadView:
         assert note.content == "new note body"
         assert (doc.kind, doc.content) == ("reference", REGISTRY_TEXT)
 
+    def test_import_of_a_document_updates_the_document_not_the_same_titled_note(
+        self, api_client, workspace
+    ):
+        doc = _reference(workspace, title="Spec")
+        note = KnowledgeEntry.objects.create(workspace=workspace, title="Spec", content="note")
+        note.save()  # most recently updated, so it heads the default ordering
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("spec.md", "---\ntitle: Spec\nkind: reference\n---\n\n[1]")
+        archive.seek(0)
+        archive.name = "import.zip"
+
+        resp = api_client.post(
+            reverse("knowledge:import", kwargs={"workspace_id": workspace.id}),
+            {"file": archive},
+            format="multipart",
+        )
+
+        assert resp.status_code == status.HTTP_200_OK, resp.data
+        note.refresh_from_db()
+        doc.refresh_from_db()
+        assert (note.kind, note.content) == ("note", "note")
+        assert doc.content == "[1]"
+
     def test_upload_rejects_nul_in_title(self, api_client, workspace):
         resp = _upload(api_client, workspace, "codes.csv", b"code\nA\n", title="bad\x00title")
         assert resp.status_code == status.HTTP_400_BAD_REQUEST

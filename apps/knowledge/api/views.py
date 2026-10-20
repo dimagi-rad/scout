@@ -431,13 +431,15 @@ class KnowledgeImportView(APIView):
                         continue
 
                     pool = available_by_title.get(title) or []
-                    # A note (or a pre-#913 export) may update a same-titled note, but must
-                    # never replace a reference document's body.
-                    usable = (
-                        pool
-                        if fields["kind"] == KnowledgeEntry.Kind.REFERENCE
-                        else [pk for pk in pool if pk not in reference_pks]
-                    )
+                    # Each file updates a same-titled entry of its own kind first, whatever
+                    # the pool's order. A note (or a pre-#913 export) never replaces a
+                    # reference document's body; a document may upgrade a spare note.
+                    is_reference = fields["kind"] == KnowledgeEntry.Kind.REFERENCE
+                    notes = [pk for pk in pool if pk not in reference_pks]
+                    if is_reference:
+                        usable = [pk for pk in pool if pk in reference_pks] or notes
+                    else:
+                        usable = notes
                     if pool and not usable:
                         errors.append(
                             {
