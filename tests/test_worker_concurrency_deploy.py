@@ -8,7 +8,7 @@ import pytest
 from mcp_server.services.pool import _MAX_POOLS
 from tests.kamal_config import load_config
 
-PROCFILE_DEV = Path(__file__).resolve().parent.parent / "Procfile.dev"
+REPO = Path(__file__).resolve().parent.parent
 
 
 def _concurrency(cmd: str) -> int:
@@ -20,18 +20,34 @@ def _deploy_worker_cmd() -> str:
     return load_config("deploy-worker.yml")["servers"]["web"]["cmd"]
 
 
-def _dev_worker_cmd() -> str:
-    (line,) = [line for line in PROCFILE_DEV.read_text().splitlines() if line.startswith("worker:")]
-    return line
+def _line_with(path: Path, marker: str) -> str:
+    lines = [line for line in path.read_text().splitlines() if marker in line]
+    assert len(lines) == 1, f"expected one worker command in {path.name}, found {lines}"
+    return lines[0]
 
 
-@pytest.mark.parametrize("read_cmd", [_deploy_worker_cmd, _dev_worker_cmd])
+def _procfile_worker_cmd() -> str:
+    return _line_with(REPO / "Procfile.dev", "worker:")
+
+
+def _invoke_worker_cmd() -> str:
+    return _line_with(REPO / "tasks.py", "procrastinate worker")
+
+
+WORKER_CMDS = pytest.mark.parametrize(
+    "read_cmd",
+    [_deploy_worker_cmd, _procfile_worker_cmd, _invoke_worker_cmd],
+    ids=["deploy-worker.yml", "Procfile.dev", "tasks.py"],
+)
+
+
+@WORKER_CMDS
 def test_worker_concurrency_fits_managed_pool_cap(read_cmd):
     # The worker's own loop plus one async_to_sync loop per job, plus one spare
     # slot for a loop stopped without closing; past the cap a job times out.
     assert _concurrency(read_cmd()) + 2 <= _MAX_POOLS
 
 
-@pytest.mark.parametrize("read_cmd", [_deploy_worker_cmd, _dev_worker_cmd])
+@WORKER_CMDS
 def test_worker_runs_more_than_one_job(read_cmd):
     assert _concurrency(read_cmd()) >= 2
