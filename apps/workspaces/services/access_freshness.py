@@ -397,12 +397,33 @@ def _renewal_due(check: FreshnessCheck, budget: VerificationBudget) -> bool:
     return budget == VerificationBudget.INTERACTIVE and bool(check.renewable) and not check.unbound
 
 
+# A renewal that could not reach the provider leaves the proofs due; without this every
+# request until they expire would retry it, each taking a provider-limiter permit.
+RENEWAL_COOLDOWN_SECONDS = 60.0
+_RENEWAL_ATTEMPTS: dict[tuple, float] = {}
+
+
+def _renewal_cooling_down(key) -> bool:
+    now = time.monotonic()
+    for stale_key in [
+        k for k, at in _RENEWAL_ATTEMPTS.items() if now - at >= RENEWAL_COOLDOWN_SECONDS
+    ]:
+        del _RENEWAL_ATTEMPTS[stale_key]
+    if key in _RENEWAL_ATTEMPTS:
+        return True
+    _RENEWAL_ATTEMPTS[key] = now
+    return False
+
+
 def _schedule_renewals(user_id, check: FreshnessCheck) -> None:
     """Renew in the background the fresh proofs this admission found due (#926).
 
-    Must run on the server's long-lived loop.
+    Must run on the server's long-lived loop. At most one attempt per tenant set per
+    ``RENEWAL_COOLDOWN_SECONDS`` in each process.
     """
     for connection_id, tenant_ids in check.renewable.items():
+        if _renewal_cooling_down((user_id, connection_id, tenant_ids)):
+            continue
         if schedule_background_verification(
             user_id, connection_id, tenant_ids, fresh_max_age=PROOF_RENEW_AFTER
         ):
@@ -413,10 +434,6 @@ def _schedule_renewals(user_id, check: FreshnessCheck) -> None:
                 len(tenant_ids),
                 extra={"user_id": user_id, "connection_id": str(connection_id)},
             )
-
-
-async def _aschedule_renewals(user_id, check: FreshnessCheck) -> None:
-    _schedule_renewals(user_id, check)
 
 
 def _admission_from(check: FreshnessCheck, results, graced=frozenset()) -> UpstreamAdmission:
@@ -452,32 +469,40 @@ def admit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) -> Upstre
     already running an event loop; async code must use the async twin.
     """
     check = check_freshness(user_id, tenant_ids)
-    if _renewal_due(check, budget) and _on_server_loop_thread():
-        async_to_sync(_aschedule_renewals)(user_id, check)
-    results = None
-    if check.stale and not check.unbound:
-        if transaction.get_connection().in_atomic_block:
-            # The verification's ORM work would run as savepoints of the caller's
-            # transaction: its row locks held across provider I/O, and the lease and
-            # proofs invisible to other verifiers until commit. Recheck outside.
-            return UpstreamAdmission(admitted=False, reason=VERIFICATION_IN_PROGRESS)
-        # Thread-bound caller (DRF); the async twin serves async callers.
-        results, graced = async_to_sync(_averify_stale_with_grace)(
-            user_id, check.stale, budget, allow_grace=_on_server_loop_thread()
-        )
-        return _admission_from(check, results, graced)
-    return _admission_from(check, results)
+    recheck = bool(check.stale) and not check.unbound
+    if recheck and transaction.get_connection().in_atomic_block:
+        # The verification's ORM work would run as savepoints of the caller's
+        # transaction: its row locks held across provider I/O, and the lease and
+        # proofs invisible to other verifiers until commit. Recheck outside.
+        return UpstreamAdmission(admitted=False, reason=VERIFICATION_IN_PROGRESS)
+    # Grace and renewal both leave a task behind, which only the server loop keeps.
+    on_server_loop = _on_server_loop_thread()
+    if not recheck and not (on_server_loop and _renewal_due(check, budget)):
+        return _admission_from(check, None)
+    # Thread-bound caller (DRF); the async twin serves async callers.
+    return async_to_sync(_aadmit_checked)(
+        user_id, check, budget, allow_grace=on_server_loop, renew=on_server_loop
+    )
 
 
-async def aadmit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) -> UpstreamAdmission:
-    check = await acheck_freshness(user_id, tenant_ids)
-    if _renewal_due(check, budget):
-        _schedule_renewals(user_id, check)
+async def _aadmit_checked(
+    user_id, check: FreshnessCheck, budget: VerificationBudget, *, allow_grace=True, renew=True
+) -> UpstreamAdmission:
     results = None
     graced = frozenset()
     if check.stale and not check.unbound:
-        results, graced = await _averify_stale_with_grace(user_id, check.stale, budget)
-    return _admission_from(check, results, graced)
+        results, graced = await _averify_stale_with_grace(
+            user_id, check.stale, budget, allow_grace=allow_grace
+        )
+    admission = _admission_from(check, results, graced)
+    # After the decision: a request denied on another connection renews nothing.
+    if renew and admission.admitted and _renewal_due(check, budget):
+        _schedule_renewals(user_id, check)
+    return admission
+
+
+async def aadmit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) -> UpstreamAdmission:
+    return await _aadmit_checked(user_id, await acheck_freshness(user_id, tenant_ids), budget)
 
 
 async def averify_membership_history(

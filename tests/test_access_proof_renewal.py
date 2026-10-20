@@ -13,7 +13,7 @@ import pytest
 from asgiref.sync import ThreadSensitiveContext, sync_to_async
 from django.utils import timezone
 
-from apps.users.models import TenantMembership, UpstreamAccessProof
+from apps.users.models import Tenant, TenantMembership, UpstreamAccessProof
 from apps.users.services import access_verification_service
 from apps.users.services.access_verification import PROOF_MAX_AGE, PROOF_RENEW_AFTER
 from apps.users.services.access_verification_service import verify_connection_access
@@ -23,10 +23,20 @@ from apps.workspaces.access import (
     aresolve_workspace_access_ex,
     resolve_workspace_access_ex,
 )
+from apps.workspaces.models import WorkspaceTenant
+from apps.workspaces.services import access_freshness
 from apps.workspaces.services.access_freshness import UPSTREAM_ACCESS_LOST, VerificationBudget
+from tests.tenant_access import agrant_tenant_access
 
 DUE = PROOF_RENEW_AFTER + timedelta(seconds=30)
 NOT_DUE = PROOF_RENEW_AFTER - timedelta(seconds=30)
+
+
+@pytest.fixture(autouse=True)
+def no_renewal_cooldown_between_tests():
+    access_freshness._RENEWAL_ATTEMPTS.clear()
+    yield
+    access_freshness._RENEWAL_ATTEMPTS.clear()
 
 
 def _age_proof(user, tenant, age):
@@ -144,6 +154,41 @@ async def test_failed_renewal_leaves_the_proof_to_expire_as_before(
     assert len(upstream_provider.requests) == 1
     assert DUE <= await _proof_age(user, tenant) < PROOF_MAX_AGE
     assert await TenantMembership.objects.filter(user=user, tenant=tenant).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_failed_renewal_is_not_retried_on_every_request(
+    user, workspace, tenant, upstream_provider
+):
+    await _aage_proof(user, tenant, DUE)
+    upstream_provider.failure = 503
+
+    for _ in range(3):
+        assert (await aresolve_workspace_access_ex(user, workspace.id)).granted
+        await _drain_background()
+
+    assert len(upstream_provider.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_one_due_proof_renews_the_whole_connection(
+    user, workspace, tenant, upstream_provider
+):
+    other = await Tenant.objects.acreate(
+        provider="commcare", external_id="other-domain", canonical_name="Other"
+    )
+    await agrant_tenant_access(user, other)
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=other)
+    await _aage_proof(user, tenant, DUE)
+    upstream_provider.domains = [tenant.external_id, other.external_id]
+
+    assert (await aresolve_workspace_access_ex(user, workspace.id)).granted
+    await _drain_background()
+
+    assert len(upstream_provider.requests) == 1
+    assert await _proof_age(user, tenant) < timedelta(minutes=1)
 
 
 @pytest.mark.asyncio
