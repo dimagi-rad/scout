@@ -1305,9 +1305,17 @@ def _refresh_oauth_token_sync(
     preflight = _sync_preflight(
         social_token, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
     )
-    adopted, advanced = _adopt_rotated_token(
-        social_token, preflight, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
-    )
+    try:
+        adopted, advanced = _adopt_rotated_token(
+            social_token,
+            preflight,
+            deadline=_phase_deadline(deadline, db_timeout, clock),
+            clock=clock,
+        )
+    except TokenRefreshError:
+        # The refresh below is self-validating; a failed read must not pre-empt it.
+        logger.warning("Could not check for a concurrently refreshed token", exc_info=True)
+        adopted, advanced = None, False
     if adopted is not None:
         logger.info("Adopted a concurrently refreshed OAuth token (sync)")
         return adopted

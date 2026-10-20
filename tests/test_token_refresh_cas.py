@@ -1127,6 +1127,58 @@ async def test_async_refresh_refused_for_a_spent_grant_takes_the_stored_token(
     assert connection.oauth_refresh_failure_fingerprint == ""
 
 
+async def _refused(mode, token, httpx_mock, requests_mock):
+    if mode == "async":
+        httpx_mock.add_response(url=URL, status_code=400, json=_SPENT["json"])
+        return await refresh_oauth_token_result(token, URL)
+    requests_mock.post(URL, status_code=400, json=_SPENT["json"])
+    return await sync_to_async(refresh_oauth_token_result_sync)(token, URL)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_a_stored_token_whose_own_refresh_failed_is_not_adopted(
+    oauth_identity, mode, httpx_mock, requests_mock
+):
+    token, connection = oauth_identity
+    await SocialToken.objects.filter(pk=token.pk).aupdate(
+        token="stored-access",
+        token_secret="stored-refresh",
+        expires_at=timezone.now() + timedelta(minutes=15),
+    )
+    stored = await SocialToken.objects.aget(pk=token.pk)
+    # The stored credential's own refresh was refused: serving it hands out a dead grant.
+    await TenantConnection.objects.filter(pk=connection.pk).aupdate(
+        oauth_refresh_failure_fingerprint=token_refresh.credential_fingerprint(stored)
+    )
+
+    with pytest.raises(TokenRefreshRejected):
+        await _refused(mode, token, httpx_mock, requests_mock)
+
+    assert token.token == "old-access"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_a_failed_adoption_read_keeps_the_providers_verdict(
+    oauth_identity, mode, httpx_mock, requests_mock, monkeypatch
+):
+    token, connection = oauth_identity
+
+    def unavailable(*args, **kwargs):
+        raise TokenRefreshUnavailable("Failed to read OAuth refresh state.")
+
+    monkeypatch.setattr(token_refresh, "_adopt_rotated_token", unavailable)
+
+    with pytest.raises(TokenRefreshRejected):
+        await _refused(mode, token, httpx_mock, requests_mock)
+
+    await connection.arefresh_from_db()
+    assert connection.oauth_refresh_failure_fingerprint != ""
+
+
 @pytest.mark.django_db(transaction=True)
 def test_waiting_for_another_refresh_honours_the_callers_deadline(oauth_identity):
     token, _ = oauth_identity
