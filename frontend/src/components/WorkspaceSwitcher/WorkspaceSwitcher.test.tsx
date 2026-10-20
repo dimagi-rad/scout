@@ -309,14 +309,25 @@ describe("combining sources", () => {
     })
   })
 
-  it("opens the panel, not the highlighted workspace, on Enter at the toggle", () => {
+  it("leaves Enter on the toggle to the button instead of switching workspace", () => {
     openSwitcher([workspace({ id: "a", display_name: "A" }), workspace({ id: "b", display_name: "B" })])
     const before = useAppStore.getState().activeDomainId
 
+    // jsdom does not turn Enter into a click; the browser does, which opens the panel.
     fireEvent.keyDown(screen.getByTestId("workspace-combine-toggle"), { key: "Enter" })
 
     expect(useAppStore.getState().activeDomainId).toBe(before)
-    expect(screen.getByTestId("workspace-combine-toggle")).toBeInTheDocument()
+  })
+
+  it("still arrows through the list after a pill takes focus", () => {
+    const ws = [workspace({ id: "a", display_name: "A" }), workspace({ id: "b", display_name: "B" })]
+    openSwitcher(ws)
+    const toggle = screen.getByTestId("workspace-combine-toggle")
+
+    fireEvent.keyDown(toggle, { key: "ArrowDown" })
+    fireEvent.keyDown(screen.getByTestId("workspace-search"), { key: "Enter" })
+
+    expect(useAppStore.getState().activeDomainId).toBe("b")
   })
 
   it("does not switch workspace on Enter inside the panel, and Escape goes back", async () => {

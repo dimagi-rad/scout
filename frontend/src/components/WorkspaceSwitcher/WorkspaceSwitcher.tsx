@@ -347,8 +347,9 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     if (o) {
       const ids = getRecentWorkspaceIds()
       setRecentIds(ids)
+      // Small accounts have no segment pills to reach All, so they open on everything.
       const hasSuggestions =
-        ids.length > 0 || accessible.some((d) => !d.is_auto_created)
+        showSegments && (ids.length > 0 || accessible.some((d) => !d.is_auto_created))
       setSegment(hasSuggestions ? "recent" : "all")
       setCombining(false)
       resetView()
@@ -405,9 +406,9 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
-    // Only the search box drives the list; Enter on a footer button or pill (or anywhere
-    // in the combine panel) must do that control's own thing, not switch workspace.
-    if (combining || e.target !== searchRef.current) return
+    if (combining) return
+    // Enter on a footer button or pill must do that control's own thing, not switch workspace.
+    if (e.key === "Enter" && e.target !== searchRef.current) return
     if (e.key === "ArrowDown") {
       e.preventDefault()
       setHighlight((h) => Math.min(h + 1, shown.length - 1))
@@ -693,7 +694,8 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
                     className="px-2 py-1.5 text-xs text-muted-foreground"
                     data-testid="workspace-list-lost-more"
                   >
-                    {lostVisible.length - lostShown.length} more — search to find one
+                    {lostVisible.length - lostShown.length} more —{" "}
+                    {suggestedView ? "search to find one" : "refine your search"}
                   </p>
                 )}
               </div>

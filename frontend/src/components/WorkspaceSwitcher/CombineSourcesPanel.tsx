@@ -1,18 +1,19 @@
-import { useEffect, useMemo, useState } from "react"
+import { type Dispatch, type SetStateAction, useEffect, useMemo, useState } from "react"
 import { ArrowLeft, Loader2, Search, X } from "lucide-react"
 import type { UserTenant } from "@/api/auth"
 import { getUserTenantsCached } from "@/api/userTenantsCache"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { CONNECT_QUICK_CHECK_LIMIT, countConnectSources } from "@/lib/connectAccessCheck"
+import { ConnectSizeNotice } from "@/components/ConnectSizeNotice"
+import { countConnectSources } from "@/lib/connectAccessCheck"
 import { combinedWorkspaceName, searchSources } from "@/lib/sourceBasket"
 import { useAppStore } from "@/store/store"
 
 interface Props {
   /** Held by the switcher so stepping back to the list keeps the ticks. */
   basket: UserTenant[]
-  setBasket: (update: (prev: UserTenant[]) => UserTenant[]) => void
+  setBasket: Dispatch<SetStateAction<UserTenant[]>>
   onBack: () => void
   onCombine: (name: string, sourceIds: string[]) => void
 }
@@ -127,7 +128,7 @@ export function CombineSourcesPanel({ basket, setBasket, onBack, onCombine }: Pr
       <div className="max-h-60 overflow-y-auto p-1" data-testid="workspace-basket-results">
         {loadError ? (
           <p className="px-2 py-4 text-center text-sm text-destructive">
-            Couldn't load your data sources. Close and try again.
+            Couldn't load your data sources. Go back and try again.
           </p>
         ) : sources === null ? (
           <p className="flex items-center justify-center gap-2 px-2 py-4 text-sm text-muted-foreground">
@@ -174,22 +175,20 @@ export function CombineSourcesPanel({ basket, setBasket, onBack, onCombine }: Pr
         )}
       </div>
 
-      {connectCount > CONNECT_QUICK_CHECK_LIMIT && (
-        <p
-          className="mx-2 mb-1 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400"
-          data-testid="workspace-basket-connect-warning"
-        >
-          {connectCount} Connect opportunities: above {CONNECT_QUICK_CHECK_LIMIT}, checking
-          access can be slow and may time out for some people.
-        </p>
-      )}
+      <ConnectSizeNotice
+        count={connectCount}
+        lead="These sources include"
+        testId="workspace-basket-connect-warning"
+        className="mx-2 mb-1 max-h-28 overflow-y-auto"
+        canSplit
+      />
 
       <div className="flex items-center justify-between gap-2 border-t p-2">
         <Button
           type="button"
           variant="ghost"
           size="sm"
-          onClick={() => setBasket(() => [])}
+          onClick={() => setBasket([])}
           disabled={basket.length === 0}
           data-testid="workspace-basket-clear"
         >
