@@ -377,7 +377,7 @@ async def _recover_workspace_data(context, recovery_id: str) -> dict:
 
 
 _CHAT_RECOVERY_NEEDS_RELOAD = (
-    "The data model can't be rebuilt from the loaded data: it needs a data refresh first."
+    "The data model can't be rebuilt from the imported data: it needs a data refresh first."
 )
 
 

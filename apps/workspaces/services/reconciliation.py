@@ -38,11 +38,11 @@ from config.procrastinate import app
 logger = logging.getLogger(__name__)
 
 RESUME_STUCK_RUNNING_MESSAGE = (
-    "Your materialization completed but the follow-up response was interrupted "
+    "Your import completed but the follow-up response was interrupted "
     "(likely a server restart). Please re-ask your question."
 )
 MATERIALIZATION_FAILED_MESSAGE = (
-    "Data loading failed before it could complete. Please retry your request."
+    "The import failed before it could complete. Please retry your request."
 )
 
 
@@ -178,7 +178,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
             completed_at=timezone.now(),
             failure_phase=ThreadJob.FailurePhase.RESUME,
             error_summary=(
-                "Materialization completed but the follow-up response was "
+                "The import completed but the follow-up response was "
                 "interrupted (likely a server restart). Please retry."
             ),
         )
@@ -242,8 +242,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
             completed_at=timezone.now(),
             failure_phase=ThreadJob.FailurePhase.RESUME,
             error_summary=(
-                "Background queue unavailable; the materialization could "
-                "not be resumed. Please retry."
+                "Background queue unavailable; the import could not be resumed. Please retry."
             ),
         )
         return "fallback_failed"
@@ -466,10 +465,9 @@ async def sweep_stale_materialization_runs() -> dict:
         if not (is_stalled or is_terminal):
             continue
         reason = (
-            "The materialization worker stopped responding before the run finished "
-            "(stalled or crashed)."
+            "The import worker stopped responding before the run finished (stalled or crashed)."
             if is_stalled
-            else f"The materialization job ended ({status}) without recording a terminal run state."
+            else f"The import job ended ({status}) without recording a terminal run state."
         )
         if await fail_zombie_materialization_run(run, reason):
             failed += 1
