@@ -1393,3 +1393,22 @@ def test_view_prefixes_reuse_recorded_assignments(db):
 
     assert mgr._view_prefixes([younger], recorded) == {younger: digest}
     assert mgr._view_prefixes([older, younger], recorded) == {older: "chc", younger: digest}
+
+
+def test_unloaded_sources_without_evidence_are_not_pinned(db):
+    """Neither same-named source loaded and nothing recorded: pinning the older one
+    would take the plain name from the other, which published it before records."""
+    _ws, older, younger = _make_long_named_workspace("CHC", "opp-1", "CHC", "opp-2")
+    Tenant.objects.filter(pk=older.pk).update(created_at=timezone.now() - timedelta(days=1))
+    older.refresh_from_db()
+    mgr = SchemaManager()
+
+    prefixes = mgr._view_prefixes([older, younger], {}, set())
+    assert mgr._recordable_prefixes(prefixes, {}, set()) == {}
+
+    # When the younger one reloads, it is the loaded source and takes the plain name.
+    assert mgr._view_prefixes([older, younger], {}, {younger.id})[younger] == "chc"
+    recorded = mgr._recordable_prefixes(
+        mgr._view_prefixes([older, younger], {}, {younger.id}), {}, {younger.id}
+    )
+    assert recorded == {str(younger.id): "chc"}

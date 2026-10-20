@@ -691,6 +691,39 @@ class SchemaManager:
         digest = hashlib.sha256(str(tenant.id).encode("utf-8")).hexdigest()[:8]
         return f"{sanitized[:23]}_{digest}"
 
+    def _prefix_evidence(self, tenants, published) -> tuple[dict, set[str]]:
+        """Return (tenant -> still-valid recorded prefix, ids that published a plain name)."""
+        published = published or {}
+        recorded = published.get("prefixes") or {}
+        kept = {
+            tenant: recorded[str(tenant.id)]
+            for tenant in tenants
+            if recorded.get(str(tenant.id))
+            in (self._view_prefix(tenant), self._collision_view_prefix(tenant))
+        }
+        by_id = {str(tenant.id): tenant for tenant in tenants}
+        # Exact match, not startswith: fitting a long multibyte name can cut the prefix.
+        published_plain = {
+            tenant_id
+            for name, source in (published.get("views") or {}).items()
+            if (tenant_id := source.get("tenant_id")) in by_id
+            and name
+            == view_name(self._view_prefix(by_id[tenant_id]), source.get("source_table_name", ""))
+        }
+        return kept, published_plain
+
+    def _recordable_prefixes(self, view_prefixes, published, loaded_ids) -> dict[str, str]:
+        """Only assignments backed by a load, a record or a published name are pinned:
+        an unloaded source with none must not claim a plain name another source
+        published before records existed (it would take it when it reloads, as on main).
+        """
+        kept, published_plain = self._prefix_evidence(list(view_prefixes), published)
+        return {
+            str(tenant.id): prefix
+            for tenant, prefix in view_prefixes.items()
+            if tenant.id in loaded_ids or tenant in kept or str(tenant.id) in published_plain
+        }
+
     def _view_prefixes(self, tenants, published=None, loaded_ids=frozenset()) -> dict:
         """Map each tenant to its view prefix, digesting only the prefixes that collide.
 
@@ -703,23 +736,9 @@ class SchemaManager:
         loaded or not, so a source dropping out never renames the others' views.
         """
         tenants = list(tenants)
-        published = published or {}
         plain = {tenant: self._view_prefix(tenant) for tenant in tenants}
         collision = {tenant: self._collision_view_prefix(tenant) for tenant in tenants}
-        recorded = published.get("prefixes") or {}
-        kept = {
-            tenant: recorded[str(tenant.id)]
-            for tenant in tenants
-            if recorded.get(str(tenant.id)) in (plain[tenant], collision[tenant])
-        }
-        by_id = {str(tenant.id): tenant for tenant in tenants}
-        # Exact match, not startswith: fitting a long multibyte name can cut the prefix.
-        published_plain = {
-            tenant_id
-            for name, source in (published.get("views") or {}).items()
-            if (tenant_id := source.get("tenant_id")) in by_id
-            and name == view_name(plain[by_id[tenant_id]], source.get("source_table_name", ""))
-        }
+        kept, published_plain = self._prefix_evidence(tenants, published)
         counts = Counter(plain.values())
         holder: dict[str, object] = {}
         for tenant in sorted(
@@ -881,9 +900,8 @@ class SchemaManager:
             tenant_prefixes: list[tuple[str, Tenant, str]] = []
             # Use the threaded tenant objects, NOT a lookup by external_id —
             # that raises MultipleObjectsReturned across providers (arch #235).
-            view_prefixes = self._view_prefixes(
-                tenants, vs.view_sources, {tenant.id for tenant in included_tenants}
-            )
+            loaded_ids = {tenant.id for tenant in included_tenants}
+            view_prefixes = self._view_prefixes(tenants, vs.view_sources, loaded_ids)
             for schema_name, tenant_obj in tenant_schemas:
                 tenant_external_id = tenant_obj.external_id
                 prefix = view_prefixes[tenant_obj]
@@ -1025,7 +1043,13 @@ class SchemaManager:
             retired_as = current_state if current_state in RETIRED_VIEW_STATES else None
             if retired_as is None:
                 coverage = self._name_sources_added_since(workspace, coverage, tenants)
-                self._publish_view_row(vs, coverage, planned_sources, view_prefixes, build_token)
+                self._publish_view_row(
+                    vs,
+                    coverage,
+                    planned_sources,
+                    self._recordable_prefixes(view_prefixes, vs.view_sources, loaded_ids),
+                    build_token,
+                )
         if retired_as is not None:
             # Retired while this build ran (the workspace dropped to one source):
             # that later decision wins, and marking the row ACTIVE would make its
@@ -1090,7 +1114,7 @@ class SchemaManager:
         }
 
     @staticmethod
-    def _publish_view_row(vs, coverage, planned_sources, view_prefixes, build_token) -> None:
+    def _publish_view_row(vs, coverage, planned_sources, prefixes, build_token) -> None:
         # Reset the TTL on (re)build: a row resurrected from EXPIRED keeps its stale
         # last_accessed_at and expire_inactive_schemas would re-tear-down it (arch #255 03#2).
         vs.state = SchemaState.ACTIVE
@@ -1104,8 +1128,8 @@ class SchemaManager:
         vs.view_sources = {
             "version": VIEW_SOURCES_VERSION,
             "views": planned_sources,
-            # Every tenant's prefix, loaded or not, so the next build reuses it (#916).
-            "prefixes": {str(tenant.id): prefix for tenant, prefix in view_prefixes.items()},
+            # Pinned prefixes the next build reuses, so a view name never moves (#916).
+            "prefixes": prefixes,
         }
         vs.physical_build_token = build_token
         vs.save(
