@@ -86,6 +86,7 @@ def test_pool_size_comes_from_the_environment(load_production_with_env):
     assert (pool["min_size"], pool["max_size"], pool["timeout"]) == (2, 8, 3.0)
     assert pool["reset"] is reset_pooled_connection
     assert pool["connection_class"] is RefusalRecordingConnection
+    assert pool["reconnect_timeout"] == 300.0
     assert db["ENGINE"] == POOLED_ENGINE
     assert db["CONN_HEALTH_CHECKS"] is True
     assert db["CONN_MAX_AGE"] == 0

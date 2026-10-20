@@ -71,6 +71,8 @@ def pool_options(*, min_size: int, max_size: int, timeout: float) -> dict[str, A
         "min_size": min_size,
         "max_size": max_size,
         "timeout": timeout,
+        # Also how long a connect failure decides busy vs outage (pooled_postgresql).
+        "reconnect_timeout": 300.0,
         "reset": reset_pooled_connection,
         "connection_class": RefusalRecordingConnection,
     }

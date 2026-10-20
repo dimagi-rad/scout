@@ -5,6 +5,11 @@ tell from an outage, so a full pool would 500 and fail the health probe instead 
 answering "busy" (#934). A recent connect failure decides: a refusal for lack of
 slots is capacity, anything else an outage. Without one, a full pool is capacity.
 ``apps.common.capacity_pool`` (the checkpointer) still lets a full pool win.
+
+A recent non-capacity failure can veto a genuinely full pool, answering 500 rather
+than busy until the pool reconnects. That errs toward paging, the safer side. A
+proxy in front of RDS whose refusals match no capacity marker would make it the
+default, so extend ``apps.common.capacity`` markers before adding one.
 """
 
 import time
