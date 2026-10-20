@@ -31,7 +31,11 @@ export function CharCounter({
   const over = isOverLimit(length)
   const hint = over ? hintText(length - MAX_MESSAGE_LENGTH, includesHeld) : ""
   // Without the count, so it is said once on crossing the limit, not on each keystroke.
-  const announcement = over ? "Message is too long to send." : ""
+  const announcement = !over
+    ? ""
+    : includesHeld
+      ? "Too long to send together with your held request."
+      : "Message is too long to send."
   return (
     <>
       <span className="sr-only" aria-live="polite">

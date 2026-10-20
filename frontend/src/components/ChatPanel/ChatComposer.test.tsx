@@ -297,6 +297,9 @@ describe("ChatComposer multi-line input and length limit (#913)", () => {
     )
     // held + "\n\n" + typed
     expect(screen.getByTestId("chat-char-count")).toHaveTextContent("11,002 / 10,000")
+    expect(document.querySelector("[aria-live=polite]")).toHaveTextContent(
+      "Too long to send together with your held request.",
+    )
     expect(screen.getByTestId("chat-char-count-hint")).toHaveTextContent(
       "Together with your held request this is 1,002 characters too long. Shorten it, or discard the request.",
     )
