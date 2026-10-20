@@ -42,8 +42,8 @@ class TableKnowledgeAdmin(admin.ModelAdmin):
 
 @admin.register(KnowledgeEntry)
 class KnowledgeEntryAdmin(admin.ModelAdmin):
-    list_display = ["title", "workspace", "tags_display", "updated_at"]
-    list_filter = ["workspace", "updated_at"]
+    list_display = ["title", "workspace", "kind", "tags_display", "updated_at"]
+    list_filter = ["kind", "workspace", "updated_at"]
     search_fields = ["title", "content"]
     autocomplete_fields = ["created_by"]
     readonly_fields = ["created_at", "updated_at"]

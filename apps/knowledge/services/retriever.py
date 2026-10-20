@@ -11,6 +11,7 @@ import re
 from typing import TYPE_CHECKING
 
 from apps.knowledge.models import AgentLearning, KnowledgeEntry, TableKnowledge
+from apps.knowledge.services.reference_documents import aformat_reference_documents_for_prompt
 
 if TYPE_CHECKING:
     from apps.workspaces.models import Workspace
@@ -177,7 +178,16 @@ class KnowledgeRetriever:
         is unchanged, learnings claim at most half the budget before the other
         sections are fitted and then take back what they leave unused, each table's column
         notes are capped, and each section is cut at a line boundary where possible.
+
+        Reference documents (#913) sit outside the budget: their bodies never
+        enter the prompt, and only a compact, capped listing of them follows the
+        budgeted knowledge.
         """
+        knowledge = await self._retrieve_budgeted()
+        references = await aformat_reference_documents_for_prompt(self.workspace)
+        return _SECTION_SEPARATOR.join(part for part in (knowledge, references) if part)
+
+    async def _retrieve_budgeted(self) -> str:
         table_rows = await self._table_rows()
         sections = {
             "entries": await self._format_knowledge_entries(),
@@ -218,7 +228,9 @@ class KnowledgeRetriever:
 
     async def _format_knowledge_entries(self) -> str:
         """Format knowledge entries as markdown sections."""
-        entries = KnowledgeEntry.objects.filter(workspace=self.workspace).order_by("title", "pk")
+        entries = KnowledgeEntry.objects.filter(
+            workspace=self.workspace, kind=KnowledgeEntry.Kind.NOTE
+        ).order_by("title", "pk")
 
         if not await entries.aexists():
             return ""

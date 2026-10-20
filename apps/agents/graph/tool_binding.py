@@ -35,6 +35,7 @@ from apps.agents.tools.memory_tool import (
     create_workspace_memory_tool,
 )
 from apps.agents.tools.recipe_tool import create_recipe_tool
+from apps.agents.tools.reference_document_tool import create_reference_document_tool
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.memory.services import has_personal_memory
 
@@ -260,6 +261,7 @@ def _build_tools(
     if not interactive:
         excluded.add("run_materialization")
     tools = [t for t in mcp_tools if getattr(t, "name", None) not in excluded]
+    tools.append(create_reference_document_tool(workspace))
     from apps.agents.tools.artifact_manager_agent import (  # noqa: PLC0415 — cycle
         create_artifact_manager_tool,
     )
