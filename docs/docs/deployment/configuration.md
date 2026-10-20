@@ -121,7 +121,7 @@ The development settings always print email to the console. Elsewhere the base s
 
 ### Storage headroom
 
-Every 15 minutes the worker checks free space on the host filesystem and sends a Sentry warning or error when it runs low. It sends the error on whichever threshold free space crosses first: the percentage or the GiB floor. The same applies to the warning. In the Kamal deployment the worker receives only the variables listed in `config/deploy-worker.yml`, so add these under `env.clear` there to change them.
+Every 15 minutes the worker checks free space on the host filesystem and sends a Sentry warning or error when it runs low. Without `SENTRY_DSN` it only logs the readings at INFO. It sends the error on whichever threshold free space crosses first: the percentage or the GiB floor. The same applies to the warning. In the Kamal deployment the worker receives only the variables listed in `config/deploy-worker.yml`, so add these under `env.clear` there to change them.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
