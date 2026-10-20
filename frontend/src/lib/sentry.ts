@@ -158,6 +158,8 @@ function scrubCommon<T extends ErrorEvent | TransactionEvent>(event: T, keptCont
     }
   }
 
+  // Browser tracing names the scope after the raw pathname, which errors inherit too.
+  if (event.transaction) event.transaction = stripUrl(event.transaction)
   event.user = event.user?.id !== undefined ? { id: event.user.id } : undefined
   delete event.extra
 
@@ -206,7 +208,8 @@ const METHOD_AND_URL = /^([A-Z]+ )(.*)$/s
 // Web-vital attributes name the element they measured, e.g. lcp.element,
 // cls.source.1 and browser.web_vital.lcp.element.
 const SELECTOR_KEY = /(?:^|\.)(?:element|source\.\d+)$/
-const URL_KEY = /(?:^|\.)url$/
+// Standalone web-vital spans carry their page's raw route as `transaction`.
+const URL_KEY = /(?:^|\.)url$|^transaction$/
 const DROPPED_KEYS = new Set(["http.query", "http.fragment"])
 
 function scrubSpanDescription(op: string | undefined, description: string): string {
@@ -251,7 +254,6 @@ const KEPT_TRANSACTION_CONTEXTS = new Set([...KEPT_CONTEXTS, "trace"])
  */
 export function scrubTransaction(event: TransactionEvent): TransactionEvent {
   scrubCommon(event, KEPT_TRANSACTION_CONTEXTS)
-  if (event.transaction) event.transaction = stripUrl(event.transaction)
   const trace = event.contexts?.trace
   if (trace?.data) trace.data = scrubSpanData(trace.data)
   if (event.spans) event.spans = event.spans.map(scrubSpan)

@@ -430,6 +430,14 @@ describe("tracing", () => {
   })
 })
 
+describe("scrubEvent transaction name", () => {
+  it("masks the route browser tracing names error events after", () => {
+    const id = "0b6e9a52-3c1d-4f7a-9e2b-1a2b3c4d5e6f"
+    const event = scrubEvent(errorEvent({ transaction: `/workspaces/acme-health/${id}/chat` }))
+    expect(event.transaction).toBe(`/workspaces/:slug/${id}/chat`)
+  })
+})
+
 describe("scrubSpan", () => {
   const id = "0b6e9a52-3c1d-4f7a-9e2b-1a2b3c4d5e6f"
 
@@ -471,9 +479,11 @@ describe("scrubSpan", () => {
       span({
         op: "ui.interaction.click",
         description: 'body > button[title="show me patient names"]',
+        data: { transaction: `/workspaces/acme-health/${id}/datasets/hiv_patients` },
       }),
     )
     expect(scrubbed.description).toBe("body > button[title]")
+    expect(scrubbed.data.transaction).toBe(`/workspaces/:slug/${id}/datasets/:name`)
   })
 
   it("drops attribute values from web-vital element attributes", () => {
