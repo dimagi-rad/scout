@@ -63,6 +63,7 @@ async def _upload(client, workspace, content, name, content_type):
 @pytest.mark.parametrize(
     ("content", "expected"),
     [(PNG, "image/png"), (JPEG, "image/jpeg"), (GIF, "image/gif"), (WEBP, "image/webp")],
+    ids=["png", "jpeg", "gif", "webp"],
 )
 def test_sniff_image_type(content, expected):
     assert sniff_image_type(content[:16]) == expected
@@ -105,6 +106,9 @@ def test_validate_extensionless_text_uses_claimed_type():
             "attachment_too_large",
         ),
     ],
+    # By filename: pytest would otherwise spell the multi-megabyte byte strings into
+    # the test ids, and CI's log streaming stalls on 20 MB lines.
+    ids=lambda value: value if isinstance(value, str) else "",
 )
 def test_validate_rejects(content, filename, claimed, reason):
     with pytest.raises(AttachmentRejected) as excinfo:
