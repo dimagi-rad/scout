@@ -226,21 +226,22 @@ export function ChatEmptyState({
 
         <div className="mt-10 grid grid-cols-1 gap-3 md:grid-cols-3">
           {starters.map((question, idx) => (
-            <button
-              key={idx}
-              type="button"
-              onClick={() => submit(question)}
-              disabled={startersBlocked}
-              title={startersHoldReason ?? undefined}
-              className="group flex items-start justify-between gap-2 rounded-lg border bg-card p-4 text-left text-sm transition hover:bg-accent disabled:opacity-50"
-              data-testid={`starter-question-${idx}`}
-            >
-              <span>{question}</span>
-              <ArrowRight
-                className="h-4 w-4 shrink-0 text-muted-foreground transition group-hover:text-foreground"
-                aria-hidden
-              />
-            </button>
+            // The title sits on a wrapper: a disabled button shows no tooltip.
+            <span key={idx} className="flex" title={startersHoldReason ?? undefined}>
+              <button
+                type="button"
+                onClick={() => submit(question)}
+                disabled={startersBlocked}
+                className="group flex w-full items-start justify-between gap-2 rounded-lg border bg-card p-4 text-left text-sm transition hover:bg-accent disabled:opacity-50"
+                data-testid={`starter-question-${idx}`}
+              >
+                <span>{question}</span>
+                <ArrowRight
+                  className="h-4 w-4 shrink-0 text-muted-foreground transition group-hover:text-foreground"
+                  aria-hidden
+                />
+              </button>
+            </span>
           ))}
         </div>
 

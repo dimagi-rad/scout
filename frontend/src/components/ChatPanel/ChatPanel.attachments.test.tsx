@@ -326,6 +326,16 @@ describe("ChatPanel attachments (#913)", () => {
     expect(screen.getByTestId("chat-send")).not.toBeDisabled()
   })
 
+  it("uploads a Markdown file the browser left untyped with its real type", async () => {
+    await renderThread()
+    await act(async () => {
+      fireEvent.drop(screen.getByTestId("chat-thread-title"), fileDrag([new File(["# hi"], "notes.md")]))
+    })
+    const sent = upload.mock.calls[0][0]
+    expect(sent.name).toBe("notes.md")
+    expect(sent.type).toBe("text/markdown")
+  })
+
   it("refuses a text file over 2 MB without uploading it", async () => {
     await renderThread()
     const big = new File([new Uint8Array(2 * 1024 * 1024 + 1)], "big.csv", { type: "text/csv" })

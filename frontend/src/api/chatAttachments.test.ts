@@ -17,6 +17,8 @@ class FakeXHR {
   onload: (() => void) | null = null
   onerror: (() => void) | null = null
   onabort: (() => void) | null = null
+  ontimeout: (() => void) | null = null
+  timeout = 0
 
   constructor() {
     FakeXHR.last = this
@@ -90,6 +92,13 @@ describe("uploadChatAttachment", () => {
     const result = uploadChatAttachment(file, "ws-1", vi.fn(), new AbortController().signal)
     FakeXHR.last.respond(503, { error: "busy", message: "Scout is busy, try again shortly." })
     await expect(result).rejects.toMatchObject({ message: "Scout is busy, try again shortly." })
+  })
+
+  it("gives up on a stalled upload", async () => {
+    const result = uploadChatAttachment(file, "ws-1", vi.fn(), new AbortController().signal)
+    expect(FakeXHR.last.timeout).toBeGreaterThan(0)
+    FakeXHR.last.ontimeout?.()
+    await expect(result).rejects.toMatchObject({ message: expect.stringContaining("timed out") })
   })
 
   it("aborts with its signal", async () => {

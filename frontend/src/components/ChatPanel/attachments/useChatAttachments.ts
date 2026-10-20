@@ -186,14 +186,20 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
           error: check.ok ? undefined : check.error,
           previewUrl: check.ok && check.kind === "image" ? URL.createObjectURL(file) : undefined,
         }
-        return { item, file, kind: check.ok ? check.kind : null }
+        return check.ok
+          ? { item, file, kind: check.kind, mediaType: check.mediaType }
+          : { item, file, kind: null, mediaType: file.type }
       })
       const addedItems = added.map(({ item }) => item)
       setList(scope, (list) => [...list, ...addedItems])
-      for (const { item, file, kind } of added) {
+      for (const { item, file, kind, mediaType } of added) {
         if (!kind) continue
-        // A pasted screenshot is often unnamed ("image.png"); keep the chip's name for it.
-        const named = file.name ? file : new File([file], item.filename, { type: file.type })
+        // A pasted screenshot is often unnamed, and browsers often type .md, .tsv and
+        // .csv as "": upload with the chip's name and the type the extension gave.
+        const named =
+          file.name && file.type === mediaType
+            ? file
+            : new File([file], item.filename, { type: mediaType })
         void process(scope, item, named, kind)
       }
     },

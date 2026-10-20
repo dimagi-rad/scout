@@ -16,8 +16,10 @@ const TYPE_LABELS: Record<string, string> = {
 function typeLabel(part: FileUIPart): string {
   const base = part.mediaType.split(";")[0]
   if (Object.hasOwn(TYPE_LABELS, base)) return TYPE_LABELS[base]
-  const ext = part.filename?.split(".").pop()
-  return ext && ext !== part.filename ? ext.toUpperCase() : "File"
+  const name = part.filename ?? ""
+  const dot = name.lastIndexOf(".")
+  // No extension, or a dotfile such as ".gitignore".
+  return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toUpperCase() : "File"
 }
 
 /** The files a user message carried: image thumbnails that open full size, and file chips. */

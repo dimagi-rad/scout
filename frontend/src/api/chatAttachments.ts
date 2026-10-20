@@ -30,6 +30,8 @@ function uploadErrorMessage(body: Record<string, unknown> | undefined, status: n
   return `Upload failed (HTTP ${status}).`
 }
 
+const UPLOAD_TIMEOUT_MS = 120_000
+
 export class AttachmentUploadError extends Error {
   reason: string | null
 
@@ -60,6 +62,8 @@ export function uploadChatAttachment(
     xhr.withCredentials = true
     xhr.setRequestHeader("X-CSRFToken", getCsrfToken())
     xhr.responseType = "text"
+    // A stalled connection would otherwise leave the chip uploading for good.
+    xhr.timeout = UPLOAD_TIMEOUT_MS
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && event.total > 0) onProgress(event.loaded / event.total)
     }
@@ -69,6 +73,10 @@ export function uploadChatAttachment(
     xhr.onabort = () => {
       done()
       reject(new DOMException("Upload cancelled", "AbortError"))
+    }
+    xhr.ontimeout = () => {
+      done()
+      reject(new AttachmentUploadError("Upload timed out. Check your connection and try again."))
     }
     xhr.onerror = () => {
       done()
