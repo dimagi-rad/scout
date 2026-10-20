@@ -126,8 +126,8 @@ def _defer_unserved_load(workspace_id, tenant_ids, actor_id) -> None:
 def _record_pending_source(workspace, tenant) -> None:
     """Name ``tenant`` as missing from the serving views until a rebuild includes it.
 
-    The queued rebuild may wait behind a long load (the worker runs one job at a
-    time), and until then the ACTIVE row's coverage would otherwise still claim
+    The queued rebuild may wait behind a long load (it needs the workspace lock the
+    load holds, or a free worker slot), and until then the ACTIVE row's coverage would otherwise still claim
     every source, so answers would omit this one without a warning.
     """
     entry = coverage_entry(tenant)

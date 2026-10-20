@@ -63,8 +63,9 @@ _POOL_MIN_SIZE = 1
 _POOL_MAX_SIZE = 10
 _POOL_MAX_IDLE_SECONDS = 60.0
 # One slot per concurrently live loop: the ASGI/worker loop plus any
-# async_to_sync loops running at once (bounded today by worker concurrency).
-# Raising worker concurrency past this turns slot waits into PoolTimeout.
+# async_to_sync loops running at once, at most one per worker job. The worker
+# runs 3 jobs (config/deploy-worker.yml), so 1 + 3 fills the cap; raising worker
+# concurrency past it turns slot waits into PoolTimeout.
 _MAX_POOLS = 4
 _SLOT_WAIT_SECONDS = 30.0
 _SLOT_POLL_SECONDS = 0.05
