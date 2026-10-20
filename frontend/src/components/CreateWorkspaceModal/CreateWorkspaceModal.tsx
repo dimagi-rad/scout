@@ -466,6 +466,9 @@ export function CreateWorkspaceModal({ onClose, initialName = "", initialSourceI
                 !name.trim() ||
                 selected.size === 0 ||
                 loading ||
+                // Preselected sources are only pruned to the user's own once these load.
+                sourcesLoading ||
+                !!sourcesError ||
                 (!!duplicateWorkspace && !duplicateAcknowledged)
               }
               data-testid="create-workspace-submit"

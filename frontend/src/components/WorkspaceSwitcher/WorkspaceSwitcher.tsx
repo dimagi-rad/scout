@@ -288,7 +288,14 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   const searchTerm = search.trim()
   const matchedSourceIds = useMemo(() => {
     if (!searchTerm || visible.length < 2) return []
-    return [...new Set(visible.flatMap((ws) => (ws.tenants ?? []).map((t) => t.id)))]
+    const q = searchTerm.toLowerCase()
+    // A multi-source workspace matched on one source must not drag in its others.
+    const sourcesOf = (ws: WorkspaceListItem) => {
+      const tenants = ws.tenants ?? []
+      const matching = tenants.filter((t) => t.tenant_name.toLowerCase().includes(q))
+      return (matching.length > 0 ? matching : tenants).map((t) => t.id)
+    }
+    return [...new Set(visible.flatMap(sourcesOf))]
   }, [searchTerm, visible])
 
   // Lost-access workspaces matching the current search (or provider tab), shown

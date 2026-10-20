@@ -115,6 +115,21 @@ it("starts from a preselection, dropping sources the user cannot add", async () 
   expect(workspaceApi.create).toHaveBeenCalledWith("Program", ["tenant-a", "tenant-b"])
 })
 
+it("cannot create from a preselection before the user's sources load", async () => {
+  vi.mocked(getUserTenantsCached).mockReturnValue(new Promise(() => {}))
+  render(
+    <MemoryRouter>
+      <CreateWorkspaceModal
+        onClose={vi.fn()}
+        initialName="Program"
+        initialSourceIds={["tenant-not-mine"]}
+      />
+    </MemoryRouter>,
+  )
+
+  expect(screen.getByTestId("create-workspace-submit")).toBeDisabled()
+})
+
 it("does not offer Connect facets when no Connect source is present", async () => {
   await openModal()
   expect(screen.getByTestId(`${F}-facet-provider`)).toBeInTheDocument()

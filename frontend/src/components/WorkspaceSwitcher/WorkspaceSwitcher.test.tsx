@@ -267,6 +267,28 @@ describe("combining search matches", () => {
     })
   })
 
+  it("leaves out the non-matching sources of a matched multi-source workspace", async () => {
+    vi.useFakeTimers()
+    const mixed = workspace({
+      id: "m",
+      display_name: "East Africa",
+      tenants: [
+        { id: "tenant-mk", tenant_name: "CHC Kenya 2", provider: "commcare_connect" },
+        { id: "tenant-mo", tenant_name: "Other Program", provider: "commcare_connect" },
+      ],
+    })
+    openSwitcher([opp("k", "CHC Kenya"), mixed])
+    fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
+
+    fireEvent.click(screen.getByTestId("workspace-combine-matches"))
+    await act(async () => vi.runAllTimers())
+    vi.useRealTimers()
+
+    expect(vi.mocked(CreateWorkspaceModal).mock.lastCall?.[0]).toMatchObject({
+      initialSourceIds: ["tenant-k", "tenant-mk"],
+    })
+  })
+
   it("does not offer to combine a single match", () => {
     openSwitcher([opp("k", "CHC Kenya"), opp("x", "Other")])
     fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "CHC" } })
