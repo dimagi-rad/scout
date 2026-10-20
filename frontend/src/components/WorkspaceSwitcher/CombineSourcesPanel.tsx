@@ -1,4 +1,4 @@
-import { type Dispatch, type SetStateAction, useEffect, useMemo, useState } from "react"
+import { type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeft, Loader2, Search, X } from "lucide-react"
 import type { UserTenant } from "@/api/auth"
 import { getUserTenantsCached } from "@/api/userTenantsCache"
@@ -28,6 +28,7 @@ export function CombineSourcesPanel({ basket, setBasket, onBack, onCombine }: Pr
   const [sources, setSources] = useState<UserTenant[] | null>(null)
   const [loadError, setLoadError] = useState(false)
   const [query, setQuery] = useState("")
+  const searchRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (!userId) return
@@ -86,6 +87,7 @@ export function CombineSourcesPanel({ basket, setBasket, onBack, onCombine }: Pr
         <div className="relative">
           <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
+            ref={searchRef}
             autoFocus
             placeholder="Search your data sources..."
             value={query}
@@ -113,7 +115,11 @@ export function CombineSourcesPanel({ basket, setBasket, onBack, onCombine }: Pr
                 <span className="truncate">{s.tenant_name}</span>
                 <button
                   type="button"
-                  onClick={() => toggle(s)}
+                  onClick={() => {
+                    toggle(s)
+                    // The button leaves with its chip; keep keyboard users in the panel.
+                    searchRef.current?.focus()
+                  }}
                   aria-label={`Remove ${s.tenant_name}`}
                   className="rounded-full p-0.5 text-muted-foreground hover:text-foreground"
                 >
@@ -188,22 +194,31 @@ export function CombineSourcesPanel({ basket, setBasket, onBack, onCombine }: Pr
           type="button"
           variant="ghost"
           size="sm"
-          onClick={() => setBasket([])}
+          onClick={() => {
+            setBasket([])
+            searchRef.current?.focus()
+          }}
           disabled={basket.length === 0}
           data-testid="workspace-basket-clear"
         >
           Clear
         </Button>
-        <Button
-          type="button"
-          size="sm"
-          onClick={combine}
-          disabled={basket.length < 2}
-          title={basket.length < 2 ? "Tick at least two sources" : undefined}
-          data-testid="workspace-basket-combine"
-        >
-          {basket.length < 2 ? "Combine" : `Combine ${basket.length}`}
-        </Button>
+        <div className="flex items-center gap-2">
+          {basket.length < 2 && (
+            <span className="text-xs text-muted-foreground" data-testid="workspace-basket-hint">
+              Tick 2 or more
+            </span>
+          )}
+          <Button
+            type="button"
+            size="sm"
+            onClick={combine}
+            disabled={basket.length < 2}
+            data-testid="workspace-basket-combine"
+          >
+            {basket.length < 2 ? "Combine" : `Combine ${basket.length}`}
+          </Button>
+        </div>
       </div>
     </div>
   )

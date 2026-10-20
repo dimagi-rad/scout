@@ -78,6 +78,7 @@ it("counts up on the combine button and needs two sources", async () => {
   search("alpha")
 
   expect(button).toBeDisabled()
+  expect(screen.getByTestId("workspace-basket-hint")).toHaveTextContent("Tick 2 or more")
   fireEvent.click(screen.getByTestId("workspace-basket-option-a"))
   expect(button).toBeDisabled()
   fireEvent.click(screen.getByTestId("workspace-basket-option-b"))
@@ -97,6 +98,7 @@ it("removes a chip, and clears the whole basket", async () => {
 
   fireEvent.click(screen.getByRole("button", { name: "Remove Alpha" }))
   expect(screen.queryByTestId("workspace-basket-chip-a")).toBeNull()
+  expect(screen.getByTestId("workspace-basket-search")).toHaveFocus()
   expect(screen.getByTestId("workspace-basket-option-a")).not.toBeChecked()
 
   fireEvent.click(screen.getByTestId("workspace-basket-clear"))
