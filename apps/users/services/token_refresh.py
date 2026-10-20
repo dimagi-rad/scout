@@ -1185,8 +1185,11 @@ def _sync_refresh_lock_wait(timeout, db_timeout, deadline, clock) -> float:
         return max(0.0, deadline - clock())
     if db_timeout is None:
         return -1
-    # The holder's provider call plus its database phases and persist retries.
-    return timeout + 4 * db_timeout
+    # The holder's worst case, twice for its one retry with a stored grant: its post,
+    # preflight, adoption read, re-preflight, re-read after a refusal, each persist
+    # attempt and the failure marker, every database phase re-armed.
+    phases = 5 + len(SPENT_GRANT_PERSIST_RETRY_DELAYS) + 1 + 1
+    return 2 * (timeout + phases * db_timeout)
 
 
 def _adopt_rotated_token(

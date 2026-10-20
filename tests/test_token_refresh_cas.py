@@ -1180,8 +1180,9 @@ async def test_a_failed_adoption_read_keeps_the_providers_verdict(
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("stored_expired", [False, True])
 def test_sync_refresh_spent_after_its_check_takes_the_stored_token(
-    oauth_identity, requests_mock, monkeypatch
+    oauth_identity, requests_mock, monkeypatch, stored_expired
 ):
     """Another process rotated the grant between the adoption read and the post."""
     token, _ = oauth_identity
@@ -1194,16 +1195,22 @@ def test_sync_refresh_spent_after_its_check_takes_the_stored_token(
             SocialToken.objects.filter(pk=token.pk).update(
                 token="stored-access",
                 token_secret="stored-refresh",
-                expires_at=timezone.now() + timedelta(minutes=15),
+                expires_at=timezone.now() + timedelta(minutes=-1 if stored_expired else 15),
             )
             return None, False
         return real_adopt(*args, **kwargs)
 
     monkeypatch.setattr(token_refresh, "_adopt_rotated_token", adopt)
-    requests_mock.post(URL, status_code=400, json=_SPENT["json"])
+    requests_mock.post(URL, [{"status_code": 400, "json": _SPENT["json"]}, {"json": _ROTATED}])
 
-    assert refresh_oauth_token_sync(token, URL) == "stored-access"
-    assert len(reads) == 2
+    if stored_expired:
+        # Refreshed again with the stored grant, under the lock this thread holds.
+        assert refresh_oauth_token_sync(token, URL) == "new-access"
+        assert "refresh_token=stored-refresh" in requests_mock.last_request.text
+        assert len(reads) == 3
+    else:
+        assert refresh_oauth_token_sync(token, URL) == "stored-access"
+        assert len(reads) == 2
 
 
 @pytest.mark.django_db(transaction=True)
