@@ -255,7 +255,7 @@ def run_pipeline(
     # Stringify the UUID so the progress dict stays JSON-serializable.
     run_id_holder["id"] = str(run.id)
 
-    report(f"Provisioning schema for {tenant_membership.tenant.external_id}...")
+    report(f"Provisioning schema for {tenant_membership.tenant.external_id}…")
 
     source_results: dict[str, dict] = {}
 
@@ -581,7 +581,7 @@ def run_pipeline(
     if transform_result:
         report("Skipping transforms")
     elif asset_snapshot:
-        report("Running transforms...")
+        report("Running transforms…")
         try:
             transform_result = _run_transform_phase(
                 schema_name,
