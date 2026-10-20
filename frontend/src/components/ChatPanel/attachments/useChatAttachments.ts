@@ -254,7 +254,7 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
       const restored = parts.map((part): ComposerAttachment => ({
         localId: `attachment-${++nextLocalId}`,
         filename: part.filename ?? "attachment",
-        kind: part.mediaType.startsWith("image/") ? "image" : "text",
+        kind: typeof part.mediaType === "string" && part.mediaType.startsWith("image/") ? "image" : "text",
         size: 0,
         status: "ready",
         progress: 1,

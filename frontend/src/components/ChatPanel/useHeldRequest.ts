@@ -8,11 +8,12 @@ import {
   pendingErrorReason,
   pendingPhase,
   pendingRequestApi,
+  pendingRequestAttachments,
   type PendingPhase,
 } from "@/api/pendingRequests"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
+import { attachmentIdFromUrl } from "@/api/chatAttachments"
 
-/** "send": the request was claimed or is gone, so the text is a new turn instead. */
 /** A 400 the server explains (too long, too many attachments, one no longer available). */
 function isExplainedRefusal(error: unknown): boolean {
   if (!(error instanceof ApiError) || error.status !== 400) return false
@@ -32,6 +33,7 @@ export type EditOutcome = "saved" | "conflict" | "gone" | { failed: string }
 
 const EDIT_FAILED_MESSAGE = "Couldn't change your request. Try again."
 
+/** "send": the request was claimed or is gone, so the text is a new turn instead. */
 export type AddOutcome = "added" | "send" | { failed: string }
 
 const ADD_FAILED_MESSAGE = "Couldn't add that to your request. It's back in the message box."
@@ -194,7 +196,7 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
               text,
               added_at: new Date().toISOString(),
               attachments: files.map((file) => ({
-                id: file.url.split("/").at(-2) ?? file.url,
+                id: attachmentIdFromUrl(file.url),
                 filename: file.filename ?? "attachment",
                 media_type: file.mediaType,
                 size: 0,
@@ -263,10 +265,18 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
     (text: string, baseVersion: number) =>
       change(
         { text },
-        [{ id: `edit-${newPartId()}`, text, added_at: new Date().toISOString() }],
+        [
+          {
+            id: `edit-${newPartId()}`,
+            text,
+            added_at: new Date().toISOString(),
+            // The server keeps the request's attachments through a rewrite.
+            attachments: current ? pendingRequestAttachments(current) : [],
+          },
+        ],
         baseVersion,
       ),
-    [change],
+    [change, current],
   )
 
   const removePart = useCallback(

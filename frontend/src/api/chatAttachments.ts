@@ -9,6 +9,12 @@ export function attachmentUrl(id: string): string {
   return `${ATTACHMENTS_PATH}${id}/`
 }
 
+/** The id ``attachmentUrl`` put in ``url``, or the url itself when it isn't one. */
+export function attachmentIdFromUrl(url: string): string {
+  if (!url.startsWith(ATTACHMENTS_PATH) || !url.endsWith("/")) return url
+  return url.slice(ATTACHMENTS_PATH.length, -1)
+}
+
 const ATTACHMENT_URL = new RegExp(`^${ATTACHMENTS_PATH.replaceAll("/", "\\/")}[0-9a-f-]{36}\\/$`, "i")
 
 /** Our attachment urls only: anything else in a file part is not fetched or linked. */

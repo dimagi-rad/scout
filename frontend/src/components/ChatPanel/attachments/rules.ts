@@ -15,6 +15,14 @@ const TEXT_EXTENSIONS: Record<string, string> = {
   md: "text/markdown",
 }
 
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+}
+
 export const ACCEPT_ATTRIBUTE = [
   ...IMAGE_MEDIA_TYPES,
   ...Object.keys(TEXT_EXTENSIONS).map((ext) => `.${ext}`),
@@ -36,9 +44,13 @@ export function checkFileType(file: File): FileCheck {
   if ((IMAGE_MEDIA_TYPES as readonly string[]).includes(file.type)) {
     return { ok: true, kind: "image", mediaType: file.type }
   }
+  const ext = extension(file.name)
+  // Some sources hand over an image with no type; the server checks its bytes anyway.
+  if (!file.type && Object.hasOwn(IMAGE_EXTENSIONS, ext)) {
+    return { ok: true, kind: "image", mediaType: IMAGE_EXTENSIONS[ext] }
+  }
   // Browsers report .md, .tsv and sometimes .csv as "" or vendor types, so the
   // extension decides for text files.
-  const ext = extension(file.name)
   // Own keys only: "x.constructor" must not match Object.prototype.constructor.
   if (Object.hasOwn(TEXT_EXTENSIONS, ext)) {
     return { ok: true, kind: "text", mediaType: TEXT_EXTENSIONS[ext] }

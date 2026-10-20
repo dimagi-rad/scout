@@ -60,16 +60,20 @@ export function pendingAttachmentPart(attachment: PendingAttachment): FileUIPart
   }
 }
 
+/** The request's attachments across its parts, each once. */
+export function pendingRequestAttachments(pending: PendingRequest): PendingAttachment[] {
+  const byId = new Map<string, PendingAttachment>()
+  for (const part of pending.parts) {
+    for (const attachment of part.attachments ?? []) {
+      if (!byId.has(attachment.id)) byId.set(attachment.id, attachment)
+    }
+  }
+  return [...byId.values()]
+}
+
 /** The request's attachments as message parts, each once. */
 export function pendingRequestFiles(pending: PendingRequest): FileUIPart[] {
-  const seen = new Set<string>()
-  return pending.parts.flatMap((part) =>
-    (part.attachments ?? []).flatMap((attachment) => {
-      if (seen.has(attachment.id)) return []
-      seen.add(attachment.id)
-      return [pendingAttachmentPart(attachment)]
-    }),
-  )
+  return pendingRequestAttachments(pending).map(pendingAttachmentPart)
 }
 
 /**
