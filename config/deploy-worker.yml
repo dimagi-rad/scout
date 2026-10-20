@@ -43,6 +43,9 @@ env:
     CUBE_SCHEMA_VALIDATION_REQUIRED: "True"
     # Langfuse host for resume-task agent traces (keys come via secrets below).
     LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
+    # Langfuse Cloud's WAF 403s uncompressed trace batches whose first 8 KB holds
+    # agent SQL like "UNION ALL SELECT"; gzip hides the body from it (SCOUT-DJANGO-46).
+    OTEL_EXPORTER_OTLP_TRACES_COMPRESSION: "gzip"
     # Base URL for the invite sign-in links built in the send_email task.
     SCOUT_BASE_URL: "https://scout.dimagi.com"
     # From-address for the send_email task; matches the verified SES domain.
