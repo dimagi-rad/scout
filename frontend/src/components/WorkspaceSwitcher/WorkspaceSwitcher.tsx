@@ -212,7 +212,9 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
 
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState("")
-  const [segment, setSegment] = useState<SegmentKey>("recent")
+  // null until the user picks a pill: the default depends on the account's size, which
+  // is unknown if the switcher opens before the workspace list has loaded.
+  const [chosenSegment, setSegment] = useState<SegmentKey | null>(null)
   const [recordedLoadsOnly, setRecordedLoadsOnly] = useState(false)
   const [combining, setCombining] = useState(false)
   const [basket, setBasket] = useState<UserTenant[]>([])
@@ -267,6 +269,10 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
       .filter((d) => !d.is_auto_created && !recentSet.has(d.id))
       .sort((a, b) => a.display_name.localeCompare(b.display_name))
   }, [accessible, recent])
+
+  // Small accounts have no segment pills to reach All, so they open on everything.
+  const segment: SegmentKey =
+    chosenSegment ?? (showSegments && (recent.length > 0 || handMade.length > 0) ? "recent" : "all")
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -347,13 +353,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     if (o) {
       const ids = getRecentWorkspaceIds()
       setRecentIds(ids)
-      // Small accounts have no segment pills to reach All, so they open on everything.
-      // Until the list arrives the account size is unknown; recents alone decide then.
-      const hasSuggestions =
-        domains.length === 0
-          ? ids.length > 0
-          : showSegments && (ids.length > 0 || accessible.some((d) => !d.is_auto_created))
-      setSegment(hasSuggestions ? "recent" : "all")
+      setSegment(null)
       setCombining(false)
       resetView()
     } else {

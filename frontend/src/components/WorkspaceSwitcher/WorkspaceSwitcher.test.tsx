@@ -415,6 +415,18 @@ describe("switcher at scale", () => {
     expect(screen.getByTestId("workspace-list-lost-more")).toHaveTextContent("195 more")
   })
 
+  it("picks the default view once a list that loads after opening arrives", () => {
+    localStorage.setItem("scout.recentWorkspaces", JSON.stringify(["auto-1"]))
+    openSwitcher([])
+
+    act(() => useAppStore.setState({ domains: many(3) }))
+    expect(screen.getByTestId("workspace-list").querySelectorAll("[data-switcher-row]")).toHaveLength(3)
+
+    act(() => useAppStore.setState({ domains: many(100) }))
+    expect(screen.getByTestId("workspace-seg-recent")).toHaveClass("bg-primary")
+    expect(screen.getByTestId("workspace-list").querySelectorAll("[data-switcher-row]")).toHaveLength(1)
+  })
+
   it("never renders more than 50 rows and asks for a narrower search", () => {
     openSwitcher(many(1000))
     fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "Auto" } })
