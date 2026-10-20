@@ -5,9 +5,10 @@ from unittest import mock
 
 import psycopg
 import pytest
-from django.db import connection
+from django.db import DatabaseError, connection
 
 from apps.telemetry import storage, tasks
+from apps.workspaces.services import data_operation
 
 GIB = 2**30
 
@@ -175,11 +176,10 @@ def test_db_size_matches_postgres():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_a_locked_table_skips_the_table_list_but_keeps_the_size():
+def test_a_locked_table_skips_the_table_list_but_keeps_the_size(caplog):
     with connection.cursor() as cursor:
         cursor.execute("CREATE TABLE storage_lock_probe (id int)")
-    params = connection.get_connection_params()
-    params.pop("cursor_factory", None)
+    params = data_operation._connection_params()
     locked, release = threading.Event(), threading.Event()
 
     def hold_lock():
@@ -201,9 +201,19 @@ def test_a_locked_table_skips_the_table_list_but_keeps_the_size():
 
     assert total > 0
     assert largest is None
+    assert "a table was locked for over 2s" in caplog.text
     with connection.cursor() as cursor:
         cursor.execute("SELECT current_setting('lock_timeout')")
         assert cursor.fetchone()[0] == "0"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_broken_scan_is_not_reported_as_a_lock():
+    with (
+        mock.patch.object(storage, "_LARGEST_TABLES_SQL", "SELECT * FROM no_such_table LIMIT %s"),
+        pytest.raises(DatabaseError),
+    ):
+        storage._platform_db_sizes()
 
 
 @pytest.mark.asyncio

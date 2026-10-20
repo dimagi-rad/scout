@@ -19,6 +19,7 @@ import logging
 import shutil
 from dataclasses import dataclass
 
+import psycopg
 import sentry_sdk
 from django.conf import settings
 from django.db import DatabaseError, connection, transaction
@@ -120,8 +121,9 @@ def _platform_db_sizes() -> tuple[int, list[tuple[str, int]] | None]:
 
     In production the managed (tenant) database is this database, so the table scan
     meets tenant schemas that a load or teardown holds ACCESS EXCLUSIVE. Sizing
-    takes ACCESS SHARE, so the scan is bounded, as in ``snapshots._schema_sizes``.
-    ``pg_database_size`` takes no relation locks.
+    takes ACCESS SHARE, which waits on those, so the lock and statement timeouts
+    bound the scan, as in ``snapshots._schema_sizes``. ``pg_database_size`` takes
+    no relation locks.
     """
     with connection.cursor() as cursor:
         cursor.execute("SELECT pg_database_size(current_database())")
@@ -138,8 +140,14 @@ def _platform_db_sizes() -> tuple[int, list[tuple[str, int]] | None]:
             )
             cursor.execute(_LARGEST_TABLES_SQL, [_LARGEST_TABLES])
             largest = [(name, int(size)) for name, size in cursor.fetchall()]
-    except DatabaseError:
-        logger.info("Storage headroom: largest tables skipped (locked or slow)", exc_info=True)
+    except DatabaseError as exc:
+        if isinstance(exc.__cause__, psycopg.errors.LockNotAvailable):
+            reason = "a table was locked for over 2s"
+        elif isinstance(exc.__cause__, psycopg.errors.QueryCanceled):
+            reason = "the scan took over 10s"
+        else:
+            raise
+        logger.warning("Storage headroom: largest tables skipped: %s", reason)
         largest = None
     return int(total), largest
 
