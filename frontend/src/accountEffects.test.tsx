@@ -110,6 +110,7 @@ describe("delayed account-owned navigation", () => {
     switchToB()
     expect(screen.queryByTestId("create-workspace-modal")).toBeNull()
     const beforeRecents = getRecentWorkspaceIds()
+    const threadB = useAppStore.getState().threadId
     await act(async () => {
       pending.resolve(workspace("private-a-created"))
       refresh.resolve([workspace("private-a-created")])
@@ -118,6 +119,7 @@ describe("delayed account-owned navigation", () => {
     })
 
     expect(useAppStore.getState().activeDomainId).toBe("workspace-b")
+    expect(useAppStore.getState().threadId).toBe(threadB)
     expect(router.state.location.pathname).toBe("/workspaces")
     expect(getRecentWorkspaceIds()).toEqual(beforeRecents)
     expect(onClose).not.toHaveBeenCalled()
@@ -125,6 +127,7 @@ describe("delayed account-owned navigation", () => {
   })
 
   it("still selects and opens a newly created workspace in the current account", async () => {
+    const previousThread = useAppStore.getState().threadId
     vi.spyOn(workspaceApi, "create").mockResolvedValue(workspace("created-a"))
     vi.spyOn(workspaceApi, "list").mockResolvedValue([workspace("created-a")])
     const onClose = vi.fn()
@@ -136,6 +139,7 @@ describe("delayed account-owned navigation", () => {
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/workspaces/created-a/created-a/chat"))
     expect(useAppStore.getState().activeDomainId).toBe("created-a")
+    expect(useAppStore.getState().threadId).not.toBe(previousThread)
     expect(onClose).toHaveBeenCalledOnce()
   })
 
