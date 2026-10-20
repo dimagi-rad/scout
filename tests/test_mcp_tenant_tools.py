@@ -23,6 +23,8 @@ from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.access import WorkspaceAccess
 from apps.workspaces.models import (
+    VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+    VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER,
     MaterializationRun,
     SchemaState,
     TenantSchema,
@@ -896,6 +898,26 @@ class TestGetSchemaStatusTool:
         error = result["error"]
         # The collision text must survive so the agent and the card can show it.
         assert "View name collision" in (error["message"] + str(error.get("detail", "")))
+
+    @pytest.mark.django_db(transaction=True)
+    async def test_failed_view_schema_detail_drops_the_cascade_marker(self):
+        user = await get_user_model().objects.acreate_user(email="vscm@b.c", password="x")
+        ws = await Workspace.objects.acreate(name="W-vscm", created_by=user)
+        for i in (1, 2):
+            tenant = await Tenant.objects.acreate(external_id=f"vscm-t{i}", provider="commcare")
+            await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=ws,
+            schema_name="ws_vscmaaaaaaaa",
+            state=SchemaState.FAILED,
+            last_error=VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+        )
+
+        result = await get_schema_status(workspace_id=str(ws.id))
+
+        detail = result["error"]["detail"]
+        assert VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER not in detail
+        assert detail.startswith("A tenant schema")
 
 
 @pytest.mark.django_db(transaction=True)
