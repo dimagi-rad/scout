@@ -199,8 +199,7 @@ def _image_omitted(entry: dict) -> dict:
 def _text_omitted(entry: dict) -> dict:
     return _text_block(
         f"[Text file {_label(entry)} is not shown: this request already carries as "
-        "much attached text as it can. Ask the user to attach it again on its own if "
-        "you need it.]"
+        "much attached text as it can. Call read_attachment with that id to read it.]"
     )
 
 
@@ -247,7 +246,11 @@ async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budg
         # A few hundred characters of a large file mislead more than they inform.
         return _text_omitted(entry)
     budget.text_chars -= shown
-    note = f"[Showing the first {shown:,} of {total:,} characters; the rest is not shown.]"
+    note = (
+        f"[Showing the first {shown:,} of {total:,} characters. Call read_attachment with "
+        f'attachment_id="{attachment.id}" and offset={shown} to read on, or with search '
+        "to find something in it.]"
+    )
     return _text_block(wrap_attachment(attachment, f"{text[:shown]}\n{note}", total))
 
 

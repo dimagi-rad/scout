@@ -556,7 +556,7 @@ async def test_expansion_truncates_long_text(user, workspace, monkeypatch):
     [block] = expanded.content
     assert "x" * 10 + "\n[Showing the first 10 of 120 characters" in block["text"]
     assert "x" * 11 not in block["text"]
-    assert "the rest is not shown" in block["text"]
+    assert f'read_attachment with attachment_id="{long.id}"' in block["text"]
 
 
 @pytest.mark.asyncio
