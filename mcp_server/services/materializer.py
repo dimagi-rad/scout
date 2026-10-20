@@ -68,7 +68,7 @@ from apps.workspaces.services.load_generations import pipeline_fingerprint
 from apps.workspaces.services.load_phases import LoadPhase
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
-from mcp_server.event_time import normalize_event_time
+from mcp_server.event_time import DATE_RANGE_COLUMNS, event_time_sql, normalize_event_time
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
 from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
@@ -455,6 +455,11 @@ def run_pipeline(
                 "cursor_state": final_cursor if source_is_resumable else None,
                 "duration_s": duration_s,
             }
+            date_range = _source_date_range(
+                schema_name, pipeline.provider, source.physical_table_name
+            )
+            if date_range is not None:
+                source_results[source.name]["date_range"] = date_range
             if source_is_resumable:
                 _persist_source_results(run, pipeline, source_results)
             logger.info(
@@ -1315,6 +1320,42 @@ _DROP_STATEMENTS = {
     "p": "DROP TABLE",
     "f": "DROP FOREIGN TABLE",
 }
+
+
+# A summary is not worth stalling the load for: an unindexed scan of a very
+# large table gives up and the summary just omits that table's dates.
+_DATE_RANGE_TIMEOUT_MS = 30_000
+
+
+def _source_date_range(schema_name: str, provider: str, table: str) -> dict | None:
+    """Earliest and latest event time in a just-committed table, for the load summary.
+
+    None when the table has no declared event time, holds no dated rows, or the
+    query fails: the load already succeeded and must not fail over its summary.
+    """
+    column = DATE_RANGE_COLUMNS.get(provider, {}).get(table)
+    if column is None:
+        return None
+    try:
+        conn = get_managed_db_connection()
+        try:
+            conn.autocommit = True
+            conn.execute(f"SET statement_timeout = {_DATE_RANGE_TIMEOUT_MS}")
+            relation = psql.Identifier(schema_name, table).as_string(conn)
+            # Built without SQL.format: the event-time regex contains braces.
+            query = (
+                f"SELECT min(t), max(t) FROM (SELECT {event_time_sql(column)} AS t "  # noqa: S608 - fixed column, quoted identifier
+                f"FROM {relation}) dated"
+            )
+            row = conn.execute(query).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        logger.warning("Could not read the date range of %s.%s", schema_name, table, exc_info=True)
+        return None
+    if not row or not all(isinstance(value, datetime) for value in row[:2]):
+        return None
+    return {"column": column, "earliest": row[0].isoformat(), "latest": row[1].isoformat()}
 
 
 def _drop_transform_outputs(schema_name: str, pipeline: PipelineConfig) -> list[str]:
