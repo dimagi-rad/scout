@@ -11,7 +11,7 @@ from pathlib import Path
 import environ
 import sentry_sdk
 
-from apps.common.db_pool import pool_options
+from apps.common.db_pool import pooled_database
 from apps.common.db_urls import enforce_django_db_tls
 from config.sentry import before_send, ignore_noisy_loggers
 from config.task_tracing import trace_job
@@ -149,10 +149,11 @@ DATABASES = {
 # Size it against the RDS connection budget alongside the checkpointer pools.
 DJANGO_DB_POOL_MAX_SIZE = env.int("DJANGO_DB_POOL_MAX_SIZE", default=0)
 if DJANGO_DB_POOL_MAX_SIZE:
-    DATABASES["default"].setdefault("OPTIONS", {})["pool"] = pool_options(
+    DATABASES["default"] = pooled_database(
+        DATABASES["default"],
         min_size=env.int("DJANGO_DB_POOL_MIN_SIZE", default=1),
         max_size=DJANGO_DB_POOL_MAX_SIZE,
-        timeout=env.float("DJANGO_DB_POOL_TIMEOUT_S", default=10.0),
+        timeout=env.float("DJANGO_DB_POOL_TIMEOUT_S", default=3.0),
     )
 
 # Separate from the application DB to allow future migration to Snowflake etc.

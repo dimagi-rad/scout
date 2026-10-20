@@ -79,10 +79,11 @@ env:
     # connections, which were unbounded, against the RDS max_connections it shares
     # with the checkpointer pools, worker, MCP and Cube. A chat turn holds one
     # slot for its whole stream, so keep this above concurrent turns per worker.
+    # A full pool answers "busy" after the timeout, inside the 4s health probe.
     # Web only: the worker and MCP keep connections on executor threads.
     DJANGO_DB_POOL_MAX_SIZE: "10"
     DJANGO_DB_POOL_MIN_SIZE: "2"
-    DJANGO_DB_POOL_TIMEOUT_S: "10"
+    DJANGO_DB_POOL_TIMEOUT_S: "3"
   secret:
     - DATABASE_URL
     - MANAGED_DATABASE_URL

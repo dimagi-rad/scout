@@ -1,15 +1,43 @@
 """Django's psycopg connection pool, made safe for code written against fresh connections.
 
 Before the pool (#934), ``connection.close()`` ended the Postgres session, and code
-relies on that: ``SET search_path``/``statement_timeout`` in custom datasets, session
-advisory locks in the Cube validator and view builds. Django sets no pool ``reset``,
-so a pooled connection would carry that state into the next request.
+relies on that: the Cube validator slot (``cube_schema``) and view builds
+(``schema_manager``) take session advisory locks on Django's connection and lean on
+the close to drop them. Django sets no pool ``reset``, so a pooled connection would
+carry such state into the next request.
+
+Settings imports this module, so it must not import Django's ORM-facing apps; the
+capacity tagging lives in the ``apps.common.pooled_postgresql`` backend.
 """
 
 from typing import Any
 
+import psycopg
 from django.db import DEFAULT_DB_ALIAS, connections
 from psycopg import sql
+
+POOLED_ENGINE = "apps.common.pooled_postgresql"
+
+
+class RefusalRecordingConnection(psycopg.Connection):
+    """Remembers the pool's last connect failure, which never reaches the caller.
+
+    The pool opens connections on its background worker, so a ``too many clients``
+    refusal only shows up as a later checkout timeout; the backend reads this to
+    tell "the server is full" from "the database is down".
+    """
+
+    last_connect_error: BaseException | None = None
+
+    @classmethod
+    def connect(cls, *args, **kwargs):
+        try:
+            conn = super().connect(*args, **kwargs)
+        except BaseException as exc:
+            RefusalRecordingConnection.last_connect_error = exc
+            raise
+        RefusalRecordingConnection.last_connect_error = None
+        return conn
 
 
 def reset_pooled_connection(conn) -> None:
@@ -36,4 +64,17 @@ def pool_options(*, min_size: int, max_size: int, timeout: float) -> dict[str, A
         "max_size": max_size,
         "timeout": timeout,
         "reset": reset_pooled_connection,
+        "connection_class": RefusalRecordingConnection,
+    }
+
+
+def pooled_database(db: dict[str, Any], **options) -> dict[str, Any]:
+    """``db`` (a ``DATABASES`` entry) pooled, health-checked and capacity-tagged."""
+    return {
+        **db,
+        "ENGINE": POOLED_ENGINE,
+        # Without it the pool hands out connections that died idle (an RDS reboot or
+        # failover), and Django skips its own per-request check when pooling.
+        "CONN_HEALTH_CHECKS": True,
+        "OPTIONS": {**db.get("OPTIONS", {}), "pool": pool_options(**options)},
     }
