@@ -6,6 +6,20 @@ from typing import Any
 
 from apps.users.services.tenant_listing.types import MalformedTenantList, TenantDescriptor
 
+MAX_DESCRIPTION_CHARS = 2000
+
+
+def clean_description(value: Any) -> str | None:
+    """Provider text fit to store: Postgres rejects NUL and lone surrogates."""
+    if not isinstance(value, str):
+        return None
+    text = value.replace("\x00", "").strip()
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return text[:MAX_DESCRIPTION_CHARS] or None
+
 
 def descriptor(row: Any, *, id_key: str, name_key: str) -> TenantDescriptor:
     """A tenant from one list row; a missing name falls back to the id, as ``Tenant.save`` does."""
@@ -20,4 +34,7 @@ def descriptor(row: Any, *, id_key: str, name_key: str) -> TenantDescriptor:
     raw_name = row.get(name_key)
     if raw_name is not None and not isinstance(raw_name, str):
         raise MalformedTenantList("list row has a non-text name")
-    return TenantDescriptor(external_id, raw_name or external_id)
+    # No list sends one yet (#917); read it so one that starts to is stored as-is.
+    return TenantDescriptor(
+        external_id, raw_name or external_id, description=clean_description(row.get("description"))
+    )

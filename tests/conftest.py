@@ -11,6 +11,7 @@ from django.contrib.sites.models import Site
 
 from apps.users.models import Tenant, TenantMembership
 from apps.users.providers.ocs.provider import OCSProvider
+from apps.users.services import source_descriptions
 from apps.workspaces.models import (
     Workspace,
     WorkspaceMembership,
@@ -21,6 +22,19 @@ from tests.pipeline_doubles import no_candidate_ddl  # noqa: F401 (registers the
 from tests.production_settings import PRODUCTION_SETTINGS, load_production_settings
 from tests.tenant_access import grant_tenant_access, record_fresh_proof, usable_connection
 from tests.upstream_proofs import ProviderStub
+
+
+@pytest.fixture(autouse=True)
+def no_ocs_description_probe(request, monkeypatch):
+    """OCS discovery probes each chatbot's sessions for its description; tests that
+    stub the experiment list alone would otherwise see extra, unmatched requests."""
+    if request.node.get_closest_marker("ocs_description_probe"):
+        return
+
+    async def no_probes(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(source_descriptions, "aprobe_ocs_chatbots", no_probes)
 
 
 @pytest.fixture

@@ -121,6 +121,7 @@ timeout = 300
 timeout_method = "thread"
 markers = [
     "smoke: end-to-end smoke tests requiring live credentials (run with: pytest -m smoke)",
+    "ocs_description_probe: let OCS discovery make its per-chatbot description requests",
 ]
 
 [dependency-groups]

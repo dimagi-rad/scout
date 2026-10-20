@@ -9,6 +9,7 @@ import uuid
 
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -26,6 +27,7 @@ from apps.users.services.api_key_providers import (
     STRATEGIES,
     CredentialVerificationError,
 )
+from apps.users.services.api_key_providers.ocs import OCS_DEFAULT_URL
 from apps.users.services.connection_access import (
     ARCHIVED_DENIED,
     archived_reason,
@@ -40,6 +42,7 @@ from apps.users.services.credential_resolver import (
 from apps.users.services.oauth_scope import account_scope, scope_account_ids
 from apps.users.services.ocs_team import adetect_team_from_api_key
 from apps.users.services.onboarding_cache import me_onboarding_cache_key
+from apps.users.services.source_descriptions import arecord_ocs_descriptions
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -262,6 +265,7 @@ async def tenant_list_view(request):
                 "tenant_uuid": str(tm.tenant.id),
                 "tenant_name": tm.tenant.canonical_name,
                 "attributes": tm.tenant.provider_attributes,
+                "description": tm.tenant.description,
                 "last_selected_at": (
                     tm.last_selected_at.isoformat() if tm.last_selected_at else None
                 ),
@@ -485,6 +489,14 @@ async def tenant_credential_list_view(request):
     except Exception as e:
         logger.exception("Failed to persist connection for provider %s", provider)
         return JsonResponse({"error": str(e)}, status=500)
+
+    if provider == "ocs":
+        await arecord_ocs_descriptions(
+            getattr(settings, "OCS_URL", OCS_DEFAULT_URL),
+            {"X-api-key": fields.get("api_key", "")},
+            [desc.external_id for desc in descriptors],
+            server,
+        )
 
     await cache.adelete(me_onboarding_cache_key(user))
     return JsonResponse({"memberships": memberships_payload}, status=201)

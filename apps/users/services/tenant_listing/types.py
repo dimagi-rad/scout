@@ -16,6 +16,8 @@ class TenantDescriptor(NamedTuple):
     canonical_name: str
     # Provider facts shown to the user as filter hints; never consulted for access.
     attributes: Mapping[str, Any] | None = None
+    # None when the list does not say; never clears a description stored earlier.
+    description: str | None = None
 
 
 @dataclass(frozen=True)

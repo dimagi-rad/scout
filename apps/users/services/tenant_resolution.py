@@ -50,6 +50,7 @@ from apps.users.services.oauth_scope import (
     scope_account_ids,
 )
 from apps.users.services.ocs_team import adetect_team_name_from_oauth
+from apps.users.services.source_descriptions import arecord_ocs_descriptions
 from apps.users.services.tenant_listing import commcare as commcare_listing
 from apps.users.services.tenant_listing import connect as connect_listing
 from apps.users.services.tenant_listing import ocs as ocs_listing
@@ -387,6 +388,7 @@ async def resolve_connect_opportunities(
             defaults={
                 "canonical_name": opp.canonical_name,
                 "provider_attributes": dict(opp.attributes or {}),
+                **({"description": opp.description} if opp.description else {}),
             },
         )
         fresh.append(tenant)
@@ -457,9 +459,15 @@ async def resolve_ocs_chatbots(
         tenant, _ = await Tenant.objects.aupdate_or_create(
             provider="ocs",
             external_id=exp.external_id,
-            defaults={"canonical_name": exp.canonical_name},
+            defaults={
+                "canonical_name": exp.canonical_name,
+                **({"description": exp.description} if exp.description else {}),
+            },
         )
         fresh.append(tenant)
+    await arecord_ocs_descriptions(
+        base_url, {"Authorization": f"Bearer {access_token}"}, [t.external_id for t in fresh]
+    )
 
     memberships = await _sync_memberships(
         user,

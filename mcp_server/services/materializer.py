@@ -62,6 +62,8 @@ from apps.transformations.services.commcare_staging import upsert_system_assets
 from apps.transformations.services.connect_staging import upsert_connect_assets
 from apps.transformations.services.executor import PhaseCallback, run_transformation_pipeline
 from apps.transformations.services.staging_identity import StagingModelMigrationRequired
+from apps.users.models import Tenant
+from apps.users.services.source_descriptions import connect_description
 from apps.users.services.upstream_denial import record_upstream_denial
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
 from apps.workspaces.services.load_generations import pipeline_fingerprint
@@ -696,6 +698,13 @@ def _run_discover_phase(
         tenant=tenant_membership.tenant,
         defaults={"metadata": metadata, "discovered_at": timezone.now()},
     )
+    if pipeline.provider == "commcare_connect":
+        # Connect's list export has no description; its per-opportunity export does.
+        description = connect_description((metadata or {}).get("opportunity"))
+        if description:
+            Tenant.objects.filter(id=tenant_membership.tenant_id).exclude(
+                description=description
+            ).update(description=description)
     logger.info("Stored metadata for tenant %s", tenant_membership.tenant.external_id)
     return metadata
 
