@@ -38,7 +38,7 @@ async def send_email(subject, message, recipient_list, from_email=None, html_mes
 
 @app.task
 async def probe_ocs_chatbots(connection_id: str) -> None:
-    """Record each chatbot's description (and last session) for one OCS connection."""
+    """Record each chatbot's description for one OCS connection."""
     base_url = getattr(settings, "OCS_URL", "https://www.openchatstudio.com")
     await aprobe_connection_chatbots(connection_id, base_url)
 

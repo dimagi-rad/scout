@@ -88,9 +88,7 @@ async def test_probe_reads_each_chatbots_newest_session(ocs_sessions):
     )
 
     assert probes["described"].description == "Answers maternal health FAQs"
-    assert probes["described"].last_session_at == "2026-10-01T09:00:00Z"
     assert probes["silent"].description is None
-    assert probes["silent"].last_session_at is None
     assert "refused" not in probes
     assert "broken" not in probes
     assert "elsewhere" not in probes

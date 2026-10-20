@@ -53,10 +53,9 @@ def connect_description(opportunity: Any) -> str | None:
 
 @dataclass(frozen=True)
 class ChatbotProbe:
-    """What a chatbot's newest session says about it; both None with no sessions."""
+    """What a chatbot's newest session says about it; None with no sessions."""
 
     description: str | None
-    last_session_at: str | None
 
 
 async def _probe_one(
@@ -76,15 +75,14 @@ async def _probe_one(
     if not isinstance(results, list):
         return None
     if not results or not isinstance(results[0], dict):
-        return ChatbotProbe(None, None)
+        return ChatbotProbe(None)
     session = results[0]
     experiment = session.get("experiment")
     if not isinstance(experiment, dict) or str(experiment.get("id")) != experiment_id:
         # Not this chatbot's session: the filter was ignored, so learn nothing.
         return None
     description = clean_description(experiment.get("description"))
-    created_at = session.get("created_at")
-    return ChatbotProbe(description, created_at if isinstance(created_at, str) else None)
+    return ChatbotProbe(description)
 
 
 async def aprobe_ocs_chatbots(
