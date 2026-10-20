@@ -252,8 +252,10 @@ and before it nothing watched the host disk (see [Host disk full](#host-disk-ful
   database (`MANAGED_DATABASE_URL` is `DATABASE_URL`), so the size includes
   every workspace's loaded data, and the largest tables are usually tenant
   tables. Use these lines to see which table grows: tenant data, chat
-  attachments, or checkpoints. The table list is skipped, and logged as
-  `unavailable`, when a load or teardown holds a lock for more than 2 seconds.
+  attachments, or checkpoints. The table list shows `unavailable` when it could
+  not be read: a load or teardown held a lock for over 2 seconds, the scan took
+  over 10 seconds, or the query failed. A WARNING line before it says which. The
+  database size is still logged in each case.
 
 The worker reads these from its environment. Kamal passes only the variables
 listed in `config/deploy-worker.yml`, so to change one, add it under `env.clear`

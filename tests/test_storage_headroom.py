@@ -5,7 +5,7 @@ from unittest import mock
 
 import psycopg
 import pytest
-from django.db import DatabaseError, connection
+from django.db import connection
 
 from apps.telemetry import storage, tasks
 from apps.workspaces.services import data_operation
@@ -208,12 +208,14 @@ def test_a_locked_table_skips_the_table_list_but_keeps_the_size(caplog):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_a_broken_scan_is_not_reported_as_a_lock():
-    with (
-        mock.patch.object(storage, "_LARGEST_TABLES_SQL", "SELECT * FROM no_such_table LIMIT %s"),
-        pytest.raises(DatabaseError),
-    ):
-        storage._platform_db_sizes()
+def test_a_broken_scan_keeps_the_size_and_is_not_reported_as_a_lock(caplog):
+    with mock.patch.object(storage, "_LARGEST_TABLES_SQL", "SELECT * FROM no_such_table LIMIT %s"):
+        total, largest = storage._platform_db_sizes()
+
+    assert total > 0
+    assert largest is None
+    assert "largest tables query failed" in caplog.text
+    assert "skipped" not in caplog.text
 
 
 @pytest.mark.asyncio

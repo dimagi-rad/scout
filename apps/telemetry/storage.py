@@ -33,6 +33,8 @@ WARNING = "warning"
 CRITICAL = "critical"
 
 _LARGEST_TABLES = 5
+_SCAN_LOCK_TIMEOUT = "2s"
+_SCAN_STATEMENT_TIMEOUT = "10s"
 
 _LARGEST_TABLES_SQL = """
     SELECT n.nspname || '.' || c.relname, COALESCE(pg_total_relation_size(c.oid), 0)
@@ -135,19 +137,26 @@ def _platform_db_sizes() -> tuple[int, list[tuple[str, int]] | None]:
             connection.cursor() as cursor,
         ):
             cursor.execute(
-                "SELECT set_config('lock_timeout', '2s', true), "
-                "set_config('statement_timeout', '10s', true)"
+                "SELECT set_config('lock_timeout', %s, true), "
+                "set_config('statement_timeout', %s, true)",
+                [_SCAN_LOCK_TIMEOUT, _SCAN_STATEMENT_TIMEOUT],
             )
             cursor.execute(_LARGEST_TABLES_SQL, [_LARGEST_TABLES])
             largest = [(name, int(size)) for name, size in cursor.fetchall()]
     except DatabaseError as exc:
+        # The size above is the trend that matters; a failed list must not lose it.
         if isinstance(exc.__cause__, psycopg.errors.LockNotAvailable):
-            reason = "a table was locked for over 2s"
+            logger.warning(
+                "Storage headroom: largest tables skipped: a table was locked for over %s",
+                _SCAN_LOCK_TIMEOUT,
+            )
         elif isinstance(exc.__cause__, psycopg.errors.QueryCanceled):
-            reason = "the scan took over 10s"
+            logger.warning(
+                "Storage headroom: largest tables skipped: the scan took over %s",
+                _SCAN_STATEMENT_TIMEOUT,
+            )
         else:
-            raise
-        logger.warning("Storage headroom: largest tables skipped: %s", reason)
+            logger.warning("Storage headroom: largest tables query failed", exc_info=True)
         largest = None
     return int(total), largest
 
