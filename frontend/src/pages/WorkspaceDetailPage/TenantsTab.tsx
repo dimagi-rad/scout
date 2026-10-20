@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react"
+import { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import { workspaceApi } from "@/api/workspaces"
 import {
   getUserTenantsCached,
@@ -19,7 +19,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-import { Plus, RefreshCw } from "lucide-react"
+import { Plus, RefreshCw, X } from "lucide-react"
 import { FacetFilterBar } from "@/components/FacetFilterBar/FacetFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { IdListSummary } from "@/components/IdListSummary/IdListSummary"
@@ -63,6 +63,7 @@ export function TenantsTab({
   const [addingId, setAddingId] = useState<string | null>(null)
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
+  const addButtonRef = useRef<HTMLButtonElement>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
   // The workspace's last source: removing it deletes the whole workspace (#381).
@@ -168,6 +169,23 @@ export function TenantsTab({
     if (!showAdd) setSearch("")
   }, [showAdd, setSearch])
 
+  const closeAdd = useCallback(() => {
+    setShowAdd(false)
+    addButtonRef.current?.focus()
+  }, [])
+
+  useEffect(() => {
+    if (!showAdd) return
+    function onKeyDown(event: KeyboardEvent) {
+      // Open facet menus and dialogs are Radix layers, which preventDefault the
+      // Escape they consume, so this only fires when nothing else claimed it.
+      if (event.key !== "Escape" || event.defaultPrevented) return
+      closeAdd()
+    }
+    document.addEventListener("keydown", onKeyDown)
+    return () => document.removeEventListener("keydown", onKeyDown)
+  }, [showAdd, closeAdd])
+
   async function handleAdd(tenant: UserTenant) {
     setAddingId(tenant.tenant_uuid)
     setMutationError(null)
@@ -258,6 +276,7 @@ export function TenantsTab({
         </span>
         {canShowAddButton && (
           <Button
+            ref={addButtonRef}
             size="sm"
             variant={showAdd ? "secondary" : "outline"}
             onClick={() => setShowAdd((v) => !v)}
@@ -273,18 +292,32 @@ export function TenantsTab({
         <div className="mb-4 rounded-lg border bg-muted/30 p-4" data-testid="add-tenant-panel">
           <div className="mb-3 flex items-center justify-between">
             <p className="text-sm font-medium">Available data sources</p>
-            {availableStatus === "ready" && (
-              <button
-                type="button"
-                onClick={handleRefreshAvailable}
-                disabled={refreshing}
-                className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
-                data-testid="refresh-available-sources"
+            <div className="flex items-center gap-3">
+              {availableStatus === "ready" && (
+                <button
+                  type="button"
+                  onClick={handleRefreshAvailable}
+                  disabled={refreshing}
+                  className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+                  data-testid="refresh-available-sources"
+                >
+                  <RefreshCw className={`h-3 w-3 ${refreshing ? "animate-spin" : ""}`} />
+                  {refreshing ? "Refreshing…" : "Refresh"}
+                </button>
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-muted-foreground"
+                onClick={closeAdd}
+                aria-label="Close add data source"
+                title="Close (Esc)"
+                data-testid="add-tenant-close"
               >
-                <RefreshCw className={`h-3 w-3 ${refreshing ? "animate-spin" : ""}`} />
-                {refreshing ? "Refreshing…" : "Refresh"}
-              </button>
-            )}
+                <X className="mr-1 h-4 w-4" />
+                Close
+              </Button>
+            </div>
           </div>
 
           {availableStatus === "loading" ? (
