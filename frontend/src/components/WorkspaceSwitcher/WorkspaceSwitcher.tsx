@@ -363,7 +363,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   useEffect(() => {
     if (openRequest === handledRequest.current) return
     handledRequest.current = openRequest
-    handleOpenChange(true)
+    if (!open) handleOpenChange(true)
     // Only a new request opens it; handleOpenChange is recreated every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openRequest])
