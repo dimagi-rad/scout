@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from django.db.models.functions import Length, Substr
 
 from apps.knowledge.models import KnowledgeEntry
+from apps.knowledge.services.sql_redaction import sanitize_prompt_content
 
 if TYPE_CHECKING:
     from apps.workspaces.models import Workspace
@@ -37,6 +38,9 @@ UPLOAD_FORMATS = {
 
 DEFAULT_READ_LIMIT = 20_000
 MAX_READ_LIMIT = 50_000
+# Under the agent's 50 KB tool-result budget (apps/agents/tool_results.py), so a page of
+# non-ASCII text is shortened here, with a correct next_offset, rather than cut there.
+MAX_RESULT_BYTES = 45_000
 DEFAULT_MAX_MATCHES = 20
 SEARCH_CONTEXT_LINES = 2
 # A JSON match larger than this is narrowed to its matching children, so a search
@@ -129,6 +133,9 @@ def decode_upload(filename: str, raw: bytes) -> DecodedUpload:
             raise ReferenceDocumentError(
                 f"File is not valid JSON (line {exc.lineno}, column {exc.colno}: {exc.msg})."
             ) from exc
+        except ValueError as exc:
+            # e.g. an integer past Python's 4300-digit conversion limit.
+            raise ReferenceDocumentError(f"File is not valid JSON ({exc}).") from exc
     title = _one_line(path.stem)[:255] or "Untitled document"
     return DecodedUpload(
         title=title, source_format=source_format, content=content, description=description
@@ -136,10 +143,13 @@ def decode_upload(filename: str, raw: bytes) -> DecodedUpload:
 
 
 def _head_summary(head: str) -> str:
+    """The first meaningful line, SQL-redacted like note content: it lands in the prompt."""
     for line in head.splitlines():
         line = _one_line(line)
+        if line.startswith("```"):
+            continue
         if line.strip("{}[]"):
-            return line
+            return sanitize_prompt_content(line)
     return ""
 
 
@@ -241,11 +251,16 @@ async def aresolve_reference_document(
     return None, []
 
 
+def _within_bytes(text: str, max_bytes: int) -> str:
+    """The longest prefix of ``text`` that is at most ``max_bytes`` of UTF-8."""
+    return text.encode()[:max_bytes].decode(errors="ignore")
+
+
 def read_page(content: str, offset: int, limit: int) -> dict[str, Any]:
     total = len(content)
     offset = min(max(0, offset), total)
     limit = min(max(1, limit), MAX_READ_LIMIT)
-    end = min(total, offset + limit)
+    end = offset + len(_within_bytes(content[offset : offset + limit], MAX_RESULT_BYTES))
     return {
         "offset": offset,
         "end_offset": end,
@@ -404,14 +419,14 @@ def _parse_json(document: KnowledgeEntry) -> tuple[bool, Any]:
         return False, None
     try:
         return True, json.loads(document.content)
-    except (json.JSONDecodeError, RecursionError):
+    except (ValueError, RecursionError):
         return False, None
 
 
 def _clip_match(match: dict[str, Any], limit: int) -> dict[str, Any]:
-    if "text" in match:
-        return {**match, "text": _clip(match["text"], limit)}
-    return {**match, "entry": _clip(_dumps(match["entry"]), limit)}
+    key = "text" if "text" in match else "entry"
+    text = match[key] if key == "text" else _dumps(match[key])
+    return {**match, key: _clip(_within_bytes(text, MAX_RESULT_BYTES), limit)}
 
 
 def search_document(
@@ -454,15 +469,18 @@ def search_document(
     kept: list[dict[str, Any]] = []
     used = 0
     clipped = False
+    used_bytes = 0
     for match in found[:max_matches]:
-        size = len(_dumps(match))
-        if used + size > limit:
+        rendered = _dumps(match)
+        size, size_bytes = len(rendered), len(rendered.encode())
+        if used + size > limit or used_bytes + size_bytes > MAX_RESULT_BYTES:
             if not kept:
                 kept.append(_clip_match(match, limit))
                 clipped = True
             break
         kept.append(match)
         used += size
+        used_bytes += size_bytes
     result["total_matches"] = total
     result["matches"] = kept
     shown = sum(covered[: len(kept)])

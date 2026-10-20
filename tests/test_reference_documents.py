@@ -10,6 +10,7 @@ from apps.knowledge.models import KnowledgeEntry
 from apps.knowledge.services.reference_documents import (
     MAX_JSON_RECORD_CHARS,
     MAX_PROMPT_LISTED_DOCUMENTS,
+    MAX_RESULT_BYTES,
     MAX_UPLOAD_BYTES,
     REFERENCE_DOCUMENTS_HEADING,
     ReferenceDocumentError,
@@ -58,9 +59,11 @@ class TestDecodeUpload:
             ("registry.json", b'{"a": 1,}', "not valid JSON"),
             ("big.txt", b"a" * (MAX_UPLOAD_BYTES + 1), "too large"),
             ("deep.json", b"[" * 100_000 + b"]" * 100_000, "nested too deeply"),
+            # json.loads raises a plain ValueError past the int-conversion digit limit.
+            ("huge-int.json", b"[" + b"1" * 5000 + b"]", "not valid JSON"),
         ],
         # Named, so the multi-megabyte payloads never become test ids.
-        ids=["type", "encoding", "nul", "empty", "json", "size", "depth"],
+        ids=["type", "encoding", "nul", "empty", "json", "size", "depth", "integer"],
     )
     def test_rejects(self, name, data, message):
         with pytest.raises(ReferenceDocumentError, match=message):
@@ -107,6 +110,19 @@ class TestPromptListing:
         tool = create_reference_document_tool(workspace)
         read = await tool.ainvoke({"title_or_id": "R" * 100})
         assert read["status"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_first_line_fallback_is_sql_redacted(self, workspace):
+        await KnowledgeEntry.objects.acreate(
+            workspace=workspace,
+            title="Queries",
+            content="```sql\nSELECT * FROM visits\n```\n",
+            kind=KnowledgeEntry.Kind.REFERENCE,
+            source_format="md",
+        )
+        result = await KnowledgeRetriever(workspace).retrieve()
+        assert "SELECT" not in result
+        assert '- "Queries" (MD' in result
 
     @pytest.mark.asyncio
     async def test_listing_falls_back_to_first_meaningful_line(self, workspace):
@@ -173,6 +189,19 @@ class TestReadReferenceDocumentTool:
         )
         assert last["content"] == REGISTRY_TEXT[-10:]
         assert last["next_offset"] is None
+
+    @pytest.mark.asyncio
+    async def test_pages_of_non_ascii_text_fit_the_byte_budget(self, workspace):
+        content = "é" * 40_000
+        await KnowledgeEntry.objects.acreate(
+            workspace=workspace, title="Accents", content=content, kind="reference"
+        )
+        tool = create_reference_document_tool(workspace)
+
+        page = await tool.ainvoke({"title_or_id": "Accents", "limit": 50_000})
+
+        assert len(page["content"].encode()) <= MAX_RESULT_BYTES
+        assert page["next_offset"] == len(page["content"]) < len(content)
 
     @pytest.mark.asyncio
     async def test_json_search_returns_the_matching_entries_with_paths(self, workspace):

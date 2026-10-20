@@ -7,26 +7,19 @@ string suitable for inclusion in the agent's system prompt.
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 from apps.knowledge.models import AgentLearning, KnowledgeEntry, TableKnowledge
 from apps.knowledge.services.reference_documents import aformat_reference_documents_for_prompt
+from apps.knowledge.services.sql_redaction import SQL_FENCE_RE as _SQL_FENCE_RE
+from apps.knowledge.services.sql_redaction import SQL_REDACTION as _SQL_REDACTION
+from apps.knowledge.services.sql_redaction import SQL_STATEMENT_LINE_RE as _SQL_STATEMENT_LINE_RE
+from apps.knowledge.services.sql_redaction import (
+    sanitize_prompt_content as _sanitize_prompt_content,
+)
 
 if TYPE_CHECKING:
     from apps.workspaces.models import Workspace
-
-_SQL_FENCE_RE = re.compile(r"```sql\b.*?```", re.IGNORECASE | re.DOTALL)
-_SQL_STATEMENT_LINE_RE = re.compile(
-    r"(?im)^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)\b.*$"
-)
-_SQL_REDACTION = "[SQL example removed; use semantic_query members instead.]"
-
-
-def _sanitize_prompt_content(value: str) -> str:
-    """Remove legacy SQL snippets before knowledge is injected into prompts."""
-    value = _SQL_FENCE_RE.sub(_SQL_REDACTION, value)
-    return _SQL_STATEMENT_LINE_RE.sub(_SQL_REDACTION, value)
 
 
 WORKSPACE_MEMORY_HEADING = (
