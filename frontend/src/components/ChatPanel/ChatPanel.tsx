@@ -18,6 +18,7 @@ import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import type { PendingRequest } from "@/api/jobs"
 import { PART_SEPARATOR, pendingRequestText } from "@/api/pendingRequests"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
+import { ChatWorkspaceScope } from "@/components/ChatWorkspaceScope"
 import { ChatComposer } from "./ChatComposer"
 import { ChatCanvasPanel } from "./ChatCanvasPanel"
 import { ChatThreadHeader, type ThreadPanelMode } from "./ChatThreadHeader"
@@ -1048,6 +1049,7 @@ export function ChatPanel() {
   ) {
     return (
       <div className="flex h-full min-w-0 flex-col">
+        <ChatWorkspaceScope />
         {loadBanners}
         {staleBanner}
         <div className="min-h-0 flex-1">
@@ -1065,6 +1067,7 @@ export function ChatPanel() {
   return (
     <div className="flex h-full min-w-0">
       <div className="flex min-w-0 flex-1 flex-col">
+        <ChatWorkspaceScope />
         <ChatThreadHeader
           title={threadTitle}
           panelOpen={threadPanelOpen}
