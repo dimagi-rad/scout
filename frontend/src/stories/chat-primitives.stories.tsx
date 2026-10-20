@@ -4,6 +4,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 
 import { ChatMessage } from "@/components/ChatMessage"
 import { ChatComposer } from "@/components/ChatPanel"
+import { CHAR_COUNT_VISIBLE_FROM, MAX_MESSAGE_LENGTH } from "@/components/ChatPanel/messageLimit"
 import type { ActiveJob, RecentTermination } from "@/api/jobs"
 
 const queryOutput = {
@@ -464,7 +465,7 @@ export const PromptInputMultiLine: Story = {
 
 export const PromptInputNearLengthLimit: Story = {
   render: function PromptInputNearLengthLimitStory() {
-    const [input, setInput] = useState("Summarize this registry export: ".padEnd(8_500, " data"))
+    const [input, setInput] = useState("Summarize this registry export: ".padEnd(CHAR_COUNT_VISIBLE_FROM + 500, " data"))
     return (
       <div className="w-[720px] rounded-lg border p-4">
         <ChatComposer input={input} setInput={setInput} onSend={() => undefined} />
@@ -475,7 +476,7 @@ export const PromptInputNearLengthLimit: Story = {
 
 export const PromptInputOverLengthLimit: Story = {
   render: function PromptInputOverLengthLimitStory() {
-    const [input, setInput] = useState("Summarize this registry export: ".padEnd(10_240, " data"))
+    const [input, setInput] = useState("Summarize this registry export: ".padEnd(MAX_MESSAGE_LENGTH + 240, " data"))
     return (
       <div className="w-[720px] rounded-lg border p-4">
         <ChatComposer input={input} setInput={setInput} onSend={() => undefined} />

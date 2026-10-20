@@ -284,6 +284,31 @@ describe("ChatComposer multi-line input and length limit (#913)", () => {
     expect(screen.getByTestId("chat-char-count")).toHaveTextContent("8,504 / 10,000")
   })
 
+  it("counts a held request's text that the message joins", () => {
+    const onSend = vi.fn()
+    render(
+      <ChatComposer
+        input={"a".repeat(2_000)}
+        setInput={vi.fn()}
+        onSend={onSend}
+        mode="add"
+        heldText={"h".repeat(9_000)}
+      />,
+    )
+    // held + "\n\n" + typed
+    expect(screen.getByTestId("chat-char-count")).toHaveTextContent("11,002 / 10,000")
+    expect(screen.getByTestId("chat-add-to-request")).toBeDisabled()
+  })
+
+  it("describes the field with the counter, which stays mounted for screen readers", () => {
+    const { rerender } = render(<ChatComposer input="hi" setInput={vi.fn()} onSend={vi.fn()} />)
+    const field = screen.getByTestId("chat-input")
+    const region = document.getElementById(field.getAttribute("aria-describedby")!)
+    expect(region).toHaveAttribute("aria-live", "polite")
+    rerender(<ChatComposer input={"a".repeat(10_001)} setInput={vi.fn()} onSend={vi.fn()} />)
+    expect(region).toContainElement(screen.getByTestId("chat-char-count-hint"))
+  })
+
   it("counts characters as the server does, not UTF-16 units", () => {
     render(<ChatComposer input={"😀".repeat(8_000)} setInput={vi.fn()} onSend={vi.fn()} />)
     expect(screen.getByTestId("chat-char-count")).toHaveTextContent("8,000 / 10,000")

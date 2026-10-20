@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import type { FormEvent, KeyboardEvent } from "react"
 import { Plus, Quote, Send, Square, X } from "lucide-react"
 
@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { composeQuotedMessage } from "@/components/ChatMessage/quotes"
+import { PART_SEPARATOR } from "@/api/pendingRequests"
 import { matchSlashCommands, resolveSlashCommand, type SlashCommand } from "./slashCommands"
 import { SlashCommandMenu } from "./SlashCommandMenu"
 import { CharCounter } from "./CharCounter"
@@ -31,6 +32,8 @@ interface ChatComposerProps {
   onQuotesSent?: () => void
   /** Bumped when a quote is picked, to move focus to the input for the reply. */
   focusRequest?: number
+  /** A held request this message is joined onto; the server's limit covers both. */
+  heldText?: string
 }
 
 const NO_QUOTES: string[] = []
@@ -49,6 +52,7 @@ export function ChatComposer({
   onRemoveQuote,
   onQuotesSent,
   focusRequest = 0,
+  heldText,
 }: ChatComposerProps) {
   const adding = mode === "add"
   const blocked = sendBlocked && !adding
@@ -75,15 +79,18 @@ export function ChatComposer({
     setSlashMenuIndex(0)
   }
 
+  const counterId = useId()
   const trimmed = input.trim()
-  // Counted as sent: the server's limit covers the quotes and an expanded slash command.
-  const length = trimmed ? messageLength(composeQuotedMessage(quotes, resolveSlashCommand(trimmed))) : 0
+  // What goes out, and what the server measures: quotes and an expanded slash command
+  // included, joined onto a held request's text when there is one.
+  const message = trimmed ? composeQuotedMessage(quotes, resolveSlashCommand(trimmed)) : ""
+  const measured = message && heldText ? `${heldText}${PART_SEPARATOR}${message}` : message
+  const length = messageLength(measured)
   const tooLong = isOverLimit(length)
 
   function submit() {
     if (!trimmed || isStreaming || blocked || tooLong) return
     setInput("")
-    const message = composeQuotedMessage(quotes, resolveSlashCommand(trimmed))
     if (quotes.length) onQuotesSent?.()
     onSend(message)
   }
@@ -159,6 +166,7 @@ export function ChatComposer({
           data-testid="chat-input"
           rows={1}
           aria-invalid={tooLong || undefined}
+          aria-describedby={counterId}
           value={input}
           onChange={(e) => {
             setInput(e.target.value)
@@ -200,7 +208,7 @@ export function ChatComposer({
           </span>
         )}
       </form>
-      <CharCounter length={length} />
+      <CharCounter id={counterId} length={length} />
     </div>
   )
 }

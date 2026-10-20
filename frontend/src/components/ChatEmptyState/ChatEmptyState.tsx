@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { useId, useRef, useState } from "react"
 import { ArrowUp, ArrowRight } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
@@ -39,8 +39,10 @@ export function ChatEmptyPrompt({
   const { canWrite } = useWorkspaceRole()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   useAutoGrow(textareaRef, input)
+  const counterId = useId()
   const trimmedInput = input.trim()
-  const length = trimmedInput ? messageLength(resolveSlashCommand(trimmedInput)) : 0
+  const message = trimmedInput ? resolveSlashCommand(trimmedInput) : ""
+  const length = messageLength(message)
   const tooLong = isOverLimit(length)
 
   // Slash command menu state — mirrors ChatPanel's active-thread input so
@@ -54,16 +56,15 @@ export function ChatEmptyPrompt({
     setSlashMenuIndex(0)
   }
 
-  function submit(text: string) {
-    const trimmed = text.trim()
-    if (!trimmed || disabled || isOverLimit(messageLength(resolveSlashCommand(trimmed)))) return
+  function submit() {
+    if (!message || disabled || tooLong) return
     setInput("")
-    onSend(resolveSlashCommand(trimmed))
+    onSend(message)
   }
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
-    submit(input)
+    submit()
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -90,7 +91,7 @@ export function ChatEmptyPrompt({
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
-      submit(input)
+      submit()
     }
   }
 
@@ -108,6 +109,7 @@ export function ChatEmptyPrompt({
           ref={textareaRef}
           data-testid="chat-input-prominent"
           aria-invalid={tooLong || undefined}
+          aria-describedby={counterId}
           value={input}
           onChange={(e) => {
             setInput(e.target.value)
@@ -128,7 +130,7 @@ export function ChatEmptyPrompt({
           <ArrowUp className="h-4 w-4" aria-hidden="true" />
         </Button>
       </form>
-      <CharCounter length={length} className="mt-1" />
+      <CharCounter id={counterId} length={length} className="mt-1" />
 
       <p
         className="mt-3 text-center text-xs text-muted-foreground"
