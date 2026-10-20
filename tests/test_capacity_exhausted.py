@@ -497,7 +497,7 @@ async def test_health_skips_the_queue_probe_once_the_pooled_database_is_busy(sen
     ):
         response = await AsyncClient().get("/health/")
     assert response.status_code == 503
-    assert response.json() == {"status": "busy", "checks": {"database": "busy", "queue": "busy"}}
+    assert response.json() == {"status": "busy", "checks": {"database": "busy", "queue": "skipped"}}
     queue_probe.assert_not_called()
 
 

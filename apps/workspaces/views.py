@@ -56,10 +56,10 @@ async def health_check(request):
     capacity_failures = {}
 
     for name, probe in (("database", _check_database), ("queue", _check_queue)):
-        if name == "queue" and checks["database"] == "busy" and connection.pool:
+        if name == "queue" and checks.get("database") == "busy" and connection.pool:
             # Same pooled connection: probing again would only wait out the pool
             # timeout a second time, pushing "busy" past the 4s container probe.
-            checks[name] = "busy"
+            checks[name] = "skipped"
             continue
         try:
             await probe()

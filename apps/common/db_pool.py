@@ -50,7 +50,8 @@ def reset_pooled_connection(conn) -> None:
     conn.autocommit = True
     conn.execute("DISCARD ALL")
     # DISCARD ALL also resets TimeZone, which Django sets only when the pool opens
-    # a connection, never on checkout.
+    # a connection, never on checkout. OPTIONS["assume_role"] would vanish the same
+    # way; restore it here before using one.
     timezone_name = connections[DEFAULT_DB_ALIAS].timezone_name
     conn.execute(sql.SQL("SET TIME ZONE {}").format(sql.Literal(timezone_name)))
 
@@ -77,6 +78,8 @@ def pooled_database(db: dict[str, Any], **options) -> dict[str, Any]:
     return {
         **db,
         "ENGINE": POOLED_ENGINE,
+        # Django refuses to pool persistent connections.
+        "CONN_MAX_AGE": 0,
         # Without it the pool hands out connections that died idle (an RDS reboot or
         # failover), and Django skips its own per-request check when pooling.
         "CONN_HEALTH_CHECKS": True,

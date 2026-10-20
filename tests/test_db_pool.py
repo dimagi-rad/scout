@@ -84,8 +84,7 @@ def test_pool_size_comes_from_the_environment(load_production_with_env):
     assert pool["connection_class"] is RefusalRecordingConnection
     assert db["ENGINE"] == POOLED_ENGINE
     assert db["CONN_HEALTH_CHECKS"] is True
-    # Django refuses to pool persistent connections.
-    assert db.get("CONN_MAX_AGE", 0) == 0
+    assert db["CONN_MAX_AGE"] == 0
 
 
 @pytest.mark.parametrize(
@@ -202,3 +201,12 @@ def test_the_pool_connection_records_its_last_connect_outcome(no_recorded_refusa
 
     RefusalRecordingConnection.connect(**params).close()
     assert RefusalRecordingConnection.last_connect_failure is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_reset_restores_djangos_time_zone_over_the_session_default():
+    # A non-UTC startup default, so DISCARD ALL alone would leave New York.
+    params = {**connection.get_connection_params(), "options": "-c TimeZone=America/New_York"}
+    with psycopg.connect(**params, autocommit=True) as conn:
+        reset_pooled_connection(conn)
+        assert conn.execute("SELECT current_setting('TimeZone')").fetchone()[0] == "UTC"

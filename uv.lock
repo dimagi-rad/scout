@@ -2961,7 +2961,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42.0" },
     { name = "dbt-core", specifier = ">=1.11.6" },
     { name = "dbt-postgres", specifier = ">=1.10.0" },
-    { name = "django", specifier = ">=5.0" },
+    { name = "django", specifier = ">=5.1" },
     { name = "django-allauth", specifier = ">=65.0" },
     { name = "django-anymail", extras = ["amazon-ses"], specifier = ">=11.0" },
     { name = "django-environ", specifier = ">=0.11" },
