@@ -80,7 +80,7 @@ def workspace_recovery_error(result: dict, surface: dict) -> str:
         # Opposite remedies (reconnect vs restore upstream permissions) must
         # keep their subjects, even when several sources share one diagnosis.
         return (
-            "Data source loading failed: "
+            "Data source import failed: "
             + " ".join(f"{', '.join(labels)}: {error}" for error, labels in source_errors.items())
         )[:1000]
     if result.get("error"):

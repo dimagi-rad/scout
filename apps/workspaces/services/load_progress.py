@@ -134,6 +134,7 @@ async def aworkspace_load_progress(workspace: Workspace) -> list[dict]:
                 "procrastinate_job_id": job_id,
                 "tenant_id": str(tenant.id),
                 "tenant_name": tenant.canonical_name or tenant.external_id,
+                "provider": tenant.provider,
                 "source_index": position,
                 "source_total": max(total, position) if sequenced else 1,
                 "state": run.state,

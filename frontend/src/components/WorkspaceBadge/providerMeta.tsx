@@ -26,6 +26,19 @@ export function getProviderMeta(provider: string | undefined): ProviderMeta {
   return META[provider] ?? FALLBACK
 }
 
+// Must match the backend's PROVIDER_CHOICES: import progress messages name providers
+// from there, and the banner title sits next to them.
+const SHORT_LABELS: Record<string, string> = {
+  commcare: "CommCare HQ",
+  commcare_connect: "CommCare Connect",
+  ocs: "Open Chat Studio",
+}
+
+/** The name import copy uses for a provider ("Importing from CommCare Connect…"). */
+export function providerShortLabel(provider: string): string | null {
+  return SHORT_LABELS[canonicalProvider(provider)] ?? null
+}
+
 /**
  * The data provider an OAuth app id belongs to ("commcare_eu" -> "commcare"),
  * matching the backend's canonical_provider: Connect is checked before CommCare.

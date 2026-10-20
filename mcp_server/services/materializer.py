@@ -62,7 +62,7 @@ from apps.transformations.services.commcare_staging import upsert_system_assets
 from apps.transformations.services.connect_staging import upsert_connect_assets
 from apps.transformations.services.executor import PhaseCallback, run_transformation_pipeline
 from apps.transformations.services.staging_identity import StagingModelMigrationRequired
-from apps.users.models import Tenant
+from apps.users.models import Tenant, provider_label
 from apps.users.services.source_descriptions import connect_description
 from apps.users.services.upstream_denial import record_upstream_denial
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
@@ -254,12 +254,12 @@ def run_pipeline(
     # Stringify the UUID so the progress dict stays JSON-serializable.
     run_id_holder["id"] = str(run.id)
 
-    report(f"Provisioning schema for {tenant_membership.tenant.external_id}...")
+    report(f"Provisioning schema for {tenant_membership.tenant.external_id}…")
 
     source_results: dict[str, dict] = {}
 
     try:
-        report(f"Discovering tenant metadata from {pipeline.provider}...")
+        report(f"Finding what to import from {provider_label(pipeline.provider)}…")
         discovered_metadata = _run_discover_phase(tenant_membership, credential, pipeline)
 
         # Connect's keyset-paginated exports return no total; reuse the counts
@@ -351,7 +351,7 @@ def run_pipeline(
         sources_list = list(pipeline.sources)
         for idx, source in enumerate(sources_list):
             current_source = source.name
-            load_message = f"Loading {source.name} from {pipeline.provider} API..."
+            load_message = f"Importing {source.name} from {provider_label(pipeline.provider)}…"
             report(load_message)
             source_is_resumable = (
                 is_resumable_provider
@@ -580,7 +580,7 @@ def run_pipeline(
     if transform_result:
         report("Skipping transforms")
     elif asset_snapshot:
-        report("Running transforms...")
+        report("Running transforms…")
         try:
             transform_result = _run_transform_phase(
                 schema_name,

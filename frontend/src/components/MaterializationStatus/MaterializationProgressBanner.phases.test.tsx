@@ -45,7 +45,7 @@ describe("post-load phases", () => {
       progress: { ...baseProgress, step: 3, source: "cases", rows_loaded: 50, rows_total: 100, percent: 50 },
     })
 
-    expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent("Loading cases into Scout")
+    expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent("Importing cases…")
     expect(screen.getByTestId("materialization-banner-step")).toHaveTextContent("Step 3 of 10")
     expect(screen.getByTestId("materialization-banner-percent")).toHaveTextContent("50%")
   })
@@ -64,9 +64,27 @@ describe("post-load phases", () => {
     renderJob({ progress: baseProgress })
 
     expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent(
-      "Loading data into Scout",
+      "Importing data…",
     )
     expect(screen.getByTestId("materialization-banner-rows")).toHaveTextContent("Preparing…")
+  })
+
+  it("names the source and its provider, also while rows arrive", () => {
+    renderJob({
+      provider: "commcare_connect",
+      progress: { ...baseProgress, source: "visits", rows_loaded: 50, rows_total: 100 },
+    })
+    expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent(
+      "Importing visits from CommCare Connect…",
+    )
+    expect(screen.getByTestId("materialization-banner-rows")).toHaveTextContent("50 of 100")
+  })
+
+  it("names only the provider when the source is not known yet", () => {
+    renderJob({ provider: "ocs", progress: { ...baseProgress, source: null } })
+    expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent(
+      "Importing from Open Chat Studio…",
+    )
   })
 })
 

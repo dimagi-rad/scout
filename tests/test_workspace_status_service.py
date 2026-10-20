@@ -12,6 +12,8 @@ from apps.agents.graph.prompt_context import _fetch_semantic_model_context
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.users.models import Tenant
 from apps.workspaces.models import (
+    VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+    VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER,
     MaterializationRun,
     SchemaState,
     TenantSchema,
@@ -141,6 +143,27 @@ async def test_prompt_and_query_surface_agree_on_serving_writers(
         assert "previously loaded data" in prompt
     else:
         assert "do not call other data tools" in prompt.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_query_surface_detail_keeps_the_cascade_marker_from_the_user(workspace, tenant):
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="first_source", state=SchemaState.ACTIVE
+    )
+    await _second_source(workspace, schema_state=SchemaState.ACTIVE)
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace,
+        schema_name="serving_view",
+        state=SchemaState.FAILED,
+        last_error=VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+    )
+
+    surface = await workspace_query_surface(workspace)
+
+    assert surface["status"] == "needs_view_rebuild"
+    assert VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER not in surface["detail"]
+    assert surface["detail"].startswith("A tenant schema")
 
 
 @pytest.mark.parametrize(

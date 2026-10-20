@@ -109,7 +109,7 @@ describe("ArtifactDataRecovery", () => {
     expect(post).toHaveBeenCalledWith(endpoint, {})
     expect(await screen.findByText("Restoring artifact data")).toBeInTheDocument()
     expect(screen.getByText("40%")).toBeInTheDocument()
-    expect(screen.getByText("400 rows loaded")).toBeInTheDocument()
+    expect(screen.getByText("400 rows imported")).toBeInTheDocument()
     expect(screen.queryByTestId("artifact-graph-renderer")).not.toBeInTheDocument()
   })
 
