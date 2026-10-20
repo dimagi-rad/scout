@@ -11,6 +11,8 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from apps.agents.graph.attachments import safe_filename
+from apps.chat.attachments import merge_attachments, message_attachments
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 
 DEFAULT_MAX_MESSAGES = 20
@@ -19,6 +21,10 @@ DEFAULT_MAX_MESSAGES = 20
 # user's message before it, and the assistant text each one answers, are kept too.
 PINNED_USER_MESSAGES = 2
 
+# The note for pruned attachments names the newest few, so an old thread's note
+# stays short instead of growing with every file ever attached.
+MAX_NOTED_ATTACHMENTS = 10
+
 
 def prune_messages(
     messages: list[BaseMessage],
@@ -26,6 +32,9 @@ def prune_messages(
 ) -> list[BaseMessage]:
     """Keep system messages plus the most recent ``max_messages`` conversation
     messages, without breaking tool call/response pairs.
+
+    When the dropped messages carried attachments, a short note leads the kept
+    window so the model still knows they exist and can read them back.
     """
     if len(messages) <= max_messages:
         return messages
@@ -70,7 +79,38 @@ def prune_messages(
     if overflow > 0 and pinned:
         pinned = _shed_pins(pinned, overflow)
 
-    return system_messages + pinned + pruned_conversation
+    kept = {id(message) for message in (*pinned, *pruned_conversation)}
+    note = dropped_attachments_note([m for m in conversation_messages if id(m) not in kept])
+    return system_messages + ([note] if note is not None else []) + pinned + pruned_conversation
+
+
+def _describe_attachment(entry: dict) -> str:
+    name = f'"{safe_filename(entry.get("filename"))}"'
+    if str(entry.get("media_type", "")).startswith("image/"):
+        return f"the image {name} (id {entry['id']})"
+    size = entry.get("size")
+    size_text = f", {size:,} bytes" if isinstance(size, int) else ""
+    return f"{name} (id {entry['id']}{size_text})"
+
+
+def dropped_attachments_note(dropped: list[BaseMessage]) -> HumanMessage | None:
+    """A note naming the attachments of messages pruned from the window, or None."""
+    entries = merge_attachments(
+        *(message_attachments(m) for m in dropped if isinstance(m, HumanMessage))
+    )
+    if not entries:
+        return None
+    shown = entries[-MAX_NOTED_ATTACHMENTS:]
+    names = "; ".join(_describe_attachment(e) for e in shown)
+    earlier = len(entries) - len(shown)
+    more = f" and {earlier} earlier files" if earlier else ""
+    return HumanMessage(
+        content=(
+            f"[Earlier in this chat the user attached {names}{more}. Those messages are no "
+            "longer shown. Call read_attachment with an id to read a text file again; "
+            "ask the user to attach an image again if you need to look at it.]"
+        )
+    )
 
 
 def _shed_pins(pinned: list[BaseMessage], count: int) -> list[BaseMessage]:

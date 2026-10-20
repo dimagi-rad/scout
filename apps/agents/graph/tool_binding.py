@@ -29,6 +29,7 @@ from apps.agents.subagents.events import (
 )
 from apps.agents.tool_results import compact_tool_results
 from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
+from apps.agents.tools.attachment_tool import create_read_attachment_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.memory_tool import (
     create_personal_memory_tool,
@@ -294,6 +295,9 @@ def _build_tools(
         # all canvas writes are delegated to the Canvas Manager subagent,
         # which read-only workspace members do not get at all.
         tools.append(create_canvas_read_tool(workspace, user, conversation_id))
+        # Every thread gets it, so the tool list (a cached prompt prefix) never
+        # changes when the first attachment arrives.
+        tools.append(create_read_attachment_tool(conversation_id))
         # build_agent_graph already folds write_capable into canvas_write; checking
         # both keeps a direct caller that forgets write_capable from failing open.
         if canvas_write and write_capable:

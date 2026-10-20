@@ -161,6 +161,7 @@ semantic_query(request) required=[request] schema=b0a54297f1a8
 read_reference_document(limit,offset,search,title_or_id) required=[title_or_id] schema=c2d36a268b55
 artifact_manager(artifact_id,task) required=[task] schema=13e2526c174f
 canvas_read(selector) required=[] schema=792072f8f8d4
+read_attachment(attachment_id,limit,offset,search) required=[attachment_id] schema=00c278d13d54
 canvas_manager(intent,task) required=[task] schema=0bb0f892a027
 save_personal_memory(memory) required=[memory] schema=3cf8ccf166d7
 save_workspace_memory(memory,tables) required=[memory] schema=8dd7783ecc95
