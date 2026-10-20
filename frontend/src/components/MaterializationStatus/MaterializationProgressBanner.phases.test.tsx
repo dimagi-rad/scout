@@ -45,7 +45,7 @@ describe("post-load phases", () => {
       progress: { ...baseProgress, step: 3, source: "cases", rows_loaded: 50, rows_total: 100, percent: 50 },
     })
 
-    expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent("Fetching cases")
+    expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent("Loading cases into Scout")
     expect(screen.getByTestId("materialization-banner-step")).toHaveTextContent("Step 3 of 10")
     expect(screen.getByTestId("materialization-banner-percent")).toHaveTextContent("50%")
   })
@@ -64,7 +64,7 @@ describe("post-load phases", () => {
     renderJob({ progress: baseProgress })
 
     expect(screen.getByTestId("materialization-banner-source")).toHaveTextContent(
-      "Materializing data",
+      "Loading data into Scout",
     )
     expect(screen.getByTestId("materialization-banner-rows")).toHaveTextContent("Preparing…")
   })

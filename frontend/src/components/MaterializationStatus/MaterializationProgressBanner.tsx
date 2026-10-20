@@ -3,6 +3,7 @@ import { api } from "@/api/client"
 import type { ActiveJob, LoadPhase, WorkspaceLoad } from "@/api/jobs"
 import { useRetryableAction } from "@/hooks/useRetryableAction"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
+import { LOADING_EXPLAINER } from "@/lib/loadingCopy"
 
 import { formatTimeEstimate } from "./timeEstimate"
 
@@ -131,8 +132,9 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
               className="text-sm font-medium text-blue-900 dark:text-blue-100"
               data-testid="materialization-banner-source"
               data-phase={phase ?? undefined}
+              title={phaseTitle ? undefined : LOADING_EXPLAINER}
             >
-              {phaseTitle ?? (sourceName ? `Fetching ${sourceName}` : "Materializing data")}
+              {phaseTitle ?? (sourceName ? `Loading ${sourceName} into Scout` : "Loading data into Scout")}
             </span>
             {sourceText && (
               <span

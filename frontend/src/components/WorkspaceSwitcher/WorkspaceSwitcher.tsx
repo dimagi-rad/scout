@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useLocation } from "react-router-dom"
-import { CircleAlert, Check, ChevronDown, History, Loader2, Plus, Search, Settings } from "lucide-react"
+import { CircleAlert, Check, ChevronDown, History, Layers, Loader2, Plus, Search, Settings } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { workspaceLoadState, workspaceHasRecordedLoad, workspaceHasAccess, type WorkspaceListItem } from "@/api/workspaces"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 import { workspacePath } from "@/lib/workspacePath"
+import { workspaceSourcesLabel } from "@/lib/workspaceSources"
 import { CONNECTIONS_PATH } from "@/lib/routes"
 import { isWorkspaceArtifactPath } from "@/lib/artifactPath"
 import { formatRelativeTime } from "@/lib/relativeTime"
@@ -36,6 +37,16 @@ function firstProvider(ws: WorkspaceListItem): string | undefined {
 
 function hasProvider(ws: WorkspaceListItem, provider: string): boolean {
   return (ws.tenants ?? []).some((t) => t.provider === provider)
+}
+
+function SourceCount({ ws, testId }: { ws: WorkspaceListItem; testId: string }) {
+  const count = ws.tenants?.length ?? 0
+  if (count < 2) return null
+  return (
+    <span className="shrink-0 text-xs font-normal text-muted-foreground" data-testid={testId}>
+      {count} sources
+    </span>
+  )
 }
 
 interface RowProps {
@@ -120,6 +131,7 @@ function WorkspaceRow({ ws, active, highlighted, onSelect, onHover, onSettings }
       data-data-state={dataState}
       onClick={onSelect}
       onMouseMove={onHover}
+      title={workspaceSourcesLabel(ws)}
       style={{ height: ROW_HEIGHT }}
       className={cn(
         "flex w-full items-center gap-2 rounded-sm px-2 text-left text-sm transition-colors",
@@ -129,6 +141,7 @@ function WorkspaceRow({ ws, active, highlighted, onSelect, onHover, onSettings }
     >
       <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
       <span className="flex-1 truncate">{ws.display_name}</span>
+      <SourceCount ws={ws} testId={`workspace-source-count-${ws.id}`} />
       <DataIndicator ws={ws} />
       <span
         role="button"
@@ -192,13 +205,16 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const newThread = useAppStore((s) => s.uiActions.newThread)
+  const openRequest = useAppStore((s) => s.workspaceSwitcherRequest)
 
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState("")
   const [segment, setSegment] = useState<SegmentKey>("recent")
   const [recordedLoadsOnly, setRecordedLoadsOnly] = useState(false)
   const [highlight, setHighlight] = useState(0)
-  const [showCreateModal, setShowCreateModal] = useState(false)
+  const [createModal, setCreateModal] = useState<{ name: string; sourceIds: string[] } | null>(
+    null,
+  )
   // Snapshot of recent ids taken when the popover opens, so selecting a
   // workspace (which writes localStorage) doesn't reshuffle the list mid-use.
   const [recentIds, setRecentIds] = useState<string[]>([])
@@ -267,6 +283,21 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     return list
   }, [accessible, recent, search, segment, recordedLoadsOnly])
 
+  // The switcher picks one workspace, so a cross-opportunity question needs a new one
+  // (#916): offer to combine every source behind the current search's matches.
+  const searchTerm = search.trim()
+  const matchedSourceIds = useMemo(() => {
+    if (!searchTerm || visible.length < 2) return []
+    const q = searchTerm.toLowerCase()
+    // A multi-source workspace matched on one source must not drag in its others.
+    const sourcesOf = (ws: WorkspaceListItem) => {
+      const tenants = ws.tenants ?? []
+      const matching = tenants.filter((t) => t.tenant_name.toLowerCase().includes(q))
+      return (matching.length > 0 ? matching : tenants).map((t) => t.id)
+    }
+    return [...new Set(visible.flatMap(sourcesOf))]
+  }, [searchTerm, visible])
+
   // Lost-access workspaces matching the current search (or provider tab), shown
   // disabled below.
   const lostVisible = useMemo(() => {
@@ -311,6 +342,32 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     setSearch("")
   }
 
+  function handleOpenChange(o: boolean) {
+    setOpen(o)
+    if (o) {
+      const ids = getRecentWorkspaceIds()
+      setRecentIds(ids)
+      setSegment(ids.length > 0 ? "recent" : "all")
+      resetView()
+    } else {
+      setSearch("")
+    }
+  }
+
+  const mountWorkspaceSwitcher = useAppStore((s) => s.uiActions.mountWorkspaceSwitcher)
+  useEffect(() => mountWorkspaceSwitcher(), [mountWorkspaceSwitcher])
+
+  // Requests made before this switcher mounted (e.g. embed mode switching to "full")
+  // must not pop it open unasked.
+  const handledRequest = useRef(openRequest)
+  useEffect(() => {
+    if (openRequest === handledRequest.current) return
+    handledRequest.current = openRequest
+    if (!open) handleOpenChange(true)
+    // Only a new request opens it; handleOpenChange is recreated every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openRequest])
+
   function select(ws: WorkspaceListItem) {
     setActiveDomain(ws.id)
     newThread()
@@ -329,6 +386,12 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     ) {
       navigate(`${pathPrefix}${workspacePath(ws)}`)
     }
+  }
+
+  function openCreate(name = "", sourceIds: string[] = []) {
+    close()
+    // Let the popover finish closing before the dialog takes focus.
+    setTimeout(() => setCreateModal({ name, sourceIds }), 0)
   }
 
   function manage(ws: WorkspaceListItem) {
@@ -389,20 +452,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
 
   return (
     <>
-      <Popover
-        open={open}
-        onOpenChange={(o) => {
-          setOpen(o)
-          if (o) {
-            const ids = getRecentWorkspaceIds()
-            setRecentIds(ids)
-            setSegment(ids.length > 0 ? "recent" : "all")
-            resetView()
-          } else {
-            setSearch("")
-          }
-        }}
-      >
+      <Popover open={open} onOpenChange={handleOpenChange}>
         {variant === "topbar" ? (
           <div className="flex min-w-0 max-w-full items-center" data-testid="topbar-workspace">
             <PopoverTrigger asChild>
@@ -410,8 +460,12 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
                 type="button"
                 data-testid="domain-selector"
                 aria-label="Switch workspace"
+                title={activeWorkspace ? workspaceSourcesLabel(activeWorkspace) : undefined}
                 className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-sm font-medium text-foreground transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
+                <span className="hidden shrink-0 font-normal text-muted-foreground sm:inline">
+                  Workspace:
+                </span>
                 {activeWorkspace ? (
                   (() => {
                     const { Icon } = getProviderMeta(firstProvider(activeWorkspace))
@@ -421,6 +475,9 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
                 <span className="min-w-0 truncate">
                   {activeWorkspace?.display_name ?? "Select workspace"}
                 </span>
+                {activeWorkspace && (
+                  <SourceCount ws={activeWorkspace} testId="topbar-workspace-source-count" />
+                )}
                 <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-50" aria-hidden />
               </button>
             </PopoverTrigger>
@@ -446,6 +503,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
               variant="outline"
               className="mt-1 w-full justify-between font-normal"
               data-testid="domain-selector"
+              title={activeWorkspace ? workspaceSourcesLabel(activeWorkspace) : undefined}
             >
               <span className="flex min-w-0 items-center gap-2">
                 {activeWorkspace ? (
@@ -596,6 +654,18 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
           </div>
 
           <div className="border-t p-1">
+            {matchedSourceIds.length > 1 && (
+              <button
+                data-testid="workspace-combine-matches"
+                onClick={() => openCreate(searchTerm, matchedSourceIds)}
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm font-medium text-primary transition-colors hover:bg-accent"
+              >
+                <Layers className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">
+                  New workspace from {matchedSourceIds.length} matching sources
+                </span>
+              </button>
+            )}
             <button
               data-testid="workspace-manage"
               onClick={() => {
@@ -609,20 +679,23 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
             </button>
             <button
               data-testid="workspace-new"
-              onClick={() => {
-                close()
-                setTimeout(() => setShowCreateModal(true), 0)
-              }}
+              onClick={() => openCreate()}
               className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
             >
               <Plus className="h-3.5 w-3.5" />
-              New workspace
+              New workspace from one or more sources
             </button>
           </div>
         </PopoverContent>
       </Popover>
 
-      {showCreateModal && <CreateWorkspaceModal onClose={() => setShowCreateModal(false)} />}
+      {createModal && (
+        <CreateWorkspaceModal
+          initialName={createModal.name}
+          initialSourceIds={createModal.sourceIds}
+          onClose={() => setCreateModal(null)}
+        />
+      )}
     </>
   )
 }

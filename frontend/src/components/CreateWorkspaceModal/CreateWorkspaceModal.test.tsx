@@ -96,6 +96,51 @@ it("filters by provider through the facet popover without creating a workspace",
   expect(workspaceApi.create).not.toHaveBeenCalled()
 })
 
+it("starts from a preselection, dropping sources the user cannot add", async () => {
+  const user = userEvent.setup()
+  render(
+    <MemoryRouter>
+      <CreateWorkspaceModal
+        onClose={vi.fn()}
+        initialName="Program"
+        initialSourceIds={["tenant-a", "tenant-b", "tenant-not-mine"]}
+      />
+    </MemoryRouter>,
+  )
+  await screen.findByTestId("create-sources-list")
+
+  expect(screen.getByLabelText("Name")).toHaveValue("Program")
+  expect(screen.getByTestId("create-sources-selected")).toHaveTextContent("2 selected")
+  await user.click(screen.getByTestId("create-workspace-submit"))
+  expect(workspaceApi.create).toHaveBeenCalledWith("Program", ["tenant-a", "tenant-b"])
+})
+
+it("cannot create from a preselection before the user's sources load", async () => {
+  vi.mocked(getUserTenantsCached).mockReturnValue(new Promise(() => {}))
+  render(
+    <MemoryRouter>
+      <CreateWorkspaceModal
+        onClose={vi.fn()}
+        initialName="Program"
+        initialSourceIds={["tenant-not-mine"]}
+      />
+    </MemoryRouter>,
+  )
+
+  expect(screen.getByTestId("create-workspace-submit")).toBeDisabled()
+})
+
+it("omits the Program filter without Connect sources", async () => {
+  await openModal()
+  expect(screen.queryByText(/Program filter/)).toBeNull()
+})
+
+it("mentions the Program filter when Connect sources are listed", async () => {
+  vi.mocked(getUserTenantsCached).mockResolvedValue(mixedSources)
+  await openModal()
+  expect(screen.getByText(/Program filter/)).toBeInTheDocument()
+})
+
 it("does not offer Connect facets when no Connect source is present", async () => {
   await openModal()
   expect(screen.getByTestId(`${F}-facet-provider`)).toBeInTheDocument()
