@@ -25,6 +25,9 @@ import {
 } from "@/components/ChatPanel/attachments/useChatAttachments"
 import { getStarterQuestions } from "./starterQuestions"
 
+// Centres a 36px button on the one-line prompt: 50px tall at text-base, 46px at md:text-sm.
+const BUTTON_BOTTOM = "bottom-[7px] md:bottom-[5px]"
+
 interface ChatEmptyPromptProps {
   input: string
   setInput: (value: string) => void
@@ -146,11 +149,11 @@ export function ChatEmptyPrompt({
           <AttachButton
             onFiles={attachments.add}
             disabled={disabled}
-            className="absolute bottom-2 left-2"
+            className={`absolute left-2 ${BUTTON_BOTTOM}`}
           />
         )}
         {/* The title sits on a wrapper: a disabled button shows no tooltip. */}
-        <span className="absolute bottom-2 right-3 flex" title={holdReason ?? undefined}>
+        <span className={`absolute right-3 flex ${BUTTON_BOTTOM}`} title={holdReason ?? undefined}>
           <Button type="submit" size="icon" disabled={!canSend} aria-label="Send message">
             <ArrowUp className="h-4 w-4" aria-hidden="true" />
           </Button>
