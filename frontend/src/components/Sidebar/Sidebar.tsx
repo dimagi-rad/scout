@@ -469,7 +469,7 @@ export function Sidebar() {
                       data-testid={`sidebar-thread-job-${thread.id}`}
                       title={
                         job.progress?.source
-                          ? `${importingSourceLabel(job.progress.source, job.provider)}${job.progress.rows_loaded ? ` — ${job.progress.rows_loaded.toLocaleString()} rows` : ""}`
+                          ? `${importingSourceLabel(job.progress.source, job.provider)}${job.progress.rows_loaded ? ` (${job.progress.rows_loaded.toLocaleString()} rows)` : ""}`
                           : (job.progress?.message ?? importingLabel(job.provider))
                       }
                     >
