@@ -240,8 +240,8 @@ def _persist_api_key_connection(
 def _attributes(tm: TenantMembership) -> dict:
     """The tenant's filter hints, plus the OCS team this member reaches it through.
 
-    The team is per membership (one chatbot can be reached via two teams), so it
-    is not on the tenant.
+    The team is recorded on the member's membership, not the tenant, so it is the
+    team this member's connection reaches the chatbot through.
     """
     attributes = dict(tm.tenant.provider_attributes or {})
     if tm.tenant.provider == "ocs" and tm.team_slug:

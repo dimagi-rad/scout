@@ -35,7 +35,7 @@ export interface FacetDef<T> {
    * Whether the facet applies under the other facets' selection, e.g. only while its
    * provider is selected. A facet that does not apply is hidden and does not filter.
    */
-  appliesTo?: (selection: FacetSelection) => boolean
+  appliesTo?: (selection: FacetSelection, items: readonly T[]) => boolean
 }
 
 export type FacetSelection = Readonly<Record<string, readonly string[]>>

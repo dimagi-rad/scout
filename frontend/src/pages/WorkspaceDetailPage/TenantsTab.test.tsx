@@ -523,7 +523,6 @@ it("shows each available source's own description", async () => {
   expect(screen.queryByTestId("available-source-description-tenant-b")).toBeNull()
 })
 
-
 describe("provider-specific filters", () => {
   beforeEach(() => localStorage.clear())
 
@@ -564,13 +563,35 @@ describe("provider-specific filters", () => {
     expect(shownAvailable()).toEqual(["o1"])
   })
 
-  it("keeps a hidden Connect filter from hiding OCS rows", async () => {
+  it("clears a Connect filter that picking OCS had hidden", async () => {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({ provider: ["ocs"], organization: ["dimagi"] }),
     )
     await open()
+    expect(screen.queryByTestId(`${F}-facet-organization`)).toBeNull()
 
-    expect(shownAvailable()).toEqual(["o1", "o2"])
+    await userEvent.click(screen.getByTestId(`${F}-clear`))
+
+    expect(shownAvailable()).toEqual(["o1", "c1", "o2"])
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}")).toEqual({})
+  })
+
+  it("offers the OCS filters without a provider pick when every source is OCS", async () => {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    vi.mocked(getUserTenantsCached).mockResolvedValue(mixed.filter((t) => t.provider === "ocs"))
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+    await screen.findByTestId(`${F}-count`)
+
+    expect(screen.queryByTestId(`${F}-facet-provider`)).toBeNull()
+    expect(screen.getByTestId(`${F}-facet-ocs_team`)).toBeInTheDocument()
+  })
+
+  it("hides the OCS filters until OCS is picked from a mixed list", async () => {
+    await open()
+
+    expect(screen.queryByTestId(`${F}-facet-ocs_team`)).toBeNull()
+    expect(screen.getByTestId(`${F}-facet-organization`)).toBeInTheDocument()
   })
 })

@@ -230,3 +230,35 @@ it("scopes the storage key to the user", () => {
   expect(sourceFiltersStorageKey(undefined)).toBeNull()
 })
 
+describe("OCS facets", () => {
+  const team = TENANT_FACETS.find((f) => f.key === "ocs_team")!
+  const chatbot = TENANT_FACETS.find((f) => f.key === "ocs_chatbot")!
+  const withTeam = tenant("a", "ocs", { team: "t-a", team_name: "Team A" }, "Helper")
+  const noTeam = tenant("b", "ocs", {}, "Lonely")
+
+  it("buckets chatbots by team, labelled by name, with None for no team", () => {
+    expect(team.getValue(withTeam)).toBe("t-a")
+    expect(team.optionLabel?.("t-a", withTeam)).toBe("Team A")
+    expect(team.getValue(noTeam)).toBe(NONE)
+    expect(team.getValue(tenant("c", "commcare_connect", { team: "t-a" }))).toBeUndefined()
+  })
+
+  it("offers Team only when some chatbot has one", () => {
+    expect(team.isAvailable?.([noTeam])).toBe(false)
+    expect(team.isAvailable?.([noTeam, withTeam])).toBe(true)
+  })
+
+  it("keys chatbots by Scout id and labels them with their team", () => {
+    expect(chatbot.getValue(withTeam)).toBe("uuid-a")
+    expect(chatbot.optionLabel?.("uuid-a", withTeam)).toBe("Helper (Team A)")
+    expect(chatbot.optionLabel?.("uuid-b", noTeam)).toBe("Lonely")
+  })
+
+  it("applies only once OCS is picked, or when every source is OCS", () => {
+    const connectRow = tenant("c", "commcare_connect", {})
+    expect(team.appliesTo?.({}, [withTeam, connectRow])).toBe(false)
+    expect(team.appliesTo?.({ provider: ["ocs"] }, [withTeam, connectRow])).toBe(true)
+    expect(team.appliesTo?.({ provider: ["commcare_connect"] }, [withTeam, connectRow])).toBe(false)
+    expect(team.appliesTo?.({}, [withTeam, noTeam])).toBe(true)
+  })
+})

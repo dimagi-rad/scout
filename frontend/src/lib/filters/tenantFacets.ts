@@ -97,15 +97,18 @@ const STATUS_LABELS: Record<string, string> = {
 const TYPE_LABELS: Record<string, string> = { real: "Real", test: "Test", [UNKNOWN]: "Unknown" }
 
 // Provider-specific facets show while their provider is selected, or no provider is.
-function providerSelected(provider: string) {
-  return (selection: FacetSelection) => {
-    const providers = selection.provider
-    return !providers || providers.length === 0 || providers.includes(provider)
-  }
+function appliesToConnect(selection: FacetSelection): boolean {
+  const providers = selection.provider
+  return !providers || providers.length === 0 || providers.includes(CONNECT_PROVIDER)
 }
-const appliesToConnect = providerSelected(CONNECT_PROVIDER)
-const appliesToOcs = providerSelected(OCS_PROVIDER)
 
+// Only once OCS is picked (or is all there is): with nothing picked, a team filter
+// would leave every non-OCS source in the list, which reads as not filtering.
+function appliesToOcs(selection: FacetSelection, items: readonly UserTenant[]): boolean {
+  const providers = selection.provider
+  if (providers && providers.length > 0) return providers.includes(OCS_PROVIDER)
+  return items.length > 0 && items.every((t) => t.provider === OCS_PROVIDER)
+}
 
 export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
   {
@@ -179,8 +182,12 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
     label: "Chatbot",
     group: "Open Chat Studio",
     searchable: true,
-    getValue: (t) => (t.provider === OCS_PROVIDER ? t.tenant_id : undefined),
-    optionLabel: (value, t) => t.tenant_name || value,
+    // The Scout id: two OCS servers can share an experiment id.
+    getValue: (t) => (t.provider === OCS_PROVIDER ? t.tenant_uuid : undefined),
+    optionLabel: (value, t) => {
+      const team = nonEmptyString(ocsAttributes(t)?.team_name)
+      return team ? `${t.tenant_name} (${team})` : t.tenant_name || value
+    },
     appliesTo: appliesToOcs,
   },
 ]
