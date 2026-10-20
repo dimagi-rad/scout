@@ -3,13 +3,7 @@
 import yaml
 
 
-def parse_frontmatter(text: str) -> tuple[str, list[str], str]:
-    """Parse YAML frontmatter from a markdown document; see ``parse_frontmatter_meta``."""
-    title, tags, body, _meta = parse_frontmatter_meta(text)
-    return title, tags, body
-
-
-def parse_frontmatter_meta(text: str) -> tuple[str, list[str], str, dict]:
+def parse_frontmatter(text: str) -> tuple[str, list[str], str, dict]:
     """Parse YAML frontmatter from a markdown document.
 
     Expected format:

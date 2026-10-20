@@ -40,8 +40,13 @@ class TestDecodeUpload:
         assert "code, name, definition" in decoded.description
 
     def test_strips_utf8_bom(self):
-        decoded = decode_upload("codes.csv", "﻿code,name\nA,Alpha\n".encode())
+        decoded = decode_upload("codes.csv", "\ufeffcode,name\nA,Alpha\n".encode())
         assert decoded.content.startswith("code,name")
+
+    def test_summary_of_long_keys_fits_the_description_column(self):
+        record = {f"field_{index}_{'x' * 80}": index for index in range(8)}
+        decoded = decode_upload("wide.json", json.dumps([record]).encode())
+        assert len(decoded.description) <= 500
 
     @pytest.mark.parametrize(
         ("name", "data", "message"),
@@ -52,6 +57,7 @@ class TestDecodeUpload:
             ("notes.txt", b"  \n", "empty"),
             ("registry.json", b'{"a": 1,}', "not valid JSON"),
             ("big.txt", b"a" * (MAX_UPLOAD_BYTES + 1), "too large"),
+            ("deep.json", b"[" * 100_000 + b"]" * 100_000, "nested too deeply"),
         ],
     )
     def test_rejects(self, name, data, message):
@@ -251,6 +257,17 @@ class TestReadReferenceDocumentTool:
         assert result["documents"] == [
             {"id": result["documents"][0]["id"], "title": "Codes", "total_chars": 1}
         ]
+
+    @pytest.mark.asyncio
+    async def test_blank_search_is_an_error_not_a_page(self, workspace):
+        await KnowledgeEntry.objects.acreate(
+            workspace=workspace, title="Codes", content="code\nA", kind="reference"
+        )
+        tool = create_reference_document_tool(workspace)
+
+        result = await tool.ainvoke({"title_or_id": "Codes", "search": "   "})
+
+        assert result == {"status": "error", "message": "search must contain at least one word."}
 
     @pytest.mark.asyncio
     async def test_ambiguous_title_lists_candidates(self, workspace):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -82,11 +83,13 @@ def create_reference_document_tool(workspace: Workspace):
                 "title": document.title,
                 "format": document.source_format or "text",
             }
-            if search and search.strip():
-                return {**header, **search_document(document, search, limit=limit)}
+            # Parsing and searching up to 2 MB is CPU work; keep it off the event loop.
+            if search:
+                found = await asyncio.to_thread(search_document, document, search, limit=limit)
+                return {**header, **found}
             return {**header, **read_page(document.content, offset, limit)}
         except ReferenceDocumentError as exc:
-            return {"status": "error", "message": str(exc)}
+            return {"status": "error", "message": exc.user_message}
         except Exception:
             # ToolNode re-raises anything but a ToolInvocationError, which would end the turn.
             logger.exception("Failed to read reference document in workspace %s", workspace.id)

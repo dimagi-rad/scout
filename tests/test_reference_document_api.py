@@ -110,6 +110,35 @@ class TestUploadView:
         assert detail.data["content"] == REGISTRY_TEXT
         assert detail.data["content_truncated"] is False
 
+    def test_echoed_preview_does_not_truncate_the_document(self, api_client, workspace):
+        doc = _reference(workspace)
+        url = reverse("knowledge:detail", kwargs={"workspace_id": workspace.id, "item_id": doc.id})
+        listed = api_client.get(
+            reverse("knowledge:list_create", kwargs={"workspace_id": workspace.id})
+        ).data["results"][0]
+
+        resp = api_client.put(
+            url, {"title": "Renamed", "content": listed["content"], "tags": []}, format="json"
+        )
+
+        assert resp.status_code == status.HTTP_200_OK, resp.data
+        doc.refresh_from_db()
+        assert (doc.title, doc.content) == ("Renamed", REGISTRY_TEXT)
+
+    def test_upload_keeps_the_file_byte_for_byte(self, api_client, workspace):
+        resp = _upload(api_client, workspace, "notes.md", b"\n# Codes\n\nA: Alpha\n")
+        assert resp.status_code == status.HTTP_201_CREATED, resp.data
+        assert KnowledgeEntry.objects.get().content == "\n# Codes\n\nA: Alpha\n"
+
+    def test_note_content_is_still_trimmed(self, api_client, workspace):
+        resp = api_client.post(
+            reverse("knowledge:list_create", kwargs={"workspace_id": workspace.id}),
+            {"type": "entry", "title": "Note", "content": "  body \n"},
+            format="json",
+        )
+        assert resp.status_code == status.HTTP_201_CREATED, resp.data
+        assert KnowledgeEntry.objects.get().content == "body"
+
     def test_metadata_edit_keeps_content(self, api_client, workspace):
         doc = _reference(workspace)
         resp = api_client.put(

@@ -18,11 +18,12 @@ from rest_framework.views import APIView
 from apps.common.http import string_field
 from apps.knowledge.models import KnowledgeEntry
 from apps.knowledge.services.reference_documents import (
+    DESCRIPTION_MAX_CHARS,
     MAX_UPLOAD_BYTES,
     ReferenceDocumentError,
     decode_upload,
 )
-from apps.knowledge.utils import parse_frontmatter_meta, render_frontmatter
+from apps.knowledge.utils import parse_frontmatter, render_frontmatter
 from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
@@ -390,7 +391,7 @@ class KnowledgeImportView(APIView):
                         errors.append({"file": name, "error": "File is not valid UTF-8."})
                         continue
                     try:
-                        title, tags, body, meta = parse_frontmatter_meta(raw)
+                        title, tags, body, meta = parse_frontmatter(raw)
                     except (ValueError, yaml.YAMLError) as exc:
                         errors.append({"file": name, "error": f"Malformed frontmatter: {exc}"})
                         continue
@@ -440,7 +441,7 @@ def _reference_fields(meta: dict) -> dict:
     source_format = meta.get("source_format", "")
     return {
         "kind": KnowledgeEntry.Kind.REFERENCE,
-        "description": " ".join(str(meta.get("description") or "").split())[:500],
+        "description": " ".join(str(meta.get("description") or "").split())[:DESCRIPTION_MAX_CHARS],
         "source_format": (
             source_format if source_format in KnowledgeEntry.SourceFormat.values else ""
         ),
@@ -486,14 +487,14 @@ class KnowledgeUploadView(APIView):
         try:
             decoded = decode_upload(uploaded.name, uploaded.read())
         except ReferenceDocumentError as exc:
-            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": exc.user_message}, status=status.HTTP_400_BAD_REQUEST)
 
         title = str(request.data.get("title") or "").strip() or decoded.title
         description = str(request.data.get("description") or "") or decoded.description
         serializer = KnowledgeEntrySerializer(
             data={
                 "title": title,
-                "description": " ".join(description.split()),
+                "description": " ".join(description.split())[:DESCRIPTION_MAX_CHARS],
                 "content": decoded.content,
                 "kind": KnowledgeEntry.Kind.REFERENCE,
                 "source_format": decoded.source_format,

@@ -21,6 +21,10 @@ def _shown_content(obj: KnowledgeEntry, full: bool) -> str:
 
 
 class _ContentField(serializers.CharField):
+    def __init__(self, **kwargs):
+        # Uploaded documents are stored byte for byte; validate() trims notes as before.
+        super().__init__(trim_whitespace=False, **kwargs)
+
     def get_attribute(self, instance):
         return _shown_content(instance, self.context.get("full_content", False))
 
@@ -58,6 +62,22 @@ class KnowledgeEntrySerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def validate(self, attrs):
+        kind = attrs.get("kind") or (self.instance.kind if self.instance else None)
+        if "content" in attrs and kind != KnowledgeEntry.Kind.REFERENCE:
+            attrs["content"] = attrs["content"].strip()
+            if not attrs["content"]:
+                raise serializers.ValidationError({"content": "This field may not be blank."})
+        if (
+            self.instance is not None
+            and self.instance.kind == KnowledgeEntry.Kind.REFERENCE
+            and attrs.get("content") == _shown_content(self.instance, full=False)
+        ):
+            # A client echoing back the preview it was served must not truncate the
+            # stored document to that preview.
+            del attrs["content"]
+        return attrs
 
     def get_type(self, obj) -> str:
         return "entry"
