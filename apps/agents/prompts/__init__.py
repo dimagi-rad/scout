@@ -10,6 +10,7 @@ from apps.agents.prompts.base_system import (
     BASE_SYSTEM_PROMPT,
     HEADLESS_BASE_SYSTEM_PROMPT,
     READ_ONLY_BASE_SYSTEM_PROMPT,
+    READ_ONLY_HEADLESS_BASE_SYSTEM_PROMPT,
     select_base_system_prompt,
 )
 
@@ -18,5 +19,6 @@ __all__ = [
     "BASE_SYSTEM_PROMPT",
     "HEADLESS_BASE_SYSTEM_PROMPT",
     "READ_ONLY_BASE_SYSTEM_PROMPT",
+    "READ_ONLY_HEADLESS_BASE_SYSTEM_PROMPT",
     "select_base_system_prompt",
 ]

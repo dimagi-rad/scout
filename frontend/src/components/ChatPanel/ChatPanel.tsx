@@ -2,6 +2,7 @@ import { Chat, useChat } from "@ai-sdk/react"
 import { DefaultChatTransport, generateId, type UIMessage } from "ai"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useLocation } from "react-router-dom"
+import { useStickToBottom } from "./useStickToBottom"
 import { getCsrfToken, api, ApiError } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
@@ -49,7 +50,7 @@ import { useHeldRequest, type EditOutcome } from "./useHeldRequest"
 import { RESUME_STREAM_POLL_MS, useResumeStream } from "./useResumeStream"
 import { REMOTE_TURN_STREAM_POLL_MS, useRemoteTurnPoll } from "./useRemoteTurn"
 import { HISTORY_LOAD_TIMEOUT_MS } from "./historyLoad"
-import { Loader2 } from "lucide-react"
+import { ArrowDown, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { isChatRunning, threadChatKey, useThreadChat } from "./threadChats"
 import {
@@ -231,9 +232,48 @@ export function ChatPanel() {
     activeDomainId,
     workspaceLoading,
   )
+  // Opens itself when a load in this workspace ends, so the user sees what it brought in.
+  const [loadSummary, setLoadSummary] = useState<{
+    workspaceId: string | null
+    open: boolean
+    justLoaded: boolean
+  }>({ workspaceId: activeDomainId, open: false, justLoaded: false })
+  const loadingSeenRef = useRef<{ workspaceId: string | null; loading: boolean }>({
+    workspaceId: activeDomainId,
+    loading: workspaceLoading,
+  })
+  // The freshness held when the load ended: the card waits for the response that
+  // replaces it, or it would open on the snapshot from before the load.
+  const staleFreshnessRef = useRef<typeof freshness | undefined>(undefined)
+  useEffect(() => {
+    const seen = loadingSeenRef.current
+    const loadEnded = seen.workspaceId === activeDomainId && seen.loading && !workspaceLoading
+    loadingSeenRef.current = { workspaceId: activeDomainId, loading: workspaceLoading }
+    if (loadEnded) staleFreshnessRef.current = freshness
+    else if (seen.workspaceId !== activeDomainId || workspaceLoading) {
+      staleFreshnessRef.current = undefined
+    }
+  }, [activeDomainId, workspaceLoading, freshness])
+  useEffect(() => {
+    if (staleFreshnessRef.current === undefined || !freshness) return
+    if (freshness === staleFreshnessRef.current) return
+    staleFreshnessRef.current = undefined
+    setLoadSummary({ workspaceId: activeDomainId, open: true, justLoaded: true })
+  }, [activeDomainId, freshness])
+  const loadSummaryOpen = loadSummary.open && loadSummary.workspaceId === activeDomainId
+  const setLoadSummaryOpen = useCallback(
+    (open: boolean) => {
+      // A choice made before the post-load data lands must not be overridden by it.
+      staleFreshnessRef.current = undefined
+      setLoadSummary({ workspaceId: activeDomainId, open, justLoaded: false })
+    },
+    [activeDomainId],
+  )
   // A refresh queues a job the load poll cannot see until a worker starts it;
   // the freshness endpoint does, so the banner hides instead of re-offering Refresh.
   const handleRefreshStarted = useCallback(() => {
+    // Its refetch is not the post-load data of an earlier load whose refetch failed.
+    staleFreshnessRef.current = undefined
     notifyJobLikelyStarted()
     refetchFreshness()
   }, [notifyJobLikelyStarted, refetchFreshness])
@@ -860,11 +900,17 @@ export function ChatPanel() {
     }
   }, [chatKey, status, regenerate, busyToken, busyError, retriedChats, busyAttempts])
 
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [messages, resumeStream.text])
+  const userMessageCount = useMemo(
+    () => messages.filter((m) => m.role === "user").length,
+    [messages],
+  )
+  const { onScroll: onMessagesScroll, onWheel: onMessagesWheel, hasNewBelow, jumpToBottom } = useStickToBottom(
+    scrollRef,
+    messages,
+    resumeStream.text,
+    threadId,
+    userMessageCount,
+  )
 
   // A held send hides its request until the server stops reporting it; once the
   // send is over, the next poll shows the server's copy again (gone, or still
@@ -1087,6 +1133,14 @@ export function ChatPanel() {
             disabled={isStreaming}
           />
         </div>
+        {/* ChatEmptyState already says when the data was last synced. */}
+        <SourceFreshness
+          freshness={freshness}
+          summaryOpen={loadSummaryOpen}
+          onSummaryOpenChange={setLoadSummaryOpen}
+          justLoaded={loadSummary.justLoaded}
+          summaryOnly
+        />
       </div>
     )
   }
@@ -1103,7 +1157,8 @@ export function ChatPanel() {
           onOpenCanvas={openThreadCanvas}
         />
         {/* Message list */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+        <div className="relative flex min-h-0 flex-1 flex-col">
+        <div ref={scrollRef} onScroll={onMessagesScroll} onWheel={onMessagesWheel} className="flex-1 overflow-y-auto p-4 space-y-4">
           {visibleMessages.map((msg: UIMessage, msgIdx: number) => (
             <ChatMessage
               key={msg.id}
@@ -1204,6 +1259,20 @@ export function ChatPanel() {
           {overloadNotice && <ChatOverloadNotice onRetry={handleRetry} />}
           {busyNotice && <ChatBusyNotice onRetry={handleRetry} />}
         </div>
+        {hasNewBelow && (
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 gap-1 rounded-full shadow-md"
+            onClick={jumpToBottom}
+            data-testid="chat-jump-to-bottom"
+          >
+            <ArrowDown className="h-3.5 w-3.5" aria-hidden="true" />
+            Jump to bottom
+          </Button>
+        )}
+        </div>
 
         {/* Materialization progress banner — always visible when a job is active for this thread */}
         {activeMaterializationJob
@@ -1218,7 +1287,12 @@ export function ChatPanel() {
 
         {loadBanners}
         {staleBanner}
-        <SourceFreshness freshness={freshness} />
+        <SourceFreshness
+          freshness={freshness}
+          summaryOpen={loadSummaryOpen}
+          onSummaryOpenChange={setLoadSummaryOpen}
+          justLoaded={loadSummary.justLoaded}
+        />
 
         {/* Input area */}
         <div className="border-t p-4">

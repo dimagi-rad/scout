@@ -18,6 +18,13 @@ SOURCE_TIME_COLUMNS = {
     "commcare_connect": {"raw_visits": {"visit_date"}},
 }
 
+# The one event time per table a load summary reports as the table's date range.
+DATE_RANGE_COLUMNS = {
+    "commcare": {"raw_forms": "received_on", "raw_cases": "date_opened"},
+    "ocs": {"raw_sessions": "created_at", "raw_messages": "created_at"},
+    "commcare_connect": {"raw_visits": "visit_date"},
+}
+
 # ISO calendar dates/times only: never let PostgreSQL interpret relative words
 # ("now", "tomorrow") or locale-sensitive survey text as a stable event time.
 ISO_EVENT_TIME = (

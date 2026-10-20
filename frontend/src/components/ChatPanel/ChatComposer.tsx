@@ -3,7 +3,7 @@ import type { FormEvent, KeyboardEvent } from "react"
 import { Plus, Quote, Send, Square, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { composeQuotedMessage } from "@/components/ChatMessage/quotes"
 import { matchSlashCommands, resolveSlashCommand, type SlashCommand } from "./slashCommands"
@@ -52,7 +52,7 @@ export function ChatComposer({
   const blocked = sendBlocked && !adding
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const { canWrite } = useWorkspaceRole()
-  const inputRef = useRef<HTMLInputElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
 
   // Latched so a remount (e.g. back from the empty state) doesn't refocus for an old pick.
   const handledFocusRef = useRef(focusRequest)
@@ -63,7 +63,7 @@ export function ChatComposer({
     inputRef.current?.focus()
   }, [focusRequest])
 
-  const showSlashMenu = input.startsWith("/") && !input.slice(1).includes(" ")
+  const showSlashMenu = input.startsWith("/") && !/\s/.test(input.slice(1))
   const slashQuery = showSlashMenu ? input.slice(1) : ""
   const filteredCommands = matchSlashCommands(slashQuery, canWrite)
 
@@ -86,7 +86,9 @@ export function ChatComposer({
     submit()
   }
 
-  function handleKeyDown(e: KeyboardEvent) {
+  function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.nativeEvent.isComposing) return
+
     if (showSlashMenu && filteredCommands.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault()
@@ -98,7 +100,7 @@ export function ChatComposer({
         setSlashMenuIndex((i) => (i - 1 + filteredCommands.length) % filteredCommands.length)
         return
       }
-      if (e.key === "Tab" || e.key === "Enter") {
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
         e.preventDefault()
         selectSlashCommand(filteredCommands[Math.min(slashMenuIndex, filteredCommands.length - 1)])
         return
@@ -146,9 +148,10 @@ export function ChatComposer({
           selectedIndex={slashMenuIndex}
           canWrite={canWrite}
         />
-        <Input
+        <Textarea
           ref={inputRef}
           data-testid="chat-input"
+          rows={1}
           value={input}
           onChange={(e) => {
             setInput(e.target.value)
@@ -156,7 +159,7 @@ export function ChatComposer({
           }}
           onKeyDown={handleKeyDown}
           placeholder={adding ? "Add to your request…" : placeholder}
-          className="flex-1"
+          className="min-h-9 max-h-40 flex-1 resize-none py-1.5"
         />
         {isStreaming ? (
           <Button

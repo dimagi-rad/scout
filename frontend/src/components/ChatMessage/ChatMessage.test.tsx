@@ -1,11 +1,20 @@
+import type { ReactElement } from "react"
 import { describe, expect, it } from "vitest"
-import { fireEvent, render, screen } from "@testing-library/react"
+import { fireEvent, render as baseRender, type RenderOptions, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { UIMessage } from "ai"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
 import { turnArtifactOwners } from "./artifactReferences"
 import { ChatMessage, ChatTextPart } from "./ChatMessage"
 import { useAppStore } from "@/store/store"
+
+// Steps are collapsed by default; most tests inspect the cards inside them.
+function render(ui: ReactElement, options?: RenderOptions) {
+  const result = baseRender(ui, options)
+  screen.queryAllByTestId("chat-steps-toggle").forEach((toggle) => fireEvent.click(toggle))
+  return result
+}
+
 
 // A live tool part as produced by the SSE stream: `output` is a JSON STRING
 // (apps/chat/stream.py emits the MCP envelope as compact JSON). The rich card
@@ -518,6 +527,101 @@ describe("artifact link card from reloaded history", () => {
     render(<ChatMessage message={message} isActiveMessage={false} />)
     expect(screen.queryByTestId("chat-artifact-title-a")).not.toBeInTheDocument()
     expect(screen.getByTestId("chat-artifact-a")).toHaveAttribute("aria-label", "View Artifact")
+  })
+})
+
+describe("ChatTextPart blank space", () => {
+  it("renders nothing for a whitespace-only text part", () => {
+    const { container } = baseRender(<ChatTextPart role="assistant" text={"\n\n  "} />)
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  it("trims the first and last child margins of assistant markdown", () => {
+    const { container } = baseRender(<ChatTextPart role="assistant" text="Hello" />)
+    expect(container.firstElementChild?.className).toContain("[&>:first-child]:mt-0")
+  })
+})
+
+describe("ChatMessage collapsed steps", () => {
+  const toolPart = (id: string, state = "output-available") => ({
+    type: "tool-query",
+    toolName: "query",
+    toolCallId: id,
+    state,
+    input: { sql: "SELECT 1" },
+    output: JSON.stringify({ success: true, data: { columns: ["a"], rows: [[1]], row_count: 1, sql_executed: "SELECT 1", tables_accessed: [] } }),
+  })
+  const message = (state = "output-available") =>
+    ({
+      id: "m",
+      role: "assistant",
+      parts: [toolPart("t1"), toolPart("t2", state), { type: "text", text: "The answer is 1." }],
+    }) as unknown as UIMessage
+
+  it("hides tool calls behind a step count but keeps the answer visible", () => {
+    baseRender(<ChatMessage message={message()} isActiveMessage={false} />)
+    expect(screen.getByTestId("chat-steps-toggle")).toHaveTextContent("2 steps")
+    expect(screen.getByTestId("chat-steps-toggle")).toHaveAttribute("aria-expanded", "false")
+    expect(screen.queryByTestId("tool-call-query")).not.toBeInTheDocument()
+    expect(screen.getByText("The answer is 1.")).toBeInTheDocument()
+  })
+
+  it("expands and collapses on toggle", () => {
+    baseRender(<ChatMessage message={message()} isActiveMessage={false} />)
+    fireEvent.click(screen.getByTestId("chat-steps-toggle"))
+    expect(screen.getAllByTestId("tool-call-query")).toHaveLength(2)
+    fireEvent.click(screen.getByTestId("chat-steps-toggle"))
+    expect(screen.queryByTestId("tool-call-query")).not.toBeInTheDocument()
+  })
+
+  it("shows the running step in the collapsed summary while streaming", () => {
+    const msg = {
+      id: "m",
+      role: "assistant",
+      parts: [toolPart("t1", "input-available")],
+    } as unknown as UIMessage
+    baseRender(<ChatMessage message={msg} isActiveMessage={true} />)
+    expect(screen.getByTestId("chat-steps-current")).toBeInTheDocument()
+    expect(screen.queryByTestId("tool-call-query")).not.toBeInTheDocument()
+  })
+
+  it("keeps one group across whitespace-only text between steps", () => {
+    const msg = {
+      id: "m",
+      role: "assistant",
+      parts: [toolPart("t1"), { type: "text", text: "\n\n" }, toolPart("t2")],
+    } as unknown as UIMessage
+    baseRender(<ChatMessage message={msg} isActiveMessage={false} />)
+    expect(screen.getAllByTestId("chat-steps-toggle")).toHaveLength(1)
+    expect(screen.getByTestId("chat-steps-toggle")).toHaveTextContent("2 steps")
+  })
+
+  it("renders nothing for a message with only blank text", () => {
+    const msg = { id: "m", role: "assistant", parts: [{ type: "text", text: " " }] } as unknown as UIMessage
+    const { container } = baseRender(<ChatMessage message={msg} isActiveMessage={false} />)
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  it("keeps a failed helper outside the collapsed group", () => {
+    const msg = {
+      id: "m",
+      role: "assistant",
+      parts: [{ type: "tool-artifact_manager", toolName: "artifact_manager", toolCallId: "h1", state: "output-error", input: {}, errorText: "boom" }],
+    } as unknown as UIMessage
+    baseRender(<ChatMessage message={msg} isActiveMessage={false} />)
+    expect(screen.queryByTestId("chat-steps-toggle")).not.toBeInTheDocument()
+    expect(screen.getByTestId("tool-call-artifact_manager")).toBeInTheDocument()
+  })
+
+  it("keeps a failed ordinary tool call visible", () => {
+    const msg = {
+      id: "m",
+      role: "assistant",
+      parts: [{ type: "tool-query", toolName: "query", toolCallId: "q1", state: "output-error", input: {}, errorText: "bad sql" }],
+    } as unknown as UIMessage
+    baseRender(<ChatMessage message={msg} isActiveMessage={false} />)
+    expect(screen.queryByTestId("chat-steps-toggle")).not.toBeInTheDocument()
+    expect(screen.getByTestId("tool-call-query")).toBeInTheDocument()
   })
 })
 

@@ -33,7 +33,7 @@ export function ChatEmptyPrompt({
 
   // Slash command menu state — mirrors ChatPanel's active-thread input so
   // slash commands work identically here.
-  const showSlashMenu = input.startsWith("/") && !input.slice(1).includes(" ")
+  const showSlashMenu = input.startsWith("/") && !/\s/.test(input.slice(1))
   const slashQuery = showSlashMenu ? input.slice(1) : ""
   const filteredCommands = matchSlashCommands(slashQuery, canWrite)
 
@@ -55,6 +55,8 @@ export function ChatEmptyPrompt({
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.nativeEvent.isComposing) return
+
     if (showSlashMenu && filteredCommands.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault()
@@ -68,7 +70,7 @@ export function ChatEmptyPrompt({
         )
         return
       }
-      if (e.key === "Tab" || e.key === "Enter") {
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
         e.preventDefault()
         selectSlashCommand(filteredCommands[Math.min(slashMenuIndex, filteredCommands.length - 1)])
         return

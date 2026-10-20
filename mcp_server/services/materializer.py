@@ -46,7 +46,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import closing
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import psycopg
@@ -68,7 +68,7 @@ from apps.workspaces.services.load_generations import pipeline_fingerprint
 from apps.workspaces.services.load_phases import LoadPhase
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.services.tenant_metadata import get_tenant_metadata
-from mcp_server.event_time import normalize_event_time
+from mcp_server.event_time import DATE_RANGE_COLUMNS, event_time_sql, normalize_event_time
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
 from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
@@ -444,6 +444,7 @@ def run_pipeline(
                         "cursor_state": None,
                     }
                 _stamp_load_ended(run, pipeline, source_results, duration_s=_elapsed(run_started))
+                _add_partial_date_ranges(run, schema_name, pipeline, sources_list, source_results)
                 raise
             # Preserve the final cursor watermark for resumable sources; non-resumable keep None.
             final_cursor = (source_results.get(source.name) or {}).get("cursor_state")
@@ -461,6 +462,9 @@ def run_pipeline(
                 "Loaded %d rows into %s.%s in %.1fs", rows, schema_name, source.name, duration_s
             )
         current_source = None
+
+        # After every source, so a slow scan never holds up the next source's fetch.
+        _record_date_ranges(schema_name, pipeline, sources_list, source_results)
 
         # Discovery may have generated SYSTEM assets. Fingerprint and execute the
         # same in-memory snapshot: the fingerprint is this run's receipt for what
@@ -1315,6 +1319,91 @@ _DROP_STATEMENTS = {
     "p": "DROP TABLE",
     "f": "DROP FOREIGN TABLE",
 }
+
+
+# A summary is not worth stalling the load for: an unindexed scan of a very
+# large table gives up and the summary just omits that table's dates.
+_DATE_RANGE_TIMEOUT_MS = 10_000
+# Not "timestamp without time zone": its offset-less value would read as local
+# time in the browser; the event-time parser treats it as UTC instead.
+_NATIVE_TIME_TYPES = frozenset({"timestamp with time zone", "date"})
+
+
+def _record_date_ranges(
+    schema_name: str, pipeline: PipelineConfig, sources: list, source_results: dict
+) -> None:
+    """Add each completed source's event-time range to its result entry."""
+    for source in sources:
+        entry = source_results.get(source.name) or {}
+        if entry.get("state") != "completed":
+            continue
+        date_range = _source_date_range(schema_name, pipeline.provider, source.physical_table_name)
+        if date_range is not None:
+            entry["date_range"] = date_range
+
+
+def _add_partial_date_ranges(
+    run, schema_name: str, pipeline: PipelineConfig, sources: list, source_results: dict
+) -> None:
+    """A PARTIAL run can be served, so its completed tables get ranges too.
+
+    After the run is stamped, so the scan never holds it non-terminal; the write
+    is conditional so a run a teardown or promotion marked STALE meanwhile keeps
+    that. Never raises: it runs inside the load's failure handler.
+    """
+    if run.state != MaterializationRun.RunState.PARTIAL:
+        return
+    try:
+        _record_date_ranges(schema_name, pipeline, sources, source_results)
+        MaterializationRun.objects.filter(
+            id=run.id, state=MaterializationRun.RunState.PARTIAL
+        ).update(result=run.result)
+    except Exception:
+        logger.warning("Could not save date ranges for run %s", run.id, exc_info=True)
+
+
+def _source_date_range(schema_name: str, provider: str, table: str) -> dict | None:
+    """Earliest and latest event time in a just-committed table, for the load summary.
+
+    None when the table has no declared event time, holds no dated rows, or the
+    query fails: the load already succeeded and must not fail over its summary.
+    """
+    column = DATE_RANGE_COLUMNS.get(provider, {}).get(table)
+    if column is None:
+        return None
+    try:
+        conn = get_managed_db_connection()
+        try:
+            conn.execute(f"SET statement_timeout = {_DATE_RANGE_TIMEOUT_MS}")
+            column_type = conn.execute(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+                (schema_name, table, column),
+            ).fetchone()
+            if column_type is None:
+                return None
+            relation = psql.Identifier(schema_name, table).as_string(conn)
+            # A native time column needs no parsing; only a legacy text snapshot does.
+            value = (
+                psql.Identifier(column).as_string(conn)
+                if column_type[0] in _NATIVE_TIME_TYPES
+                else event_time_sql(column)
+            )
+            # Built without SQL.format: the event-time regex contains braces.
+            query = f"SELECT min(t), max(t) FROM (SELECT {value} AS t FROM {relation}) dated"  # noqa: S608 - fixed column, quoted identifiers
+            row = conn.execute(query).fetchone()
+        finally:
+            conn.close()
+    except psycopg.errors.QueryCanceled:
+        # Expected for a very large table: the timeout is what bounds the scan.
+        logger.info("Gave up reading the date range of %s.%s", schema_name, table)
+        return None
+    except Exception:
+        logger.warning("Could not read the date range of %s.%s", schema_name, table, exc_info=True)
+        return None
+    if not row or not all(isinstance(value, date) for value in row[:2]):
+        return None
+    return {"column": column, "earliest": row[0].isoformat(), "latest": row[1].isoformat()}
 
 
 def _drop_transform_outputs(schema_name: str, pipeline: PipelineConfig) -> list[str]:

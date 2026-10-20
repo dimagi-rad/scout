@@ -1,10 +1,19 @@
+import type { ReactElement } from "react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { render, screen } from "@testing-library/react"
+import { render as baseRender, type RenderOptions, screen, fireEvent } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { personalMemoryApi, workspaceMemoryApi } from "@/api/memory"
 import type { UIMessage } from "ai"
 import { MemoryRouter } from "react-router-dom"
 import { ChatMessage } from "./ChatMessage"
+
+// Steps are collapsed by default; most tests inspect the cards inside them.
+function render(ui: ReactElement, options?: RenderOptions) {
+  const result = baseRender(ui, options)
+  screen.queryAllByTestId("chat-steps-toggle").forEach((toggle) => fireEvent.click(toggle))
+  return result
+}
+
 
 vi.mock("@/api/memory", () => ({
   personalMemoryApi: { remove: vi.fn() },

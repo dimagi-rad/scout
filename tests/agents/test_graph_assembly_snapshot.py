@@ -35,6 +35,7 @@ from apps.agents.prompts.base_system import (
     BASE_SYSTEM_PROMPT,
     HEADLESS_BASE_SYSTEM_PROMPT,
     READ_ONLY_BASE_SYSTEM_PROMPT,
+    READ_ONLY_HEADLESS_BASE_SYSTEM_PROMPT,
 )
 from apps.knowledge.models import KnowledgeEntry
 from apps.memory.models import PersonalMemory
@@ -110,6 +111,7 @@ def _with_markers(text: str) -> str:
         (BASE_SYSTEM_PROMPT, "<<BASE_SYSTEM_PROMPT>>"),
         (HEADLESS_BASE_SYSTEM_PROMPT, "<<HEADLESS_BASE_SYSTEM_PROMPT>>"),
         (READ_ONLY_BASE_SYSTEM_PROMPT, "<<READ_ONLY_BASE_SYSTEM_PROMPT>>"),
+        (READ_ONLY_HEADLESS_BASE_SYSTEM_PROMPT, "<<READ_ONLY_HEADLESS_BASE_SYSTEM_PROMPT>>"),
         (ARTIFACT_PROMPT_ADDITION, "<<ARTIFACT_PROMPT_ADDITION>>"),
         (ARTIFACT_READ_ONLY_PROMPT_ADDITION, "<<ARTIFACT_READ_ONLY_PROMPT_ADDITION>>"),
     ]
