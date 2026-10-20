@@ -54,7 +54,9 @@ TENANT_REFRESH_FAILURE_TTL = 60  # seconds
 # Bounds a refresh another request is already running, should that request die;
 # above the worst-case fetch (60s listing budget plus token refresh).
 TENANT_REFRESH_INFLIGHT_TTL = 180  # seconds
-# How long a poll waits on another request's refresh of the same identity.
+# How long a poll waits on another request's refresh of the same identity. Kept
+# below the worst-case fetch on purpose: it bounds the tenant-list request, at the
+# cost of overlapping (as before #918) a fetch slower than the wait.
 TENANT_REFRESH_INFLIGHT_WAIT = 30  # seconds
 TENANT_REFRESH_INFLIGHT_POLL = 0.25  # seconds
 
@@ -130,7 +132,7 @@ async def _arefresh_identity(user, provider, resolve, token_obj, *, force: bool)
         await _arefresh_identity_guarded(user, provider, resolve, token_obj, force=force)
     except Exception:
         logger.warning(
-            "Could not refresh %s tenants for account %s",
+            "Tenant refresh bookkeeping (cache) failed for %s account %s",
             provider,
             token_obj.account_id,
             exc_info=True,
@@ -174,8 +176,9 @@ async def _arefresh_identity_guarded(user, provider, resolve, token_obj, *, forc
             ttl = TENANT_REFRESH_TTL
         await cache.aset(cache_key, True, ttl)
     finally:
-        # Only the owner releases, and only its own key: one that expired under
-        # a slow fetch may since belong to another request.
+        # Only the owner releases its own key: one that expired under a slow fetch
+        # may since belong to another request. Advisory (get-then-delete is not
+        # atomic); a lost race costs one duplicate fetch.
         if owns_inflight and await cache.aget(inflight_key) == owner:
             await cache.adelete(inflight_key)
 
