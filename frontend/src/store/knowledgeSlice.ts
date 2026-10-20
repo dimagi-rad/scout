@@ -201,7 +201,13 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice & DomainSlice & A
           formData,
         )
         if (!isCurrent()) return item
-        set({ knowledgeItems: [item, ...get().knowledgeItems] })
+        // Refetch rather than prepend, so the page, search and counts stay right.
+        const { knowledgeFilter, knowledgeSearch, knowledgePagination } = get()
+        await get().knowledgeActions.fetchKnowledge({
+          type: knowledgeFilter ?? undefined,
+          search: knowledgeSearch || undefined,
+          page: knowledgePagination?.page,
+        })
         return item
       },
 

@@ -8,7 +8,7 @@ import { REFERENCE_UPLOAD_MAX_BYTES, type KnowledgeEntryItem } from "@/store/kno
 import { KnowledgeForm } from "./KnowledgeForm"
 import { KnowledgeList } from "./KnowledgeList"
 import { ReferenceUploadDialog } from "./ReferenceUploadDialog"
-import { fullReference, referenceFilename } from "./referenceFormat"
+import { downloadText, fullReference, referenceFilename } from "./referenceFormat"
 
 const note: KnowledgeEntryItem = {
   id: "note-1",
@@ -170,10 +170,15 @@ describe("reference document upload", () => {
 })
 
 describe("reference document store actions", () => {
-  it("uploads to the workspace's upload endpoint and adds the document to the list", async () => {
+  it("uploads to the workspace's upload endpoint and refetches the current view", async () => {
     const store = createAppStore()
     store.getState().domainActions.setActiveDomain("ws-1")
+    store.getState().knowledgeActions.setSearch("registry")
     const upload = vi.spyOn(api, "upload").mockResolvedValue(registry)
+    const pagination = {
+      page: 1, page_size: 50, total_count: 1, total_pages: 1, has_next: false, has_previous: false,
+    }
+    const list = vi.spyOn(api, "get").mockResolvedValue({ results: [registry], pagination })
     const doc = file("registry.json")
 
     await store.getState().knowledgeActions.uploadReferenceDocument(doc, { title: "Registry" })
@@ -183,7 +188,9 @@ describe("reference document store actions", () => {
     expect((body as FormData).get("file")).toBe(doc)
     expect((body as FormData).get("title")).toBe("Registry")
     expect((body as FormData).has("description")).toBe(false)
+    expect(list).toHaveBeenCalledWith("/api/workspaces/ws-1/knowledge/?search=registry")
     expect(store.getState().knowledgeItems).toEqual([registry])
+    expect(store.getState().knowledgePagination).toEqual(pagination)
   })
 
   function file(name: string) {
@@ -220,6 +227,18 @@ describe("fullReference", () => {
 })
 
 describe("upload dialog title", () => {
+  it("replaces a derived title after an invalid pick in between", async () => {
+    render(<ReferenceUploadDialog open onOpenChange={vi.fn()} onUpload={vi.fn()} />)
+    const picker = screen.getByTestId("reference-upload-file")
+    const user = userEvent.setup({ applyAccept: false })
+
+    await user.upload(picker, new File(["[]"], "registry.json"))
+    await user.upload(picker, new File(["x"], "photo.png"))
+    await user.upload(picker, new File(["a"], "codes.csv"))
+
+    expect(screen.getByTestId("reference-upload-title")).toHaveValue("codes")
+  })
+
   it("keeps a title typed before the file is picked", async () => {
     render(<ReferenceUploadDialog open onOpenChange={vi.fn()} onUpload={vi.fn()} />)
 
@@ -227,5 +246,23 @@ describe("upload dialog title", () => {
     await userEvent.upload(screen.getByTestId("reference-upload-file"), new File(["[]"], "x.json"))
 
     expect(screen.getByTestId("reference-upload-title")).toHaveValue("My registry")
+  })
+})
+
+describe("downloadText", () => {
+  it("restores the UTF-8 BOM for tables only", async () => {
+    const blobs: Blob[] = []
+    vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+      blobs.push(blob as Blob)
+      return "blob:test"
+    })
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {})
+
+    downloadText({ title: "Codes", source_format: "csv", content: "a,b" })
+    downloadText({ title: "Registry", source_format: "json", content: "[]" })
+
+    const bytes = await Promise.all(blobs.map(async (blob) => [...new Uint8Array(await blob.arrayBuffer())]))
+    expect(bytes[0].slice(0, 3)).toEqual([0xef, 0xbb, 0xbf])
+    expect(bytes[1][0]).toBe("[".charCodeAt(0))
   })
 })

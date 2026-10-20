@@ -47,7 +47,12 @@ export function downloadText(
   item: Pick<KnowledgeEntryItem, "title" | "source_format" | "content">,
 ): void {
   const type = MIME_TYPES[item.source_format || "txt"] ?? "text/plain"
-  downloadBlob(referenceFilename(item), new Blob([item.content], { type: `${type};charset=utf-8` }))
+  // The server drops an upload's BOM; restore it for tables so Excel reads them as UTF-8.
+  const bom = item.source_format === "csv" || item.source_format === "tsv" ? "\ufeff" : ""
+  downloadBlob(
+    referenceFilename(item),
+    new Blob([bom, item.content], { type: `${type};charset=utf-8` }),
+  )
 }
 
 export function fileProblem(file: File): string | null {

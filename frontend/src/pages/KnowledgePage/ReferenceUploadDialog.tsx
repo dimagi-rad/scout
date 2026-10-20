@@ -38,6 +38,9 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
   const { canWrite } = useWorkspaceRole()
   const [file, setFile] = useState<File | null>(null)
   const [title, setTitle] = useState("")
+  // The title last filled in from a file name, so a later pick replaces it but never
+  // a title the user typed, even after an invalid pick or a cancelled picker.
+  const [derivedTitle, setDerivedTitle] = useState("")
   const [description, setDescription] = useState("")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -46,6 +49,7 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
   useEffect(() => {
     setFile(null)
     setTitle("")
+    setDerivedTitle("")
     setDescription("")
     setError(null)
     setLoading(false)
@@ -58,14 +62,11 @@ export function ReferenceUploadDialog({ open, onOpenChange, onUpload }: Referenc
     const picked = e.target.files?.[0] ?? null
     setFile(picked)
     setError(null)
-    // Keep a title the user typed; replace only the empty or file-derived one, and
-    // only with the name of a file that can actually be uploaded.
-    if (picked && !fileProblem(picked)) {
-      setTitle((current) =>
-        !current.trim() || (file && current === titleFromFilename(file.name))
-          ? titleFromFilename(picked.name)
-          : current,
-      )
+    // Only the name of a file that can actually be uploaded becomes the title.
+    if (picked && !fileProblem(picked) && (!title.trim() || title === derivedTitle)) {
+      const derived = titleFromFilename(picked.name)
+      setTitle(derived)
+      setDerivedTitle(derived)
     }
   }
 
