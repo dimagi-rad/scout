@@ -74,7 +74,7 @@ export function ChatComposer({
         setSlashMenuIndex((i) => (i - 1 + filteredCommands.length) % filteredCommands.length)
         return
       }
-      if (e.key === "Tab" || e.key === "Enter") {
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
         e.preventDefault()
         selectSlashCommand(filteredCommands[Math.min(slashMenuIndex, filteredCommands.length - 1)])
         return

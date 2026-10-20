@@ -1,5 +1,6 @@
+import type { ReactElement } from "react"
 import { describe, expect, it } from "vitest"
-import { fireEvent, render as baseRender, screen } from "@testing-library/react"
+import { fireEvent, render as baseRender, type RenderOptions, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { UIMessage } from "ai"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
@@ -8,7 +9,7 @@ import { ChatMessage, ChatTextPart } from "./ChatMessage"
 import { useAppStore } from "@/store/store"
 
 // Steps are collapsed by default; most tests inspect the cards inside them.
-const render: typeof baseRender = (ui, options) => {
+function render(ui: ReactElement, options?: RenderOptions) {
   const result = baseRender(ui, options)
   screen.queryAllByTestId("chat-steps-toggle").forEach((toggle) => fireEvent.click(toggle))
   return result
@@ -582,5 +583,33 @@ describe("ChatMessage collapsed steps", () => {
     baseRender(<ChatMessage message={msg} isActiveMessage={true} />)
     expect(screen.getByTestId("chat-steps-current")).toBeInTheDocument()
     expect(screen.queryByTestId("tool-call-query")).not.toBeInTheDocument()
+  })
+
+  it("keeps one group across whitespace-only text between steps", () => {
+    const msg = {
+      id: "m",
+      role: "assistant",
+      parts: [toolPart("t1"), { type: "text", text: "\n\n" }, toolPart("t2")],
+    } as unknown as UIMessage
+    baseRender(<ChatMessage message={msg} isActiveMessage={false} />)
+    expect(screen.getAllByTestId("chat-steps-toggle")).toHaveLength(1)
+    expect(screen.getByTestId("chat-steps-toggle")).toHaveTextContent("2 steps")
+  })
+
+  it("renders nothing for a message with only blank text", () => {
+    const msg = { id: "m", role: "assistant", parts: [{ type: "text", text: " " }] } as unknown as UIMessage
+    const { container } = baseRender(<ChatMessage message={msg} isActiveMessage={false} />)
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  it("keeps a failed helper outside the collapsed group", () => {
+    const msg = {
+      id: "m",
+      role: "assistant",
+      parts: [{ type: "tool-artifact_manager", toolName: "artifact_manager", toolCallId: "h1", state: "output-error", input: {}, errorText: "boom" }],
+    } as unknown as UIMessage
+    baseRender(<ChatMessage message={msg} isActiveMessage={false} />)
+    expect(screen.queryByTestId("chat-steps-toggle")).not.toBeInTheDocument()
+    expect(screen.getByTestId("tool-call-artifact_manager")).toBeInTheDocument()
   })
 })

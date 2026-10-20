@@ -853,16 +853,16 @@ export function ChatPanel() {
     }
   }, [chatKey, status, regenerate, busyToken, busyError, retriedChats, busyAttempts])
 
-  const lastUserMessageId = useMemo(
-    () => messages.findLast((m) => m.role === "user")?.id,
+  const userMessageCount = useMemo(
+    () => messages.filter((m) => m.role === "user").length,
     [messages],
   )
-  const { onScroll: onMessagesScroll, hasNewBelow, jumpToBottom } = useStickToBottom(
+  const { onScroll: onMessagesScroll, onWheel: onMessagesWheel, hasNewBelow, jumpToBottom } = useStickToBottom(
     scrollRef,
     messages,
     resumeStream.text,
     threadId,
-    lastUserMessageId,
+    userMessageCount,
   )
 
   // A held send hides its request until the server stops reporting it; once the
@@ -1082,7 +1082,7 @@ export function ChatPanel() {
         />
         {/* Message list */}
         <div className="relative flex min-h-0 flex-1 flex-col">
-        <div ref={scrollRef} onScroll={onMessagesScroll} className="flex-1 overflow-y-auto p-4 space-y-4">
+        <div ref={scrollRef} onScroll={onMessagesScroll} onWheel={onMessagesWheel} className="flex-1 overflow-y-auto p-4 space-y-4">
           {visibleMessages.map((msg: UIMessage, msgIdx: number) => (
             <ChatMessage
               key={msg.id}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type RefObject } from "react"
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 
 const BOTTOM_THRESHOLD_PX = 80
 
@@ -23,22 +23,40 @@ export function useStickToBottom(
   forceKey: unknown,
 ) {
   const [detached, setDetached] = useState<Detached | null>(null)
+  // Drop a snapshot from another conversation or send so it can't match again later.
+  if (detached && (detached.resetKey !== resetKey || detached.forceKey !== forceKey)) {
+    setDetached(null)
+  }
   const current = detached?.resetKey === resetKey && detached?.forceKey === forceKey ? detached : null
   const isStuck = current === null
   const hasNewBelow =
     current !== null && (current.content !== content || current.streamingText !== streamingText)
 
+  const lastPinned = useRef<number | null>(null)
+
   useEffect(() => {
     const el = ref.current
-    if (isStuck && el) el.scrollTop = el.scrollHeight
+    if (isStuck && el) {
+      el.scrollTop = el.scrollHeight
+      lastPinned.current = el.scrollTop
+    }
   }, [ref, isStuck, content, streamingText, resetKey, forceKey])
 
   const onScroll = () => {
     const el = ref.current
     if (!el) return
+    // Our own pin fires a scroll event; it must not count as the user's position.
+    if (isStuck && el.scrollTop === lastPinned.current) return
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_THRESHOLD_PX
     if (atBottom) setDetached(null)
     else setDetached((prev) => (prev && current ? prev : { content, streamingText, resetKey, forceKey }))
+  }
+
+  // Small upward wheel moves stay inside the bottom threshold, so detach on intent.
+  const onWheel = (e: { deltaY: number }) => {
+    if (e.deltaY < 0 && isStuck) {
+      setDetached({ content, streamingText, resetKey, forceKey })
+    }
   }
 
   const jumpToBottom = useCallback(() => {
@@ -47,5 +65,5 @@ export function useStickToBottom(
     if (el) el.scrollTop = el.scrollHeight
   }, [ref])
 
-  return { onScroll, hasNewBelow, jumpToBottom }
+  return { onScroll, onWheel, hasNewBelow, jumpToBottom }
 }

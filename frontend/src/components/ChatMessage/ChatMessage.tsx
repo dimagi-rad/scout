@@ -849,17 +849,21 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
       />
     ))
 
-  type RenderedPart = { node: React.ReactNode; step: boolean; label?: string; pending?: boolean; failed?: boolean }
+  type RenderedPart = { node: React.ReactNode; step: boolean; key?: string; label?: string; pending?: boolean; failed?: boolean }
   const rendered: RenderedPart[] = message.parts.map((part, i): RenderedPart => {
     if (part.type === "text") {
+      if (!part.text.trim()) return { node: null, step: false }
       return { node: <ChatTextPart key={i} role={isUser ? "user" : "assistant"} text={part.text} />, step: false }
     }
 
     if (part.type === "reasoning") {
       const hasText = !!((part as { reasoning?: string; text?: string }).reasoning || (part as { text?: string }).text)
       return {
-        node: <ChatReasoningPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} />,
+        node: hasText
+          ? <ChatReasoningPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} />
+          : null,
         step: hasText,
+        key: `reasoning-${i}`,
         label: "Thinking",
         pending: part.state === "streaming",
       }
@@ -872,8 +876,8 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
         return { node: null, step: false }
       }
       const toolName = getToolName(part)
+      const buttons = renderArtifacts(i)
       if (!(toolName in SUBAGENT_TOOL_LABELS)) {
-        const buttons = renderArtifacts(i)
         if (buttons.length) return { node: <Fragment key={i}>{buttons}</Fragment>, step: false }
       }
 
@@ -887,15 +891,21 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
         toolCallId && recentTerminationsByToolCallId
           ? recentTerminationsByToolCallId[toolCallId] ?? null
           : null
+      const helperFailedOutcome =
+        toolName in SUBAGENT_TOOL_LABELS
+        && (toolPart.state === "output-error"
+          || (toolPart.state === "output-available" && isUnsuccessfulHelperOutcome(parseOutput(toolPart.output))))
       return {
         node: (
           <Fragment key={i}>
             <ChatToolCallPart part={toolPart} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} childParts={toolCallId ? childToolPartsByParent.get(toolCallId) ?? [] : []} subagentEvents={toolCallId ? subagentEventsByParent.get(toolCallId) ?? [] : []} subagentTimeline={toolCallId ? subagentTimelineByParent.get(toolCallId) ?? [] : []} />
-            {renderArtifacts(i)}
+            {buttons}
           </Fragment>
         ),
         // Materialization carries a live progress card and Stop button the user must see.
-        step: toolName !== "run_materialization" && !renderArtifacts(i).length,
+        // A failed helper stays visible: its error and retry path must not hide.
+        step: toolName !== "run_materialization" && !buttons.length && !helperFailedOutcome,
+        key: toolCallId ?? `tool-${i}`,
         label: displayToolName(toolName),
         pending: toolPart.state === "input-streaming" || toolPart.state === "input-available",
         failed: toolPart.state === "output-error",
@@ -906,12 +916,12 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
   })
 
   const blocks: React.ReactNode[] = []
-  let run: { index: number; items: RenderedPart[] } | null = null
+  let run: { key: string; items: RenderedPart[] } | null = null
   const flushRun = (isTrailing: boolean) => {
     if (!run) return
     blocks.push(
       <ChatStepsGroup
-        key={`steps-${run.index}`}
+        key={`steps-${run.key}`}
         steps={run.items}
         isLive={isActiveMessage && isTrailing}
       />,
@@ -920,7 +930,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
   }
   rendered.forEach((item, i) => {
     if (item.step) {
-      run ??= { index: i, items: [] }
+      run ??= { key: item.key ?? String(i), items: [] }
       run.items.push(item)
       return
     }
