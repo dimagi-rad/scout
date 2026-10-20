@@ -54,7 +54,7 @@ The agent maintains state across conversation turns:
 
 The state carries no role. Tools that write re-check the user's workspace role each time they run.
 
-Message history is automatically pruned to keep the last 20 messages plus system messages. Orphaned tool messages (those whose parent AI message was pruned) are removed.
+Message history is automatically pruned to about the last 20 messages plus system messages. The request the current turn answers is always kept, even when it is older than the window: the latest run of user messages (including a resume marker), the user's last two own messages, and the assistant text each of those answers. Tool results whose AI message was pruned are dropped, except when one tool round is wider than the window, in which case the window grows to keep that round whole.
 
 ## Roles and run modes
 
@@ -403,7 +403,10 @@ don't include the refresh yet. During a first load or an unsafe refresh, or when
 no catalog is available, it holds guidance on what to do instead, depending on
 the run mode and the member's role.
 Workspaces with more than one tenant also get a warning when sources are
-excluded from the active view, or when its coverage is unknown.
+excluded from the active view, or when its coverage is unknown. A
+`### Workspace Sources` list (up to 50 names) follows, so the agent can tell
+when a question names a source the workspace doesn't have, then a
+`### Source Freshness` block once data has loaded.
 
 ### 8. Current date context
 

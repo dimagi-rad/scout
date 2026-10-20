@@ -166,14 +166,14 @@ async def test_prompt_names_the_stale_source_and_says_reconnect(
             workspace, user, write_capable=write_capable
         )
 
-    hq_line = next(line for line in volatile.splitlines() if "Test Domain (CommCare HQ)" in line)
+    hq_line = next(line for line in volatile.splitlines() if "Test Domain (CommCare HQ):" in line)
     # Calendar days: a run straddling UTC midnight may count one more.
     assert re.search(r"\b3[01] days ago", hq_line)
     assert "NOT refreshed" in hq_line
     assert ErrorCode.AUTH_TOKEN_EXPIRED in hq_line
     assert RECONNECT_HQ in hq_line
     connect_line = next(
-        line for line in volatile.splitlines() if "Reading Opp (CommCare Connect)" in line
+        line for line in volatile.splitlines() if "Reading Opp (CommCare Connect):" in line
     )
     assert "today" in connect_line or "1 day ago" in connect_line
     assert "refreshed by the latest load" in connect_line
@@ -369,7 +369,7 @@ async def test_prompt_says_when_a_stale_source_is_left_out_of_the_queryable_data
             workspace, user, write_capable=True
         )
 
-    hq_line = next(line for line in volatile.splitlines() if "Test Domain (CommCare HQ)" in line)
+    hq_line = next(line for line in volatile.splitlines() if "Test Domain (CommCare HQ):" in line)
     assert "not in what this workspace can query" in hq_line
     assert "report the error" in hq_line
     # Not a sign-in problem, so the agent may say the load itself failed.
