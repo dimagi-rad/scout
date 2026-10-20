@@ -90,8 +90,13 @@ export function uploadChatAttachment(
       } catch {
         body = undefined
       }
-      if (xhr.status === 201 && isUploadedAttachment(body)) {
+      const ok = xhr.status >= 200 && xhr.status < 300
+      if (ok && isUploadedAttachment(body)) {
         resolve(body)
+        return
+      }
+      if (ok) {
+        reject(new AttachmentUploadError("Upload failed: the server's reply was not understood."))
         return
       }
       const reason = typeof body?.reason === "string" ? body.reason : null

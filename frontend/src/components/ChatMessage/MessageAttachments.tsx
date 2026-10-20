@@ -13,8 +13,13 @@ const TYPE_LABELS: Record<string, string> = {
   "text/markdown": "Markdown",
 }
 
+/** History parts come from the server; a missing type must not take the transcript down. */
+function mediaTypeOf(part: FileUIPart): string {
+  return typeof part.mediaType === "string" ? part.mediaType : ""
+}
+
 function typeLabel(part: FileUIPart): string {
-  const base = part.mediaType.split(";")[0]
+  const base = mediaTypeOf(part).split(";")[0]
   if (Object.hasOwn(TYPE_LABELS, base)) return TYPE_LABELS[base]
   const name = part.filename ?? ""
   const dot = name.lastIndexOf(".")
@@ -30,7 +35,7 @@ export function MessageAttachments({ parts, alignEnd }: { parts: FileUIPart[]; a
         const name = part.filename || "attachment"
         // Only our own attachment urls are fetched or linked; anything else shows as a name.
         const href = isAttachmentUrl(part.url) ? withBasePath(part.url) : null
-        if (href && part.mediaType.startsWith("image/")) {
+        if (href && mediaTypeOf(part).startsWith("image/")) {
           return (
             <a
               key={i}

@@ -52,6 +52,11 @@ describe("ChatMessage file parts (#913)", () => {
     expect(document.querySelector(".bg-primary")).toBeNull()
   })
 
+  it("shows a file part with no media type as a plain chip", () => {
+    renderMessage([{ filename: "odd.bin", url: URL_B, type: "file" } as never])
+    expect(screen.getByTestId("chat-message-attachment")).toHaveTextContent("odd.bin")
+  })
+
   it("never fetches or links a url that is not one of our attachments", () => {
     renderMessage([
       { type: "file", mediaType: "image/png", filename: "x.png", url: "https://evil.example/x.png" },

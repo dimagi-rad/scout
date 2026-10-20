@@ -86,6 +86,7 @@ describe("uploadChatAttachment", () => {
     const result = uploadChatAttachment(file, "ws-1", vi.fn(), new AbortController().signal)
     FakeXHR.last.respond(201, { id: "a", url: "/api/chat/attachments/a/", media_type: "application/json" })
     await expect(result).rejects.toBeInstanceOf(AttachmentUploadError)
+    await expect(result).rejects.toMatchObject({ message: expect.stringContaining("not understood") })
   })
 
   it("shows the busy prose, not its machine code, when Scout is at capacity", async () => {
