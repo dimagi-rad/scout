@@ -51,6 +51,9 @@ VALIDATOR_SLOT_WAIT_SECONDS = 300.0
 # The 110s total is not headroom: commit_canvas's diagnostics and writes come first.
 INTERACTIVE_VALIDATOR_SLOT_WAIT_SECONDS = 10.0
 VALIDATOR_SLOT_POLL_SECONDS = 1.0
+# Marks a schema promoted without validation, so an identical rebuild is not
+# trusted to skip it (#918). Older rows carry only the message.
+VALIDATION_SKIPPED_CODE = "cube_validation_skipped"
 VALIDATION_SKIPPED_MESSAGE = (
     "Cube schema validation skipped because CUBE_VALIDATOR_URL is not configured."
 )
@@ -487,7 +490,11 @@ def _serving_validated_content(workspace, model: SemanticModel, content_hash: st
     if serving is None:
         return False
     return not any(
-        isinstance(diagnostic, dict) and diagnostic.get("message") == VALIDATION_SKIPPED_MESSAGE
+        isinstance(diagnostic, dict)
+        and (
+            diagnostic.get("code") == VALIDATION_SKIPPED_CODE
+            or diagnostic.get("message") == VALIDATION_SKIPPED_MESSAGE
+        )
         for diagnostic in serving.diagnostics or []
     )
 
@@ -577,6 +584,7 @@ def _diagnostics_from_validation(validation: dict[str, Any]) -> list[dict[str, A
         diagnostics.append(
             {
                 "level": "warning",
+                "code": VALIDATION_SKIPPED_CODE,
                 "message": VALIDATION_SKIPPED_MESSAGE,
             }
         )

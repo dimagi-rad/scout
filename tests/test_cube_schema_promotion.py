@@ -660,3 +660,28 @@ def test_unchanged_refresh_needs_no_validator_slot(
     assert promoted.status == CubeSchema.Status.ACTIVE
     assert attempts == []
     assert cube_http.calls["validate"] == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_skipping_validation_releases_a_slot_it_was_handed(workspace, model, validator):
+    build_and_promote_cube_schema(workspace, model=model)
+
+    with cube_schema._validator_slot(0) as slot:
+        cube_schema._build_validate_and_promote(workspace, model, slot=slot)
+        # Released before promotion, not held until the caller's block ends.
+        assert slot._slot is None
+
+    assert validator.await_count == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_row_marked_only_by_the_legacy_skip_message_is_validated_again(
+    workspace, model, validator
+):
+    serving = build_and_promote_cube_schema(workspace, model=model)
+    serving.diagnostics = [{"level": "warning", "message": cube_schema.VALIDATION_SKIPPED_MESSAGE}]
+    serving.save(update_fields=["diagnostics"])
+
+    build_and_promote_cube_schema(workspace, model=model)
+
+    assert validator.await_count == 2
