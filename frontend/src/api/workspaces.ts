@@ -62,6 +62,24 @@ export interface SourceFreshnessDetail {
   last_fetched_at: string | null
   // Skipped over this viewer's own expired sign-in: a refresh cannot fix it.
   reconnect: boolean
+  // What the serving snapshot's load put in each table; null before any load.
+  // Absent from a server that predates it.
+  summary?: LoadSummary | null
+}
+
+export interface LoadSummaryTable {
+  name: string
+  // completed, failed, cancelled, skipped or in_progress.
+  state: string
+  rows: number | null
+  // Earliest and latest event time, for tables that declare one.
+  earliest?: string | null
+  latest?: string | null
+}
+
+export interface LoadSummary {
+  tables: LoadSummaryTable[]
+  total_rows: number
 }
 
 export interface WorkspaceFreshness {
