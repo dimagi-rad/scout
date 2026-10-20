@@ -35,6 +35,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const isCurrentAccount = useIsCurrentAccount()
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
+  const newThread = useAppStore((s) => s.uiActions.newThread)
   const userId = useAppStore((s) => s.user?.id)
   const domains = useAppStore((s) => s.domains)
   const domainsStatus = useAppStore((s) => s.domainsStatus)
@@ -180,8 +181,10 @@ export function CreateWorkspaceModal({ onClose }: Props) {
       await fetchDomains()
       if (!isCurrentAccount()) return
       setActiveDomain(workspace.id)
+      newThread()
       onClose()
-      navigate(`${pathPrefix}${workspacePath(workspace)}`)
+      // Its sources were just chosen here, so the next step is asking it something.
+      navigate(`${pathPrefix}${workspacePath(workspace)}/chat`)
     } catch (err) {
       if (!isCurrentAccount()) return
       setError(err instanceof ApiError ? err.message : "Failed to create workspace")

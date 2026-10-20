@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Iterator
+from functools import partial
 
 import requests
 from django.conf import settings
@@ -69,7 +71,10 @@ class OCSBaseLoader:
         self.base_url = base_url.rstrip("/")
         # A mid-run token refresher (OAuth only); None for API keys (arch #252,
         # finding 14#3).
-        self._refresh = credential.get("refresh")
+        self._mint_token = credential.get("refresh")
+        self._refresh_lock = threading.Lock()
+        self._minted_token: str | None = None
+        self._refresh_failure: Exception | None = None
         self._session = requests.Session()
         if credential.get("type") == "api_key":
             self._session.headers.update({"X-api-key": credential["value"]})
@@ -79,18 +84,43 @@ class OCSBaseLoader:
         self._session.mount("https://", adapter)
         self._session.mount("http://", adapter)
 
+    def _coalesced_refresh(self, rejected_auth: str | None) -> str | None:
+        """Refresh once for every request that 401'd on the same token (#918).
+
+        Detail fetches run concurrently, so one expired token 401s several
+        requests at once. OAuth refresh tokens rotate: only the first may mint;
+        the rest take the token it minted. A failed mint is final for the
+        rejected token, so waiters re-raise it rather than retry a dead grant.
+        """
+        with self._refresh_lock:
+            if self._minted_token and rejected_auth != f"Bearer {self._minted_token}":
+                return self._minted_token
+            if self._refresh_failure is not None:
+                raise self._refresh_failure
+            try:
+                token = self._mint_token()
+            except Exception as exc:
+                self._refresh_failure = exc
+                raise
+            if token:
+                self._minted_token = token
+            return token
+
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
         """GET a URL, raising on auth failure or an unrecoverable status.
 
         Transient 5xx/429 responses are retried by the session adapter; a
         surviving non-2xx becomes a typed error rather than a bare HTTPError.
         """
+        refresh = None
+        if self._mint_token is not None:
+            refresh = partial(self._coalesced_refresh, self._session.headers.get("Authorization"))
         try:
             resp = get_with_auth_refresh(
                 self._session,
                 url,
                 trusted_origin=self.base_url,
-                refresh=self._refresh,
+                refresh=refresh,
                 params=params,
                 timeout=HTTP_TIMEOUT,
             )
