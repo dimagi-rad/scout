@@ -186,11 +186,13 @@ describe("ChatComposer quotes (#920)", () => {
     expect(onQuotesSent).toHaveBeenCalled()
   })
 
-  it("focuses the input when a quote is added", () => {
+  it("focuses the input when a quote is picked, not when chips just appear", () => {
     const props = { input: "", setInput: vi.fn(), onSend: vi.fn() }
     const { rerender } = render(<ChatComposer {...props} quotes={[]} />)
-    expect(screen.getByTestId("chat-input")).not.toHaveFocus()
+    // As on switching to a chat that already holds quotes.
     rerender(<ChatComposer {...props} quotes={["a point"]} />)
+    expect(screen.getByTestId("chat-input")).not.toHaveFocus()
+    rerender(<ChatComposer {...props} quotes={["a point", "another"]} focusRequest={1} />)
     expect(screen.getByTestId("chat-input")).toHaveFocus()
   })
 })

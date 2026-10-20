@@ -63,12 +63,14 @@ export function QuoteSelectionAction({ containerRef, onQuote }: QuoteSelectionAc
     }
     const reposition = () => setAnchor((current) => (current ? readSelection(containerRef.current) : null))
     document.addEventListener("mouseup", show)
+    document.addEventListener("touchend", show)
     document.addEventListener("keyup", show)
     document.addEventListener("selectionchange", hideIfCleared)
     container?.addEventListener("scroll", reposition)
     window.addEventListener("resize", reposition)
     return () => {
       document.removeEventListener("mouseup", show)
+      document.removeEventListener("touchend", show)
       document.removeEventListener("keyup", show)
       document.removeEventListener("selectionchange", hideIfCleared)
       container?.removeEventListener("scroll", reposition)

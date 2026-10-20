@@ -159,6 +159,7 @@ export function ChatPanel() {
   // Keyed by thread so quotes picked in one chat never ride along into another.
   const [quotesByThread, setQuotesByThread] = useState<Record<string, string[]>>({})
   const quotes = quotesByThread[threadId] ?? NO_QUOTES
+  const [quoteFocusRequest, setQuoteFocusRequest] = useState(0)
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const [threadPanelOpen, setThreadPanelOpen] = useState(false)
   const [threadPanelMode, setThreadPanelMode] = useState<ThreadPanelMode>("files")
@@ -979,7 +980,9 @@ export function ChatPanel() {
   async function handleSend(text: string) {
     // Defensive: the composer blocks this; keep the typed text rather than drop it.
     if ((historyLoading || remoteTurnRunning) && !held.adding) {
-      returnToComposer(activeDomainId, threadId, text)
+      const { quotes: returnedQuotes, body } = splitQuotedMessage(text)
+      if (returnedQuotes.length) addQuotes(threadId, returnedQuotes)
+      setInput(body)
       return
     }
     if (held.adding) {
@@ -1114,7 +1117,13 @@ export function ChatPanel() {
               onRetryDispatched={notifyJobLikelyStarted}
             />
           ))}
-          <QuoteSelectionAction containerRef={scrollRef} onQuote={(text) => addQuotes(threadId, [text])} />
+          <QuoteSelectionAction
+            containerRef={scrollRef}
+            onQuote={(text) => {
+              addQuotes(threadId, [text])
+              setQuoteFocusRequest((n) => n + 1)
+            }}
+          />
           {historyLoading && (
             <div
               className="flex items-center gap-2 text-sm text-muted-foreground"
@@ -1228,6 +1237,7 @@ export function ChatPanel() {
             onRemoveQuote={(index) =>
               setThreadQuotes(threadId, (current) => current.filter((_, i) => i !== index))}
             onQuotesSent={() => setThreadQuotes(threadId, () => NO_QUOTES)}
+            focusRequest={quoteFocusRequest}
           />
         </div>
       </div>

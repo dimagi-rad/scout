@@ -27,6 +27,8 @@ interface ChatComposerProps {
   onRemoveQuote?: (index: number) => void
   /** Called as a send takes the quotes, so the next message starts without them. */
   onQuotesSent?: () => void
+  /** Bumped when a quote is picked, to move focus to the input for the reply. */
+  focusRequest?: number
 }
 
 const NO_QUOTES: string[] = []
@@ -44,18 +46,17 @@ export function ChatComposer({
   quotes = NO_QUOTES,
   onRemoveQuote,
   onQuotesSent,
+  focusRequest = 0,
 }: ChatComposerProps) {
   const adding = mode === "add"
   const blocked = sendBlocked && !adding
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const { canWrite } = useWorkspaceRole()
   const inputRef = useRef<HTMLInputElement>(null)
-  const quoteCountRef = useRef(quotes.length)
 
   useEffect(() => {
-    if (quotes.length > quoteCountRef.current) inputRef.current?.focus()
-    quoteCountRef.current = quotes.length
-  }, [quotes.length])
+    if (focusRequest) inputRef.current?.focus()
+  }, [focusRequest])
 
   const showSlashMenu = input.startsWith("/") && !input.slice(1).includes(" ")
   const slashQuery = showSlashMenu ? input.slice(1) : ""
