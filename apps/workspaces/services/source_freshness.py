@@ -136,10 +136,16 @@ def _load_summary(result) -> dict | None:
         if not isinstance(entry, dict):
             continue
         rows = entry.get("rows")
+        state = str(entry.get("state") or "")
         table = {
             "name": str(name),
-            "state": str(entry.get("state") or ""),
-            "rows": rows if isinstance(rows, int) and not isinstance(rows, bool) else None,
+            "state": state,
+            # A failed or cancelled source's rows were rolled back or are partial.
+            "rows": (
+                rows
+                if state == "completed" and isinstance(rows, int) and not isinstance(rows, bool)
+                else None
+            ),
         }
         date_range = entry.get("date_range")
         if isinstance(date_range, dict):
@@ -152,8 +158,12 @@ def _load_summary(result) -> dict | None:
     }
 
 
-async def _load_summaries(tenant_ids: Iterable) -> dict[str, dict]:
-    """Each tenant's serving snapshot summary, from the same run ``_last_fetched`` dates."""
+async def aload_summaries(tenant_ids: Iterable) -> dict[str, dict]:
+    """Each tenant's serving snapshot summary, from the same run ``_last_fetched`` dates.
+
+    For the UI only: these are materialization-time counts, which the agent must
+    not report as answers, so the prompt and MCP freshness payloads leave them out.
+    """
     rows = (
         synced_runs()
         .filter(
@@ -285,7 +295,6 @@ async def _source_freshness(workspace_id, viewer_id: str) -> list[dict]:
     ]
     tenant_ids = [wt.tenant_id for wt in rows]
     fetched = await _last_fetched(tenant_ids)
-    summaries = await _load_summaries(tenant_ids)
     active = {
         str(tenant_id)
         async for tenant_id in TenantSchema.objects.filter(
@@ -312,7 +321,6 @@ async def _source_freshness(workspace_id, viewer_id: str) -> list[dict]:
             "last_fetched_at": last.isoformat() if last else None,
             "last_load": outcome.get("refresh"),
             "not_refreshed": not_refreshed,
-            "summary": summaries.get(tenant_id),
         }
         if not_refreshed:
             loader = outcome.get("by") or ""

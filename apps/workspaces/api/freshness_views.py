@@ -5,7 +5,11 @@ from django.http import JsonResponse
 
 from apps.users.decorators import async_login_required
 from apps.workspaces.services.load_activity import aworkspace_load_pending
-from apps.workspaces.services.source_freshness import aworkspace_source_freshness, provider_label
+from apps.workspaces.services.source_freshness import (
+    aload_summaries,
+    aworkspace_source_freshness,
+    provider_label,
+)
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 
@@ -25,6 +29,7 @@ async def source_freshness_view(request, workspace_id):
         return err
 
     sources = await aworkspace_source_freshness(workspace.id, user.id)
+    summaries = await aload_summaries(source["tenant_id"] for source in sources)
     in_progress = await aworkspace_load_pending(workspace.id)
     return JsonResponse(
         {
@@ -39,7 +44,7 @@ async def source_freshness_view(request, workspace_id):
                     "serving": source["serving"],
                     "last_fetched_at": source["last_fetched_at"],
                     "reconnect": source.get("reconnect", False),
-                    "summary": source.get("summary"),
+                    "summary": summaries.get(source["tenant_id"]),
                 }
                 for source in sources
             ],
