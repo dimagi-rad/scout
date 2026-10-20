@@ -28,6 +28,8 @@ def scratch_table(db):
         conn.execute("CREATE SCHEMA IF NOT EXISTS date_range_t")
         conn.execute("DROP TABLE IF EXISTS date_range_t.raw_forms")
         conn.execute("CREATE TABLE date_range_t.raw_forms (received_on text)")
+        conn.execute("DROP TABLE IF EXISTS date_range_t.raw_visits")
+        conn.execute("CREATE TABLE date_range_t.raw_visits (visit_date timestamptz)")
     with mock.patch.object(materializer, "get_managed_db_connection", side_effect=connect):
         yield connect
     with connect() as conn:
@@ -47,6 +49,22 @@ def test_reports_the_earliest_and_latest_event_time(scratch_table):
         "column": "received_on",
         "earliest": "2024-01-15T08:30:00+00:00",
         "latest": "2025-03-01T10:00:00+00:00",
+    }
+
+
+def test_reads_a_native_timestamp_column_directly(scratch_table):
+    with scratch_table() as conn:
+        conn.execute(
+            "INSERT INTO date_range_t.raw_visits VALUES "
+            "('2025-06-01T00:00:00Z'), ('2026-02-03T12:00:00Z'), (NULL)"
+        )
+
+    result = _source_date_range("date_range_t", "commcare_connect", "raw_visits")
+
+    assert result == {
+        "column": "visit_date",
+        "earliest": "2025-06-01T00:00:00+00:00",
+        "latest": "2026-02-03T12:00:00+00:00",
     }
 
 

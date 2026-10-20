@@ -46,7 +46,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import closing
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import psycopg
@@ -455,17 +455,22 @@ def run_pipeline(
                 "cursor_state": final_cursor if source_is_resumable else None,
                 "duration_s": duration_s,
             }
-            date_range = _source_date_range(
-                schema_name, pipeline.provider, source.physical_table_name
-            )
-            if date_range is not None:
-                source_results[source.name]["date_range"] = date_range
             if source_is_resumable:
                 _persist_source_results(run, pipeline, source_results)
             logger.info(
                 "Loaded %d rows into %s.%s in %.1fs", rows, schema_name, source.name, duration_s
             )
         current_source = None
+
+        # After every source, so a slow scan never holds up the next source's fetch.
+        for source in sources_list:
+            if (source_results.get(source.name) or {}).get("state") != "completed":
+                continue
+            date_range = _source_date_range(
+                schema_name, pipeline.provider, source.physical_table_name
+            )
+            if date_range is not None:
+                source_results[source.name]["date_range"] = date_range
 
         # Discovery may have generated SYSTEM assets. Fingerprint and execute the
         # same in-memory snapshot: the fingerprint is this run's receipt for what
@@ -1324,7 +1329,8 @@ _DROP_STATEMENTS = {
 
 # A summary is not worth stalling the load for: an unindexed scan of a very
 # large table gives up and the summary just omits that table's dates.
-_DATE_RANGE_TIMEOUT_MS = 30_000
+_DATE_RANGE_TIMEOUT_MS = 10_000
+_NATIVE_TIME_TYPES = frozenset({"timestamp with time zone", "timestamp without time zone", "date"})
 
 
 def _source_date_range(schema_name: str, provider: str, table: str) -> dict | None:
@@ -1339,21 +1345,30 @@ def _source_date_range(schema_name: str, provider: str, table: str) -> dict | No
     try:
         conn = get_managed_db_connection()
         try:
-            conn.autocommit = True
             conn.execute(f"SET statement_timeout = {_DATE_RANGE_TIMEOUT_MS}")
+            column_type = conn.execute(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+                (schema_name, table, column),
+            ).fetchone()
+            if column_type is None:
+                return None
             relation = psql.Identifier(schema_name, table).as_string(conn)
-            # Built without SQL.format: the event-time regex contains braces.
-            query = (
-                f"SELECT min(t), max(t) FROM (SELECT {event_time_sql(column)} AS t "  # noqa: S608 - fixed column, quoted identifier
-                f"FROM {relation}) dated"
+            # A native time column needs no parsing; only a legacy text snapshot does.
+            value = (
+                psql.Identifier(column).as_string(conn)
+                if column_type[0] in _NATIVE_TIME_TYPES
+                else event_time_sql(column)
             )
+            # Built without SQL.format: the event-time regex contains braces.
+            query = f"SELECT min(t), max(t) FROM (SELECT {value} AS t FROM {relation}) dated"  # noqa: S608 - fixed column, quoted identifiers
             row = conn.execute(query).fetchone()
         finally:
             conn.close()
     except Exception:
         logger.warning("Could not read the date range of %s.%s", schema_name, table, exc_info=True)
         return None
-    if not row or not all(isinstance(value, datetime) for value in row[:2]):
+    if not row or not all(isinstance(value, date) for value in row[:2]):
         return None
     return {"column": column, "earliest": row[0].isoformat(), "latest": row[1].isoformat()}
 
