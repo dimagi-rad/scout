@@ -623,7 +623,7 @@ def test_concurrent_loads_share_the_process_wide_fetch_limit():
             if state["in_flight"] >= 5:
                 five_in_flight.set()
         try:
-            five_in_flight.wait(5)
+            assert five_in_flight.wait(5), "the process limit was never reached"
             time.sleep(0.01)
         finally:
             with lock:
@@ -646,7 +646,7 @@ def test_concurrent_loads_share_the_process_wide_fetch_limit():
             results.append(len(list(loader.load_pages())))
 
     results: list[int] = []
-    loads = [threading.Thread(target=run_load, args=(results,)) for _ in range(3)]
+    loads = [threading.Thread(target=run_load, args=(results,), daemon=True) for _ in range(3)]
     for load in loads:
         load.start()
     for load in loads:

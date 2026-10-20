@@ -154,6 +154,8 @@ class OCSMessageLoader(OCSBaseLoader):
         # A session with no messages legitimately omits/empties the key, so a
         # missing ``messages`` is treated as empty (not an error) — but the JSON
         # parse itself is validated via _get_json (finding 03#6).
+        if stopped.is_set():
+            return []
         try:
             with _process_fetch_slots():
                 if stopped.is_set():
