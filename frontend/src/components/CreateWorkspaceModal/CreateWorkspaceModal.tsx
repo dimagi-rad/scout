@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { AlertTriangle, Check, RefreshCw } from "lucide-react"
+import { SourceDescription } from "@/components/SourceDescription/SourceDescription"
 import { FacetFilterBar } from "@/components/FacetFilterBar/FacetFilterBar"
 import { IdListSummary } from "@/components/IdListSummary/IdListSummary"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
@@ -29,9 +30,12 @@ import { ConnectSizeNotice } from "@/components/ConnectSizeNotice"
 
 interface Props {
   onClose: () => void
+  initialName?: string
+  /** Sources to start selected, e.g. every match of a workspace-switcher search. */
+  initialSourceIds?: string[]
 }
 
-export function CreateWorkspaceModal({ onClose }: Props) {
+export function CreateWorkspaceModal({ onClose, initialName = "", initialSourceIds = [] }: Props) {
   const navigate = useNavigate()
   const pathPrefix = useLocation().pathname.startsWith("/embed") ? "/embed" : ""
   const isCurrentAccount = useIsCurrentAccount()
@@ -42,7 +46,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const domains = useAppStore((s) => s.domains)
   const domainsStatus = useAppStore((s) => s.domainsStatus)
 
-  const [name, setName] = useState("")
+  const [name, setName] = useState(initialName)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -52,7 +56,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const [sourcesAttempt, setSourcesAttempt] = useState(0)
   const [sourcesRefreshing, setSourcesRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState<string | null>(null)
-  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(initialSourceIds))
   // Set once the user opts to "Create anyway" past the duplicate warning.
   const [duplicateAcknowledged, setDuplicateAcknowledged] = useState(false)
 
@@ -64,7 +68,13 @@ export function CreateWorkspaceModal({ onClose }: Props) {
       setSourcesError(null)
       try {
         const data = await getUserTenantsCached(userId!)
-        if (!cancelled) setSources(data)
+        if (!cancelled) {
+          setSources(data)
+          // A preselected source from someone else's shared workspace may not be one the
+          // user can add; left selected, it would be invisible and fail the create.
+          const ids = new Set(data.map((t) => t.tenant_uuid))
+          setSelected((prev) => new Set([...prev].filter((id) => ids.has(id))))
+        }
       } catch (err) {
         // A source is required, so an empty list here would be a silent dead end.
         if (!cancelled) {
@@ -250,7 +260,10 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                 </div>
               </div>
               <p className="mb-2 text-xs text-muted-foreground">
-                Choose at least one data source for the workspace.
+                A workspace answers questions across all of its data sources. Pick one, or
+                several to analyze across them.
+                {sources.some((t) => t.provider === "commcare_connect") &&
+                  " The Program filter narrows Connect opportunities to one program."}
               </p>
               {refreshError && (
                 <p
@@ -378,6 +391,10 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                               <div className="truncate text-xs text-muted-foreground">
                                 #{t.tenant_id} · {getProviderMeta(t.provider).label}
                               </div>
+                              <SourceDescription
+                                description={t.description}
+                                testId={`create-source-description-${t.tenant_uuid}`}
+                              />
                             </div>
                             <span
                               className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
@@ -455,6 +472,9 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                 !name.trim() ||
                 selected.size === 0 ||
                 loading ||
+                // Preselected sources are only pruned to the user's own once these load.
+                sourcesLoading ||
+                !!sourcesError ||
                 (!!duplicateWorkspace && !duplicateAcknowledged)
               }
               data-testid="create-workspace-submit"

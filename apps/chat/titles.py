@@ -29,8 +29,8 @@ TITLE_MAX_CHARS = 80
 # Long enough to identify the topic; caps the cost of a pasted 10k-char message.
 TITLE_INPUT_MAX_CHARS = 1000
 TITLE_MAX_TOKENS = 32
-# The worker runs one job at a time and title jobs are queued ahead of the rest, so
-# a slow or failing call must not hold the slot for long: one short try, no retry.
+# The worker has only a few job slots and title jobs are queued ahead of the rest, so
+# a slow or failing call must not hold a slot for long: one short try, no retry.
 # A failed title is retried on the thread's next successful turn.
 TITLE_TIMEOUT_S = 8
 

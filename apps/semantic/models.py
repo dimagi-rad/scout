@@ -276,6 +276,10 @@ class CubeSchema(models.Model):
     content_hash = models.CharField(max_length=64, db_index=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
     diagnostics = models.JSONField(default=list, blank=True)
+    # "<compiler>/<validator>" versions that passed this content; empty when it was
+    # never validated, or predates recording it. Unchanged content skips revalidation
+    # only while this matches the live validator (#918).
+    validated_version = models.CharField(max_length=64, blank=True, default="", db_default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

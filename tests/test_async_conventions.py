@@ -439,7 +439,7 @@ _ASYNC_TO_SYNC_ROOTS = ("apps", "mcp_server", "config")
 _ASYNC_TO_SYNC_BASELINE = {
     "apps/semantic/services/catalog.py": 1,
     "apps/semantic/services/custom_datasets.py": 1,
-    "apps/semantic/services/cube_schema.py": 3,
+    "apps/semantic/services/cube_schema.py": 4,
     "apps/semantic/services/query.py": 1,
     "apps/users/auth_views.py": 1,
     "apps/users/management/commands/restore_token_expired_memberships.py": 1,

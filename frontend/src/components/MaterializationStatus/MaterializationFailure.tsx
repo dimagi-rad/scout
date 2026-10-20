@@ -49,8 +49,8 @@ export function MaterializationFailure({
 
   const Icon = isCancelled ? XCircle : AlertTriangle
   const headerText = isCancelled
-    ? "Materialization cancelled"
-    : "Materialization failed"
+    ? "Data load cancelled"
+    : "Data load failed"
   let retryLabel = "Retry"
   if (retry.state === "pending") retryLabel = "Retrying..."
   else if (retry.failure) retryLabel = retry.failure.retryable ? "Retry failed" : "Can't retry"

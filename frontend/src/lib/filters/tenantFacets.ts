@@ -2,9 +2,12 @@ import type { UserTenant } from "@/api/auth"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { localIsoDate } from "@/lib/localDate"
 
-import type { FacetDef } from "./facets"
+import type { FacetDef, FacetSelection } from "./facets"
 
 export const CONNECT_PROVIDER = "commcare_connect"
+// No Active filter for OCS yet: OCS reports no archived flag or last activity.
+// Add one once it does (open-chat-studio upstream change, #917).
+export const OCS_PROVIDER = "ocs"
 export const UNKNOWN = "unknown"
 // A colon cannot occur in an org slug or a program id, so this never collides with one.
 export const NONE = ":none"
@@ -43,6 +46,12 @@ export function connectStatus(t: UserTenant, today = currentDay()): string | und
   if (endDateHasPassed(attrs.end_date, today)) return "inactive"
   if (typeof attrs.is_active === "boolean") return attrs.is_active ? "active" : "inactive"
   return UNKNOWN
+}
+
+function ocsAttributes(t: UserTenant): Record<string, unknown> | undefined {
+  if (t.provider !== OCS_PROVIDER) return undefined
+  const attrs = t.attributes
+  return attrs !== null && typeof attrs === "object" && !Array.isArray(attrs) ? attrs : {}
 }
 
 export function connectType(t: UserTenant): string | undefined {
@@ -87,6 +96,20 @@ const STATUS_LABELS: Record<string, string> = {
 }
 const TYPE_LABELS: Record<string, string> = { real: "Real", test: "Test", [UNKNOWN]: "Unknown" }
 
+// Provider-specific facets show while their provider is selected, or no provider is.
+function appliesToConnect(selection: FacetSelection): boolean {
+  const providers = selection.provider
+  return !providers || providers.length === 0 || providers.includes(CONNECT_PROVIDER)
+}
+
+// Only once OCS is picked (or is all there is): with nothing picked, a team filter
+// would leave every non-OCS source in the list, which reads as not filtering.
+function appliesToOcs(selection: FacetSelection, items: readonly UserTenant[]): boolean {
+  const providers = selection.provider
+  if (providers && providers.length > 0) return providers.includes(OCS_PROVIDER)
+  return items.length > 0 && items.every((t) => t.provider === OCS_PROVIDER)
+}
+
 export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
   {
     key: "provider",
@@ -103,6 +126,7 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
     optionLabel: (value) => STATUS_LABELS[value] ?? value,
     valueOrder: ["active", "inactive", UNKNOWN],
     isAvailable: hasConnectAttributes,
+    appliesTo: appliesToConnect,
   },
   {
     key: "type",
@@ -114,6 +138,7 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
     // Only meaningful once the backend reports is_test; otherwise every row is "Unknown".
     isAvailable: (items) =>
       items.some((t) => typeof connectAttributes(t)?.is_test === "boolean"),
+    appliesTo: appliesToConnect,
   },
   {
     key: "organization",
@@ -124,6 +149,7 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
     trailingValues: [NONE],
     ...labelled("organization", "organization_name"),
     isAvailable: hasConnectAttributes,
+    appliesTo: appliesToConnect,
   },
   {
     key: "program",
@@ -133,6 +159,36 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
     trailingValues: [NONE],
     ...labelled("program", "program_name"),
     isAvailable: hasConnectAttributes,
+    appliesTo: appliesToConnect,
+  },
+  {
+    key: "ocs_team",
+    label: "Team",
+    group: "Open Chat Studio",
+    searchable: true,
+    getValue: (t) => {
+      const attrs = ocsAttributes(t)
+      if (!attrs) return undefined
+      return nonEmptyString(attrs.team) ?? NONE
+    },
+    optionLabel: (value, t) =>
+      value === NONE ? "None" : nonEmptyString(ocsAttributes(t)?.team_name),
+    trailingValues: [NONE],
+    isAvailable: (items) => items.some((t) => nonEmptyString(ocsAttributes(t)?.team)),
+    appliesTo: appliesToOcs,
+  },
+  {
+    key: "ocs_chatbot",
+    label: "Chatbot",
+    group: "Open Chat Studio",
+    searchable: true,
+    // The Scout id: two OCS servers can share an experiment id.
+    getValue: (t) => (t.provider === OCS_PROVIDER ? t.tenant_uuid : undefined),
+    optionLabel: (value, t) => {
+      const team = nonEmptyString(ocsAttributes(t)?.team_name)
+      return team ? `${t.tenant_name} (${team})` : t.tenant_name || value
+    },
+    appliesTo: appliesToOcs,
   },
 ]
 

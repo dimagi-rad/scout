@@ -69,6 +69,7 @@ from apps.users.services.upstream_denial import (
     arecord_upstream_denial,
     credential_is_current,
 )
+from apps.users.tasks import aschedule_ocs_probe
 from apps.workspaces import access_cache
 
 logger = logging.getLogger(__name__)
@@ -387,6 +388,7 @@ async def resolve_connect_opportunities(
             defaults={
                 "canonical_name": opp.canonical_name,
                 "provider_attributes": dict(opp.attributes or {}),
+                **({"description": opp.description} if opp.description else {}),
             },
         )
         fresh.append(tenant)
@@ -457,10 +459,12 @@ async def resolve_ocs_chatbots(
         tenant, _ = await Tenant.objects.aupdate_or_create(
             provider="ocs",
             external_id=exp.external_id,
-            defaults={"canonical_name": exp.canonical_name},
+            defaults={
+                "canonical_name": exp.canonical_name,
+                **({"description": exp.description} if exp.description else {}),
+            },
         )
         fresh.append(tenant)
-
     memberships = await _sync_memberships(
         user,
         conn,
@@ -471,6 +475,8 @@ async def resolve_ocs_chatbots(
         access_token=access_token,
         archive=may_revoke,
     )
+    if memberships:
+        await aschedule_ocs_probe(conn.id)
     logger.info(
         "Resolved %d OCS chatbots for user %s (team %s)", len(memberships), user.email, team_slug
     )

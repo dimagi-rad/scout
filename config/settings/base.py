@@ -14,6 +14,7 @@ import sentry_sdk
 from apps.common.db_pool import pooled_database
 from apps.common.db_urls import enforce_django_db_tls
 from config.sentry import before_send, ignore_noisy_loggers
+from config.task_threads import isolate_job_thread
 from config.task_tracing import trace_job
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -389,8 +390,9 @@ if SENTRY_DSN:
     )
     ignore_noisy_loggers()
 
-# Every worker job runs inside a Sentry transaction (a no-op without SENTRY_DSN).
-PROCRASTINATE_WORKER_DEFAULTS = {"worker_middleware": [trace_job]}
+# Every worker job gets its own thread-sensitive thread (config/task_threads.py) and
+# runs inside a Sentry transaction (a no-op without SENTRY_DSN).
+PROCRASTINATE_WORKER_DEFAULTS = {"worker_middleware": [isolate_job_thread, trace_job]}
 
 # Task Badger background-task tracking (optional — leave TASKBADGER_API_KEY blank to disable)
 TASKBADGER_API_KEY = env("TASKBADGER_API_KEY", default="")
@@ -425,6 +427,11 @@ OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
 # An OCS that predates open-chat-studio#4685 rejects the unknown `teams` scope with
 # invalid_scope, failing every OCS sign-in; turn this off when pointing at one.
 OCS_REQUEST_TEAMS_SCOPE = env.bool("OCS_REQUEST_TEAMS_SCOPE", default=True)
+# OCS session-detail fetches (the messages N+1, #918): concurrent per load, and in
+# total per process. The worker runs several loads at once and OCS has no API
+# throttling of its own, so the process cap is what bounds the load on it.
+OCS_DETAIL_FETCH_CONCURRENCY = env.int("OCS_DETAIL_FETCH_CONCURRENCY", default=8)
+OCS_DETAIL_FETCH_PROCESS_LIMIT = env.int("OCS_DETAIL_FETCH_PROCESS_LIMIT", default=10)
 
 
 # The default cache backs chat rate limiting, DRF throttles, and per-user

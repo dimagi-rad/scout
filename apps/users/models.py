@@ -157,6 +157,17 @@ class Tenant(models.Model):
             "materialization."
         ),
     )
+    description = models.TextField(
+        blank=True,
+        default="",
+        # Older processes omit this column during a rolling deployment.
+        db_default="",
+        help_text=(
+            "The provider's own description (an OCS chatbot's, a Connect opportunity's), "
+            "shown in the source picker and given to the agent as context. Kept when a "
+            "later discovery cannot see one, since not every provider call carries it."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

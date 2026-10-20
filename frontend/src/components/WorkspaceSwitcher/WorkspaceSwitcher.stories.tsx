@@ -5,7 +5,7 @@ import type { WorkspaceListItem } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher"
 
-const workspaces: WorkspaceListItem[] = [
+const baseWorkspaces: WorkspaceListItem[] = [
   { id: "recorded", display_name: "Example — recorded load", schema_status: "available" },
   { id: "loading", display_name: "Example — loading data", schema_status: "provisioning" },
   { id: "failed", display_name: "Example — setup failed", schema_status: "failed" },
@@ -23,10 +23,23 @@ const workspaces: WorkspaceListItem[] = [
   created_at: "2026-01-01T12:00:00Z",
 }))
 
+const programWorkspace: WorkspaceListItem = {
+  ...baseWorkspaces[0],
+  id: "program",
+  name: "program",
+  display_name: "Example — program across opportunities",
+  tenants: ["Kenya", "Uganda", "Malawi", "Nigeria"].map((country) => ({
+    id: `tenant-${country}`,
+    tenant_name: `Example program ${country}`,
+    provider: "commcare_connect",
+  })),
+}
+const workspaces = [programWorkspace, ...baseWorkspaces]
+
 function LoadHistoryFixture({ variant }: { variant: "sidebar" | "topbar" }) {
   useEffect(() => {
     const previous = useAppStore.getState()
-    useAppStore.setState({ domains: workspaces, activeDomainId: "recorded" })
+    useAppStore.setState({ domains: workspaces, activeDomainId: "program" })
     return () => useAppStore.setState(previous)
   }, [])
 

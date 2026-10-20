@@ -80,7 +80,7 @@ jobs, with the same environment as the API:
 
 ```bash
 DJANGO_SETTINGS_MODULE=config.settings.production \
-  uv run python manage.py procrastinate worker
+  uv run python manage.py procrastinate worker --concurrency 3
 ```
 
 Manage it with the same process supervisor as the API and MCP server.

@@ -45,6 +45,7 @@ from apps.users.services.tenant_resolution import (
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
+from apps.users.tasks import aschedule_ocs_probe
 from apps.workspaces.models import Workspace
 
 TENANT_REFRESH_TTL = 3600  # seconds (1 hour)
@@ -210,7 +211,10 @@ def _persist_api_key_connection(
                 provider=provider,
                 server=server,
                 external_id=desc.external_id,
-                defaults={"canonical_name": desc.canonical_name},
+                defaults={
+                    "canonical_name": desc.canonical_name,
+                    **({"description": desc.description} if desc.description else {}),
+                },
             )
             # all_objects: re-adding an API key after its memberships were archived
             # must reuse the tombstone, not create a duplicate (unique(user,tenant)).
@@ -230,7 +234,20 @@ def _persist_api_key_connection(
                     "tenant_name": tenant.canonical_name,
                 }
             )
-    return rows
+    return rows, conn.id
+
+
+def _attributes(tm: TenantMembership) -> dict:
+    """The tenant's filter hints, plus the OCS team this member reaches it through.
+
+    The team is recorded on the member's membership, not the tenant, so it is the
+    team this member's connection reaches the chatbot through.
+    """
+    attributes = dict(tm.tenant.provider_attributes or {})
+    if tm.tenant.provider == "ocs" and tm.team_slug:
+        attributes["team"] = tm.team_slug
+        attributes["team_name"] = tm.team_name or tm.team_slug
+    return attributes
 
 
 @require_http_methods(["GET"])
@@ -261,7 +278,8 @@ async def tenant_list_view(request):
                 "tenant_id": tm.tenant.external_id,
                 "tenant_uuid": str(tm.tenant.id),
                 "tenant_name": tm.tenant.canonical_name,
-                "attributes": tm.tenant.provider_attributes,
+                "attributes": _attributes(tm),
+                "description": tm.tenant.description,
                 "last_selected_at": (
                     tm.last_selected_at.isoformat() if tm.last_selected_at else None
                 ),
@@ -472,7 +490,7 @@ async def tenant_credential_list_view(request):
         return JsonResponse({"error": str(e)}, status=500)
 
     try:
-        memberships_payload = await _persist_api_key_connection(
+        memberships_payload, connection_id = await _persist_api_key_connection(
             user,
             provider,
             descriptors,
@@ -485,6 +503,9 @@ async def tenant_credential_list_view(request):
     except Exception as e:
         logger.exception("Failed to persist connection for provider %s", provider)
         return JsonResponse({"error": str(e)}, status=500)
+
+    if provider == "ocs":
+        await aschedule_ocs_probe(connection_id)
 
     await cache.adelete(me_onboarding_cache_key(user))
     return JsonResponse({"memberships": memberships_payload}, status=201)

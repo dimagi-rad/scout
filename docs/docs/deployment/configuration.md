@@ -46,6 +46,8 @@ OAuth client IDs and secrets live in allauth social application records. `manage
 | `CONNECT_API_URL` | `https://connect.dimagi.com` | CommCare Connect API and OAuth host. |
 | `OCS_URL` | `https://www.openchatstudio.com` | Open Chat Studio API and OAuth host. |
 | `OCS_REQUEST_TEAMS_SCOPE` | `true` | Request the OCS `teams` scope, which lists a user's teams so they can connect them all at once. Set to `false` for an OCS that predates it, which otherwise rejects every OCS sign-in with `invalid_scope`. |
+| `OCS_DETAIL_FETCH_CONCURRENCY` | `8` | Concurrent OCS session-detail requests per messages load (capped at 10 and at the process limit). |
+| `OCS_DETAIL_FETCH_PROCESS_LIMIT` | `10` | Concurrent OCS session-detail requests across every load in one process. The worker runs several loads at once, so this is what bounds the load on your OCS. |
 
 ### CommCare HQ on EU
 
@@ -108,6 +110,7 @@ These are staged-rollout switches.
 | `DJANGO_DB_POOL_MAX_SIZE` | `0` (off) | Size of each process's pool of Django database connections. The production API sets `10` per uvicorn worker. Set it only for the API: the worker and MCP server keep connections on their executor threads, which would hold pool slots for good. A chat turn holds one slot for its whole stream. Count this toward PostgreSQL `max_connections` with the checkpointer pool. |
 | `DJANGO_DB_POOL_MIN_SIZE` | `1` | Connections each pool keeps open while idle. |
 | `DJANGO_DB_POOL_TIMEOUT_S` | `3` | Seconds a request waits for a free pooled connection. A full pool then answers with the retryable "busy" response. Keep it under the 4-second container health probe. |
+| Worker `--concurrency` | `3` in the shipped commands | Background jobs run at once. Each running job can hold up to two advisory-lock sessions and a few more connections, and `_MAX_POOLS` in `mcp_server/services/pool.py` must be at least concurrency + 2, so raise both together and recheck `max_connections`. |
 | `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_BASE_URL` | (empty) | Langfuse tracing for agent runs. Leave blank to disable. |
 | `TELEMETRY_ENABLED` | `True` | In-app usage and performance events (#862), stored in the platform database: ids, durations, counts, outcomes and tool names, never message or query text. Raw events are deleted after 400 days by a nightly task. Set it to `False` to stop every write; requests and chat turns behave the same either way. |
 
