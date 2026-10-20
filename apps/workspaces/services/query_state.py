@@ -8,12 +8,12 @@ from django.db.models import Exists, OuterRef, Q, Subquery
 
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.workspaces.models import (
-    VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER,
     MaterializationRun,
     SchemaState,
     TenantSchema,
     WorkspaceTenant,
     WorkspaceViewSchema,
+    readable_view_schema_error,
 )
 from apps.workspaces.services.load_activity import active_runs_for_workspaces
 from apps.workspaces.services.status import SYNCED_RUN_STATES, serving_excluded_tenant_ids
@@ -205,11 +205,7 @@ async def workspace_query_surface(workspace) -> dict[str, Any]:
                 else "The workspace data is no longer available. Restore it to use this artifact again."
             ),
             **(
-                {
-                    "detail": view.last_error.replace(
-                        VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER, ""
-                    ).strip()[:500]
-                }
+                {"detail": readable_view_schema_error(view.last_error)[:500]}
                 if view and view.last_error
                 else {}
             ),

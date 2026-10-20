@@ -35,6 +35,7 @@ from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
     WorkspaceViewSchema,
+    readable_view_schema_error,
 )
 from apps.workspaces.services.failure_guidance import credential_guidance, summary_failures
 from apps.workspaces.services.load_activity import aworkspace_own_build_pending
@@ -305,7 +306,7 @@ async def _resume_claimed_job(
                 )
     # The marker is a machine tag for the branches below; users see only the text after it.
     cascade_teardown = VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error
-    view_schema_error = view_schema_error.replace(VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER, "").strip()
+    view_schema_error = readable_view_schema_error(view_schema_error)
 
     # The agent answers through the semantic model, so a data load whose Cube
     # schema build failed leaves it with nothing to query even though every run

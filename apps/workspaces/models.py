@@ -423,7 +423,8 @@ class WorkspaceInvite(models.Model):
 # Sentinel prefix in WorkspaceViewSchema.last_error marking a FAILED-by-cascade-
 # teardown (vs a genuine build failure). Resume-prompt logic keys off it (arch
 # #256, 07#9) to advise re-materializing — which fixes a cascade but not a build
-# failure. Embedded in the human-readable message so get_schema_status surfaces it.
+# failure. Code matches on it; anything shown to people goes through
+# readable_view_schema_error.
 VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER = "[cascade-teardown]"
 VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR = (
     f"{VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER} A tenant schema this workspace's "
@@ -431,6 +432,11 @@ VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR = (
     "namespaced views were cascade-dropped. Re-running the import rebuilds "
     "the tenant data and the view schema."
 )
+
+
+def readable_view_schema_error(last_error: str) -> str:
+    """A view schema's last_error without the cascade-teardown marker."""
+    return last_error.replace(VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER, "").strip()
 
 
 class WorkspaceViewSchema(models.Model):
