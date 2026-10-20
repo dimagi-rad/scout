@@ -36,6 +36,15 @@ async def fake_task() -> int:
     return await User.objects.acount()
 
 
+_job_connections = []
+
+
+@app.task(name="tests.fake_task_db_resilience_records_connection", queue=QUEUE)
+async def connection_recording_task() -> None:
+    await User.objects.acount()
+    _job_connections.append(await sync_to_async(lambda: connections["default"])())
+
+
 def _kill_default_connection():
     """Close the underlying psycopg connection behind Django's back.
 
@@ -48,11 +57,11 @@ def _kill_default_connection():
     conn.connection.close()
 
 
-async def _run_one_job() -> str:
+async def _run_one_job(task=fake_task) -> str:
     connector = InMemoryConnector()
     with app.replace_connector(connector):
         async with app.open_async():
-            job_id = await fake_task.defer_async()
+            job_id = await task.defer_async()
             await app.run_worker_async(
                 queues=[QUEUE],
                 wait=False,
@@ -91,7 +100,12 @@ async def test_task_recovers_from_dead_connection():
     """A job succeeds even when the worker's connection died since the
     previous job."""
     await sync_to_async(_kill_default_connection)()
-    assert await _run_one_job() == "succeeded"
+    try:
+        assert await _run_one_job() == "succeeded"
+    finally:
+        # The job ran on its own thread, so the dead connection killed above is
+        # still on this one; later tests share it.
+        await sync_to_async(lambda: connections["default"].close())()
 
 
 @pytest.mark.asyncio
@@ -99,10 +113,10 @@ async def test_task_recovers_from_dead_connection():
 async def test_task_closes_connections_after_body():
     """The worker also cleans up after the task body (mirroring Django's
     request_finished) so it doesn't hold a connection open between jobs —
-    with the default CONN_MAX_AGE=0 it must be closed."""
-    assert await _run_one_job() == "succeeded"
+    with the default CONN_MAX_AGE=0 it must be closed. Each job has its own
+    thread (config/task_threads.py), so check the connection the job used."""
+    _job_connections.clear()
+    assert await _run_one_job(connection_recording_task) == "succeeded"
 
-    def _connection_is_closed():
-        return connections["default"].connection is None
-
-    assert await sync_to_async(_connection_is_closed)()
+    [job_connection] = _job_connections
+    assert job_connection.connection is None

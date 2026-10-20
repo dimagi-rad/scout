@@ -13,6 +13,7 @@ import sentry_sdk
 
 from apps.common.db_urls import enforce_django_db_tls
 from config.sentry import before_send, ignore_noisy_loggers
+from config.task_threads import isolate_job_thread
 from config.task_tracing import trace_job
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -375,8 +376,9 @@ if SENTRY_DSN:
     )
     ignore_noisy_loggers()
 
-# Every worker job runs inside a Sentry transaction (a no-op without SENTRY_DSN).
-PROCRASTINATE_WORKER_DEFAULTS = {"worker_middleware": [trace_job]}
+# Every worker job gets its own thread-sensitive thread (config/task_threads.py) and
+# runs inside a Sentry transaction (a no-op without SENTRY_DSN).
+PROCRASTINATE_WORKER_DEFAULTS = {"worker_middleware": [isolate_job_thread, trace_job]}
 
 # Task Badger background-task tracking (optional — leave TASKBADGER_API_KEY blank to disable)
 TASKBADGER_API_KEY = env("TASKBADGER_API_KEY", default="")
