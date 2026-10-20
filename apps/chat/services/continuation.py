@@ -724,10 +724,9 @@ async def _resume_claimed_job(
             )
         elif view_schema_failed and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
             # 07#9: cascade teardown — re-running materialization IS the fix.
-            error_summary = (
-                "The workspace query layer (view schema) is unavailable because a "
-                f"tenant schema it depends on was torn down: {view_schema_error}"
-            )
+            # The marker is for code, and the error already says what was torn down.
+            cascade = view_schema_error.replace(VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER, "").strip()
+            error_summary = f"The workspace query layer (view schema) is unavailable. {cascade}"
         elif view_schema_failed:
             error_summary = (
                 "Per-tenant data imported, but the workspace query layer (view "

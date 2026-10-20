@@ -25,6 +25,7 @@ from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.api.jobs_views import _termination_to_dict
 from apps.workspaces.models import (
     VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+    VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER,
     MaterializationRun,
     SchemaState,
     TenantSchema,
@@ -1492,6 +1493,7 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun(current_state):
     assert result["terminal_state"] == ThreadJob.State.FAILED
     await tj.arefresh_from_db()
     assert "re-running the import" in tj.error_summary.lower()
+    assert VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER not in tj.error_summary
     assert "account credentials" not in tj.error_summary.lower()
     assert tj.failure_phase == ThreadJob.FailurePhase.MATERIALIZATION
     assert _termination_to_dict(tj, [], viewer_can_write=True)["retry_available"] is True
