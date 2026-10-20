@@ -298,12 +298,12 @@ describe("ChatComposer multi-line input and length limit (#913)", () => {
     // held + "\n\n" + typed
     expect(screen.getByTestId("chat-char-count")).toHaveTextContent("11,002 / 10,000")
     expect(screen.getByTestId("chat-char-count-hint")).toHaveTextContent(
-      "Together with your waiting request this is 1,002 characters too long. Shorten it, or discard the request.",
+      "Together with your held request this is 1,002 characters too long. Shorten it, or discard the request.",
     )
     expect(screen.getByTestId("chat-add-to-request")).toBeDisabled()
   })
 
-  it("describes the field with the counter, and announces only the over-limit hint", () => {
+  it("describes the field with the counter, and announces only going over the limit", () => {
     const { container, rerender } = render(
       <ChatComposer input={"a".repeat(9_000)} setInput={vi.fn()} onSend={vi.fn()} />,
     )
@@ -315,7 +315,7 @@ describe("ChatComposer multi-line input and length limit (#913)", () => {
 
     rerender(<ChatComposer input={"a".repeat(10_001)} setInput={vi.fn()} onSend={vi.fn()} />)
     expect(described).toContainElement(screen.getByTestId("chat-char-count-hint"))
-    expect(live).toHaveTextContent("Too long to send. Shorten it by 1 character.")
+    expect(live).toHaveTextContent("Message is too long to send.")
   })
 
   it("counts characters as the server does, not UTF-16 units", () => {

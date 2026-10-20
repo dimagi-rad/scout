@@ -1,4 +1,4 @@
-import { useLayoutEffect, type KeyboardEvent, type RefObject } from "react"
+import { useEffect, useLayoutEffect, type KeyboardEvent, type RefObject } from "react"
 
 /** apps/chat/constants.py MAX_MESSAGE_LENGTH; the server refuses longer messages. */
 export const MAX_MESSAGE_LENGTH = 10_000
@@ -21,19 +21,41 @@ export function isComposingKey(e: KeyboardEvent): boolean {
 
 const MAX_TEXTAREA_HEIGHT_PX = 240
 
-/** Grows a textarea with its content up to a cap, then it scrolls. */
+function fitHeight(el: HTMLTextAreaElement) {
+  const previous = el.style.height
+  el.style.height = "auto"
+  // Hidden (display: none) measures 0; keep the last size rather than collapse it.
+  if (!el.scrollHeight) {
+    el.style.height = previous
+    return
+  }
+  // scrollHeight leaves out the border, which a border-box height includes.
+  const border = el.offsetHeight - el.clientHeight
+  const wanted = el.scrollHeight + border
+  el.style.height = `${Math.min(wanted, MAX_TEXTAREA_HEIGHT_PX)}px`
+  el.style.overflowY = wanted > MAX_TEXTAREA_HEIGHT_PX ? "auto" : "hidden"
+}
+
+/**
+ * Grows a textarea with its content up to a cap, then it scrolls. Done in JS rather
+ * than with CSS field-sizing, which Firefox does not support.
+ */
 export function useAutoGrow(ref: RefObject<HTMLTextAreaElement | null>, value: string) {
   useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const previous = el.style.height
-    el.style.height = "auto"
-    // Hidden (display: none) measures 0; keep the last size rather than collapse it.
-    if (!el.scrollHeight) {
-      el.style.height = previous
-      return
-    }
-    el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_HEIGHT_PX)}px`
-    el.style.overflowY = el.scrollHeight > MAX_TEXTAREA_HEIGHT_PX ? "auto" : "hidden"
+    if (ref.current) fitHeight(ref.current)
   }, [ref, value])
+
+  // Lines rewrap when the width changes (a side panel opens, the window resizes).
+  useEffect(() => {
+    const el = ref.current
+    if (!el || typeof ResizeObserver === "undefined") return
+    let width = el.clientWidth
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth === width) return
+      width = el.clientWidth
+      fitHeight(el)
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [ref])
 }
