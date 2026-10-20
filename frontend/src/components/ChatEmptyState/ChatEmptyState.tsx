@@ -55,6 +55,8 @@ export function ChatEmptyPrompt({
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.nativeEvent.isComposing) return
+
     if (showSlashMenu && filteredCommands.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault()

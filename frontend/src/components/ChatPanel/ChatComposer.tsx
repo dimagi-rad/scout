@@ -3,7 +3,7 @@ import type { FormEvent, KeyboardEvent } from "react"
 import { Plus, Send, Square } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { matchSlashCommands, resolveSlashCommand, type SlashCommand } from "./slashCommands"
 import { SlashCommandMenu } from "./SlashCommandMenu"
@@ -60,7 +60,9 @@ export function ChatComposer({
     submit()
   }
 
-  function handleKeyDown(e: KeyboardEvent) {
+  function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.nativeEvent.isComposing) return
+
     if (showSlashMenu && filteredCommands.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault()
@@ -94,8 +96,9 @@ export function ChatComposer({
         selectedIndex={slashMenuIndex}
         canWrite={canWrite}
       />
-      <Input
+      <Textarea
         data-testid="chat-input"
+        rows={1}
         value={input}
         onChange={(e) => {
           setInput(e.target.value)
@@ -103,7 +106,7 @@ export function ChatComposer({
         }}
         onKeyDown={handleKeyDown}
         placeholder={adding ? "Add to your request…" : placeholder}
-        className="flex-1"
+        className="min-h-9 max-h-40 flex-1 resize-none py-1.5"
       />
       {isStreaming ? (
         <Button
