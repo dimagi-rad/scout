@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import html
 import logging
+import re
 from dataclasses import dataclass
 
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -78,8 +79,14 @@ def _text_block(text: str) -> dict:
     return {"type": "text", "text": text}
 
 
+_CLOSING_TAG = re.compile(r"</(attachment)", re.IGNORECASE)
+
+
 def _wrap(attachment: LoadedAttachment, body: str, total_chars: int) -> str:
     filename = html.escape(attachment.filename, quote=True)
+    # The tags mark where user-supplied content ends; a closing tag inside the file
+    # must not end it early and pass what follows off as framing.
+    body = _CLOSING_TAG.sub(r"<\\/\1", body)
     return (
         f'<attachment filename="{filename}" id="{attachment.id}" '
         f'media_type="{attachment.media_type}" chars="{total_chars}">\n{body}\n</attachment>'
@@ -104,8 +111,7 @@ def _image_omitted(entry: dict) -> dict:
 def _text_omitted(entry: dict) -> dict:
     return _text_block(
         f"[Text file {_label(entry)} was attached earlier in this chat and is not shown "
-        f'again, to keep the request small. Call read_attachment with attachment_id="'
-        f'{entry["id"]}" to read it.]'
+        "again, to keep the request small. Ask the user to attach it again if you need it.]"
     )
 
 
@@ -144,10 +150,7 @@ async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budg
         return _text_block(_wrap(attachment, text, total))
     shown = min(TRUNCATED_TEXT_CHARS, budget.text_chars)
     budget.text_chars -= shown
-    note = (
-        f"[Showing the first {shown:,} of {total:,} characters. Call read_attachment with "
-        f'attachment_id="{attachment.id}" (offset, limit, search) to read the rest.]'
-    )
+    note = f"[Showing the first {shown:,} of {total:,} characters; the rest is not shown.]"
     return _text_block(_wrap(attachment, f"{text[:shown]}\n{note}", total))
 
 
