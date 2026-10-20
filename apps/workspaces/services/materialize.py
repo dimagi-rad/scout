@@ -743,12 +743,6 @@ async def materialize_workspace_core(
                 waited = release is None
                 if waited:
                     release = await lanes.take()
-                # The prechecks await, so a load may have been cancelled meanwhile.
-                if loads_cancelled:
-                    release()
-                    attempted_tenant_ids.discard(str(tm.tenant_id))
-                    break
-                if waited:
                     try:
                         # Waited for a lane, so the access check above may have gone stale.
                         stop = await stopped_by_denial(index)
@@ -761,6 +755,11 @@ async def materialize_workspace_core(
                         if stop:
                             break
                         continue
+                if loads_cancelled:
+                    # Every check above awaits; a sibling may have been cancelled meanwhile.
+                    release()
+                    attempted_tenant_ids.discard(str(tm.tenant_id))
+                    break
                 loaded_tenant_ids.add(str(tm.tenant_id))
                 try:
                     load = create_task_sharing_data_locks(
