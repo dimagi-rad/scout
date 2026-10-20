@@ -48,6 +48,7 @@ export function TenantsTab({
 }) {
   const userId = useAppStore((s) => s.user?.id)
   const isCurrentAccount = useIsCurrentAccount()
+  const accountSession = useAppStore((s) => s.accountSession)
 
   // Connected sources — fast local-DB query, gates only its own section.
   const [tenants, setTenants] = useState<WorkspaceTenant[]>([])
@@ -62,11 +63,12 @@ export function TenantsTab({
 
   const [addingId, setAddingId] = useState<string | null>(null)
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null)
-  // A bulk add outliving this workspace's tab must not write into the next one's list.
-  const currentWorkspaceRef = useRef<string | null>(workspaceId)
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null)
+  // This component is reused across workspaces: a bulk add for one must stop, and not
+  // write into the next one's list. Unmounting (another tab) lets it finish.
+  const currentWorkspaceRef = useRef(workspaceId)
   useEffect(() => {
     currentWorkspaceRef.current = workspaceId
-    return () => { currentWorkspaceRef.current = null }
   }, [workspaceId])
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
@@ -206,13 +208,21 @@ export function TenantsTab({
     }
   }
 
-  // One at a time: the server checks the adder's and every member's access per source,
-  // and one refusal (say, a member without that opportunity) must not stop the rest.
+  // One at a time: the server checks the adder's and every member's access per source.
+  // A refusal of one source (400/409, say a member without that opportunity) must not
+  // stop the rest; any other error (signed out, no longer a manager, server down) would
+  // fail every remaining source the same way, so it ends the run.
   async function handleAddShown() {
     const batch = [...filteredAvailable]
-    const failures: string[] = []
+    const refused: { name: string; reason: string }[] = []
+    let added = 0
+    let stoppedBy: string | null = null
     setMutationError(null)
-    const stillHere = () => currentWorkspaceRef.current === workspaceId && isCurrentAccount()
+    setBulkNotice(null)
+    // Not isCurrentAccount(): that is false once unmounted, and leaving the tab must not
+    // cut the run short.
+    const session = accountSession
+    const stillHere = () => currentWorkspaceRef.current === workspaceId && session.isCurrent()
     setBulkProgress({ done: 0, total: batch.length })
     try {
       for (const [index, tenant] of batch.entries()) {
@@ -220,22 +230,35 @@ export function TenantsTab({
         setAddingId(tenant.tenant_uuid)
         try {
           await addOne(tenant)
+          added += 1
         } catch (err) {
-          failures.push(
-            `${tenant.tenant_name} (${err instanceof ApiError ? err.message : "failed to add"})`,
-          )
+          const reason = err instanceof ApiError ? err.message : "Failed to add data source"
+          if (err instanceof ApiError && (err.status === 400 || err.status === 409)) {
+            refused.push({ name: tenant.tenant_name, reason })
+          } else {
+            stoppedBy = reason
+            break
+          }
         }
         setBulkProgress({ done: index + 1, total: batch.length })
       }
     } finally {
-      setAddingId(null)
-      setBulkProgress(null)
+      if (currentWorkspaceRef.current === workspaceId) {
+        setAddingId(null)
+        setBulkProgress(null)
+      }
     }
     if (!stillHere()) return
-    if (failures.length > 0) {
-      setMutationError(
-        `Added ${batch.length - failures.length} of ${batch.length}. Couldn't add: ${failures.join("; ")}`,
-      )
+    const summary = `Added ${added} of ${batch.length}.`
+    if (stoppedBy) {
+      setMutationError(`${summary} Stopped: ${stoppedBy}`)
+    } else if (refused.length > 0) {
+      // The server's reason already names the source, so one example is enough.
+      const names = refused.map((r) => r.name).join(", ")
+      const more = refused.length > 1 ? ` (first of ${refused.length})` : ""
+      setMutationError(`${summary} Couldn't add ${names}. Reason${more}: ${refused[0].reason}`)
+    } else {
+      setBulkNotice(`${summary}`)
     }
   }
 
@@ -466,6 +489,12 @@ export function TenantsTab({
             </>
           )}
         </div>
+      )}
+
+      {bulkNotice && !mutationError && (
+        <p className="mb-3 text-sm text-muted-foreground" role="status" data-testid="bulk-add-notice">
+          {bulkNotice}
+        </p>
       )}
 
       {mutationError && (

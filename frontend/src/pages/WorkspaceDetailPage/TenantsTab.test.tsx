@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { cleanup, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -171,6 +171,7 @@ describe("available source filters", () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ provider: ["commcare_connect"] }))
     await openAddPanel()
     await userEvent.type(screen.getByTestId("search-filter-input"), "alpha")
+    expect(screen.getByTestId("available-sources-empty")).toBeInTheDocument()
 
     await userEvent.click(screen.getByTestId(`${F}-empty-clear`))
 
@@ -227,9 +228,10 @@ describe("adding every shown source", () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ program: ["7"] }))
     vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
     vi.mocked(getUserTenantsCached).mockResolvedValue(programSources)
-    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    const view = render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
     await userEvent.click(await screen.findByTestId("add-tenant-btn"))
     await screen.findByTestId(`${F}-count`)
+    return view
   }
 
   it("adds a whole program one source at a time", async () => {
@@ -247,6 +249,7 @@ describe("adding every shown source", () => {
       ["ws-1", "tenant-p1"],
       ["ws-1", "tenant-p2"],
     ])
+    expect(screen.getByTestId("bulk-add-notice")).toHaveTextContent("Added 2 of 2.")
   })
 
   it("keeps going past a refused source and names it", async () => {
@@ -258,9 +261,62 @@ describe("adding every shown source", () => {
 
     await userEvent.click(screen.getByTestId("available-sources-add-shown"))
 
-    expect(await screen.findByText(/Added 1 of 2\. Couldn't add: Malaria North \(A member lacks this source\)/))
+    expect(await screen.findByText("Added 1 of 2. Couldn't add Malaria North. Reason: A member lacks this source"))
       .toBeInTheDocument()
     expect(screen.getByTestId("tenant-row-wt-tenant-p2")).toBeInTheDocument()
+    expect(screen.queryByTestId("tenant-row-wt-tenant-p1")).toBeNull()
+  })
+
+  it("stops at an error that would fail every source, such as losing manager rights", async () => {
+    vi.mocked(workspaceApi.addTenant).mockRejectedValue(
+      new ApiError(403, "Only workspace managers can add tenants.", {}),
+    )
+    await openWithProgramFilter()
+
+    await userEvent.click(screen.getByTestId("available-sources-add-shown"))
+
+    expect(await screen.findByText("Added 0 of 2. Stopped: Only workspace managers can add tenants."))
+      .toBeInTheDocument()
+    expect(workspaceApi.addTenant).toHaveBeenCalledOnce()
+  })
+
+  it("finishes the run when the tab unmounts", async () => {
+    let release!: () => void
+    vi.mocked(workspaceApi.addTenant)
+      .mockImplementationOnce(
+        (_ws, uuid) =>
+          new Promise((resolve) => {
+            release = () => resolve({ id: `wt-${uuid}`, tenant_id: uuid, tenant_name: uuid })
+          }),
+      )
+      .mockImplementation(async (_ws, uuid) => ({ id: `wt-${uuid}`, tenant_id: uuid, tenant_name: uuid }))
+    await openWithProgramFilter()
+    await userEvent.click(screen.getByTestId("available-sources-add-shown"))
+    await waitFor(() => expect(workspaceApi.addTenant).toHaveBeenCalledOnce())
+
+    cleanup()
+    release()
+
+    await waitFor(() => expect(workspaceApi.addTenant).toHaveBeenCalledTimes(2))
+  })
+
+  it("stops, writing nothing, when the tab moves to another workspace", async () => {
+    let release!: () => void
+    vi.mocked(workspaceApi.addTenant).mockImplementationOnce(
+      (_ws, uuid) =>
+        new Promise((resolve) => {
+          release = () => resolve({ id: `wt-${uuid}`, tenant_id: uuid, tenant_name: uuid })
+        }),
+    )
+    const { rerender } = await openWithProgramFilter()
+    await userEvent.click(screen.getByTestId("available-sources-add-shown"))
+    await waitFor(() => expect(workspaceApi.addTenant).toHaveBeenCalledOnce())
+
+    rerender(<TenantsTab workspaceId="ws-2" isManager onWorkspaceDeleted={vi.fn()} />)
+    release()
+
+    await waitFor(() => expect(workspaceApi.getTenants).toHaveBeenCalledWith("ws-2"))
+    expect(workspaceApi.addTenant).toHaveBeenCalledOnce()
     expect(screen.queryByTestId("tenant-row-wt-tenant-p1")).toBeNull()
   })
 
