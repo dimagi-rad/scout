@@ -260,8 +260,9 @@ export function CreateWorkspaceModal({ onClose, initialName = "", initialSourceI
               </div>
               <p className="mb-2 text-xs text-muted-foreground">
                 A workspace answers questions across all of its data sources. Pick one, or
-                several to analyze across opportunities — the Program filter narrows the
-                list to one program.
+                several to analyze across them.
+                {sources.some((t) => t.provider === "commcare_connect") &&
+                  " The Program filter narrows Connect opportunities to one program."}
               </p>
               {refreshError && (
                 <p
