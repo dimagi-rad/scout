@@ -65,6 +65,7 @@ def test_the_percent_warning_applies_on_a_large_volume():
 
 
 def test_below_the_deploy_guard_warning_is_a_warning_on_a_small_volume():
+    # 50% free, but under the 16 GiB at which the deploy guard starts warning.
     reading = storage.DiskReading("/", total_bytes=30 * GIB, free_bytes=15 * GIB)
     assert storage.disk_severity(reading) == storage.WARNING
 

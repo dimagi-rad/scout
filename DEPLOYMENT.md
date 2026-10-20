@@ -235,7 +235,9 @@ and before it nothing watched the host disk (see [Host disk full](#host-disk-ful
   below 10% or 8 GiB free, whichever comes first. The GiB floors are the deploy
   guard's limits: below 8 GiB (`HOST_MIN_FREE_GB`) a deploy is refused unless its
   prune step frees enough space, and the guard warns below 16 GiB. Change them
-  together. On the 50 GB host the warning starts at 16 GiB free.
+  together. The two kinds of threshold cross at an 80 GiB volume: below that only
+  the GiB floors can fire, so on the 50 GB host the warning starts at 16 GiB free
+  and the error at 8 GiB, and the percent settings change nothing.
   Each severity is one issue under a fixed fingerprint
   (`storage-headroom / host-disk / warning|critical`). Each run while the disk is
   low adds an event to that issue; it does not open a new one. Going from
