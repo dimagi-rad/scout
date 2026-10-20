@@ -190,10 +190,10 @@ If a user asks you to do something outside these constraints, politely explain t
 
 ## When a Question Names Data Outside This Workspace
 
-Queries read only this workspace's sources, listed under Workspace Sources. When the user names an opportunity, project, domain, or other source, check it against that list. If a named source is not clearly one of them:
+Queries read only this workspace's sources, listed under Workspace Sources (none listed means none are connected). When the user names an opportunity, project, domain, or other source, check it against that list. If a named source is not clearly one of them:
 - Say so first, naming it. Never answer only from the sources you have as if they covered the question.
 - Search `list_workspaces` for it; a source in another workspace still cannot be queried from this chat.
-- Offer to add it: a workspace manager can use Add data source on the Data sources tab of this workspace's settings, then ask again.
+- {missing_source_next_step}
 - Answer only the part the workspace's sources support, and label it partial.
 
 ## When You Need Clarification
@@ -209,12 +209,27 @@ Ask clarifying questions when:
 Frame clarifying questions helpfully:
 "To make sure I give you the right answer: Did you mean [option A] or [option B]?"
 
-Ask about the specific assumption, and propose a sensible default with its trade-off. When the user has asked a question, never reply with a generic menu of things you could look at: answer it, or ask what blocks it.
+{missing_assumption_guidance} When the user has asked a question, never reply with a generic menu of things you could look at.
 """
 
 
 PLACEHOLDERS = frozenset(
-    {"query_failure_fix", "unavailable_count_guidance", "schema_drift_guidance"}
+    {
+        "query_failure_fix",
+        "unavailable_count_guidance",
+        "schema_drift_guidance",
+        "missing_source_next_step",
+        "missing_assumption_guidance",
+    }
+)
+
+_OFFER_TO_ADD_SOURCE = (
+    "Offer to add it: a workspace manager can use Add data source on the Data sources "
+    "tab of this workspace's settings, then ask again."
+)
+_ASK_ABOUT_ASSUMPTION = (
+    "Ask about the specific assumption, and propose a sensible default with its "
+    "trade-off. Answer the question, or ask what blocks it."
 )
 
 
@@ -235,6 +250,8 @@ def _render(**values: str) -> str:
 # Read-only members have no materialization tools (#517), so every place the
 # prompt would offer a rebuild has to point them at a write-capable member instead.
 BASE_SYSTEM_PROMPT = _render(
+    missing_source_next_step=_OFFER_TO_ADD_SOURCE,
+    missing_assumption_guidance=_ASK_ABOUT_ASSUMPTION,
     query_failure_fix="propose a corrected semantic member or ask to rebuild the data",
     unavailable_count_guidance=(
         "Only offer to re-run materialization when recovery_action is materialization."
@@ -256,6 +273,14 @@ ask again once loading finishes, without naming a time.""",
 # Headless (recipe) runs have no user to answer an ask-first question and no
 # resume path, so every rebuild offer becomes a direct call to the blocking tool.
 HEADLESS_BASE_SYSTEM_PROMPT = _render(
+    missing_source_next_step=(
+        "Say in the result that a workspace manager can add it with Add data source "
+        "on the Data sources tab of this workspace's settings."
+    ),
+    missing_assumption_guidance=(
+        "No one can answer a question in this run: choose a sensible default, state it "
+        "and its trade-off in the result, and finish the analysis."
+    ),
     query_failure_fix=(
         "propose a corrected semantic member, or call `run_materialization` to "
         "rebuild the data and continue in the same run"
@@ -271,6 +296,8 @@ Never infer missing data from a failed describe or query alone.""",
 )
 
 READ_ONLY_BASE_SYSTEM_PROMPT = _render(
+    missing_source_next_step=_OFFER_TO_ADD_SOURCE,
+    missing_assumption_guidance=_ASK_ABOUT_ASSUMPTION,
     query_failure_fix=(
         "propose a corrected semantic member, or explain that a workspace member "
         "with write access can refresh the data"
