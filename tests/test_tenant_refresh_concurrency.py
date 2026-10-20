@@ -137,9 +137,20 @@ async def test_failing_identity_backs_off_without_hiding_the_others(identities, 
 
 
 @pytest.mark.asyncio
+async def test_poll_refreshes_itself_when_the_running_fetch_outlasts_its_wait(identities):
+    """An owner that died holding the in-flight key must not block refreshes until it expires."""
+    await cache.aset(f"{_key('commcare', 1)}:inflight", True, 120)
+    with patch.object(user_views, "TENANT_REFRESH_INFLIGHT_WAIT", 0.05):
+        await asyncio.wait_for(_arefresh_all_identities(USER), timeout=2)
+    assert identities["commcare"].await_count == 1
+    assert await cache.aget(_key("commcare", 1))
+
+
+@pytest.mark.asyncio
 async def test_failed_identity_is_retried_once_its_failure_ttl_lapses(identities):
     identities["commcare"].side_effect = RuntimeError("upstream down")
     await _arefresh_all_identities(USER)
+    assert await cache.aget(_key("commcare", 1))
 
     await cache.adelete(_key("commcare", 1))
     identities["commcare"].side_effect = None
@@ -195,6 +206,8 @@ async def test_forced_refresh_does_not_wait_on_a_running_fetch(identities):
     identities["commcare"].side_effect = None
     await asyncio.wait_for(_arefresh_all_identities(USER, force=True), timeout=2)
     assert identities["commcare"].await_count == 2
+    # It must not release the key the running fetch still holds.
+    assert await cache.aget(f"{_key('commcare', 1)}:inflight")
 
     release.set()
     await first

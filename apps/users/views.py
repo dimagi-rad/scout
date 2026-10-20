@@ -52,7 +52,7 @@ TENANT_REFRESH_FAILURE_TTL = 60  # seconds
 # Bounds a refresh another request is already running, should that request die.
 TENANT_REFRESH_INFLIGHT_TTL = 120  # seconds
 # How long a poll waits on another request's refresh of the same identity.
-TENANT_REFRESH_INFLIGHT_WAIT = 60  # seconds
+TENANT_REFRESH_INFLIGHT_WAIT = 30  # seconds
 TENANT_REFRESH_INFLIGHT_POLL = 0.25  # seconds
 
 logger = logging.getLogger(__name__)
@@ -110,12 +110,14 @@ async def _arefresh_all_identities(user, *, force: bool = False) -> None:
         raise
 
 
-async def _await_inflight(inflight_key: str) -> None:
+async def _await_inflight(inflight_key: str) -> bool:
+    """Whether another request's refresh finished within the wait."""
     # Polled, not an Event: the refresh may be running in another worker process.
     for _ in range(int(TENANT_REFRESH_INFLIGHT_WAIT / TENANT_REFRESH_INFLIGHT_POLL)):
         if not await cache.aget(inflight_key):
-            return
+            return True
         await asyncio.sleep(TENANT_REFRESH_INFLIGHT_POLL)
+    return False
 
 
 async def _arefresh_identity(user, provider, resolve, token_obj, *, force: bool) -> None:
@@ -124,11 +126,11 @@ async def _arefresh_identity(user, provider, resolve, token_obj, *, force: bool)
         return
     inflight_key = f"{cache_key}:inflight"
     owns_inflight = await cache.aadd(inflight_key, True, TENANT_REFRESH_INFLIGHT_TTL)
-    if not owns_inflight and not force:
-        # Another poll is already fetching this identity: share its result
-        # rather than repeat the upstream call. A forced refresh does not wait,
-        # since that fetch may predate the access the user is refreshing for.
-        await _await_inflight(inflight_key)
+    # Another poll is already fetching this identity: share its result rather
+    # than repeat the upstream call. A forced refresh does not wait, since that
+    # fetch may predate the access the user is refreshing for; nor does a poll
+    # whose wait outlasts it (its owner may have died holding the key).
+    if not owns_inflight and not force and await _await_inflight(inflight_key):
         return
     try:
         try:
