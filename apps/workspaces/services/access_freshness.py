@@ -27,15 +27,17 @@ from uuid import UUID
 from asgiref.sync import SyncToAsync, async_to_sync
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantMembership
 from apps.users.services.access_verification import (
+    PROOF_RENEW_AFTER,
     afresh_proof_tenant_ids,
+    afresh_proof_verified_at,
     agrace_proof_tenant_ids,
-    aproofs_are_fresh,
+    fresh_proof_verified_at,
     grace_proof_tenant_ids,
-    proofs_are_fresh,
 )
 from apps.users.services.access_verification_providers import PROVIDER_BUDGET_SECONDS
 from apps.users.services.access_verification_service import (
@@ -115,6 +117,8 @@ class FreshnessCheck:
 
     stale: dict[UUID, frozenset] = field(default_factory=dict)
     unbound: frozenset = frozenset()
+    # Connections whose proofs are all fresh but at least one is due for renewal.
+    renewable: dict[UUID, frozenset] = field(default_factory=dict)
 
     @property
     def fresh(self) -> bool:
@@ -153,24 +157,38 @@ def _live_bindings_queryset(user_id, tenant_ids):
     )
 
 
+def _freshness_check(grouped, verified_at_by_connection, unbound, *, now) -> FreshnessCheck:
+    stale, renewable = {}, {}
+    renew_before = now - PROOF_RENEW_AFTER
+    for connection_id, ids in grouped.items():
+        ids = frozenset(ids)
+        verified_at = verified_at_by_connection[connection_id]
+        if verified_at.keys() != ids:
+            stale[connection_id] = ids
+        elif min(verified_at.values()) <= renew_before:
+            renewable[connection_id] = ids
+    return FreshnessCheck(stale=stale, unbound=frozenset(unbound), renewable=renewable)
+
+
 def check_freshness(user_id, tenant_ids) -> FreshnessCheck:
     grouped, unbound = _group_by_connection(_live_bindings_queryset(user_id, list(tenant_ids)))
-    stale = {
-        connection_id: frozenset(ids)
+    now = timezone.now()
+    verified_at = {
+        connection_id: fresh_proof_verified_at(user_id, connection_id, ids, now=now)
         for connection_id, ids in grouped.items()
-        if not proofs_are_fresh(user_id, connection_id, ids)
     }
-    return FreshnessCheck(stale=stale, unbound=frozenset(unbound))
+    return _freshness_check(grouped, verified_at, unbound, now=now)
 
 
 async def acheck_freshness(user_id, tenant_ids) -> FreshnessCheck:
     rows = [row async for row in _live_bindings_queryset(user_id, list(tenant_ids))]
     grouped, unbound = _group_by_connection(rows)
-    stale = {}
-    for connection_id, ids in grouped.items():
-        if not await aproofs_are_fresh(user_id, connection_id, ids):
-            stale[connection_id] = frozenset(ids)
-    return FreshnessCheck(stale=stale, unbound=frozenset(unbound))
+    now = timezone.now()
+    verified_at = {
+        connection_id: await afresh_proof_verified_at(user_id, connection_id, ids, now=now)
+        for connection_id, ids in grouped.items()
+    }
+    return _freshness_check(grouped, verified_at, unbound, now=now)
 
 
 async def acheck_freshness_many(user_id, tenant_ids_by_key: dict) -> dict:
@@ -374,6 +392,33 @@ async def aexcuse_graced(user_id, final: FreshnessCheck, graced) -> FreshnessChe
     return FreshnessCheck(stale=stale, unbound=final.unbound)
 
 
+def _renewal_due(check: FreshnessCheck, budget: VerificationBudget) -> bool:
+    # Only interactive admissions renew: a worker can afford to wait for a recheck.
+    return budget == VerificationBudget.INTERACTIVE and bool(check.renewable) and not check.unbound
+
+
+def _schedule_renewals(user_id, check: FreshnessCheck) -> None:
+    """Renew in the background the fresh proofs this admission found due (#926).
+
+    Must run on the server's long-lived loop.
+    """
+    for connection_id, tenant_ids in check.renewable.items():
+        if schedule_background_verification(
+            user_id, connection_id, tenant_ids, fresh_max_age=PROOF_RENEW_AFTER
+        ):
+            logger.info(
+                "upstream_proof_renewal user_id=%s connection_id=%s tenants=%d",
+                user_id,
+                connection_id,
+                len(tenant_ids),
+                extra={"user_id": user_id, "connection_id": str(connection_id)},
+            )
+
+
+async def _aschedule_renewals(user_id, check: FreshnessCheck) -> None:
+    _schedule_renewals(user_id, check)
+
+
 def _admission_from(check: FreshnessCheck, results, graced=frozenset()) -> UpstreamAdmission:
     if check.unbound:
         # A legacy membership with no bound credential can never be rechecked, and
@@ -407,6 +452,8 @@ def admit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) -> Upstre
     already running an event loop; async code must use the async twin.
     """
     check = check_freshness(user_id, tenant_ids)
+    if _renewal_due(check, budget) and _on_server_loop_thread():
+        async_to_sync(_aschedule_renewals)(user_id, check)
     results = None
     if check.stale and not check.unbound:
         if transaction.get_connection().in_atomic_block:
@@ -424,6 +471,8 @@ def admit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) -> Upstre
 
 async def aadmit_upstream(user_id, tenant_ids, *, budget: VerificationBudget) -> UpstreamAdmission:
     check = await acheck_freshness(user_id, tenant_ids)
+    if _renewal_due(check, budget):
+        _schedule_renewals(user_id, check)
     results = None
     graced = frozenset()
     if check.stale and not check.unbound:
