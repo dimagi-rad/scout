@@ -54,7 +54,7 @@ The agent maintains state across conversation turns:
 
 The state carries no role. Tools that write re-check the user's workspace role each time they run.
 
-Message history is automatically pruned to about the last 20 messages plus system messages. The request the current turn answers is kept even when it is older than the window: the latest run of user messages (including a resume marker), the user's last two own messages, and the assistant text each of those answers. Tool results whose AI message was pruned are dropped, except when one tool round is wider than the window, in which case the window grows to keep that round whole and drops the pinned resume markers and assistant text first (the user's own messages always stay).
+Message history is automatically pruned to about the last 20 messages plus system messages. The request the current turn answers is kept even when it is older than the window: the latest run of user messages (including a resume marker), the user's last two own messages, and the assistant text each of those answers. Tool results whose AI message was pruned are dropped, except when one tool round is wider than the window, in which case the window grows to keep that round whole and drops pinned assistant text and resume markers but keeps the user's own messages (or, when there are none, the latest marker).
 
 ## Roles and run modes
 

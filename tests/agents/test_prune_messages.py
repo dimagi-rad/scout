@@ -198,6 +198,14 @@ def test_round_filling_the_window_sheds_markers_and_text_but_no_user_message():
     _assert_tool_pairs_intact(pruned)
 
 
+def test_a_marker_only_turn_keeps_its_marker_past_a_wide_round():
+    """A resume whose request was discarded has only the marker as its user turn."""
+    marker = HumanMessage(content=f"{SYSTEM_RESUME_MARKER} Materialization FAILED.")
+    history = [marker, *_parallel_tool_rounds(1, calls_per_round=25)]
+
+    assert prune_messages(history) == history
+
+
 def test_round_wider_than_window_keeps_its_results():
     history = [HumanMessage(content=KK_QUESTION), *_parallel_tool_rounds(2, calls_per_round=25)]
 

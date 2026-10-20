@@ -84,6 +84,11 @@ def _shed_pins(pinned: list[BaseMessage], count: int) -> list[BaseMessage]:
         for k, message in enumerate(pinned)
         if not isinstance(message, HumanMessage) or _is_resume_marker(message)
     ]
+    # With no user message pinned, the latest marker is the user turn the API needs.
+    if not any(isinstance(m, HumanMessage) and not _is_resume_marker(m) for m in pinned):
+        markers = [k for k in droppable if isinstance(pinned[k], HumanMessage)]
+        if markers:
+            droppable.remove(markers[-1])
     dropped = set(droppable[:count])
     return [message for k, message in enumerate(pinned) if k not in dropped]
 
