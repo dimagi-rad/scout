@@ -163,9 +163,13 @@ async def arecord_ocs_descriptions(
 
 
 def _activity_is_fresh(tenant: Tenant, now) -> bool:
+    # An unusable value means "not fresh", so one bad row cannot stop the refresh.
     checked = (tenant.provider_attributes or {}).get("activity_checked_at")
-    checked_at = parse_datetime(checked) if isinstance(checked, str) else None
-    return checked_at is not None and now - checked_at < _OCS_ACTIVITY_FRESH
+    try:
+        checked_at = parse_datetime(checked) if isinstance(checked, str) else None
+        return checked_at is not None and now - checked_at < _OCS_ACTIVITY_FRESH
+    except (ValueError, TypeError):
+        return False
 
 
 async def arecord_ocs_activity(base_url: str, api_key: str, tenants: Iterable[Tenant]) -> None:

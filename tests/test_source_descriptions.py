@@ -416,3 +416,12 @@ async def test_probe_stops_once_ocs_refuses_or_rate_limits(ocs_sessions, monkeyp
     assert await aprobe_ocs_chatbots("https://ocs.example.com", {}, ["a", "b", "c"]) == {}
 
     assert ocs_sessions.client.get.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "checked", ["2026-02-30T00:00:00Z", "2026-10-21T00:00:00", "soon", 5, None]
+)
+def test_an_unusable_check_time_reads_as_stale(checked):
+    tenant = Tenant(provider_attributes={"activity_checked_at": checked})
+
+    assert not source_descriptions._activity_is_fresh(tenant, timezone.now())
