@@ -13,7 +13,8 @@ from config.procrastinate import app
 logger = logging.getLogger(__name__)
 
 # Descriptions change rarely; re-probing every chatbot on each discovery would
-# spend the token's OCS rate limit that its data loads also draw on.
+# spend the token's OCS rate limit that its data loads also draw on. Under the
+# day after which the Status filter stops trusting an API-key chatbot's activity.
 OCS_PROBE_COOLDOWN_SECONDS = 6 * 3600
 
 
@@ -38,7 +39,7 @@ async def send_email(subject, message, recipient_list, from_email=None, html_mes
 
 @app.task
 async def probe_ocs_chatbots(connection_id: str) -> None:
-    """Record each chatbot's description for one OCS connection."""
+    """Record each chatbot's description (and an API key's activity) for one OCS connection."""
     base_url = getattr(settings, "OCS_URL", "https://www.openchatstudio.com")
     await aprobe_connection_chatbots(connection_id, base_url)
 

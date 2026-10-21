@@ -27,11 +27,13 @@ class _Sessions(dict):
     """Each experiment's canned response, plus the mocked client for assertions."""
 
     client = None
+    chatbots = None
 
 
 class _Response:
     def __init__(self, status_code, payload):
         self.status_code = status_code
+        self.is_success = 200 <= status_code < 300
         self._payload = payload
 
     def json(self):
@@ -51,6 +53,8 @@ def ocs_sessions(mocker):
     by_experiment = _Sessions()
 
     async def fake_get(url, headers=None, params=None, **_):
+        if url.startswith("https://ocs.example.com/api/v2/chatbots/"):
+            return by_experiment.chatbots or _Response(200, {"results": [], "next": None})
         assert url == "https://ocs.example.com/api/sessions/"
         assert params["page_size"] == 1
         result = by_experiment[params["experiment"]]
@@ -198,6 +202,82 @@ async def test_connection_probe_uses_the_connections_own_api_key(user, ocs_sessi
     assert (await Tenant.objects.aget(id=bot.id)).description == "Triage helper"
     headers = ocs_sessions.client.get.await_args.kwargs["headers"]
     assert headers == {"X-api-key": "the-key"}
+
+
+async def _api_key_bot(user, external_id="bot", **tenant_fields):
+    conn = await TenantConnection.objects.acreate(
+        user=user,
+        provider="ocs",
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential("the-key"),
+    )
+    bot = await Tenant.objects.acreate(
+        provider="ocs", external_id=external_id, canonical_name="Bot", **tenant_fields
+    )
+    await TenantMembership.objects.acreate(user=user, tenant=bot, connection=conn)
+    return conn, bot
+
+
+def _chatbot_row(external_id, last_activity_at):
+    return {"id": external_id, "name": "Bot", "last_activity_at": last_activity_at}
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_api_key_probe_refreshes_its_chatbots_activity(user, ocs_sessions):
+    conn, bot = await _api_key_bot(
+        user,
+        provider_attributes={
+            "last_activity_at": None,
+            "activity_checked_at": "2026-10-01T00:00:00+00:00",
+        },
+    )
+    quiet = await Tenant.objects.acreate(
+        provider="ocs",
+        external_id="quiet",
+        canonical_name="Quiet",
+        provider_attributes={"last_activity_at": "2026-09-01T00:00:00Z"},
+    )
+    await TenantMembership.objects.acreate(user=user, tenant=quiet, connection=conn)
+    ocs_sessions["bot"] = _Response(200, {"results": []})
+    ocs_sessions["quiet"] = _Response(200, {"results": []})
+    ocs_sessions.chatbots = _Response(
+        200,
+        {
+            "results": [
+                _chatbot_row("bot", "2026-10-20T08:00:00Z"),
+                _chatbot_row("not-onboarded", "2026-10-20T08:00:00Z"),
+            ],
+            "next": None,
+        },
+    )
+
+    await aprobe_connection_chatbots(str(conn.id), "https://ocs.example.com")
+
+    attributes = (await Tenant.objects.aget(id=bot.id)).provider_attributes
+    assert attributes["last_activity_at"] == "2026-10-20T08:00:00Z"
+    assert attributes["activity_checked_at"] > "2026-10-01T00:00:00+00:00"
+    # Left out of the list: what was stored stays, rather than reading as inactive.
+    quiet_attributes = (await Tenant.objects.aget(id=quiet.id)).provider_attributes
+    assert quiet_attributes == {"last_activity_at": "2026-09-01T00:00:00Z"}
+    assert not await Tenant.objects.filter(external_id="not-onboarded").aexists()
+    listing = ocs_sessions.client.get.await_args_list[0]
+    assert listing.args[0].startswith("https://ocs.example.com/api/v2/chatbots/")
+    assert listing.kwargs["headers"] == {"X-api-key": "the-key"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_failed_activity_list_still_records_descriptions(user, ocs_sessions):
+    conn, bot = await _api_key_bot(user)
+    ocs_sessions.chatbots = _Response(500, {})
+    ocs_sessions["bot"] = _Response(200, {"results": [_session("bot", "Triage helper")]})
+
+    await aprobe_connection_chatbots(str(conn.id), "https://ocs.example.com")
+
+    stored = await Tenant.objects.aget(id=bot.id)
+    assert stored.description == "Triage helper"
+    assert stored.provider_attributes == {}
 
 
 @pytest.mark.asyncio
