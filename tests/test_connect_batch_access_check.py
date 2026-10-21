@@ -7,6 +7,7 @@ older per-opportunity and full-listing checks decide exactly as they did before.
 from __future__ import annotations
 
 import asyncio
+import logging
 from functools import partial
 from uuid import uuid4
 
@@ -168,6 +169,8 @@ async def test_ids_connect_would_reject_skip_the_batch(settings, external_id):
         pytest.param(_json(400, {"opportunity_ids": ["bad"]}, BATCH, "POST"), id="400"),
         pytest.param(_batch({"7": True}), id="missing-id"),
         pytest.param(_batch({"7": True, "8": "yes"}), id="non-bool"),
+        pytest.param(_batch({"7": True, "8": 1}), id="int-not-bool"),
+        pytest.param(_batch({"7": True, "8": True, "9": True}), id="extra-id"),
         pytest.param(_json(200, {"unexpected": True}, BATCH, "POST"), id="wrong-shape"),
         pytest.param(
             httpx.Response(200, text="not json", request=httpx.Request("POST", BATCH)),
@@ -189,42 +192,68 @@ async def test_unusable_batch_answer_falls_back_to_per_opportunity_checks(settin
     assert sorted(client.gets) == [_opp("7"), _opp("8")]
 
 
+@pytest.mark.parametrize(
+    ("answer", "cause"),
+    [
+        pytest.param(
+            _json(400, {"opportunity_ids": ["bad"]}, BATCH, "POST"), "batch_http_status", id="400"
+        ),
+        pytest.param(
+            _json(401, {"detail": "Invalid token."}, BATCH, "POST"), "batch_http_status", id="401"
+        ),
+        pytest.param(
+            _json(403, {"detail": "Forbidden."}, BATCH, "POST"), "batch_http_status", id="403"
+        ),
+        pytest.param(_json(503, {}, BATCH, "POST"), "batch_http_status", id="503"),
+        pytest.param(
+            httpx.Response(
+                302, headers={"location": "/login/"}, request=httpx.Request("POST", BATCH)
+            ),
+            "batch_http_status",
+            id="redirect",
+        ),
+        pytest.param(httpx.ConnectError("down"), "batch_request_error:ConnectError", id="network"),
+        pytest.param(httpx.ReadTimeout("slow"), "batch_request_error:ReadTimeout", id="timeout"),
+        pytest.param(_batch({"7": True, "8": True}), "batch_unrecognized_answer", id="extra-id"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_batch_401_rejects_the_credential_without_falling_back(settings):
-    client = _Client(_json(401, {"detail": "Invalid token."}, BATCH, "POST"))
+async def test_batch_never_decides_short_of_a_wellformed_answer(settings, caplog, answer, cause):
+    """Whatever an edge or proxy answers for this route, the older checks decide."""
+    caplog.set_level(logging.WARNING)
+    client = _Client(answer, {_opp("7"): _json(200, {"id": 7}, _opp("7"))})
+
+    result = await _check(settings, {"7"}, client)
+
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert set(result.external_ids) == {"7"}
+    assert client.gets == [_opp("7")]
+    assert any(f"cause={cause}" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_older_checks_still_reject_a_dead_credential(settings):
+    client = _Client(
+        _json(401, {"detail": "Invalid token."}, BATCH, "POST"),
+        {_opp("7"): _json(401, {"detail": "Invalid token."}, _opp("7"))},
+    )
 
     result = await _check(settings, {"7"}, client)
 
     assert result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
-    assert client.gets == []
-
-
-@pytest.mark.parametrize(
-    "answer",
-    [
-        pytest.param(_json(503, {}, BATCH, "POST"), id="503"),
-        pytest.param(httpx.ConnectError("down"), id="network"),
-    ],
-)
-@pytest.mark.asyncio
-async def test_unreachable_batch_is_unavailable_without_falling_back(settings, answer):
-    client = _Client(answer)
-
-    result = await _check(settings, {"7"}, client)
-
-    assert result.outcome == VerificationOutcome.UNAVAILABLE
-    assert client.gets == []
 
 
 @pytest.mark.asyncio
-async def test_batch_403_is_indeterminate(settings):
-    """A token without the export scope: the per-opportunity check would 403 as well."""
-    client = _Client(_json(403, {"detail": "Forbidden."}, BATCH, "POST"))
+async def test_undeployed_route_falls_back_without_logging(settings, caplog):
+    caplog.set_level(logging.WARNING)
+    client = _Client(
+        httpx.Response(404, text="<h1>Not Found</h1>", request=httpx.Request("POST", BATCH)),
+        {_opp("7"): _json(200, {"id": 7}, _opp("7"))},
+    )
 
-    result = await _check(settings, {"7"}, client)
+    await _check(settings, {"7"}, client)
 
-    assert result.outcome == VerificationOutcome.INDETERMINATE
-    assert client.gets == []
+    assert not [record for record in caplog.records if "batch_" in record.getMessage()]
 
 
 @pytest.fixture

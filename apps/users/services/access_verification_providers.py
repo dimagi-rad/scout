@@ -160,28 +160,22 @@ def _light_deadline(deadline, clock) -> float:
     return deadline - min(CONNECT_LISTING_RESERVE_SECONDS, (deadline - clock()) / 2)
 
 
-# Not answering the batch route as designed: before commcare-connect#1588 is deployed
-# the route 404s (or 405s), and a 400 means a request it does not accept. Either way
-# the older checks still decide, and none of these may be read as a denial.
-_BATCH_FALLBACK_STATUSES = frozenset({400, 404, 405})
+async def _verify_connect_batch(client, listing, ids, deadline, clock, *, log):
+    """One request deciding every opportunity in ``ids``, or None to fall back.
 
-
-async def _verify_connect_batch(
-    client, listing, ids, deadline, clock, *, connection_id, log, unavailable
-):
-    """One request deciding every opportunity in ``ids``; None falls back.
-
-    A ``false`` is an omission, which publication archives as a no-access 404 from
-    the per-opportunity check would have.
+    Only a well-formed 2xx decides. Anything else, a 401 included, falls back to the
+    older checks, which reach the same answer one request later: whatever an edge or
+    proxy says for this route must never archive memberships on its own. A ``false``
+    is an omission, which publication archives as a no-access 404 would have.
     """
     try:
         request = connect_listing.batch_access_request(listing)
     except UnsafeProviderURL:
-        log("batch_unsafe_url", outcome="indeterminate")
-        return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+        log("batch_unsafe_url", outcome="fallback")
+        return None
     remaining = _light_deadline(deadline, clock) - clock()
     if remaining <= 0:
-        return unavailable("batch_deadline_before_request")
+        return None
     request_timeout = min(PER_REQUEST_TIMEOUT_SECONDS, remaining)
     try:
         response = await asyncio.wait_for(
@@ -195,29 +189,23 @@ async def _verify_connect_batch(
             timeout=request_timeout,
         )
     except TimeoutError:
-        return unavailable("batch_request_timeout")
+        log("batch_request_timeout", outcome="fallback")
+        return None
     except httpx.RequestError as exc:
         # The class name only: str(exc) can carry the request URL.
-        return unavailable(f"batch_request_error:{type(exc).__name__}")
-    if clock() >= deadline:
-        return unavailable("batch_deadline_after_response", status=response.status_code)
-    if response.status_code in _BATCH_FALLBACK_STATUSES:
+        log(f"batch_request_error:{type(exc).__name__}", outcome="fallback")
         return None
-    status_result = _status_result(response.status_code)
-    if response.status_code == 401:
-        logger.info(
-            "Provider commcare_connect answered verification for connection %s with HTTP 401 (%s)",
-            connection_id,
-            "invalid_token" if _names_invalid_token(response) else "no token error",
-        )
-        return status_result
-    if status_result is not None:
-        log("batch_http_status", status=response.status_code, outcome=status_result.outcome.value)
-        return status_result
+    if response.status_code == 404:
+        # Silent: the route 404s until commcare-connect#1588 is deployed.
+        return None
+    if not 200 <= response.status_code < 300:
+        log("batch_http_status", status=response.status_code, outcome="fallback")
+        return None
     access = connect_listing.batch_access(response, ids)
     if access is None:
-        # A changed response shape must cost a slow check, not every user's access.
         log("batch_unrecognized_answer", status=response.status_code, outcome="fallback")
+        return None
+    if clock() >= deadline:
         return None
     return ProviderVerificationResult.complete(
         [external_id for external_id in ids if access[external_id]], scope=ids
@@ -443,9 +431,7 @@ async def verify_provider(
                     batch_ids,
                     deadline,
                     clock,
-                    connection_id=snapshot.observation.connection_id,
                     log=log,
-                    unavailable=unavailable,
                 )
                 if batch_result is not None:
                     return batch_result
