@@ -1059,10 +1059,12 @@ async def query(sql: str, workspace_id: str = "", user_id: str = "", thread_id: 
         return tc["result"]
 
 
-def _row_limit_warning(row_limit: int) -> str:
+def _row_limit_warning(row_limit: int, *, more_rows_known: bool = True) -> str:
     # The full result reaches the user as a CSV download (#969), never through the model.
+    # Only SQL probes past the cap; a semantic result of exactly the cap may be complete.
+    extent = "the full result has more" if more_rows_known else "the full result may have more"
     return (
-        f"Only the first {row_limit} rows were returned; the full result has more."
+        f"Only the first {row_limit} rows were returned; {extent}."
         " Say so in your answer and do not present these rows as complete. To answer"
         " from all of the data, aggregate it further in the query. Members with edit"
         " access can download the full result as CSV from this query's result card."
@@ -1242,7 +1244,7 @@ async def semantic_query(
         warnings = []
         if result.get("truncated"):
             if result.get("row_count", 0) >= MAX_SEMANTIC_LIMIT:
-                warnings.append(_row_limit_warning(MAX_SEMANTIC_LIMIT))
+                warnings.append(_row_limit_warning(MAX_SEMANTIC_LIMIT, more_rows_known=False))
             else:
                 warnings.append(
                     f"Results stopped at the requested limit of {result.get('row_count')} rows;"

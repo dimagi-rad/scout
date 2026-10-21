@@ -153,8 +153,8 @@ function RowLimitNotice({
     >
       <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
       <span className="flex-1 min-w-48">
-        Showing the first {shown.toLocaleString()} rows. The full result is larger than the{" "}
-        {rowLimit.toLocaleString()}-row chat limit, so this is not the complete result.
+        Showing the first {shown.toLocaleString()} rows. The result reached the{" "}
+        {rowLimit.toLocaleString()}-row chat limit, so it may not be complete.
       </span>
       {canExport && <FullResultDownloadButton exportUrl={exportUrl} />}
     </div>
@@ -200,6 +200,7 @@ export interface QueryOutput {
     row_count: number
     truncated?: boolean
     row_limit?: number
+    truncation?: { original_row_count?: number }
     sql_executed?: string
     tables_accessed?: string[]
   }
@@ -370,6 +371,7 @@ export interface SemanticQueryOutput {
     row_count: number
     truncated?: boolean
     row_limit?: number
+    truncation?: { original_row_count?: number }
     semantic_query?: Record<string, unknown>
     members?: string[]
   }

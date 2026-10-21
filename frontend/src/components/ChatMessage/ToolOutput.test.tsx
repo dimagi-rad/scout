@@ -240,9 +240,23 @@ describe("Row-limit notice (#969)", () => {
       />,
     )
     expect(screen.getByTestId("query-result-row-limit")).toHaveTextContent(
-      "Showing the first 2 rows. The full result is larger than the 2-row chat limit",
+      "Showing the first 2 rows. The result reached the 2-row chat limit, so it may not be complete.",
     )
     expect(screen.queryByText("Say so in your answer.")).not.toBeInTheDocument()
+  })
+
+  it("still flags a cut-off result whose rows the byte budget trimmed further", () => {
+    render(
+      <QueryToolOutput
+        output={{
+          success: true,
+          data: { ...capped, row_count: 1, rows: [["x"]], truncation: { original_row_count: 2 } },
+        }}
+        exportUrl={exportUrl}
+      />,
+    )
+    expect(screen.getByTestId("query-result-row-limit")).toHaveTextContent("Showing the first 1 rows")
+    expect(screen.getByTestId("query-result-download-full")).toBeInTheDocument()
   })
 
   it("is not shown when the result stopped at a smaller limit the agent chose", () => {
