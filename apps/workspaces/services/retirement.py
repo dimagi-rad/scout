@@ -749,8 +749,8 @@ async def _reconcile_dependent_view_schemas_after_teardown(schema) -> None:
     """Reconcile dependent multi-tenant view schemas after ``schema`` is dropped.
 
     If the tenant has another ACTIVE schema (refresh path), rebuild the views
-    against it; if none survives (pure TTL expiry), flip them FAILED so the catalog
-    reports the truth instead of serving an empty view.
+    that left the tenant out; if none survives (pure TTL expiry), flip them FAILED
+    so the catalog reports the truth instead of serving an empty view.
 
     ``exclude(id=schema.id)`` matters: a direct caller may pass an ACTIVE row, so
     excluding it makes the "another ACTIVE schema?" check correct either way.
@@ -764,7 +764,13 @@ async def _reconcile_dependent_view_schemas_after_teardown(schema) -> None:
         .aexists()
     )
     if tenant_has_surviving_active_schema:
-        await publication.rebuild_dependent_view_schemas([schema.tenant_id])
+        # The RESTRICT drop just proved no view reads the old schema, so a view
+        # schema that includes the tenant already reads a current one. Rebuilding
+        # those changed nothing: one 11-source refresh queued 11 rebuilds that held
+        # every worker slot for 15 minutes (#918).
+        await publication.rebuild_dependent_view_schemas(
+            [schema.tenant_id], skip_serving_tenant_id=schema.tenant_id
+        )
     else:
         # Log the count so a cascade that silently degrades N workspaces is
         # visible (arch #257, finding 08#9).
