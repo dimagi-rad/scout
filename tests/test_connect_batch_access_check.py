@@ -16,6 +16,7 @@ import pytest
 from allauth.socialaccount.models import SocialAccount, SocialToken
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership, UpstreamAccessProof
+from apps.users.services import access_verification_providers
 from apps.users.services.access_verification_providers import verify_provider
 from apps.users.services.access_verification_service import verify_connection_access
 from apps.users.services.access_verification_types import (
@@ -267,6 +268,26 @@ async def test_batch_answer_landing_past_the_deadline_is_logged(settings, caplog
     assert any(
         "cause=batch_deadline_after_response" in record.getMessage() for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_stalled_batch_route_leaves_the_listing_its_budget(settings, monkeypatch):
+    monkeypatch.setattr(access_verification_providers, "CONNECT_BATCH_TIMEOUT_SECONDS", 0.05)
+    ids = {str(100 + i) for i in range(MAX_SUBSET + 1)}
+    listed = [{"id": int(i), "name": i} for i in ids]
+
+    class StalledBatch(_Client):
+        async def post(self, url, **kwargs):
+            self.posts.append((url, kwargs))
+            await asyncio.sleep(3600)
+
+    client = StalledBatch(None, {LISTING: _json(200, {"opportunities": listed}, LISTING)})
+
+    result = await asyncio.wait_for(_check(settings, ids, client), timeout=5)
+
+    assert result.outcome == VerificationOutcome.COMPLETE
+    assert client.gets == [LISTING]
+    assert client.posts[0][1]["timeout"] == 0.05
 
 
 @pytest.mark.asyncio

@@ -42,6 +42,9 @@ MAX_ROWS = 10_000
 CONNECT_LISTING_RESERVE_SECONDS = 5.0
 # Concurrent per-opportunity requests within one connection's check.
 CONNECT_LIGHT_CONCURRENCY = 8
+# One indexed query on Connect's side; a route that stalls instead (an edge holding
+# the POST) must leave the listing, the only fallback above 25 ids, its ~10s.
+CONNECT_BATCH_TIMEOUT_SECONDS = 3.0
 
 
 class ProcessNetworkLimiter:
@@ -177,7 +180,7 @@ async def _verify_connect_batch(client, listing, ids, deadline, clock, *, log):
     if remaining <= 0:
         log("batch_deadline_before_request", outcome="fallback")
         return None
-    request_timeout = min(PER_REQUEST_TIMEOUT_SECONDS, remaining)
+    request_timeout = min(CONNECT_BATCH_TIMEOUT_SECONDS, remaining)
     try:
         response = await asyncio.wait_for(
             client.post(
