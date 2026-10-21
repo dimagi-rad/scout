@@ -1,19 +1,29 @@
-import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react"
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
+import { createPortal } from "react-dom"
 import { Upload } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import { carriesFiles } from "./rules"
 
+// dragover repeats while a drag hovers (every 350ms ±200ms by spec), so one this
+// late means the drag ended somewhere we heard nothing from.
+const DRAG_IDLE_MS = 1_000
+
 /**
- * Makes the whole chat panel (thread header and empty state included) a drop
- * target for files, with an overlay while files are dragged over it.
+ * While a chat is open the whole window takes dropped files: the app's top bar,
+ * the sidebar and the artifact panel as well as the chat itself, since a user
+ * drags a screenshot onto whatever is nearest.
  *
- * - dragenter/dragleave fire for every child crossed, so a depth counter, not
- *   the last event, decides whether the pointer is still inside.
- * - Only drags carrying files count: a text selection or a link dragged around
- *   the page must not show the overlay or be swallowed.
- * - While mounted, a file dropped anywhere else on the page is ignored instead of
- *   the browser navigating away to open it.
+ * - The drag is noticed on window. A full-window overlay then takes every drag
+ *   event, so no element (an artifact iframe included) can swallow the drop, and
+ *   crossing elements underneath can't make it flicker.
+ * - The overlay goes on leaving the window, on drop or dragend, at the next
+ *   pointer move (none fire during a drag), or when dragover stops arriving. A
+ *   dragleave from a node that unmounted mid-drag can't keep it up.
+ * - Only drags carrying files count: a text selection, a link, or an image
+ *   dragged from the page itself is left alone.
+ * - A file dropped while the overlay is not up is still taken here rather than
+ *   opened by the browser.
  */
 export function ChatDropZone({
   onFiles,
@@ -21,110 +31,141 @@ export function ChatDropZone({
   className,
   children,
 }: {
-  onFiles: (files: File[]) => void
+  /** ``folders``: dropped folders, which arrive as File objects but can't be read. */
+  onFiles: (files: File[], folders?: File[]) => void
   disabled?: boolean
   className?: string
   children: ReactNode
 }) {
   const [dragging, setDragging] = useState(false)
-  const depth = useRef(0)
+  const draggingRef = useRef(false)
   // A drag that began on this page (an image in a reply, say) is never an upload.
   const internalDrag = useRef(false)
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const latest = useRef({ onFiles, disabled })
+  useLayoutEffect(() => {
+    latest.current = { onFiles, disabled }
+  })
 
   useEffect(() => {
-    const reset = () => {
-      depth.current = 0
-      internalDrag.current = false
-      setDragging(false)
+    const show = (on: boolean) => {
+      if (idleTimer.current) clearTimeout(idleTimer.current)
+      idleTimer.current = on ? setTimeout(() => show(false), DRAG_IDLE_MS) : null
+      if (draggingRef.current === on) return
+      draggingRef.current = on
+      setDragging(on)
     }
+    const takes = (e: DragEvent) =>
+      !internalDrag.current && !latest.current.disabled && carriesFiles(e.dataTransfer)
+
     const onDragStart = () => {
       internalDrag.current = true
     }
-    // A drag source that unmounts mid-drag never fires dragend; the pointer moving
-    // over the page again means that drag is over.
-    const endInternalDrag = () => {
+    const onDragEnd = () => {
       internalDrag.current = false
+      show(false)
     }
-    // Bubbles up after the zone's own handlers: a drag the zone took is already
-    // defaultPrevented. Anywhere else, cancelling dragover with dropEffect "none"
-    // is what stops the browser from opening the file.
-    const swallowFileDrop = (e: globalThis.DragEvent) => {
+    // Pointer events don't fire during a drag; one now means any drag is over.
+    const onPointerMove = () => {
+      internalDrag.current = false
+      if (draggingRef.current) show(false)
+    }
+    const onDragEnter = (e: DragEvent) => {
+      if (takes(e)) show(true)
+    }
+    const onDragOver = (e: DragEvent) => {
       if (!carriesFiles(e.dataTransfer)) return
-      if (e.type === "dragover" && e.dataTransfer && !e.defaultPrevented) {
+      // Cancelled either way: dropEffect "none" is what stops the browser opening it.
+      e.preventDefault()
+      if (!e.dataTransfer) return
+      if (takes(e)) {
+        e.dataTransfer.dropEffect = "copy"
+        show(true)
+      } else {
         e.dataTransfer.dropEffect = "none"
       }
-      e.preventDefault()
-      if (e.type === "drop") reset()
     }
+    const onDragLeave = (e: DragEvent) => {
+      // Leaving the window: nothing inside it is entered next.
+      if (draggingRef.current && !e.relatedTarget && leftWindow(e)) show(false)
+    }
+    const onDrop = (e: DragEvent) => {
+      if (!carriesFiles(e.dataTransfer)) return
+      e.preventDefault()
+      const taken = takes(e)
+      internalDrag.current = false
+      show(false)
+      if (!taken) return
+      const { files, folders } = splitFolders(e.dataTransfer)
+      if (files.length || folders.length) latest.current.onFiles(files, folders)
+    }
+
     window.addEventListener("dragstart", onDragStart)
-    window.addEventListener("pointermove", endInternalDrag, { passive: true })
-    window.addEventListener("dragend", reset)
-    window.addEventListener("dragover", swallowFileDrop)
-    window.addEventListener("drop", swallowFileDrop)
+    window.addEventListener("dragend", onDragEnd)
+    window.addEventListener("pointermove", onPointerMove, { passive: true })
+    window.addEventListener("mousemove", onPointerMove, { passive: true })
+    window.addEventListener("dragenter", onDragEnter)
+    window.addEventListener("dragover", onDragOver)
+    window.addEventListener("dragleave", onDragLeave)
+    window.addEventListener("drop", onDrop)
     return () => {
+      if (idleTimer.current) clearTimeout(idleTimer.current)
       window.removeEventListener("dragstart", onDragStart)
-      window.removeEventListener("pointermove", endInternalDrag)
-      window.removeEventListener("dragend", reset)
-      window.removeEventListener("dragover", swallowFileDrop)
-      window.removeEventListener("drop", swallowFileDrop)
+      window.removeEventListener("dragend", onDragEnd)
+      window.removeEventListener("pointermove", onPointerMove)
+      window.removeEventListener("mousemove", onPointerMove)
+      window.removeEventListener("dragenter", onDragEnter)
+      window.removeEventListener("dragover", onDragOver)
+      window.removeEventListener("dragleave", onDragLeave)
+      window.removeEventListener("drop", onDrop)
     }
   }, [])
 
-  // Disabling only stops a new drag being taken: a drag already under way must still
-  // be able to leave (or drop), or the overlay would stick.
-  const accepts = (e: DragEvent) => !internalDrag.current && carriesFiles(e.dataTransfer)
-
-  function handleDragEnter(e: DragEvent) {
-    if (disabled || !accepts(e)) return
-    e.preventDefault()
-    depth.current += 1
-    setDragging(true)
-  }
-
-  function handleDragOver(e: DragEvent) {
-    if (disabled || !accepts(e)) return
-    e.preventDefault()
-    e.dataTransfer.dropEffect = "copy"
-  }
-
-  function handleDragLeave(e: DragEvent) {
-    if (!accepts(e)) return
-    depth.current = Math.max(0, depth.current - 1)
-    if (depth.current === 0) setDragging(false)
-  }
-
-  function handleDrop(e: DragEvent) {
-    if (!accepts(e)) return
-    e.preventDefault()
-    depth.current = 0
-    setDragging(false)
-    if (disabled) return
-    const files = Array.from(e.dataTransfer.files)
-    if (files.length) onFiles(files)
-  }
-
   return (
-    <div
-      className={cn("relative", className)}
-      onDragEnter={handleDragEnter}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-      data-testid="chat-drop-zone"
-    >
+    <div className={cn("relative", className)} data-testid="chat-drop-zone">
       {children}
-      {dragging && (
-        <div
-          className="pointer-events-none absolute inset-2 z-50 flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-primary bg-background/90 text-primary backdrop-blur-sm"
-          data-testid="chat-drop-overlay"
-        >
-          <Upload className="size-8" aria-hidden="true" />
-          <p className="text-base font-medium">Drop files to attach</p>
-          <p className="text-xs text-muted-foreground">
-            Images, or JSON, CSV, TSV, TXT and MD files
-          </p>
-        </div>
-      )}
+      {dragging
+        && createPortal(
+          // Takes pointer events on purpose: over an iframe, the drop must land here.
+          <div
+            className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-2 bg-background/80 p-4 text-primary backdrop-blur-sm"
+            data-testid="chat-drop-overlay"
+          >
+            <div className="pointer-events-none flex size-full flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-primary">
+              <Upload className="size-8" aria-hidden="true" />
+              <p className="text-base font-medium">Drop files to attach</p>
+              <p className="text-xs text-muted-foreground">
+                Images, or JSON, CSV, TSV, TXT and MD files
+              </p>
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   )
+}
+
+/**
+ * A dropped folder comes through as a File with no readable bytes; its item's entry
+ * says it is a directory. Items and files list the dropped files in the same order.
+ */
+function splitFolders(dataTransfer: DataTransfer | null): { files: File[]; folders: File[] } {
+  const all = Array.from(dataTransfer?.files ?? [])
+  const items = Array.from(dataTransfer?.items ?? []).filter((item) => item.kind === "file")
+  if (items.length !== all.length) return { files: all, folders: [] }
+  const files: File[] = []
+  const folders: File[] = []
+  all.forEach((file, i) => {
+    const entry = items[i].webkitGetAsEntry?.()
+    if (entry?.isDirectory) folders.push(file)
+    else files.push(file)
+  })
+  return { files, folders }
+}
+
+/** Whether a dragleave's coordinates are outside the viewport (or unknown: Safari). */
+function leftWindow(e: DragEvent): boolean {
+  const { clientX: x, clientY: y } = e
+  if (x === 0 && y === 0) return true
+  return x <= 0 || y <= 0 || x >= window.innerWidth || y >= window.innerHeight
 }

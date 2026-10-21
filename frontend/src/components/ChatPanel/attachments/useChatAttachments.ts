@@ -6,6 +6,7 @@ import { downscaleImage } from "./downscale"
 import {
   MAX_ATTACHMENTS,
   checkFileType,
+  type FileCheck,
   filesToAttachFromPaste,
   sizeError,
   type AttachmentKind,
@@ -33,7 +34,8 @@ export interface ChatAttachments {
   failed: boolean
   /** Why files were turned away, e.g. over the per-message limit. */
   notice: string | null
-  add: (files: File[]) => void
+  /** ``folders`` get a chip that says they can't be attached. */
+  add: (files: File[], folders?: File[]) => void
   remove: (localId: string) => void
   /** Uploaded files can go out with a message. */
   ready: boolean
@@ -172,7 +174,8 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
   )
 
   const add = useCallback(
-    (files: File[]) => {
+    (dropped: File[], folders: File[] = []) => {
+      const files = [...dropped, ...folders]
       // No workspace means no chat to attach to; the panel shows no composer then.
       if (!files.length || !workspaceId) return
       const existing = byScopeRef.current[scope]?.length ?? 0
@@ -185,7 +188,9 @@ export function useChatAttachments(workspaceId: string | null, threadId: string)
       }
       if (!accepted.length) return
       const added = accepted.map((file) => {
-        const check = checkFileType(file)
+        const check: FileCheck = folders.includes(file)
+          ? { ok: false, error: "Folders aren't supported. Attach the files inside it instead." }
+          : checkFileType(file)
         const item: ComposerAttachment = {
           localId: `attachment-${++nextLocalId}`,
           filename: file.name || pastedName(file.type),

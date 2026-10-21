@@ -1,5 +1,6 @@
 import { createUIMessageStream, createUIMessageStreamResponse, type UIMessage } from "ai"
 import { act, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import type { ReactNode } from "react"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -8,6 +9,7 @@ import { workspaceApi, type WorkspaceListItem } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
 import { ChatComposer } from "./ChatComposer"
 import { ChatPanel } from "./ChatPanel"
+import { TopBarProvider } from "@/components/TopBar"
 import type { ChatAttachments } from "./attachments/useChatAttachments"
 
 vi.mock("@/contexts/WorkspaceJobsContext", () => ({
@@ -92,14 +94,42 @@ function screenshot(name = "shot.png") {
   return new File([new Uint8Array([137, 80, 78, 71])], name, { type: "image/png" })
 }
 
+/** ChatPanel inside AppLayout's shape: the drop must work on its siblings too. */
+function AppShell({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex h-screen">
+      <aside data-testid="sidebar-shell">Sidebar</aside>
+      <div className="flex flex-1 flex-col">
+        <TopBarProvider>
+          <main>{children}</main>
+        </TopBarProvider>
+      </div>
+      <div data-testid="artifact-modal">
+        <iframe title="artifact" />
+      </div>
+    </div>
+  )
+}
+
 async function renderThread() {
   const posted = mockApi()
-  render(<MemoryRouter><ChatPanel /></MemoryRouter>)
+  render(<MemoryRouter><AppShell><ChatPanel /></AppShell></MemoryRouter>)
   await screen.findByText("Visits fell 20% in May.")
   return posted
 }
 
+// jsdom has no DragEvent, so without this a drag event loses its coordinates
+// and relatedTarget, which tell leaving the window from crossing an element.
+class TestDragEvent extends MouseEvent {
+  dataTransfer: DataTransfer | null
+  constructor(type: string, init: DragEventInit = {}) {
+    super(type, init)
+    this.dataTransfer = init.dataTransfer ?? null
+  }
+}
+
 beforeEach(() => {
+  vi.stubGlobal("DragEvent", TestDragEvent)
   sessionStorage.clear()
   localStorage.clear()
   useAppStore.setState({ activeDomainId: WS })
@@ -221,20 +251,110 @@ describe("ChatPanel attachments (#913)", () => {
     expect(screen.queryByTestId("chat-attachment-chip-0")).toBeNull()
   })
 
-  it("keeps the overlay while the drag crosses child elements, and drops it on leaving", async () => {
+  it.each([
+    ["the app top bar", "top-bar"],
+    ["the sidebar", "sidebar-shell"],
+    ["the artifact panel", "artifact-modal"],
+  ])("takes a file dropped on %s, outside the chat panel", async (_where, testId) => {
+    await renderThread()
+    const target = screen.getByTestId(testId)
+    const file = screenshot()
+
+    fireEvent.dragEnter(target, fileDrag([file]))
+    const overlay = screen.getByTestId("chat-drop-overlay")
+    // Full window, and it takes the pointer, so no iframe under it can swallow the drop.
+    expect(overlay).toHaveClass("fixed", "inset-0")
+    expect(overlay).not.toHaveClass("pointer-events-none")
+    const over = createEvent.dragOver(target, fileDrag([file]))
+    fireEvent(target, over)
+    expect(over.defaultPrevented).toBe(true)
+
+    await act(async () => {
+      fireEvent.drop(target, fileDrag([file]))
+    })
+    expect(screen.queryByTestId("chat-drop-overlay")).toBeNull()
+    expect(upload).toHaveBeenCalledWith(file, WS, expect.any(Function), expect.any(AbortSignal))
+  })
+
+  it("takes a drop on the overlay itself", async () => {
+    await renderThread()
+    const file = screenshot()
+    fireEvent.dragEnter(screen.getByTestId("top-bar"), fileDrag([file]))
+    await act(async () => {
+      fireEvent.drop(screen.getByTestId("chat-drop-overlay"), fileDrag([file]))
+    })
+    expect(upload).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps the overlay while the drag moves inside the window, and drops it on leaving", async () => {
     await renderThread()
     const header = screen.getByTestId("chat-thread-title")
-    const input = screen.getByTestId("chat-input")
     const drag = fileDrag([screenshot()])
 
     fireEvent.dragEnter(header, drag)
-    // Entering the next element fires before leaving the last.
-    fireEvent.dragEnter(input, drag)
-    fireEvent.dragLeave(header, drag)
+    const overlay = screen.getByTestId("chat-drop-overlay")
+    // Moving onto the overlay leaves the header for something inside the window.
+    fireEvent.dragEnter(overlay, drag)
+    fireEvent.dragLeave(header, { ...drag, relatedTarget: overlay, clientX: 300, clientY: 200 })
     expect(screen.getByTestId("chat-drop-overlay")).toBeInTheDocument()
 
-    fireEvent.dragLeave(input, drag)
+    fireEvent.dragLeave(overlay, { ...drag, relatedTarget: null, clientX: 0, clientY: 0 })
     expect(screen.queryByTestId("chat-drop-overlay")).toBeNull()
+  })
+
+  it("does not stick when the hovered node unmounts mid-drag", async () => {
+    await renderThread()
+    const drag = fileDrag([screenshot()])
+    const doomed = document.createElement("div")
+    document.body.append(doomed)
+
+    fireEvent.dragEnter(doomed, drag)
+    doomed.remove()
+    // Its dragleave goes to a detached node and never reaches the window.
+    fireEvent.dragLeave(doomed, drag)
+    fireEvent.dragEnter(screen.getByTestId("chat-input"), drag)
+    fireEvent.dragLeave(screen.getByTestId("chat-input"), {
+      ...drag,
+      relatedTarget: screen.getByTestId("chat-drop-overlay"),
+      clientX: 300,
+      clientY: 200,
+    })
+    expect(screen.getByTestId("chat-drop-overlay")).toBeInTheDocument()
+
+    // The drag is over (it ended outside the page): the pointer moving again says so.
+    fireEvent.pointerMove(window)
+    expect(screen.queryByTestId("chat-drop-overlay")).toBeNull()
+  })
+
+  it("drops the overlay when dragover stops arriving", async () => {
+    await renderThread()
+    vi.useFakeTimers()
+    try {
+      fireEvent.dragEnter(screen.getByTestId("top-bar"), fileDrag([screenshot()]))
+      expect(screen.getByTestId("chat-drop-overlay")).toBeInTheDocument()
+      act(() => {
+        vi.advanceTimersByTime(1_100)
+      })
+      expect(screen.queryByTestId("chat-drop-overlay")).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("says a dropped folder can't be attached instead of uploading it", async () => {
+    await renderThread()
+    const folder = new File([], "screenshots")
+    const dataTransfer = {
+      types: ["Files"],
+      files: [folder],
+      items: [{ kind: "file", webkitGetAsEntry: () => ({ isDirectory: true }) }],
+      dropEffect: "none",
+    }
+    await act(async () => {
+      fireEvent.drop(screen.getByTestId("top-bar"), { dataTransfer })
+    })
+    expect(screen.getByTestId("chat-attachment-chip-0")).toHaveTextContent("Folders aren't supported")
+    expect(upload).not.toHaveBeenCalled()
   })
 
   it("stops the browser opening a file dropped outside the chat", async () => {

@@ -1,10 +1,12 @@
 import { useRef, useState } from "react"
 import type { UIMessage } from "ai"
 import type { Meta, StoryObj } from "@storybook/react-vite"
+import { MemoryRouter } from "react-router-dom"
 
 import { ChatMessage } from "@/components/ChatMessage"
 import { ChatComposer, QuoteSelectionAction } from "@/components/ChatPanel"
 import { ChatThreadHeader } from "@/components/ChatPanel/ChatThreadHeader"
+import { TopBarProvider } from "@/components/TopBar"
 import { ChatDropZone } from "@/components/ChatPanel/attachments/ChatDropZone"
 import { useChatAttachments } from "@/components/ChatPanel/attachments/useChatAttachments"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
@@ -267,53 +269,88 @@ const attachmentMessages: UIMessage[] = [
  * Drop files anywhere on the panel, header included, paste a screenshot, or use the
  * paperclip. Uploads go to /api/chat/attachments/, so outside the app they need a mock.
  */
+function AttachmentsChat({ className = "h-[760px]" }: { className?: string }) {
+  const [messages, setMessages] = useState<UIMessage[]>(attachmentMessages)
+  const [input, setInput] = useState("")
+  const attachments = useChatAttachments("workspace-story", "thread-story")
+
+  function send(text: string) {
+    const files = attachments.take()
+    setMessages((current) => [
+      ...current,
+      {
+        id: `user-${current.length + 1}`,
+        role: "user",
+        parts: [{ type: "text", text }, ...files],
+      } as UIMessage,
+    ])
+  }
+
+  return (
+    <ChatDropZone onFiles={attachments.add} className={`flex flex-col bg-background ${className}`}>
+      <ChatThreadHeader
+        title="Registry vs dashboard"
+        panelOpen={false}
+        panelMode="files"
+        onTitleChange={() => undefined}
+        onOpenFiles={() => undefined}
+        onOpenCanvas={() => undefined}
+      />
+      <div className="flex-1 overflow-y-auto p-5">
+        <div className="mx-auto max-w-4xl space-y-5">
+          {messages.map((message) => (
+            <ChatMessage
+              key={message.id}
+              message={message}
+              isActiveMessage={false}
+              workspaceId="workspace-story"
+              threadId="thread-story"
+            />
+          ))}
+        </div>
+      </div>
+      <div className="border-t p-4">
+        <div className="mx-auto max-w-4xl">
+          <ChatComposer input={input} setInput={setInput} onSend={send} attachments={attachments} />
+        </div>
+      </div>
+    </ChatDropZone>
+  )
+}
+
 export const ChatWithAttachments: Story = {
-  render: function ChatWithAttachmentsStory() {
-    const [messages, setMessages] = useState<UIMessage[]>(attachmentMessages)
-    const [input, setInput] = useState("")
-    const attachments = useChatAttachments("workspace-story", "thread-story")
+  render: () => <AttachmentsChat />,
+}
 
-    function send(text: string) {
-      const files = attachments.take()
-      setMessages((current) => [
-        ...current,
-        {
-          id: `user-${current.length + 1}`,
-          role: "user",
-          parts: [{ type: "text", text }, ...files],
-        } as UIMessage,
-      ])
-    }
-
-    return (
-      <ChatDropZone onFiles={attachments.add} className="flex h-[760px] flex-col bg-background">
-        <ChatThreadHeader
-          title="Registry vs dashboard"
-          panelOpen={false}
-          panelMode="files"
-          onTitleChange={() => undefined}
-          onOpenFiles={() => undefined}
-          onOpenCanvas={() => undefined}
-        />
-        <div className="flex-1 overflow-y-auto p-5">
-          <div className="mx-auto max-w-4xl space-y-5">
-            {messages.map((message) => (
-              <ChatMessage
-                key={message.id}
-                message={message}
-                isActiveMessage={false}
-                workspaceId="workspace-story"
-                threadId="thread-story"
-              />
-            ))}
-          </div>
+/**
+ * The chat inside the app's frame: the top bar, a sidebar and an artifact panel (an
+ * iframe) all take a dropped file too, as the user drags onto whatever is nearest.
+ */
+export const ChatWithAttachmentsInAppFrame: Story = {
+  render: () => (
+    <MemoryRouter>
+      <div className="flex h-[760px] bg-background">
+        <aside
+          className="w-56 shrink-0 border-r p-3 text-sm text-muted-foreground"
+          data-testid="sidebar-shell"
+        >
+          Sidebar
+        </aside>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <TopBarProvider>
+            <main className="min-h-0 flex-1">
+              <AttachmentsChat className="h-full" />
+            </main>
+          </TopBarProvider>
         </div>
-        <div className="border-t p-4">
-          <div className="mx-auto max-w-4xl">
-            <ChatComposer input={input} setInput={setInput} onSend={send} attachments={attachments} />
-          </div>
+        <div className="w-80 shrink-0 border-l" data-testid="artifact-modal">
+          <iframe
+            title="Artifact"
+            className="size-full"
+            srcDoc="<body style='font:14px sans-serif;padding:16px'>Artifact iframe</body>"
+          />
         </div>
-      </ChatDropZone>
-    )
-  },
+      </div>
+    </MemoryRouter>
+  ),
 }
