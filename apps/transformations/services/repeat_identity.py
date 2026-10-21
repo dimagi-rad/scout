@@ -19,6 +19,7 @@ from sqlglot.errors import SqlglotError
 from apps.common.identifiers import PG_MAX_IDENTIFIER_BYTES, fit_identifier
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.staging_identity import RepeatModelMigrationRequired
+from apps.transformations.services.staging_source import detoasted_source
 from mcp_server.event_time import event_time_sql
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,44 @@ def _parse(sql: str) -> exp.Select | None:
     if len(statements) != 1 or not isinstance(statements[0], exp.Select):
         return None
     tree = statements[0]
-    return None if any(node.comments for node in tree.walk()) else tree
+    return None if any(node.comments for node in tree.walk()) else _plain_source(tree)
+
+
+def _plain_source(tree: exp.Select) -> exp.Select:
+    """Read a detoasted staging source (#918) as the plain table scan it wraps.
+
+    Only a wrapper that ``detoasted_source`` reproduces exactly is unwrapped, so
+    old and new generated SQL share one source identity and nothing else is admitted.
+    """
+    source = tree.args.get("from_")
+    subquery = source.this if source else None
+    if not isinstance(subquery, exp.Subquery) or tree.args.get("where") or tree.args.get("joins"):
+        return tree
+    inner = subquery.this
+    inner_from = inner.args.get("from_") if isinstance(inner, exp.Select) else None
+    if inner_from is None or not isinstance(inner_from.this, exp.Table) or not inner.expressions:
+        return tree
+    *columns, json_column = inner.expressions
+    if not all(isinstance(column, exp.Column) and not column.table for column in columns):
+        return tree
+    where = inner.args.get("where")
+    table = inner_from.this.name
+    rebuilt = sqlglot.parse_one(
+        "SELECT 1 "
+        + detoasted_source(
+            table,
+            [column.name for column in columns],
+            json_column.alias_or_name,
+            where=where.this.sql(dialect="postgres") if where else None,
+        ),
+        read="postgres",
+    )
+    if rebuilt.args.get("from_") != source:
+        return tree
+    plain = tree.copy()
+    plain.set("from_", exp.From(this=exp.to_table(table)))
+    plain.set("where", where.copy() if where else None)
+    return plain
 
 
 def _without_projection(tree: exp.Select) -> exp.Select:

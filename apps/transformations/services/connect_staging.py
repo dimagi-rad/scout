@@ -32,6 +32,7 @@ from apps.transformations.services.repeat_identity import (
     preserve_repeat_names,
     rename_legacy_repeats,
 )
+from apps.transformations.services.staging_source import detoasted_source
 from apps.users.models import Tenant
 
 logger = logging.getLogger(__name__)
@@ -117,7 +118,13 @@ def _generate_stg_visits(
     warn_folded(tenant, "stg_visits", total=len(columns), kept=len(kept), raw_column="form_json")
     select_parts = [f"    {col}" for col in _VISIT_BASE_COLUMNS]
     select_parts.extend(column.select_sql() for column in kept)
-    lines = ["SELECT", ",\n".join(select_parts), "FROM raw_visits"]
+    lines = [
+        "SELECT",
+        ",\n".join(select_parts),
+        detoasted_source(
+            "raw_visits", [c for c in _VISIT_BASE_COLUMNS if c != "form_json"], "form_json"
+        ),
+    ]
 
     return TransformationAsset(
         name="stg_visits",
