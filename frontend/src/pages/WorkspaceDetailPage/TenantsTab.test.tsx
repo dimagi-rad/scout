@@ -534,7 +534,12 @@ describe("provider-specific filters", () => {
   const mixed = [
     connect("c1", "Kenya Live", { is_active: true, organization: "dimagi" }),
     ocs("o1", "Helper Bot", { team: "t-a", team_name: "Team A", last_activity_at: recent }),
-    ocs("o2", "Old Bot", { team: "t-b", team_name: "Team B", last_activity_at: null }),
+    ocs("o2", "Old Bot", {
+      team: "t-b",
+      team_name: "Team B",
+      last_activity_at: null,
+      activity_checked_at: new Date().toISOString(),
+    }),
   ]
 
   async function open() {

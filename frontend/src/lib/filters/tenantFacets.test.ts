@@ -277,12 +277,23 @@ describe("ocsStatus", () => {
   const NOW = Date.parse("2026-10-20T12:00:00Z")
   const DAY = 86_400_000
 
+  const checked = new Date(NOW - 3_600_000).toISOString()
+  const staleCheck = new Date(NOW - 2 * DAY).toISOString()
+  const recent = new Date(NOW - (OCS_ACTIVE_DAYS - 1) * DAY).toISOString()
+  const old = new Date(NOW - (OCS_ACTIVE_DAYS + 1) * DAY).toISOString()
+
   it("is active with activity inside the window, inactive outside it or with none", () => {
-    const recent = new Date(NOW - (OCS_ACTIVE_DAYS - 1) * DAY).toISOString()
-    const old = new Date(NOW - (OCS_ACTIVE_DAYS + 1) * DAY).toISOString()
-    expect(ocsStatus(tenant("a", "ocs", { last_activity_at: recent }), NOW)).toBe("active")
-    expect(ocsStatus(tenant("b", "ocs", { last_activity_at: old }), NOW)).toBe("inactive")
-    expect(ocsStatus(tenant("c", "ocs", { last_activity_at: null }), NOW)).toBe("inactive")
+    const at = (last: string | null) => ({ last_activity_at: last, activity_checked_at: checked })
+    expect(ocsStatus(tenant("a", "ocs", at(recent)), NOW)).toBe("active")
+    expect(ocsStatus(tenant("b", "ocs", at(old)), NOW)).toBe("inactive")
+    expect(ocsStatus(tenant("c", "ocs", at(null)), NOW)).toBe("inactive")
+  })
+
+  it("trusts no activity only from a recent check, since API-key rows are read once", () => {
+    const at = (last: string | null) => ({ last_activity_at: last, activity_checked_at: staleCheck })
+    expect(ocsStatus(tenant("a", "ocs", at(recent)), NOW)).toBe("active")
+    expect(ocsStatus(tenant("b", "ocs", at(old)), NOW)).toBe(UNKNOWN)
+    expect(ocsStatus(tenant("c", "ocs", { last_activity_at: null }), NOW)).toBe(UNKNOWN)
   })
 
   it("is unknown before discovery looked, and does not apply to other providers", () => {

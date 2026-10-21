@@ -55,19 +55,27 @@ function ocsAttributes(t: UserTenant): Record<string, unknown> | undefined {
   return attrs !== null && typeof attrs === "object" && !Array.isArray(attrs) ? attrs : {}
 }
 
+// OAuth discovery re-reads the list hourly; an API-key tenant is read once, at onboarding.
+const OCS_CHECK_FRESH_MS = 86_400_000
+
 /**
  * "active" when a participant messaged the chatbot within OCS_ACTIVE_DAYS,
- * "inactive" when longer ago or never, unknown before discovery has looked.
+ * "inactive" when longer ago or never as of a recent check, otherwise unknown.
  */
 export function ocsStatus(t: UserTenant, now = Date.now()): string | undefined {
   const attrs = ocsAttributes(t)
   if (!attrs) return undefined
   if (!("last_activity_at" in attrs)) return UNKNOWN
   const last = attrs.last_activity_at
-  if (last === null) return "inactive"
-  const time = typeof last === "string" ? Date.parse(last) : Number.NaN
-  if (Number.isNaN(time)) return UNKNOWN
-  return now - time <= OCS_ACTIVE_DAYS * 86_400_000 ? "active" : "inactive"
+  if (last !== null) {
+    const time = typeof last === "string" ? Date.parse(last) : Number.NaN
+    if (Number.isNaN(time)) return UNKNOWN
+    if (now - time <= OCS_ACTIVE_DAYS * 86_400_000) return "active"
+  }
+  // No recent activity is only news if the check itself is recent.
+  const checked =
+    typeof attrs.activity_checked_at === "string" ? Date.parse(attrs.activity_checked_at) : NaN
+  return now - checked <= OCS_CHECK_FRESH_MS ? "inactive" : UNKNOWN
 }
 
 export function connectType(t: UserTenant): string | undefined {
