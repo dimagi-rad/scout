@@ -24,7 +24,7 @@ from django.db.models import Exists, OuterRef, ProtectedError, Q
 from django.utils import timezone
 
 from apps.chat.image_headers import MalformedImage, read_image_header
-from apps.chat.models import AttachmentBlob, ChatAttachment
+from apps.chat.models import AttachmentBlob, ChatAttachment, Thread
 
 logger = logging.getLogger(__name__)
 
@@ -453,9 +453,12 @@ def mark_held_sync(ids, *, thread_id) -> None:
     """
     ids = list(ids)
     if ids:
-        ChatAttachment.objects.filter(id__in=ids, thread_id=thread_id).update(
-            held_at=timezone.now()
-        )
+        # Re-binds too, as amark_held does: a concurrent refused request may have
+        # unbound one since it was resolved.
+        owner = Thread.objects.filter(id=thread_id).values_list("user_id", flat=True)
+        ChatAttachment.objects.filter(
+            Q(thread_id=thread_id) | Q(thread__isnull=True), id__in=ids, user_id__in=owner
+        ).update(thread_id=thread_id, held_at=timezone.now())
 
 
 def release_held_sync(ids, *, thread_id) -> None:

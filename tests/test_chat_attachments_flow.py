@@ -25,8 +25,10 @@ from apps.chat.attachments import (
     amark_sent,
     attachment_url,
     aunbind,
+    mark_held_sync,
 )
 from apps.chat.models import AttachmentBlob, ChatAttachment, PendingRequest, Thread
+from apps.chat.views import _hold_while_loading as _real_hold_while_loading
 from apps.chat.views import _TurnStreamingResponse
 from tests import image_fixtures as images
 
@@ -432,6 +434,13 @@ def _held_post_body(attachment, thread_id, workspace):
     )
 
 
+async def _hold_then_cancel(*args, **kwargs):
+    # The hold commits, then the closed tab's cancellation lands before the view
+    # narrows what it would unbind.
+    await _real_hold_while_loading(*args, **kwargs)
+    raise asyncio.CancelledError
+
+
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_a_send_cancelled_after_its_hold_commits_keeps_the_attachment(user, workspace):
@@ -445,7 +454,7 @@ async def test_a_send_cancelled_after_its_hold_commits_keeps_the_attachment(user
         patch("apps.chat.views.athread_awaits_load", AsyncMock(return_value=False)),
         patch("apps.chat.views.aworkspace_own_build_pending", AsyncMock(return_value=True)),
         patch("apps.chat.views.astart_chat_load", AsyncMock(return_value=object())),
-        patch("apps.chat.views._held_response", side_effect=asyncio.CancelledError),
+        patch("apps.chat.views._hold_while_loading", side_effect=_hold_then_cancel),
         pytest.raises(asyncio.CancelledError),
     ):
         await client.post(
@@ -477,6 +486,19 @@ async def test_an_added_held_part_is_marked_held_in_its_own_commit(user, workspa
     )
     # As if the request were cancelled before its own post-commit mark ran.
     await aunbind(newly, thread=thread)
+
+    await attachment.arefresh_from_db()
+    assert attachment.thread_id == thread.id
+    assert attachment.held_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_marking_held_rebinds_an_attachment_a_racing_refusal_unbound(user, workspace):
+    thread = await Thread.objects.acreate(user=user, workspace=workspace)
+    attachment = await _attachment(user, workspace)  # unbound, as a refusal left it
+
+    await sync_to_async(mark_held_sync)([str(attachment.id)], thread_id=thread.id)
 
     await attachment.arefresh_from_db()
     assert attachment.thread_id == thread.id
