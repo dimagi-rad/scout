@@ -14,6 +14,7 @@ from apps.chat.thread_views import (
     thread_pending_request_parts_view,
     thread_pending_request_view,
     thread_resume_stream_view,
+    thread_tool_call_export_view,
     thread_viewed_view,
 )
 from apps.chat.views import chat_view
@@ -36,6 +37,11 @@ workspace_thread_urlpatterns = [
         "<uuid:thread_id>/pending-request/",
         thread_pending_request_view,
         name="thread_pending_request",
+    ),
+    path(
+        "<uuid:thread_id>/tool-calls/<str:tool_call_id>/export/csv/",
+        thread_tool_call_export_view,
+        name="thread_tool_call_export",
     ),
     path(
         "<uuid:thread_id>/pending-request/parts/",
