@@ -508,6 +508,52 @@ async def test_refresh_teardown_rebuilds_only_views_not_serving_the_tenant(
         mock_rebuild.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_teardown_skip_is_per_workspace(tenant, user):
+    """Skipping a serving sibling still rebuilds one whose coverage predates the record."""
+    old_schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="t_mixed_old", state=SchemaState.TEARDOWN
+    )
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="t_mixed_new_r1", state=SchemaState.ACTIVE
+    )
+    extra = await Tenant.objects.acreate(
+        provider="commcare", external_id="mixed-extra", canonical_name="Mixed Extra"
+    )
+    coverages = {
+        "serving": {
+            "included_tenants": [{"tenant_id": str(tenant.id)}, {"tenant_id": str(extra.id)}],
+            "excluded_tenants": [],
+        },
+        "legacy": {},
+    }
+    workspaces = {}
+    for name, coverage in coverages.items():
+        ws = await Workspace.objects.acreate(name=f"Mixed {name}", created_by=user)
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=extra)
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=ws,
+            schema_name=f"ws_mixed_{name}",
+            state=SchemaState.ACTIVE,
+            tenant_coverage=coverage,
+        )
+        workspaces[name] = ws
+
+    with (
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch(
+            "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
+            new_callable=AsyncMock,
+        ) as mock_rebuild,
+    ):
+        MockManager.return_value.retire_tenant_schema.return_value = None
+        await teardown_schema(schema_id=str(old_schema.id))
+
+    mock_rebuild.assert_awaited_once_with(workspace_id=str(workspaces["legacy"].id))
+
+
 @pytest.mark.parametrize("retiring_state", [SchemaState.TEARDOWN, SchemaState.EXPIRED])
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
