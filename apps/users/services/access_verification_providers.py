@@ -124,8 +124,8 @@ def _new_shared_client() -> httpx.AsyncClient:
 
 
 async def _close_on_loop_shutdown(client: httpx.AsyncClient) -> AsyncGenerator[None, None]:
-    # Holds no reference to its loop, so a loop that never shuts down can still be
-    # collected along with its WeakKeyDictionary entry.
+    # The only cleanup: an open connection references its loop, so a loop closed
+    # without shutdown_asyncgens keeps its entry (and sockets) alive.
     try:
         yield
     finally:
