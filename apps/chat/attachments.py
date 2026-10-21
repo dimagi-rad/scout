@@ -18,12 +18,13 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import PurePath
 
-from django.db import IntegrityError
-from django.db.models import Exists, OuterRef, ProtectedError
+from asgiref.sync import sync_to_async
+from django.db import IntegrityError, transaction
+from django.db.models import Exists, OuterRef, ProtectedError, Q
 from django.utils import timezone
 
 from apps.chat.image_headers import MalformedImage, read_image_header
-from apps.chat.models import AttachmentBlob, ChatAttachment
+from apps.chat.models import AttachmentBlob, ChatAttachment, Thread
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,8 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_IMAGE_DIMENSION = 8000
 MAX_TEXT_BYTES = 2 * 1024 * 1024
 MAX_ATTACHMENTS_PER_MESSAGE = 10
+# File parts read per message, repeats included; a client sends each attachment once.
+MAX_FILE_PARTS = 5 * MAX_ATTACHMENTS_PER_MESSAGE
 # Unsent uploads a user may hold at once; GC frees them after UNSENT_TTL.
 MAX_UNSENT_PER_USER = 100
 UNSENT_TTL = timedelta(hours=24)
@@ -277,3 +280,193 @@ async def _acollect_orphans_one_by_one(orphans) -> int:
             continue
         blobs_deleted += deleted
     return blobs_deleted
+
+
+# Where a HumanMessage carries its attachments; its content stays the typed text.
+SCOUT_ATTACHMENTS_KWARG = "scout_attachments"
+
+
+def message_attachments(message) -> list[dict]:
+    """The ``{id, filename, media_type, size}`` entries a checkpointed message carries."""
+    kwargs = getattr(message, "additional_kwargs", None) or {}
+    entries = kwargs.get(SCOUT_ATTACHMENTS_KWARG)
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)]
+
+
+def with_attachments(attachments) -> dict:
+    """``additional_kwargs`` for a HumanMessage carrying ``attachments`` (none: empty)."""
+    return {SCOUT_ATTACHMENTS_KWARG: list(attachments)} if attachments else {}
+
+
+def merge_attachments(*groups) -> list[dict]:
+    """The groups' attachments in order, each id once."""
+    seen: set[str] = set()
+    merged = []
+    for group in groups:
+        for entry in group:
+            if entry["id"] not in seen:
+                seen.add(entry["id"])
+                merged.append(entry)
+    return merged
+
+
+def attachment_ids_from_parts(parts) -> tuple[list[str], str | None]:
+    """The attachment ids a message's ``file`` parts name, in order, or an error message.
+
+    Only this server's attachment URLs are accepted: a data: URL or any other link
+    would put content the server never validated in front of the model.
+    """
+    too_many = f"A message can carry at most {MAX_ATTACHMENTS_PER_MESSAGE} attachments."
+    ids: dict[str, None] = {}
+    file_parts = 0
+    for part in parts or []:
+        if not isinstance(part, dict) or part.get("type") != "file":
+            continue
+        # Bounded as it goes: a body can hold tens of thousands of parts, and this
+        # runs on the event loop.
+        file_parts += 1
+        if file_parts > MAX_FILE_PARTS:
+            return [], too_many
+        attachment_id = attachment_id_from_url(part.get("url"))
+        if attachment_id is None:
+            return [], "File parts must reference an uploaded attachment."
+        ids[attachment_id] = None
+        if len(ids) > MAX_ATTACHMENTS_PER_MESSAGE:
+            return [], too_many
+    return list(ids), None
+
+
+async def aresolve_for_send(ids: list[str], *, user, workspace, thread_id) -> list[dict] | None:
+    """The attachments' metadata in ``ids`` order, or None unless every one is the
+    user's, in ``workspace``, and unsent or already in this thread."""
+    if not ids:
+        return []
+    rows = {
+        str(row["id"]): row
+        async for row in ChatAttachment.objects.filter(
+            Q(thread__isnull=True) | Q(thread_id=thread_id),
+            id__in=ids,
+            user=user,
+            workspace=workspace,
+        ).values("id", "filename", "media_type", "blob__size")
+    }
+    if len(rows) != len(ids):
+        return None
+    return [
+        {
+            "id": attachment_id,
+            "filename": rows[attachment_id]["filename"],
+            "media_type": rows[attachment_id]["media_type"],
+            "size": rows[attachment_id]["blob__size"],
+        }
+        for attachment_id in ids
+    ]
+
+
+async def abind_to_thread(ids, *, user, workspace, thread) -> list[str] | None:
+    """Tie the attachments to the thread their message is sent in, so GC keeps them.
+
+    Returns the ids this call bound (those still unsent), for ``aunbind`` should the
+    message not be accepted after all; None, binding nothing, when one vanished
+    since it was resolved (its unsent TTL ran out meanwhile).
+    """
+    ids = list(ids)
+    if not ids:
+        return []
+    return await _bind(ids, user=user, workspace=workspace, thread=thread)
+
+
+@sync_to_async
+def _bind(ids: list[str], *, user, workspace, thread) -> list[str] | None:
+    # One transaction with the rows locked, so a concurrent bind of the same ids
+    # cannot be read as unsent here and then undone by this call's rollback.
+    with transaction.atomic():
+        rows = list(
+            ChatAttachment.objects.select_for_update()
+            .filter(Q(thread__isnull=True) | Q(thread=thread))
+            .filter(id__in=ids, user=user, workspace=workspace)
+            .values_list("id", "thread_id")
+        )
+        if len(rows) != len(ids):
+            return None
+        unsent = [str(attachment_id) for attachment_id, thread_id in rows if thread_id is None]
+        ChatAttachment.objects.filter(id__in=unsent).update(thread=thread)
+        return unsent
+
+
+def uncarried(newly_bound, pending: dict) -> list[str]:
+    """Of ``newly_bound``, the ids no part of the serialized held request carries.
+
+    A part whose id was already held is not added again, so its attachments are not
+    recorded; those must go back to unsent.
+    """
+    carried = {e["id"] for part in pending.get("parts", []) for e in part.get("attachments", [])}
+    return [i for i in newly_bound if i not in carried]
+
+
+async def amark_sent(ids, *, user, thread) -> None:
+    """Record that a message carrying these is going to the agent, so its checkpoint
+    may hold them and nothing may unbind them.
+
+    Binds them too: a concurrent refused request may have unbound one meanwhile.
+    """
+    await _amark(ids, user=user, thread=thread, sent_at=timezone.now())
+
+
+async def amark_held(ids, *, user, thread) -> None:
+    """Record that a held request carries these, so no refused request unbinds them."""
+    await _amark(ids, user=user, thread=thread, held_at=timezone.now())
+
+
+async def _amark(ids, *, user, thread, **stamp) -> None:
+    ids = list(ids)
+    if ids:
+        await ChatAttachment.objects.filter(id__in=ids, user=user).aupdate(thread=thread, **stamp)
+
+
+async def aunbind(ids, *, thread) -> None:
+    """Return attachments bound for a message that was never accepted to unsent, for GC.
+
+    One an accepted message carries stays bound, whoever bound it.
+    """
+    if ids:
+        await ChatAttachment.objects.filter(
+            id__in=list(ids), thread=thread, sent_at__isnull=True, held_at__isnull=True
+        ).aupdate(thread=None)
+
+
+def unbind_unsent_sync(ids, *, thread_id) -> None:
+    """``aunbind`` for sync callers, such as Django closing a response it never sent."""
+    if ids:
+        ChatAttachment.objects.filter(
+            id__in=list(ids), thread_id=thread_id, sent_at__isnull=True, held_at__isnull=True
+        ).update(thread=None)
+
+
+def mark_held_sync(ids, *, thread_id) -> None:
+    """``amark_held`` inside the transaction that stores the held part.
+
+    In the same commit, so a request cancelled right after it (a closed tab) cannot
+    unbind what the stored part carries.
+    """
+    ids = list(ids)
+    if ids:
+        # Re-binds too, as amark_held does: a concurrent refused request may have
+        # unbound one since it was resolved.
+        owner = Thread.objects.filter(id=thread_id).values_list("user_id", flat=True)
+        ChatAttachment.objects.filter(
+            Q(thread_id=thread_id) | Q(thread__isnull=True), id__in=ids, user_id__in=owner
+        ).update(thread_id=thread_id, held_at=timezone.now())
+
+
+def release_held_sync(ids, *, thread_id) -> None:
+    """Release attachments a dropped held part bound, inside the caller's transaction.
+
+    One a sent message also carries stays bound: its checkpoint may refer to it.
+    """
+    if ids:
+        rows = ChatAttachment.objects.filter(id__in=list(ids), thread_id=thread_id)
+        rows.update(held_at=None)
+        rows.filter(sent_at__isnull=True).update(thread=None)

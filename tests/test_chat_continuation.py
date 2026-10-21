@@ -22,6 +22,7 @@ from langgraph.graph import END, START, StateGraph
 from apps.agents.graph.base import AGENT_NODE
 from apps.agents.graph.state import AgentState
 from apps.chat import pending_requests
+from apps.chat.attachments import message_attachments
 from apps.chat.constants import STEP_LIMIT_NOTICE, SYSTEM_RESUME_MARKER
 from apps.chat.helpers import repair_dangling_tool_calls
 from apps.chat.models import PendingRequest, Thread, ThreadJob
@@ -302,6 +303,25 @@ class TestHeldRequest:
         assert not await PendingRequest.objects.filter(thread=thread).aexists()
         assert (await _streamed(thread))[0] == DEFAULT_REPLY
 
+    async def test_the_resume_sends_the_held_attachments(self):
+        _ws, thread, tj = await _resumable("cont-held-att", 930031)
+        entry = {
+            "id": "0b6f7a5e-1c1d-4a7e-9d43-3f1f2b0c9a11",
+            "filename": "a.png",
+            "media_type": "image/png",
+            "size": 1,
+        }
+        await pending_requests.ahold_message(
+            thread.id, part_id="m1", text="what is this?", attachments=[entry]
+        )
+
+        result = await _resume(agent := FakeAgent(), tj)
+
+        assert result["status"] == "resumed"
+        _marker, request, _answer = await agent.thread_messages(thread.id)
+        assert request.content == "what is this?"
+        assert message_attachments(request) == [entry]
+
     async def test_a_turn_that_failed_before_the_request_landed_leaves_it_waiting(self):
         _ws, thread, tj = await _resumable("cont-held-unsent", 930007)
         await pending_requests.ahold_message(thread.id, part_id="m1", text="visits?")
@@ -361,6 +381,26 @@ class TestFlush:
             assert (await _streamed(thread))[0] == DEFAULT_REPLY
             assert await _thread_is_free(thread)
         assert not await PendingRequest.objects.filter(thread__workspace=ws).aexists()
+
+    async def test_the_flush_sends_the_held_attachments(self):
+        ws, _user, _client, thread = await _thread("cont-flush-att")
+        entry = {
+            "id": "0b6f7a5e-1c1d-4a7e-9d43-3f1f2b0c9a12",
+            "filename": "r.csv",
+            "media_type": "text/csv",
+            "size": 3,
+        }
+        await pending_requests.ahold_message(
+            thread.id, part_id="m1", text="", for_workspace_load=True, attachments=[entry]
+        )
+        agent = FakeAgent()
+
+        with serving(agent):
+            result = await flush_pending_requests(str(ws.id))
+
+        assert result == {"status": "flushed", "sent": 1}
+        _marker, request, _answer = await agent.thread_messages(thread.id)
+        assert message_attachments(request) == [entry]
 
     async def test_a_reply_that_failed_after_the_request_landed_says_so(self):
         ws, _user, _client, thread = await _thread("cont-flush-fail")

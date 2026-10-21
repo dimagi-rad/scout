@@ -183,7 +183,8 @@ class PendingRequest(models.Model):
     # Names the sent message (with the version), so a thread's next request never
     # reuses a message id already in its checkpoint.
     request_id = models.UUIDField(default=uuid.uuid4, editable=False)
-    # Each part is {"id", "text", "added_at"}; they are sent joined, in order.
+    # Each part is {"id", "text", "added_at", "attachments"?, "bound"?}; they are sent joined,
+    # in order, with every part's attachments (apps/chat/attachments.py).
     parts = models.JSONField(default=list)
     # Bumped on every change, so an edit made against an older copy is refused.
     version = models.PositiveIntegerField(default=1)
@@ -275,6 +276,13 @@ class ChatAttachment(models.Model):
     filename = models.CharField(max_length=255)
     media_type = models.CharField(max_length=100)
     created_at = models.DateTimeField(auto_now_add=True)
+    # Set once a message carrying it goes to the agent (and so the checkpoint), and
+    # once a held request carries it. A refused request unbinds only attachments with
+    # neither; releasing a held part never unbinds one a sent message carries.
+    sent_at = models.DateTimeField(null=True, blank=True)
+    held_at = models.DateTimeField(null=True, blank=True)
+    # The model API refused this image; later requests carry a note instead of it.
+    rejected_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [
