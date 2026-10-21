@@ -276,9 +276,11 @@ class ChatAttachment(models.Model):
     filename = models.CharField(max_length=255)
     media_type = models.CharField(max_length=100)
     created_at = models.DateTimeField(auto_now_add=True)
-    # Set once a message carrying it is accepted, by any request; a refused request
-    # unbinds only attachments no accepted message carries.
+    # Set once a message carrying it goes to the agent (and so the checkpoint), and
+    # once a held request carries it. A refused request unbinds only attachments with
+    # neither; releasing a held part never unbinds one a sent message carries.
     sent_at = models.DateTimeField(null=True, blank=True)
+    held_at = models.DateTimeField(null=True, blank=True)
     # The model API refused this image; later requests carry a note instead of it.
     rejected_at = models.DateTimeField(null=True, blank=True)
 

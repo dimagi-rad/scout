@@ -407,15 +407,23 @@ def uncarried(newly_bound, pending: dict) -> list[str]:
 
 
 async def amark_sent(ids, *, user, thread) -> None:
-    """Record that an accepted message carries these, so no refused request unbinds them.
+    """Record that a message carrying these is going to the agent, so its checkpoint
+    may hold them and nothing may unbind them.
 
     Binds them too: a concurrent refused request may have unbound one meanwhile.
     """
+    await _amark(ids, user=user, thread=thread, sent_at=timezone.now())
+
+
+async def amark_held(ids, *, user, thread) -> None:
+    """Record that a held request carries these, so no refused request unbinds them."""
+    await _amark(ids, user=user, thread=thread, held_at=timezone.now())
+
+
+async def _amark(ids, *, user, thread, **stamp) -> None:
     ids = list(ids)
     if ids:
-        await ChatAttachment.objects.filter(id__in=ids, user=user).aupdate(
-            thread=thread, sent_at=timezone.now()
-        )
+        await ChatAttachment.objects.filter(id__in=ids, user=user).aupdate(thread=thread, **stamp)
 
 
 async def aunbind(ids, *, thread) -> None:
@@ -425,7 +433,7 @@ async def aunbind(ids, *, thread) -> None:
     """
     if ids:
         await ChatAttachment.objects.filter(
-            id__in=list(ids), thread=thread, sent_at__isnull=True
+            id__in=list(ids), thread=thread, sent_at__isnull=True, held_at__isnull=True
         ).aupdate(thread=None)
 
 
@@ -433,16 +441,16 @@ def unbind_unsent_sync(ids, *, thread_id) -> None:
     """``aunbind`` for sync callers, such as Django closing a response it never sent."""
     if ids:
         ChatAttachment.objects.filter(
-            id__in=list(ids), thread_id=thread_id, sent_at__isnull=True
+            id__in=list(ids), thread_id=thread_id, sent_at__isnull=True, held_at__isnull=True
         ).update(thread=None)
 
 
-def unbind_sync(ids, *, thread_id) -> None:
+def release_held_sync(ids, *, thread_id) -> None:
     """Release attachments a dropped held part bound, inside the caller's transaction.
 
-    The part was accepted, so ``sent_at`` is cleared with the binding.
+    One a sent message also carries stays bound: its checkpoint may refer to it.
     """
     if ids:
-        ChatAttachment.objects.filter(id__in=list(ids), thread_id=thread_id).update(
-            thread=None, sent_at=None
-        )
+        rows = ChatAttachment.objects.filter(id__in=list(ids), thread_id=thread_id)
+        rows.update(held_at=None)
+        rows.filter(sent_at__isnull=True).update(thread=None)

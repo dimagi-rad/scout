@@ -205,9 +205,9 @@ def _text_omitted(entry: dict) -> dict:
 
 
 async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budget) -> dict:
-    # Checked against the stored metadata first, so an image over budget or a text
-    # file past the text budget is never loaded. A text file within it is loaded
-    # whole, even when only its head is shown.
+    # Checked against the stored metadata first, so an image over budget, or any text
+    # file once under MIN_SHOWN_TEXT_CHARS of text budget is left, is never loaded.
+    # A text file admitted is loaded whole, even when only its head is shown.
     is_image = str(entry.get("media_type", "")).startswith("image/")
     # Before any budget: a refused image spends none, and its bytes are never loaded.
     if is_image and entry["id"] in loader.rejected_images:

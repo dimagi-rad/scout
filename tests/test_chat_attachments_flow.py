@@ -16,9 +16,11 @@ from langchain_core.messages import AIMessage, HumanMessage
 from apps.agents.graph import attachments as expansion
 from apps.agents.graph.attachments import AttachmentLoader, aexpand_attachments
 from apps.agents.graph.base import build_agent_graph
+from apps.chat import pending_requests
 from apps.chat.attachments import (
     SCOUT_ATTACHMENTS_KWARG,
     abind_to_thread,
+    amark_held,
     amark_sent,
     attachment_url,
     aunbind,
@@ -180,7 +182,7 @@ async def test_a_turn_closed_before_it_started_unbinds_its_attachments(user, wor
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_a_held_message_keeps_its_attachments_bound_and_sent(user, workspace):
+async def test_a_held_message_keeps_its_attachments_bound_and_held(user, workspace):
     attachment = await _attachment(user, workspace)
     thread_id = str(uuid.uuid4())
     client = AsyncClient()
@@ -221,7 +223,9 @@ async def test_a_held_message_keeps_its_attachments_bound_and_sent(user, workspa
     assert pending.parts[0]["attachments"][0]["id"] == str(attachment.id)
     await attachment.arefresh_from_db()
     assert str(attachment.thread_id) == thread_id
-    assert attachment.sent_at is not None
+    # Held, not yet sent: it is in no checkpoint until the request goes to the agent.
+    assert attachment.held_at is not None
+    assert attachment.sent_at is None
 
 
 def _note(attachment):
@@ -331,3 +335,61 @@ async def test_a_refused_image_spends_no_budget_and_is_never_loaded(user, worksp
     assert note == _note(refused)
     assert image["type"] == "image"
     assert str(refused.id) not in loader._cache
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_refused_request_never_unbinds_what_a_held_request_carries(user, workspace):
+    thread = await Thread.objects.acreate(user=user, workspace=workspace)
+    held = await _attachment(user, workspace)
+    first = await abind_to_thread([str(held.id)], user=user, workspace=workspace, thread=thread)
+    await amark_held([str(held.id)], user=user, thread=thread)
+    await aunbind(first, thread=thread)
+
+    await held.arefresh_from_db()
+    assert held.thread_id == thread.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_releasing_a_held_part_keeps_what_a_sent_message_carries(user, workspace):
+    thread = await Thread.objects.acreate(user=user, workspace=workspace)
+    attachment = await _attachment(user, workspace, thread)
+    entry = _entry(attachment)
+    await PendingRequest.objects.acreate(
+        thread=thread, parts=[pending_requests._new_part("p1", "q", [entry], [entry["id"]])]
+    )
+    await amark_held([entry["id"]], user=user, thread=thread)
+    lease = uuid.uuid4()
+    await Thread.objects.filter(pk=thread.pk).aupdate(turn_lease_token=lease)
+    # The claim goes to the agent (its message may reach the checkpoint), then goes stale.
+    claimed = await pending_requests.aclaim(thread.id, lease)
+    await pending_requests.amark_claim_sent(claimed, thread)
+    await PendingRequest.objects.filter(thread=thread).aupdate(
+        state=PendingRequest.State.WAITING, claim_token=None
+    )
+
+    await pending_requests.adiscard(thread.id, version=1)
+
+    await attachment.arefresh_from_db()
+    assert attachment.thread_id == thread.id
+    assert attachment.sent_at is not None
+    assert attachment.held_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_releasing_a_held_part_frees_what_only_it_carried(user, workspace):
+    thread = await Thread.objects.acreate(user=user, workspace=workspace)
+    attachment = await _attachment(user, workspace, thread)
+    entry = _entry(attachment)
+    await PendingRequest.objects.acreate(
+        thread=thread, parts=[pending_requests._new_part("p1", "q", [entry], [entry["id"]])]
+    )
+    await amark_held([entry["id"]], user=user, thread=thread)
+
+    await pending_requests.adiscard(thread.id, version=1)
+
+    await attachment.arefresh_from_db()
+    assert attachment.thread_id is None
+    assert attachment.held_at is None

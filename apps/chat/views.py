@@ -26,11 +26,13 @@ from apps.chat import pending_requests
 from apps.chat.attachments import (
     MAX_ATTACHMENTS_PER_MESSAGE,
     abind_to_thread,
+    amark_held,
     amark_sent,
     aresolve_for_send,
     attachment_ids_from_parts,
     aunbind,
     merge_attachments,
+    message_attachments,
     unbind_unsent_sync,
     uncarried,
     with_attachments,
@@ -206,7 +208,7 @@ async def chat_view(request):
     if isinstance(response, _TurnStreamingResponse):
         pass
     elif isinstance(response, StreamingHttpResponse):
-        await _mark_sent(bound)
+        await _mark(amark_held, bound)
     else:
         await _unbind_unaccepted(bound)
     return response
@@ -220,12 +222,12 @@ async def _unbind_unaccepted(bound: dict) -> None:
             logger.warning("Could not unbind attachments of a refused message", exc_info=True)
 
 
-async def _mark_sent(bound: dict) -> None:
+async def _mark(mark, bound: dict) -> None:
     if bound.get("sent"):
         try:
-            await amark_sent(bound["sent"], user=bound["user"], thread=bound["thread"])
+            await mark(bound["sent"], user=bound["user"], thread=bound["thread"])
         except Exception:
-            logger.warning("Could not mark the attachments of a message sent", exc_info=True)
+            logger.warning("Could not mark the attachments of a message", exc_info=True)
 
 
 async def _chat_view(request, bound: dict):
@@ -607,6 +609,9 @@ async def _start_turn(
     )
     if isinstance(human_message, JsonResponse):
         return human_message
+    if bound is not None:
+        # The turn sends the held request's attachments too, not only this message's.
+        bound["sent"] = [entry["id"] for entry in message_attachments(human_message)]
     input_state = {
         "messages": [*dangling_tool_results, human_message],
         "workspace_id": str(workspace.id),
@@ -618,7 +623,7 @@ async def _start_turn(
 
     async def _traced_stream():
         response.turn_started = True
-        await _mark_sent(bound or {})
+        await _mark(amark_sent, bound or {})
         live = LiveTurnWriter(thread_id)
         try:
             # aclosing: nothing else closes the inner stream on disconnect, and its

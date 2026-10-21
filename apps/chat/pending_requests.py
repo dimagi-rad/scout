@@ -30,8 +30,9 @@ from langchain_core.messages import HumanMessage
 
 from apps.chat.attachments import (
     MAX_ATTACHMENTS_PER_MESSAGE,
+    amark_sent,
     merge_attachments,
-    unbind_sync,
+    release_held_sync,
     with_attachments,
 )
 from apps.chat.checkpointer import ensure_checkpointer
@@ -112,6 +113,14 @@ class _StaleClaim:
     request_id: uuid.UUID
     version: int
     token: uuid.UUID
+
+
+async def amark_claim_sent(claimed: ClaimedRequest, thread: Thread) -> None:
+    """Before a claimed request goes to the agent: its attachments may now be in the
+    checkpoint, so releasing its parts must never unbind them."""
+    await amark_sent(
+        [entry["id"] for entry in claimed.attachments], user=thread.user_id, thread=thread
+    )
 
 
 def held_human_message(claimed: ClaimedRequest) -> HumanMessage:
@@ -389,7 +398,7 @@ def adiscard(thread_id, *, version: int) -> None:
 def _release_attachments(dropped: list[dict], *, keep: list[dict], thread_id) -> None:
     """Unbind what dropped parts bound and no kept part carries, so GC reclaims it."""
     kept = {entry["id"] for entry in combined_attachments(keep)} | set(_bound_ids(keep))
-    unbind_sync([i for i in _bound_ids(dropped) if i not in kept], thread_id=thread_id)
+    release_held_sync([i for i in _bound_ids(dropped) if i not in kept], thread_id=thread_id)
 
 
 @sync_to_async

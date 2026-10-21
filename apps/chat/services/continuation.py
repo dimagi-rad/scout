@@ -537,6 +537,7 @@ async def _resume_claimed_job(
     if held is not None:
         if HELD_REQUEST_NOTE not in body:
             body += f" {HELD_REQUEST_NOTE}"
+        await pending_requests.amark_claim_sent(held, tj.thread)
         resume_messages = [
             HumanMessage(content=body, id=held.marker_id),
             pending_requests.held_human_message(held),
@@ -958,6 +959,7 @@ async def _answer_flushed_request(thread: Thread, held) -> bool:
     workspace, user = thread.workspace, thread.user
     telemetry = background_turn("flush", user=user, workspace=workspace, thread_id=thread.id)
     try:
+        await pending_requests.amark_claim_sent(held, thread)
         agent = await build_agent_for_resume(workspace, user, conversation_id=str(thread.id))
         config = {
             "configurable": {"thread_id": str(thread.id)},
