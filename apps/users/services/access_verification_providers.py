@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
-from collections.abc import Callable
-from contextlib import aclosing
+import weakref
+from collections.abc import AsyncGenerator, Callable
+from contextlib import aclosing, asynccontextmanager
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from threading import BoundedSemaphore
 from typing import Any
 
@@ -105,8 +108,62 @@ def _log_unconfirmed(
     )
 
 
-def _default_client_factory():
-    return httpx.AsyncClient(timeout=PER_REQUEST_TIMEOUT_SECONDS)
+_shared_clients: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, tuple[httpx.AsyncClient, AsyncGenerator[None, None]]
+] = weakref.WeakKeyDictionary()
+_shared_clients_lock = threading.Lock()
+
+
+def _new_shared_client() -> httpx.AsyncClient:
+    # The client is shared across users, so it must never replay a provider's
+    # Set-Cookie (e.g. a Django sessionid) on another user's request (#933).
+    return httpx.AsyncClient(
+        timeout=PER_REQUEST_TIMEOUT_SECONDS,
+        cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
+    )
+
+
+async def _close_on_loop_shutdown(client: httpx.AsyncClient) -> AsyncGenerator[None, None]:
+    # Holds no reference to its loop, so a loop that never shuts down can still be
+    # collected along with its WeakKeyDictionary entry.
+    try:
+        yield
+    finally:
+        loop = asyncio.get_running_loop()
+        with _shared_clients_lock:
+            if _shared_clients.get(loop, (None,))[0] is client:
+                del _shared_clients[loop]
+        await client.aclose()
+
+
+async def _loop_client() -> httpx.AsyncClient:
+    """This event loop's provider client, reused across checks to keep connections warm.
+
+    An AsyncClient's pool belongs to the loop that opened it, and checks run on the
+    server loop as well as on per-call ``async_to_sync`` loops, so each loop gets its
+    own, closed as that loop shuts down (as ``mcp_server/services/pool.py`` does).
+    """
+    loop = asyncio.get_running_loop()
+    with _shared_clients_lock:
+        entry = _shared_clients.get(loop)
+    if entry is not None:
+        return entry[0]
+    client = _new_shared_client()
+    lifetime = _close_on_loop_shutdown(client)
+    # The first iteration registers the generator for the loop's shutdown_asyncgens.
+    await anext(lifetime)
+    with _shared_clients_lock:
+        entry = _shared_clients.setdefault(loop, (client, lifetime))
+    if entry[0] is not client:
+        await lifetime.aclose()
+    return entry[0]
+
+
+@asynccontextmanager
+async def _default_client_factory():
+    # Yields the shared client without closing it, matching a factory's
+    # ``async with`` contract.
+    yield await _loop_client()
 
 
 def _provider_request(snapshot, settings):
