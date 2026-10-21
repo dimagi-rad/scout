@@ -114,6 +114,10 @@ and have them reconnect.
   limit the endpoint returns 429 with `Retry-After` and `X-RateLimit-*`
   headers. The `CHAT_RATE_LIMIT` and `CHAT_RATE_WINDOW` Django settings
   override the defaults.
+- **Chat attachments**: 60 uploads per user per window on
+  `POST /api/chat/attachments/`, counted apart from chat messages. The window
+  is `CHAT_RATE_WINDOW`; `ATTACHMENT_UPLOAD_RATE_LIMIT` overrides the count.
+  A user can also hold at most 100 uploads not yet sent with a message.
 - **DRF endpoints**: 60 requests per minute for anonymous clients and 120 per
   minute for signed-in users.
 

@@ -9,7 +9,7 @@ from django.contrib import admin
 
 from apps.common.admin import ReadOnlyModelAdmin
 
-from .models import Thread, ThreadArtifact, ThreadJob
+from .models import ChatAttachment, Thread, ThreadArtifact, ThreadJob
 
 
 @admin.register(Thread)
@@ -40,3 +40,11 @@ class ThreadArtifactAdmin(ReadOnlyModelAdmin):
     list_filter = ["source", "last_seen_at"]
     search_fields = ["thread__title", "artifact__title", "message_id", "tool_call_id"]
     raw_id_fields = ["thread", "artifact", "workspace"]
+
+
+@admin.register(ChatAttachment)
+class ChatAttachmentAdmin(ReadOnlyModelAdmin):
+    list_display = ["filename", "media_type", "user", "workspace", "thread", "created_at"]
+    list_filter = ["media_type", "created_at"]
+    search_fields = ["filename", "user__email"]
+    raw_id_fields = ["blob", "user", "workspace", "thread"]

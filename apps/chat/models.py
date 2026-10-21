@@ -230,3 +230,60 @@ class ResumeStreamChunk(models.Model):
 
     def __str__(self):
         return f"ResumeStreamChunk({self.run}, {self.id}) for thread {self.thread_id}"
+
+
+class AttachmentBlob(models.Model):
+    """The bytes of an uploaded chat attachment, stored once per distinct content.
+
+    Never addressed directly: every read goes through a ChatAttachment the caller
+    owns, so sharing one blob across users discloses nothing.
+    """
+
+    sha256 = models.CharField(max_length=64, unique=True)
+    size = models.BigIntegerField()
+    content = models.BinaryField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"AttachmentBlob({self.sha256[:12]}, {self.size} bytes)"
+
+
+class ChatAttachment(models.Model):
+    """One upload of a file to a chat: a user's handle on a shared AttachmentBlob.
+
+    ``thread`` stays null until a message carrying the attachment is sent; unsent
+    uploads are collected by the GC task. See apps/chat/attachments.py.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    blob = models.ForeignKey(
+        "chat.AttachmentBlob", on_delete=models.PROTECT, related_name="attachments"
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="chat_attachments"
+    )
+    workspace = models.ForeignKey(
+        "workspaces.Workspace", on_delete=models.CASCADE, related_name="chat_attachments"
+    )
+    thread = models.ForeignKey(
+        "chat.Thread",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="attachments",
+    )
+    filename = models.CharField(max_length=255)
+    media_type = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["created_at"],
+                condition=models.Q(thread__isnull=True),
+                name="chat_attach_unsent_created",
+            ),
+        ]
+
+    def __str__(self):
+        return f"ChatAttachment({self.filename}, {self.id})"
