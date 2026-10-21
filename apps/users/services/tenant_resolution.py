@@ -462,7 +462,11 @@ async def resolve_ocs_chatbots(
             defaults={
                 "canonical_name": exp.canonical_name,
                 # A row without a usable value keeps the stored one, as API-key onboarding does.
-                **({"provider_attributes": dict(exp.attributes)} if exp.attributes else {}),
+                **(
+                    {"provider_attributes": dict(exp.attributes)}
+                    if exp.attributes is not None
+                    else {}
+                ),
                 **({"description": exp.description} if exp.description else {}),
             },
         )

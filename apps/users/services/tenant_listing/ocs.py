@@ -20,7 +20,9 @@ from apps.users.services.tenant_listing.types import (
 # 10s, so stay well under the max rather than risk a page that cannot finish (#918).
 LIST_PAGE_SIZE = 500
 
-# Both list the team's working chatbots. Only v2 reports last_activity_at
+# Both list the team's working chatbots, from the same queryset upstream (v2's
+# working_chatbots() is v1's filter); were they to diverge, verification would archive
+# what discovery adds. Only v2 reports last_activity_at
 # (open-chat-studio#4843), at the cost of a per-row subquery over each chatbot's
 # sessions, so callers that need only ids (access verification, key rotation) stay on v1.
 DISCOVERY_PATH = "/api/v2/chatbots/"
