@@ -462,6 +462,39 @@ def test_freshness_is_rechecked_after_lock_wait(user, tenant, verification_conne
     assert VerificationControl.objects.get(connection=conn).lease_token is None
 
 
+@pytest.mark.django_db(transaction=True)
+def test_freshness_clock_is_sampled_after_lock_wait(
+    user, tenant, verification_connection, monkeypatch
+):
+    conn, _membership = verification_connection
+    base = timezone.now()
+    first = claim_verification(user.id, conn.id, {tenant.id}, now=base)
+    publish_verification(first, VerificationResult.complete({tenant.id}), now=base)
+    UpstreamAccessProof.objects.filter(connection=conn).update(
+        verified_at=base - timedelta(minutes=6)
+    )
+    release = HeldRow()
+    monkeypatch.setattr(
+        "apps.users.services.access_verification.timezone.now",
+        lambda: base + (timedelta(minutes=2) if release.is_set() else timedelta(0)),
+    )
+
+    with (
+        ThreadPoolExecutor(max_workers=1) as executor,
+        row_locked(user_row(user.id), release=release, acquire_timeout=10),
+    ):
+        waiter = executor.submit(claim_verification, user.id, conn.id, {tenant.id})
+        release.wait_until_blocking()
+        # Fresh against the clock before the wait, expired against the clock after it.
+        UpstreamAccessProof.objects.filter(connection=conn).update(
+            verified_at=base - timedelta(minutes=4)
+        )
+        release.set()
+        result = waiter.result(timeout=10)
+
+    assert result.status == ClaimStatus.CLAIMED
+
+
 def _refresh_locks(user_id, connection_id):
     """The rows a token refresh holds for its whole transaction (token_refresh)."""
 
