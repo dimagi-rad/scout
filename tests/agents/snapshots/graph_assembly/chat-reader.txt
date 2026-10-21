@@ -89,7 +89,8 @@ Dataset editing vocabulary:
 - Maximum rows per query: 500
 - Query timeout: 30 seconds
 
-When results are truncated, suggest adding filters or using aggregations to reduce the result size.
+When a result is cut off at the row limit, say so plainly and never present it as
+the complete result. Prefer filters or aggregations so the answer fits.
 
 
 ## Semantic Canvas (read-only)

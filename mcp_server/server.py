@@ -53,7 +53,11 @@ from apps.semantic.services.catalog import (
     serialize_dataset,
 )
 from apps.semantic.services.column_policy import is_listed
-from apps.semantic.services.query import run_semantic_query, semantic_tool_spec
+from apps.semantic.services.query import (
+    MAX_SEMANTIC_LIMIT,
+    run_semantic_query,
+    semantic_tool_spec,
+)
 from apps.transformations.services.lineage import aget_lineage_chain
 from apps.users.models import TenantMembership, User
 from apps.workspaces.access import (
@@ -1036,7 +1040,7 @@ async def query(sql: str, workspace_id: str = "", user_id: str = "", thread_id: 
 
         warnings = []
         if result.get("truncated"):
-            warnings.append(f"Results truncated to {ctx.max_rows_per_query} rows")
+            warnings.append(_row_limit_warning(ctx.max_rows_per_query))
 
         tc["result"] = success_response(
             {
@@ -1044,6 +1048,7 @@ async def query(sql: str, workspace_id: str = "", user_id: str = "", thread_id: 
                 "rows": result["rows"],
                 "row_count": result["row_count"],
                 "truncated": result.get("truncated", False),
+                "row_limit": ctx.max_rows_per_query,
                 "sql_executed": result.get("sql_executed", ""),
                 "tables_accessed": result.get("tables_accessed", []),
             },
@@ -1052,6 +1057,16 @@ async def query(sql: str, workspace_id: str = "", user_id: str = "", thread_id: 
             warnings=warnings or None,
         )
         return tc["result"]
+
+
+def _row_limit_warning(row_limit: int) -> str:
+    # The full result reaches the user as a CSV download (#969), never through the model.
+    return (
+        f"Only the first {row_limit} rows were returned; the full result has more."
+        " Say so in your answer and do not present these rows as complete. To answer"
+        " from all of the data, aggregate it further in the query. Members with edit"
+        " access can download the full result as CSV from this query's result card."
+    )
 
 
 def _serialized_semantic_catalog(workspace: Workspace) -> dict:
@@ -1226,10 +1241,16 @@ async def semantic_query(
 
         warnings = []
         if result.get("truncated"):
-            warnings.append("Results were truncated to the semantic query row limit.")
+            if result.get("row_count", 0) >= MAX_SEMANTIC_LIMIT:
+                warnings.append(_row_limit_warning(MAX_SEMANTIC_LIMIT))
+            else:
+                warnings.append(
+                    f"Results stopped at the requested limit of {result.get('row_count')} rows;"
+                    " more rows may exist."
+                )
 
         tc["result"] = success_response(
-            result,
+            {**result, "row_limit": MAX_SEMANTIC_LIMIT},
             schema="semantic",
             timing_ms=tc["timer"].elapsed_ms,
             warnings=warnings or None,

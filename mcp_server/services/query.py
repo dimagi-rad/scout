@@ -12,6 +12,7 @@ under the tenant's read-only role.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any
 
 import psycopg
@@ -111,8 +112,13 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
     tables_accessed = validator.get_tables_accessed(statement)
 
     requested_limit = validator.limit_value(statement)
+    capped = requested_limit is None or requested_limit > validator.max_limit
+    # One row past the cap tells a cut-off result from one that fits exactly. The
+    # reported SQL keeps the cap, which is what the agent and the user can rely on.
+    probe = replace(validator, max_limit=validator.max_limit + 1) if capped else validator
     try:
-        sql_executed = validator.inject_limit(statement).sql(dialect=validator.dialect)
+        sql_executed = validator.inject_limit(statement.copy()).sql(dialect=validator.dialect)
+        sql_run = probe.inject_limit(statement).sql(dialect=validator.dialect)
     except Exception:
         # SQLGlot can parse syntax that its PostgreSQL generator cannot render.
         logger.warning("SQL generation failed for tenant %s", ctx.tenant_id, exc_info=True)
@@ -121,12 +127,8 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
             "Could not generate supported PostgreSQL syntax. Simplify the query and retry.",
         )
 
-    truncated = requested_limit is not None and requested_limit > validator.max_limit
-
     try:
-        result = await _execute_async_parameterized(
-            ctx, sql_executed, (), ctx.max_query_timeout_seconds
-        )
+        result = await _execute_async_parameterized(ctx, sql_run, (), ctx.max_query_timeout_seconds)
     except Exception as e:
         capacity = classify_capacity_error(e)
         if capacity is not None:
@@ -139,14 +141,17 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
         logger.log(level, "Query error for tenant %s: %s", ctx.tenant_id, message, exc_info=True)
         return error_response(code, message)
 
-    if result["row_count"] == validator.max_limit:
-        truncated = True
+    rows = result["rows"]
+    truncated = len(rows) > validator.max_limit
+    if truncated:
+        rows = rows[: validator.max_limit]
 
     return {
         "columns": result["columns"],
-        "rows": result["rows"],
-        "row_count": result["row_count"],
+        "rows": rows,
+        "row_count": len(rows),
         "truncated": truncated,
+        "row_limit": validator.max_limit,
         "sql_executed": sql_executed,
         "tables_accessed": tables_accessed,
     }
