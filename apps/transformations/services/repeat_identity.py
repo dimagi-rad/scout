@@ -63,8 +63,9 @@ def _parse(sql: str) -> exp.Select | None:
 def _plain_source(tree: exp.Select) -> exp.Select:
     """Read a detoasted staging source (#918) as the plain table scan it wraps.
 
-    Only a wrapper that ``detoasted_source`` reproduces exactly is unwrapped, so
-    old and new generated SQL share one source identity and nothing else is admitted.
+    Only a wrapper that ``detoasted_source`` reproduces exactly is unwrapped, so old
+    and new generated SQL share one source identity. The inner column list is not
+    checked against the table: a missing or extra plain column fails at build time.
     """
     source = tree.args.get("from_")
     subquery = source.this if source else None
@@ -72,29 +73,46 @@ def _plain_source(tree: exp.Select) -> exp.Select:
         return tree
     inner = subquery.this
     inner_from = inner.args.get("from_") if isinstance(inner, exp.Select) else None
-    if inner_from is None or not isinstance(inner_from.this, exp.Table) or not inner.expressions:
+    if inner_from is None or not isinstance(inner_from.this, exp.Table):
         return tree
-    *columns, json_column = inner.expressions
-    if not all(isinstance(column, exp.Column) and not column.table for column in columns):
+    *columns, json_column = inner.expressions or [None]
+    extract = json_column.this if isinstance(json_column, exp.Alias) else None
+    if (
+        not columns
+        or not isinstance(extract, exp.JSONBExtract)
+        or not all(_bare_column(column) for column in [*columns, extract.this])
+    ):
         return tree
     where = inner.args.get("where")
     table = inner_from.this.name
-    rebuilt = sqlglot.parse_one(
-        "SELECT 1 "
-        + detoasted_source(
-            table,
-            [column.name for column in columns],
-            json_column.alias_or_name,
-            where=where.this.sql(dialect="postgres") if where else None,
-        ),
-        read="postgres",
-    )
+    try:
+        rebuilt = sqlglot.parse_one(
+            "SELECT 1 "
+            + detoasted_source(
+                table,
+                [column.name for column in columns],
+                json_column.alias_or_name,
+                where=where.this.sql(dialect="postgres") if where else None,
+            ),
+            read="postgres",
+        )
+    except SqlglotError:
+        return tree
     if rebuilt.args.get("from_") != source:
         return tree
     plain = tree.copy()
     plain.set("from_", exp.From(this=exp.to_table(table)))
     plain.set("where", where.copy() if where else None)
     return plain
+
+
+def _bare_column(node: exp.Expression) -> bool:
+    return (
+        isinstance(node, exp.Column)
+        and not node.table
+        and isinstance(node.this, exp.Identifier)
+        and not node.this.args.get("quoted")
+    )
 
 
 def _without_projection(tree: exp.Select) -> exp.Select:

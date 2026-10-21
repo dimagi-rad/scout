@@ -1,70 +1,88 @@
 import json
+import re
 
 import pytest
 from django.db import connection
 
-from apps.transformations.services.commcare_staging import _form_xmlns
+from apps.transformations.services.commcare_staging import (
+    _form_xmlns,
+    _generate_case_type_asset,
+    _generate_form_asset,
+)
+from apps.transformations.services.connect_staging import _generate_stg_visits
 from apps.transformations.services.repeat_identity import _canonical_case, _parent_source
 from apps.transformations.services.staging_source import detoasted_source
+from apps.users.models import Tenant
 
-_VISIT_COLUMNS = ["visit_id", "opportunity_id", "username", "entity_id", "status"]
-_VISIT_SELECT = (
+_WRAPPER = re.compile(
+    r"\nFROM \(\n    SELECT .*\n    FROM (\w+)\n(?:    WHERE (.*)\n)?    OFFSET 0\n\) AS \1\Z"
+)
+
+
+def _plain(sql):
+    """The pre-#918 shape of a generated model: the same projection over a plain scan."""
+    match = _WRAPPER.search(sql)
+    assert match, sql[-300:]
+    where = f"\nWHERE {match[2]}" if match[2] else ""
+    return f"{sql[: match.start()]}\nFROM {match[1]}{where}"
+
+
+def _questions(count):
+    return [{"value": f"/data/q{i}", "type": "Int" if i % 2 else "Text"} for i in range(count)]
+
+
+@pytest.fixture
+def tenant():
+    return Tenant(provider="commcare", external_id="detoast")
+
+
+@pytest.mark.parametrize("count", [3, 1700], ids=["plain", "folded"])
+def test_generated_connect_parent_keeps_its_plain_source_identity(tenant, count):
+    sql = _generate_stg_visits(tenant, {"du": {"questions": _questions(count)}}).sql_content
+
+    identity = _parent_source(sql, provider="commcare_connect")
+    assert identity is not None
+    assert identity == _parent_source(_plain(sql), provider="commcare_connect")
+
+
+@pytest.mark.parametrize("count", [3, 1700], ids=["plain", "folded"])
+def test_generated_form_keeps_its_plain_source_identity(tenant, count):
+    sql = _generate_form_asset(
+        tenant, "urn:it's", {"questions": _questions(count)}, model_name="form_x"
+    ).sql_content
+
+    identity = _parent_source(sql, provider="commcare")
+    assert identity is not None
+    assert identity == _parent_source(_plain(sql), provider="commcare")
+    assert _form_xmlns(sql) == _form_xmlns(_plain(sql)) == "urn:it's"
+
+
+@pytest.mark.parametrize("count", [3, 1700], ids=["plain", "folded"])
+def test_generated_case_stays_canonical(tenant, count):
+    properties = [f"p{i}" for i in range(count)]
+    sql = _generate_case_type_asset(
+        tenant, "patient", properties, {}, model_name="patient"
+    ).sql_content
+
+    assert _canonical_case(_plain(sql))
+    assert _canonical_case(sql)
+    assert not _canonical_case(sql.replace("    OFFSET 0\n", "    OFFSET 1\n"))
+
+
+_PLAIN_VISITS = (
     "SELECT\n    visit_id,\n    opportunity_id,\n    username,\n    entity_id,\n    status,\n"
     "    deliver_unit_id,\n    form_json,\n"
     "    form_json #>> ARRAY['data','muac']::text[] AS \"muac\"\n"
+    "FROM raw_visits"
 )
-_PLAIN_VISITS = _VISIT_SELECT + "FROM raw_visits"
-_DETOASTED_VISITS = _VISIT_SELECT + detoasted_source(
-    "raw_visits", [*_VISIT_COLUMNS, "deliver_unit_id"], "form_json"
+_DETOASTED_VISITS = _PLAIN_VISITS.replace(
+    "FROM raw_visits",
+    detoasted_source(
+        "raw_visits",
+        ["visit_id", "opportunity_id", "username", "entity_id", "status", "deliver_unit_id"],
+        "form_json",
+    ),
 )
-
-
-def test_detoasted_connect_parent_keeps_its_plain_source_identity():
-    assert _parent_source(_PLAIN_VISITS, provider="commcare_connect") is not None
-    assert _parent_source(_DETOASTED_VISITS, provider="commcare_connect") == _parent_source(
-        _PLAIN_VISITS, provider="commcare_connect"
-    )
-
-
-def test_detoasted_form_and_case_keep_their_plain_source_identity():
-    form_select = (
-        'SELECT form_id, xmlns, received_on::timestamp AS "received_on", app_id, form_data, '
-        "form_data #>> ARRAY['data','q']::text[] AS \"q\"\n"
-    )
-    plain = form_select + "FROM raw_forms\nWHERE xmlns = 'urn:it''s'"
-    detoasted = form_select + detoasted_source(
-        "raw_forms",
-        ["form_id", "xmlns", "received_on", "app_id"],
-        "form_data",
-        where="xmlns = 'urn:it''s'",
-    )
-    assert _parent_source(detoasted, provider="commcare") == _parent_source(
-        plain, provider="commcare"
-    )
-    assert _form_xmlns(plain) == _form_xmlns(detoasted) == "urn:it's"
-
-    case_select = (
-        "SELECT case_id, case_type, case_name, owner_id, "
-        'date_opened::timestamp AS "date_opened", last_modified::timestamp AS "last_modified", '
-        "closed, properties->>'dob' AS \"dob\"\n"
-    )
-    assert _canonical_case(
-        case_select
-        + detoasted_source(
-            "raw_cases",
-            [
-                "case_id",
-                "case_type",
-                "case_name",
-                "owner_id",
-                "date_opened",
-                "last_modified",
-                "closed",
-            ],
-            "properties",
-            where="case_type = 'patient'",
-        )
-    )
 
 
 @pytest.mark.parametrize(
@@ -82,6 +100,23 @@ def test_detoasted_form_and_case_keep_their_plain_source_identity():
 )
 def test_only_an_exact_detoasted_wrapper_reads_as_the_plain_source(tampered):
     assert _parent_source(tampered, provider="commcare_connect") is None
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "SELECT * FROM raw_forms",
+        "SELECT a, count(*) FROM raw_forms",
+        'SELECT a, "my col" FROM raw_forms',
+        "SELECT form_json #> '{}' AS form_json FROM raw_forms",
+        "SELECT a, b.form_json #> '{}' AS form_json FROM raw_forms b",
+    ],
+)
+def test_other_subquery_sources_are_not_canonical_and_do_not_raise(inner):
+    sql = f"SELECT x FROM ({inner}) AS raw_forms WHERE xmlns = 'a'"
+    assert _parent_source(sql, provider="commcare") is None
+    assert _parent_source(sql, provider="commcare_connect") is None
+    assert not _canonical_case(sql)
 
 
 @pytest.mark.django_db
