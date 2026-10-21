@@ -77,17 +77,19 @@ def find_exportable_call(messages: list[Any], tool_call_id: str) -> ExportableCa
 
 
 def semantic_export_spec(args: dict[str, Any]) -> dict[str, Any]:
-    """The tool's spec with the display cap lifted, keeping a smaller limit the agent chose.
+    """The tool's spec with the display cap lifted, keeping the limit the agent chose.
 
-    A "top 10" query must still export 10 rows; only a limit the 500-row cap
-    clamped is raised to the export cap.
+    A "top 10" exports 10 rows and a "top 1000" 1000, as a SQL LIMIT does; a limit
+    of exactly the cap is the agent asking for all it may see, so it gets the export cap.
     """
     spec = semantic_tool_spec(args)
     try:
         requested = int(spec["limit"])
     except (TypeError, ValueError):
-        requested = MAX_SEMANTIC_LIMIT
-    spec["limit"] = EXPORT_ROW_LIMIT if requested >= MAX_SEMANTIC_LIMIT else requested
+        requested = 100  # _coerce_limit's default, which the chat call ran with
+    if requested == MAX_SEMANTIC_LIMIT:
+        requested = EXPORT_ROW_LIMIT
+    spec["limit"] = max(1, min(requested, EXPORT_ROW_LIMIT))
     return spec
 
 

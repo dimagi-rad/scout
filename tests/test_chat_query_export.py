@@ -254,7 +254,13 @@ async def test_semantic_query_export_lifts_the_display_cap(workspace, thread, wr
 
 @pytest.mark.parametrize(
     ("limit", "exported"),
-    [(MAX_SEMANTIC_LIMIT, EXPORT_ROW_LIMIT), (10_000, EXPORT_ROW_LIMIT), (10, 10)],
+    [
+        (MAX_SEMANTIC_LIMIT, EXPORT_ROW_LIMIT),
+        (1_000, 1_000),
+        (10**6, EXPORT_ROW_LIMIT),
+        (10, 10),
+        ("lots", 100),
+    ],
 )
 def test_semantic_export_keeps_a_limit_the_agent_chose(limit, exported):
     assert semantic_export_spec({"measures": ["visits.count"], "limit": limit})["limit"] == exported
