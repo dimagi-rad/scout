@@ -506,6 +506,27 @@ def _is_lock_timeout(error: OperationalError) -> bool:
     return getattr(error.__cause__, "sqlstate", None) in {"55P03", "57014"}
 
 
+def _lease_is_live(control, now) -> bool:
+    return bool(control.lease_token and control.lease_expires_at and now < control.lease_expires_at)
+
+
+def _fresh_claim(requested, request) -> VerificationClaim:
+    return VerificationClaim(
+        ClaimStatus.FRESH, requested, observation=request.observation, request=request
+    )
+
+
+def _in_progress_claim(requested, request, control) -> VerificationClaim:
+    return VerificationClaim(
+        ClaimStatus.IN_PROGRESS,
+        requested,
+        observation=request.observation,
+        lease_token=control.lease_token,
+        lease_expires_at=control.lease_expires_at,
+        completed_attempt=_completed_attempt(control),
+    )
+
+
 def _unlocked_claim(
     actor_user_id, connection_id, requested, *, now, deadline, clock, cancelled, fresh_max_age
 ) -> VerificationClaim | None:
@@ -534,28 +555,13 @@ def _unlocked_claim(
     _configure_transaction_deadline(deadline, clock, cancelled)
     if _history_is_fresh(current, request, requested, history, now=now, max_age=fresh_max_age):
         _ensure_before_deadline(deadline, clock, cancelled)
-        return VerificationClaim(
-            ClaimStatus.FRESH, requested, observation=request.observation, request=request
-        )
+        return _fresh_claim(requested, request)
     _configure_transaction_deadline(deadline, clock, cancelled)
     control = VerificationControl.objects.filter(connection=current).first()
-    lease_now = now or timezone.now()
-    if (
-        control is None
-        or not control.lease_token
-        or not control.lease_expires_at
-        or lease_now >= control.lease_expires_at
-    ):
+    if control is None or not _lease_is_live(control, now or timezone.now()):
         return None
     _ensure_before_deadline(deadline, clock, cancelled)
-    return VerificationClaim(
-        ClaimStatus.IN_PROGRESS,
-        requested,
-        observation=request.observation,
-        lease_token=control.lease_token,
-        lease_expires_at=control.lease_expires_at,
-        completed_attempt=_completed_attempt(control),
-    )
+    return _in_progress_claim(requested, request, control)
 
 
 def _claim_verification(
@@ -608,28 +614,15 @@ def _claim_verification(
         _configure_transaction_deadline(deadline, clock, cancelled)
         if _history_is_fresh(current, request, requested, history, now=now, max_age=fresh_max_age):
             _ensure_before_deadline(deadline, clock, cancelled)
-            return VerificationClaim(
-                ClaimStatus.FRESH, requested, observation=request.observation, request=request
-            )
+            return _fresh_claim(requested, request)
         _configure_transaction_deadline(deadline, clock, cancelled)
         control, _ = VerificationControl.objects.select_for_update().get_or_create(
             connection=current
         )
         _ensure_before_deadline(deadline, clock, cancelled)
         lease_now = now or timezone.now()
-        if (
-            control.lease_token
-            and control.lease_expires_at
-            and lease_now < control.lease_expires_at
-        ):
-            return VerificationClaim(
-                ClaimStatus.IN_PROGRESS,
-                requested,
-                observation=request.observation,
-                lease_token=control.lease_token,
-                lease_expires_at=control.lease_expires_at,
-                completed_attempt=_completed_attempt(control),
-            )
+        if _lease_is_live(control, lease_now):
+            return _in_progress_claim(requested, request, control)
         lease_token = uuid.uuid4()
         expires_at = lease_now + LEASE_DURATION
         control.lease_token = lease_token
