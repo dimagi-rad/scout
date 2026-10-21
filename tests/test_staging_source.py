@@ -153,3 +153,43 @@ def test_detoasted_source_returns_every_json_value_unchanged():
             "WHERE form_json IS NOT NULL AND form_json = 'null'::jsonb"
         )
         assert cursor.fetchone() == (1,)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("count", [3, 1700], ids=["plain", "folded"])
+def test_generated_case_and_form_models_build_the_same_rows(tenant, count):
+    case_sql = _generate_case_type_asset(
+        tenant, "patient", [f"p{i}" for i in range(count)], {}, model_name="patient"
+    ).sql_content
+    form_sql = _generate_form_asset(
+        tenant, "urn:visit", {"questions": _questions(count)}, model_name="visit"
+    ).sql_content
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "CREATE TEMP TABLE raw_cases (case_id text, case_type text, case_name text, "
+            "external_id text, owner_id text, date_opened timestamptz, "
+            "last_modified timestamptz, closed boolean, properties jsonb) ON COMMIT DROP"
+        )
+        cursor.execute(
+            "CREATE TEMP TABLE raw_forms (form_id text, xmlns text, received_on timestamptz, "
+            "app_id text, form_data jsonb) ON COMMIT DROP"
+        )
+        for i, case_type in enumerate(["patient", "patient", "household"]):
+            properties = {"p0": f"v{i}", "p1": str(i), "big": "x" * 5000}
+            cursor.execute(
+                "INSERT INTO raw_cases VALUES (%s, %s, 'n', NULL, 'o', now(), now(), false, "
+                "%s::jsonb)",
+                [f"c{i}", case_type, json.dumps(properties)],
+            )
+            form_data = {"data": {"q0": f"v{i}", "q1": str(i), "big": "x" * 5000}}
+            cursor.execute(
+                "INSERT INTO raw_forms VALUES (%s, %s, now(), 'app', %s::jsonb)",
+                [f"f{i}", "urn:visit" if i < 2 else "urn:other", json.dumps(form_data)],
+            )
+
+        for sql in (case_sql, form_sql):
+            cursor.execute(f"SELECT * FROM ({_plain(sql)}) s ORDER BY 1")
+            plain = cursor.fetchall()
+            cursor.execute(f"SELECT * FROM ({sql}) s ORDER BY 1")
+            assert cursor.fetchall() == plain
+            assert len(plain) == 2

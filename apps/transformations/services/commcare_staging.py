@@ -62,6 +62,8 @@ _CASE_CORE_COLUMNS = [
     (event_time_sql("last_modified"), "last_modified"),
     ("closed", None),
 ]
+# The raw columns the outer projection reads through detoasted_source. Each core
+# alias must name its raw column; test_staging_source builds every model to check.
 _CASE_RAW_COLUMNS = [alias or expr for expr, alias in _CASE_CORE_COLUMNS]
 _FORM_RAW_COLUMNS = ["form_id", "xmlns", "received_on", "app_id"]
 
