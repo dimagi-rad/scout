@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from apps.agents.graph.state import is_rejected_tool_result
 from apps.agents.subagents.events import SUBAGENT_TOOL_NAMES
+from apps.chat.attachments import attachment_url, message_attachments
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.stream import _redact_tool_input, _tool_content_to_str
 
@@ -32,11 +33,22 @@ def langchain_messages_to_ui(lc_messages) -> list[dict]:
     for msg in visible:
         if isinstance(msg, HumanMessage):
             content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            attachments = message_attachments(msg)
+            parts = [{"type": "text", "text": content}] if content or not attachments else []
+            parts.extend(
+                {
+                    "type": "file",
+                    "mediaType": attachment.get("media_type", ""),
+                    "filename": attachment.get("filename", ""),
+                    "url": attachment_url(attachment["id"]),
+                }
+                for attachment in attachments
+            )
             ui_messages.append(
                 {
                     "id": msg.id or uuid.uuid4().hex,
                     "role": "user",
-                    "parts": [{"type": "text", "text": content}],
+                    "parts": parts,
                 }
             )
         elif isinstance(msg, AIMessage):

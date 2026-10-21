@@ -72,7 +72,7 @@ describe("workspace load-history indicator", () => {
     openSwitcher()
 
     const indicator = screen.getByTestId("workspace-data-indicator-workspace-recorded")
-    const label = `Last recorded load: ${new Date(LAST_LOAD).toLocaleDateString()}. ${AVAILABILITY_NOTE}`
+    const label = `Last recorded import: ${new Date(LAST_LOAD).toLocaleDateString()}. ${AVAILABILITY_NOTE}`
     expect(indicator).toHaveAccessibleName(label)
     expect(indicator).toHaveAttribute("title", label)
     expect(indicator).toHaveAttribute("data-data-state", "recorded")
@@ -82,14 +82,14 @@ describe("workspace load-history indicator", () => {
   })
 
   it.each([
-    ["provisioning", "loading", "Loading data…", "svg.animate-spin"],
+    ["provisioning", "loading", "Importing data…", "svg.animate-spin"],
     ["failed", "failed", "Data setup failed.", "svg.text-destructive"],
     ["unavailable", "unavailable", "Data setup unavailable.", null],
   ] as const)("preserves %s setup status and the last recorded load", (status, state, prefix, icon) => {
     openSwitcher([workspace({ schema_status: status })])
 
     const indicator = screen.getByTestId("workspace-data-indicator-workspace-recorded")
-    const label = `${prefix} Last recorded load: ${new Date(LAST_LOAD).toLocaleDateString()}. ${AVAILABILITY_NOTE}`
+    const label = `${prefix} Last recorded import: ${new Date(LAST_LOAD).toLocaleDateString()}. ${AVAILABILITY_NOTE}`
     expect(indicator).toHaveAttribute("data-data-state", state)
     expect(indicator).toHaveAccessibleName(label)
     expect(indicator).toHaveAttribute("title", label)
@@ -100,14 +100,14 @@ describe("workspace load-history indicator", () => {
 
   it.each([
     ["available", "unknown", ""],
-    ["provisioning", "loading", "Loading data… "],
+    ["provisioning", "loading", "Importing data… "],
     ["failed", "failed", "Data setup failed. "],
     ["unavailable", "unavailable", "Data setup unavailable. "],
   ] as const)("does not invent a load time for %s metadata", (status, state, prefix) => {
     openSwitcher([workspace({ schema_status: status, last_synced_at: null })])
 
     const indicator = screen.getByTestId("workspace-data-indicator-workspace-recorded")
-    const label = `${prefix}No load time recorded. ${AVAILABILITY_NOTE}`
+    const label = `${prefix}No import time recorded. ${AVAILABILITY_NOTE}`
     expect(indicator).toHaveAttribute("data-data-state", state)
     expect(indicator).toHaveAccessibleName(label)
     expect(indicator).toHaveAttribute("title", label)
@@ -119,7 +119,7 @@ describe("workspace load-history indicator", () => {
     openSwitcher([workspace({ last_synced_at: "2026-09-14T11:48:00Z" })])
 
     expect(screen.getByTestId("workspace-data-indicator-workspace-recorded"))
-      .toHaveAccessibleName(`Last recorded load: 12 minutes ago. ${AVAILABILITY_NOTE}`)
+      .toHaveAccessibleName(`Last recorded import: 12 minutes ago. ${AVAILABILITY_NOTE}`)
   })
 
   it("filters by recorded load history, including setup failures, without claiming current data", () => {
@@ -135,20 +135,20 @@ describe("workspace load-history indicator", () => {
       }),
     ])
 
-    const filter = screen.getByRole("button", { name: "Show only workspaces with recorded loads" })
+    const filter = screen.getByRole("button", { name: "Show only workspaces with recorded imports" })
     expect(filter).toHaveAttribute("aria-pressed", "false")
-    expect(filter).toHaveAttribute("title", "Show only workspaces with recorded loads")
+    expect(filter).toHaveAttribute("title", "Show only workspaces with recorded imports")
     fireEvent.click(filter)
 
     expect(filter).toHaveAttribute("aria-pressed", "true")
-    expect(filter).toHaveAccessibleName("Showing only workspaces with recorded loads")
+    expect(filter).toHaveAccessibleName("Showing only workspaces with recorded imports")
     expect(screen.queryByTestId("domain-item-undated-schema")).not.toBeInTheDocument()
     for (const id of ["workspace-recorded", "failed-load", "unavailable-load"]) {
       expect(screen.getByTestId(`domain-item-${id}`)).toHaveAttribute("data-has-recorded-load", "true")
     }
 
     fireEvent.change(screen.getByTestId("workspace-search"), { target: { value: "No load time" } })
-    expect(screen.getByText("No recorded loads match these filters.")).toBeInTheDocument()
+    expect(screen.getByText("No recorded imports match these filters.")).toBeInTheDocument()
     fireEvent.click(filter)
     expect(screen.getByTestId("domain-item-undated-schema")).toBeInTheDocument()
     expect(api.get).not.toHaveBeenCalled()

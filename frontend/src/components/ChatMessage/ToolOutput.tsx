@@ -527,7 +527,7 @@ export function ListTablesOutput({ output }: { output: ListTablesOutput }) {
             {t.materialized_row_count != null && (
               <span
                 className="text-muted-foreground/50 ml-1"
-                title="Row count at last materialization (not verified live)"
+                title="Row count at last import (not verified live)"
               >
                 (~{t.materialized_row_count.toLocaleString()})
               </span>

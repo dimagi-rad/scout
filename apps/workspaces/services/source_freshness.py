@@ -18,7 +18,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from apps.common.error_codes import ErrorCode
-from apps.users.models import PROVIDER_CHOICES
+from apps.users.models import provider_label
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant, WorkspaceViewSchema
 from apps.workspaces.services.query_state import synced_runs
 from apps.workspaces.services.status import serving_excluded_tenant_ids
@@ -29,8 +29,6 @@ logger = logging.getLogger(__name__)
 REFRESHED = "refreshed"
 REUSED = "reused"
 SKIPPED = "skipped"
-
-_PROVIDER_LABELS = dict(PROVIDER_CHOICES)
 
 # A new sign-in by the member who ran the load fixes these; any member whose own
 # sign-in works can also refresh. Everything else is not about a credential.
@@ -44,10 +42,6 @@ REQUESTER_CODES = CREDENTIAL_CODES | {
     ErrorCode.AUTH_ACCESS_DENIED,
     ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
 }
-
-
-def provider_label(provider: str) -> str:
-    return _PROVIDER_LABELS.get(provider, provider or "the provider")
 
 
 def load_outcome(entry: dict) -> dict:
@@ -71,18 +65,18 @@ def remedy(outcome: dict, provider: str, *, own_load: bool = True) -> str:
     label = provider_label(provider)
     code = outcome.get("error_code") or ""
     if outcome.get("cancelled") or outcome.get("not_reached"):
-        return "the load stopped before it fetched this source; refresh the data again"
+        return "the import stopped before it fetched this source; refresh the data again"
     if code in CREDENTIAL_CODES:
         if own_load:
             return f"reconnect {label} in Connected Accounts, then refresh the data"
         return (
-            f"the member who ran the last load has to reconnect {label} in Connected "
+            f"the member who ran the last import has to reconnect {label} in Connected "
             f"Accounts, or a member whose {label} sign-in works can refresh the data"
         )
     if code == ErrorCode.WORKSPACE_TENANT_UNREACHABLE:
         if not own_load:
             return (
-                f"the member who ran the last load has no live {label} access to this "
+                f"the member who ran the last import has no live {label} access to this "
                 f"source; a member whose {label} access works can refresh the data"
             )
         return (
@@ -100,7 +94,7 @@ def remedy(outcome: dict, provider: str, *, own_load: bool = True) -> str:
         return "fix the other sources listed as not refreshed, then refresh the data"
     if code == ErrorCode.WORKSPACE_ROLE_INSUFFICIENT:
         return (
-            "the member who ran the load lost write access during it; a workspace member "
+            "the member who ran the import lost write access during it; a workspace member "
             "with read-write or manage access has to refresh the data"
         )
     if code in {ErrorCode.AUTH_REFRESH_FAILED, ErrorCode.ACCESS_VERIFICATION_UNAVAILABLE}:

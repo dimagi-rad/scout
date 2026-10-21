@@ -1,6 +1,6 @@
 import type { SourceFreshnessDetail, WorkspaceFreshness } from "@/api/workspaces"
 import { formatRelativeTime } from "@/lib/relativeTime"
-import { LOADING_EXPLAINER } from "@/lib/loadingCopy"
+import { IMPORT_EXPLAINER } from "@/lib/importCopy"
 
 import { LoadSummary } from "./LoadSummary"
 
@@ -10,14 +10,14 @@ interface Props {
   onSummaryOpenChange?: (open: boolean) => void
   /** The summary opened itself because a load just finished. */
   justLoaded?: boolean
-  /** Only the What's loaded link: the layout already says how fresh the data is. */
+  /** Only the What's imported link: the layout already says how fresh the data is. */
   summaryOnly?: boolean
 }
 
 function freshnessLabel(source: SourceFreshnessDetail): string {
-  if (!source.last_fetched_at) return "not loaded into Scout yet"
+  if (!source.last_fetched_at) return "not imported yet"
   // Loaded, but outside what the workspace queries (e.g. no live multi-source view).
-  if (!source.serving) return "loaded, but not used by this workspace"
+  if (!source.serving) return "imported, but not used by this workspace"
   return `data as of ${formatRelativeTime(source.last_fetched_at)}`
 }
 
@@ -54,7 +54,7 @@ export function SourceFreshness({
       >
         {!summaryOnly && (
           <>
-            <li className="font-medium" title={LOADING_EXPLAINER}>
+            <li className="font-medium" title={IMPORT_EXPLAINER}>
               {sources.length === 1 ? "Data source:" : `${sources.length} data sources:`}
             </li>
             {sources.map((source) => (
@@ -73,7 +73,7 @@ export function SourceFreshness({
               aria-expanded={summaryOpen}
               data-testid="source-freshness-details"
             >
-              {summaryOpen ? "Hide details" : "What's loaded"}
+              {summaryOpen ? "Hide details" : "What's imported"}
             </button>
           </li>
         )}

@@ -68,17 +68,17 @@ function DataIndicator({ ws }: { ws: WorkspaceListItem }) {
   const state = workspaceLoadState(ws)
   const setupLabel =
     state === "loading"
-      ? "Loading data…"
+      ? "Importing data…"
       : state === "failed"
         ? "Data setup failed."
         : state === "not_loaded"
-          ? "No data loaded yet."
+          ? "No data imported yet."
           : state === "unavailable"
             ? "Data setup unavailable."
             : ""
   const loadLabel = ws.last_synced_at
-    ? `Last recorded load: ${formatRelativeTime(ws.last_synced_at)}.`
-    : "No load time recorded."
+    ? `Last recorded import: ${formatRelativeTime(ws.last_synced_at)}.`
+    : "No import time recorded."
   const label = [
     setupLabel,
     loadLabel,
@@ -611,11 +611,11 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
                 aria-pressed={recordedLoadsOnly}
                 aria-label={
                   recordedLoadsOnly
-                    ? "Showing only workspaces with recorded loads"
-                    : "Show only workspaces with recorded loads"
+                    ? "Showing only workspaces with recorded imports"
+                    : "Show only workspaces with recorded imports"
                 }
                 onClick={toggleRecordedLoads}
-                title="Show only workspaces with recorded loads"
+                title="Show only workspaces with recorded imports"
                 className={cn(
                   "flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition-colors",
                   recordedLoadsOnly
@@ -637,7 +637,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
             {visible.length === 0 && lostVisible.length === 0 ? (
               <p className="px-2 py-6 text-center text-sm text-muted-foreground">
                 {recordedLoadsOnly
-                  ? "No recorded loads match these filters."
+                  ? "No recorded imports match these filters."
                   : !search && segment === "recent"
                     ? "No recent workspaces — search to find one."
                     : "No workspaces match."}

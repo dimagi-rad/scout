@@ -87,6 +87,21 @@ async def test_agent_tool_node_compacts_mcp_results_only():
 
 
 @pytest.mark.asyncio
+async def test_agent_tool_node_compacts_reference_document_reads():
+    # ToolNode serialises a local tool's dict with ensure_ascii, six bytes per non-ASCII char.
+    page = {"status": "ok", "content": "Indicateur é"}
+    read = ToolMessage(
+        content=json.dumps(page), tool_call_id="tc-1", name="read_reference_document"
+    )
+    node = _make_injecting_tool_node(_base_node([read]), {})
+
+    result = await node(_state("read_reference_document"))
+
+    [compacted] = result["messages"]
+    assert compacted.content == '{"status":"ok","content":"Indicateur é"}'
+
+
+@pytest.mark.asyncio
 async def test_subagent_tool_nodes_compact_mcp_results():
     node = _make_nested_tool_node(_base_node([_mcp_message("list_datasets")]))
 

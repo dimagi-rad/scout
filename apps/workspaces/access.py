@@ -92,7 +92,7 @@ _GENERIC_DENIED = "Workspace not found or access denied."
 TOOL_READ_DENIED_MESSAGE = "Workspace access required for this operation."
 TOOL_WRITE_DENIED_MESSAGE = "Read-write or manage role required for this operation."
 NO_SOURCES_MESSAGE = (
-    "This workspace has no data sources, so there is nothing to load or query. "
+    "This workspace has no data sources, so there is nothing to import or query. "
     "A manager can delete it."
 )
 

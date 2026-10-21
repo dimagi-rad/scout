@@ -183,7 +183,8 @@ class PendingRequest(models.Model):
     # Names the sent message (with the version), so a thread's next request never
     # reuses a message id already in its checkpoint.
     request_id = models.UUIDField(default=uuid.uuid4, editable=False)
-    # Each part is {"id", "text", "added_at"}; they are sent joined, in order.
+    # Each part is {"id", "text", "added_at", "attachments"?, "bound"?}; they are sent joined,
+    # in order, with every part's attachments (apps/chat/attachments.py).
     parts = models.JSONField(default=list)
     # Bumped on every change, so an edit made against an older copy is refused.
     version = models.PositiveIntegerField(default=1)
@@ -230,3 +231,67 @@ class ResumeStreamChunk(models.Model):
 
     def __str__(self):
         return f"ResumeStreamChunk({self.run}, {self.id}) for thread {self.thread_id}"
+
+
+class AttachmentBlob(models.Model):
+    """The bytes of an uploaded chat attachment, stored once per distinct content.
+
+    Never addressed directly: every read goes through a ChatAttachment the caller
+    owns, so sharing one blob across users discloses nothing.
+    """
+
+    sha256 = models.CharField(max_length=64, unique=True)
+    size = models.BigIntegerField()
+    content = models.BinaryField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"AttachmentBlob({self.sha256[:12]}, {self.size} bytes)"
+
+
+class ChatAttachment(models.Model):
+    """One upload of a file to a chat: a user's handle on a shared AttachmentBlob.
+
+    ``thread`` stays null until a message carrying the attachment is sent; unsent
+    uploads are collected by the GC task. See apps/chat/attachments.py.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    blob = models.ForeignKey(
+        "chat.AttachmentBlob", on_delete=models.PROTECT, related_name="attachments"
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="chat_attachments"
+    )
+    workspace = models.ForeignKey(
+        "workspaces.Workspace", on_delete=models.CASCADE, related_name="chat_attachments"
+    )
+    thread = models.ForeignKey(
+        "chat.Thread",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="attachments",
+    )
+    filename = models.CharField(max_length=255)
+    media_type = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+    # Set once a message carrying it goes to the agent (and so the checkpoint), and
+    # once a held request carries it. A refused request unbinds only attachments with
+    # neither; releasing a held part never unbinds one a sent message carries.
+    sent_at = models.DateTimeField(null=True, blank=True)
+    held_at = models.DateTimeField(null=True, blank=True)
+    # The model API refused this image; later requests carry a note instead of it.
+    rejected_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["created_at"],
+                condition=models.Q(thread__isnull=True),
+                name="chat_attach_unsent_created",
+            ),
+        ]
+
+    def __str__(self):
+        return f"ChatAttachment({self.filename}, {self.id})"

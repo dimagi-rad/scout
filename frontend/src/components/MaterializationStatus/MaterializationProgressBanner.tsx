@@ -3,7 +3,7 @@ import { api } from "@/api/client"
 import type { ActiveJob, LoadPhase, WorkspaceLoad } from "@/api/jobs"
 import { useRetryableAction } from "@/hooks/useRetryableAction"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
-import { LOADING_EXPLAINER } from "@/lib/loadingCopy"
+import { IMPORT_EXPLAINER, importingSourceLabel } from "@/lib/importCopy"
 
 import { formatTimeEstimate } from "./timeEstimate"
 
@@ -25,7 +25,7 @@ type Props = { workspaceId: string } & (
 )
 
 /**
- * Slim status card shown above the chat input while a materialization job is
+ * Slim status card shown above the chat input while an import job is
  * active. Styled to read like a system chat message — light-blue fill, blue
  * outline, rounded like a message bubble — rather than a full-bleed banner.
  *
@@ -53,6 +53,7 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
   const sourceIndex = active?.source_index ?? null
   const sourceTotal = active?.source_total ?? null
   const tenantName = active?.tenant_name ?? null
+  const provider = active?.provider ?? null
   const rowsLoaded = progress?.rows_loaded ?? 0
   const rowsTotal = progress?.rows_total ?? null
   const percent = progress?.percent ?? null
@@ -81,8 +82,6 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
       rowsTotal != null && rowsTotal > 0
         ? `${rowsStr} of ${rowsTotal.toLocaleString()} ${unit}`
         : `${rowsStr} ${unit}`
-  } else if (sourceName) {
-    countText = `Loading ${sourceName}…`
   } else {
     countText = "Preparing…"
   }
@@ -132,9 +131,9 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
               className="text-sm font-medium text-blue-900 dark:text-blue-100"
               data-testid="materialization-banner-source"
               data-phase={phase ?? undefined}
-              title={phaseTitle ? undefined : LOADING_EXPLAINER}
+              title={phaseTitle ? undefined : IMPORT_EXPLAINER}
             >
-              {phaseTitle ?? (sourceName ? `Loading ${sourceName} into Scout` : "Loading data into Scout")}
+              {phaseTitle ?? importingSourceLabel(sourceName, provider)}
             </span>
             {sourceText && (
               <span
@@ -218,7 +217,7 @@ export function MaterializationProgressBanner({ job, load, workspaceId }: Props)
                 : "border-blue-600/30 text-blue-700 hover:border-red-400 hover:bg-red-50 hover:text-red-600 dark:border-blue-400/30 dark:text-blue-300 dark:hover:border-red-400/50 dark:hover:bg-red-950/40 dark:hover:text-red-400"
             }`}
             data-testid="materialization-banner-stop-btn"
-            title={cancel.failure?.message ?? "Stop data loading"}
+            title={cancel.failure?.message ?? "Stop import"}
           >
             <X
               className={`h-3.5 w-3.5 ${cancel.state === "pending" ? "animate-pulse" : ""}`}

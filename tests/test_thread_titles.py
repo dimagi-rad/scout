@@ -3,19 +3,21 @@
 import json
 import logging
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
 from django.db import connection
 from django.test import AsyncClient
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
 
 from apps.chat import stream, titles
+from apps.chat.attachments import SCOUT_ATTACHMENTS_KWARG
 from apps.chat.models import Thread
 from apps.chat.tasks import TITLE_JOB_PRIORITY, aschedule_thread_title, generate_thread_title
-from apps.chat.titles import agenerate_thread_title, clean_generated_title
+from apps.chat.titles import agenerate_thread_title, clean_generated_title, title_text
 
 
 @pytest.fixture
@@ -486,3 +488,36 @@ async def test_blank_title_fill_does_not_reread_an_empty_checkpoint(workspace, u
     await titles.afill_blank_titles([thread])
 
     assert len(reads) == 1
+
+
+def test_title_text_falls_back_to_the_first_attachment():
+    files = [{"id": "a", "filename": "registry.json"}, {"id": "b", "filename": "x.png"}]
+    assert title_text("", files) == "registry.json"
+    assert title_text("  ", files) == "registry.json"
+    assert title_text("compare these", files) == "compare these"
+    assert title_text("", []) == ""
+
+
+@pytest.mark.asyncio
+async def test_first_message_with_only_files_reads_as_its_first_filename(monkeypatch):
+    message = HumanMessage(
+        content="",
+        additional_kwargs={SCOUT_ATTACHMENTS_KWARG: [{"id": "a", "filename": "visits.csv"}]},
+    )
+    checkpoint = SimpleNamespace(checkpoint={"channel_values": {"messages": [message]}})
+    saver = SimpleNamespace(aget_tuple=AsyncMock(return_value=checkpoint))
+    monkeypatch.setattr(titles, "ensure_checkpointer", AsyncMock(return_value=saver))
+
+    assert await titles._aread_first_user_message(uuid.uuid4()) == "visits.csv"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_a_filename_title_is_generated_with_file_framing(workspace, user, title_model):
+    thread = await _thread(workspace, user, title="district_visits_2026.csv")
+
+    assert await agenerate_thread_title(str(thread.id)) == "generated"
+
+    system, message = title_model.calls[0]["messages"]
+    assert "district_visits_2026.csv" in message.content
+    assert "only a file name" in system.content

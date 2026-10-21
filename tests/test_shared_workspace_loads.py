@@ -375,7 +375,7 @@ async def test_a_tenant_added_after_the_locks_were_taken_is_reported_not_loaded(
     assert [call[0] for call in pipeline.calls] == [tenant.id]
     late_entry = next(e for e in result["tenants"] if e.get("tenant_id") == str(late.id))
     assert late_entry["success"] is False
-    assert "added while the load was starting" in late_entry["error"]
+    assert "added while the import was starting" in late_entry["error"]
     assert late_entry["error_code"] == ErrorCode.WORKSPACE_SOURCES_CHANGED
 
 

@@ -10,6 +10,7 @@ import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import type { ActiveJob, RecentTermination } from "@/api/jobs"
+import { importingLabel } from "@/lib/importCopy"
 import { MaterializationFailure } from "@/components/MaterializationStatus/MaterializationFailure"
 import {
   Bot,
@@ -609,7 +610,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
             title={
               cancelState === "error"
                 ? "Cancel failed — try again"
-                : "Stop materialization"
+                : "Stop import"
             }
           >
             <Square className="w-3 h-3" />
@@ -662,7 +663,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
           )}
           {toolName === "run_materialization" && matchingJob && (
             <div className="text-xs text-muted-foreground mb-2">
-              ⏳ {matchingJob.progress?.message ?? "Loading data…"}
+              ⏳ {matchingJob.progress?.message ?? importingLabel(matchingJob.provider)}
               {!matchingJob.progress?.phase && matchingJob.progress?.rows_loaded != null && (
                 <>
                   {" "}({matchingJob.progress.rows_loaded.toLocaleString()}

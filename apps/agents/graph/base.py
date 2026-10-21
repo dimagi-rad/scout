@@ -17,6 +17,11 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from apps.agents.graph.attachments import (
+    AttachmentLoader,
+    aexpand_attachments,
+    is_image_rejection,
+)
 from apps.agents.graph.prompt_context import (
     PROMPT_CACHE_CONTROL,
     _build_cached_system_message,
@@ -120,6 +125,9 @@ async def build_agent_graph(
     canvas_write = bool(interactive and conversation_id and write_capable)
 
     # --- Build tools ---
+    # Per run: the graph is built per turn, and each tool loop iteration re-sends
+    # the same attachments. read_attachment shares it, so a file is loaded once.
+    attachment_loader = AttachmentLoader(conversation_id)
     tools = _build_tools(
         workspace,
         user,
@@ -129,6 +137,7 @@ async def build_agent_graph(
         job_id=job_id,
         canvas_write=canvas_write,
         write_capable=write_capable,
+        attachment_loader=attachment_loader,
     )
     logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
@@ -219,13 +228,24 @@ async def build_agent_graph(
                         )
                         answered_ids.add(tc_id)
 
-        messages = [
-            _build_cached_system_message(stable_prompt, volatile_prompt, personal_memory),
-            *repaired,
-        ]
+        system_message = _build_cached_system_message(
+            stable_prompt, volatile_prompt, personal_memory
+        )
+        messages = [system_message, *await aexpand_attachments(repaired, attachment_loader)]
         # cache_control lands on the last eligible message block, caching the
         # (pruned) conversation-history prefix (arch #254, 02#3).
-        response = await llm_with_tools.ainvoke(messages, cache_control=PROMPT_CACHE_CONTROL)
+        try:
+            response = await llm_with_tools.ainvoke(messages, cache_control=PROMPT_CACHE_CONTROL)
+        except Exception as exc:
+            # The checkpoint keeps the attachment, so without this one image the API
+            # cannot read would fail every turn while its message is in the window.
+            if not is_image_rejection(exc) or not await attachment_loader.areject_images(
+                exc, messages
+            ):
+                raise
+            logger.warning("agent_node: the API refused an image; retrying without it")
+            messages = [system_message, *await aexpand_attachments(repaired, attachment_loader)]
+            response = await llm_with_tools.ainvoke(messages, cache_control=PROMPT_CACHE_CONTROL)
         return {"messages": [response]}
 
     def should_continue(

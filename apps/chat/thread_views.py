@@ -13,6 +13,14 @@ from apps.chat.artifact_links import (
     latest_version_links,
     serialize_thread_artifact_link,
 )
+from apps.chat.attachments import (
+    abind_to_thread,
+    amark_held,
+    aresolve_for_send,
+    attachment_ids_from_parts,
+    aunbind,
+    uncarried,
+)
 from apps.chat.checkpointer import athread_has_checkpoint, ensure_checkpointer
 from apps.chat.helpers import (
     CheckpointerUnavailable,
@@ -297,15 +305,17 @@ def _pending_conflict(error: pending_requests.PendingRequestConflict) -> JsonRes
 async def thread_pending_request_parts_view(request, workspace_id, thread_id):
     """POST /api/workspaces/<workspace_id>/threads/<thread_id>/pending-request/parts/
 
-    Adds ``{id, text}`` to the request held while the chat's data loads; idempotent
-    on ``id``. A 409 means the request was claimed or is gone, and the client sends
-    the text as a normal message instead.
+    Adds ``{id, text, files?}`` to the request held while the chat's data loads;
+    idempotent on ``id``. ``files`` are the message's AI SDK file parts, which name
+    uploaded attachments; ``text`` may be empty when there are some. A 409 means
+    the request was claimed or is gone, and the client sends the text as a normal
+    message instead.
     """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
     user = request._authenticated_user
-    _workspace, err = await aresolve_workspace(user, workspace_id)
+    workspace, err = await aresolve_workspace(user, workspace_id)
     if err:
         return err
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
@@ -315,20 +325,49 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
     body, err = parse_json_object(request)
     if err:
         return err
-    part_id, text = body.get("id"), body.get("text")
+    part_id, text, files = body.get("id"), body.get("text"), body.get("files", [])
     if (
         not isinstance(part_id, str)
         or not part_id
         or len(part_id) > pending_requests.MAX_PART_ID_LENGTH
     ):
         return JsonResponse({"error": "id must be a non-empty string"}, status=400)
-    if not isinstance(text, str) or not text.strip():
+    # Every entry must be a file part: one without its type would be skipped silently.
+    if not isinstance(files, list) or not all(
+        isinstance(f, dict) and f.get("type") == "file" for f in files
+    ):
+        return JsonResponse(
+            {"error": "files must be a list of file parts", "reason": "attachment_invalid"},
+            status=400,
+        )
+    attachment_ids, error = attachment_ids_from_parts(files)
+    if error:
+        return JsonResponse({"error": error, "reason": "attachment_invalid"}, status=400)
+    if not isinstance(text, str) or not (text.strip() or attachment_ids):
         return JsonResponse({"error": "text must be a non-empty string"}, status=400)
+    attachments = await aresolve_for_send(
+        attachment_ids, user=user, workspace=workspace, thread_id=thread.id
+    )
+    newly_bound = None
+    if attachments is not None:
+        newly_bound = await abind_to_thread(
+            attachment_ids, user=user, workspace=workspace, thread=thread
+        )
+    if newly_bound is None:
+        return JsonResponse(
+            {"error": "An attachment is no longer available.", "reason": "attachment_invalid"},
+            status=400,
+        )
     try:
-        pending = await pending_requests.aadd_part(thread.id, part_id=part_id, text=text)
+        pending = await pending_requests.aadd_part(
+            thread.id, part_id=part_id, text=text, attachments=attachments, bound=newly_bound
+        )
     except pending_requests.PendingRequestConflict as e:
+        # The client sends it as a message instead, which binds them again.
+        await _unbind_quietly(newly_bound, thread)
         return _pending_conflict(e)
     except pending_requests.PendingRequestTooLong as e:
+        await _unbind_quietly(newly_bound, thread)
         return JsonResponse(
             {
                 "error": e.user_message,
@@ -336,7 +375,24 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
             },
             status=400,
         )
+    except BaseException:
+        await _unbind_quietly(newly_bound, thread)
+        raise
+    # The part is stored by now, so a failure here must not fail the request.
+    dropped = set(uncarried(newly_bound, pending))
+    await _unbind_quietly(list(dropped), thread)
+    try:
+        await amark_held([i for i in attachment_ids if i not in dropped], user=user, thread=thread)
+    except Exception:
+        logger.warning("Could not mark attachments of thread %s held", thread.id, exc_info=True)
     return JsonResponse(pending)
+
+
+async def _unbind_quietly(ids, thread) -> None:
+    try:
+        await aunbind(ids, thread=thread)
+    except Exception:
+        logger.warning("Could not unbind attachments of thread %s", thread.id, exc_info=True)
 
 
 @async_login_required

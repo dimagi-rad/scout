@@ -6,6 +6,7 @@ from django.contrib import admin
 from django.http import HttpResponse
 from django.urls import include, path
 
+from apps.chat.attachment_views import attachment_detail_view, attachment_upload_view
 from apps.chat.urls import workspace_thread_urlpatterns
 from apps.chat.views import chat_view
 from apps.memory.urls import workspace_memory_urlpatterns
@@ -107,6 +108,12 @@ urlpatterns = [
     ),
     # workspace_id comes from the request body, not the URL
     path("api/chat/", chat_view, name="chat"),
+    path("api/chat/attachments/", attachment_upload_view, name="chat_attachment_upload"),
+    path(
+        "api/chat/attachments/<uuid:attachment_id>/",
+        attachment_detail_view,
+        name="chat_attachment_detail",
+    ),
     path("api/auth/", include("apps.users.auth_urls")),
     path("api/memory/", include("apps.memory.urls")),
     path("api/telemetry/", include("apps.telemetry.urls")),

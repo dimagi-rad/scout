@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react"
-import { Loader2 } from "lucide-react"
+import { Download, Loader2 } from "lucide-react"
 import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import { READ_ONLY_HINT, writeErrorMessage } from "@/hooks/useWorkspaceRole"
 import {
@@ -14,7 +14,13 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import type { KnowledgeItem, KnowledgeType } from "@/store/knowledgeSlice"
+import {
+  KNOWLEDGE_TITLE_MAX_LENGTH,
+  REFERENCE_DESCRIPTION_MAX_LENGTH,
+  type KnowledgeItem,
+  type KnowledgeType,
+} from "@/store/knowledgeSlice"
+import { formatChars } from "./referenceFormat"
 
 interface KnowledgeFormProps {
   open: boolean
@@ -22,11 +28,13 @@ interface KnowledgeFormProps {
   item: KnowledgeItem | null
   onSave: (data: Partial<KnowledgeItem> & { type: KnowledgeType }) => Promise<void>
   readOnly?: boolean
+  onDownload?: (item: KnowledgeItem) => Promise<void>
 }
 
 interface FormState {
   type: KnowledgeType
   title: string
+  description: string
   content: string
   tags: string
 }
@@ -34,6 +42,7 @@ interface FormState {
 const initialFormState: FormState = {
   type: "entry",
   title: "",
+  description: "",
   content: "",
   tags: "",
 }
@@ -44,13 +53,17 @@ export function KnowledgeForm({
   item,
   onSave,
   readOnly = false,
+  onDownload,
 }: KnowledgeFormProps) {
   const isCurrentAccount = useIsCurrentAccount()
   const [form, setForm] = useState<FormState>(initialFormState)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [downloading, setDownloading] = useState(false)
 
   const isEdit = !!item
+  // A reference document can be megabytes: show a preview and a download, never a textarea.
+  const isReference = item?.kind === "reference"
 
   useEffect(() => {
     if (item) {
@@ -58,6 +71,7 @@ export function KnowledgeForm({
 
       if (item.type === "entry") {
         formData.title = item.title || ""
+        formData.description = item.description || ""
         formData.content = item.content || ""
         formData.tags = item.tags?.join(", ") || ""
       }
@@ -67,6 +81,8 @@ export function KnowledgeForm({
       setForm(initialFormState)
     }
     setError(null)
+    setLoading(false)
+    setDownloading(false)
   }, [item, open])
 
   const handleChange = (
@@ -95,8 +111,12 @@ export function KnowledgeForm({
 
       if (form.type === "entry") {
         data.title = form.title
-        data.content = form.content
         data.tags = parseCommaSeparated(form.tags)
+        if (isReference) {
+          data.description = form.description
+        } else {
+          data.content = form.content
+        }
       }
 
       await onSave(data)
@@ -111,20 +131,34 @@ export function KnowledgeForm({
     }
   }
 
+  const handleDownload = async () => {
+    if (!item || !onDownload) return
+    setDownloading(true)
+    setError(null)
+    try {
+      await onDownload(item)
+    } catch (err) {
+      if (!isCurrentAccount()) return
+      setError(err instanceof Error ? err.message : "Download failed. Try again.")
+    } finally {
+      if (isCurrentAccount()) setDownloading(false)
+    }
+  }
+
+  const entryNoun = isReference ? "Reference Document" : "Entry"
+  let dialogHint = "Add a new entry to your knowledge base"
+  if (readOnly) dialogHint = READ_ONLY_HINT
+  else if (isReference) dialogHint = "Update how Scout sees this document"
+  else if (isEdit) dialogHint = "Update the knowledge entry details"
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
-            {readOnly ? "View Entry" : isEdit ? "Edit Entry" : "New Knowledge Entry"}
+            {readOnly ? `View ${entryNoun}` : isEdit ? `Edit ${entryNoun}` : "New Knowledge Entry"}
           </DialogTitle>
-          <DialogDescription>
-            {readOnly
-              ? READ_ONLY_HINT
-              : isEdit
-                ? "Update the knowledge entry details"
-                : "Add a new entry to your knowledge base"}
-          </DialogDescription>
+          <DialogDescription>{dialogHint}</DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit}>
@@ -144,24 +178,86 @@ export function KnowledgeForm({
                 value={form.title}
                 onChange={handleChange}
                 placeholder="Enter a title"
+                maxLength={KNOWLEDGE_TITLE_MAX_LENGTH}
                 required
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="content">Content</Label>
-              <Textarea
-                id="content"
-                name="content"
-                readOnly={readOnly}
-                value={form.content}
-                onChange={handleChange}
-                placeholder="Markdown content (metric definitions, semantic-model notes, business rules, etc.)"
-                rows={10}
-                className="font-mono text-sm"
-                required
-              />
-            </div>
+            {isReference && item ? (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="description">Description</Label>
+                  <Input
+                    id="description"
+                    name="description"
+                    readOnly={readOnly}
+                    value={form.description}
+                    onChange={handleChange}
+                    placeholder="What it is and when Scout should use it"
+                    maxLength={REFERENCE_DESCRIPTION_MAX_LENGTH}
+                    data-testid="knowledge-form-description"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Scout sees the title and this line in every chat, and reads the document
+                    itself only when a question needs it.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span id="reference-content-label" className="text-sm font-medium">
+                      Content
+                    </span>
+                    {onDownload && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={handleDownload}
+                        disabled={downloading}
+                        data-testid="knowledge-form-download"
+                      >
+                        {downloading ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <Download className="mr-2 h-4 w-4" />
+                        )}
+                        Download
+                      </Button>
+                    )}
+                  </div>
+                  <pre
+                    role="group"
+                    tabIndex={0}
+                    aria-labelledby="reference-content-label"
+                    className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 font-mono text-xs"
+                    data-testid="knowledge-form-preview"
+                  >
+                    {item.content}
+                  </pre>
+                  <p className="text-xs text-muted-foreground" data-testid="knowledge-form-preview-note">
+                    {item.content_truncated
+                      ? `Preview of the first ${item.content.length.toLocaleString()} of ${item.size.toLocaleString()} characters.`
+                      : `${formatChars(item.size)}.`}{" "}
+                    To change the content, upload a new version and delete this one.
+                  </p>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-2">
+                <Label htmlFor="content">Content</Label>
+                <Textarea
+                  id="content"
+                  name="content"
+                  readOnly={readOnly}
+                  value={form.content}
+                  onChange={handleChange}
+                  placeholder="Markdown content (metric definitions, semantic-model notes, business rules, etc.)"
+                  rows={10}
+                  className="font-mono text-sm"
+                  required
+                />
+              </div>
+            )}
 
             <div className="space-y-2">
               <Label htmlFor="tags">Tags</Label>

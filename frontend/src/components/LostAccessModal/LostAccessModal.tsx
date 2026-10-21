@@ -92,7 +92,7 @@ export function LostAccessModal() {
 
         {noSources ? (
           <p className="text-sm text-muted-foreground" data-testid="lost-access-no-sources">
-            There is nothing to load or query in this workspace. A manager can delete it from
+            There is nothing to import or query in this workspace. A manager can delete it from
             the workspace’s settings.
           </p>
         ) : missing.length > 0 ? (

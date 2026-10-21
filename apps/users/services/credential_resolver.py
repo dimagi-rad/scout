@@ -186,7 +186,7 @@ async def aresolve_credential(membership) -> dict | None:
             AUTH_TOKEN_EXPIRED,
             "Your sign-in is scoped to a different team than this chatbot's "
             f"team ({membership.team_slug}). Please connect team "
-            f"'{membership.team_slug}' to materialize it.",
+            f"'{membership.team_slug}' to import its data.",
         )
 
     return await _aresolve_oauth_credential(token_obj, conn.provider, conn.scope_key)
