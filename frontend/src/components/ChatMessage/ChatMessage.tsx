@@ -97,6 +97,8 @@ function renderToolOutput(
 
 function toolRowLimitCutOff(toolName: string, rawOutput: unknown): number | null {
   if (toolName !== "query" && toolName !== "semantic_query") return null
+  // Every render of a message reaches here, so skip parsing a result that was never cut.
+  if (typeof rawOutput === "string" && !/"truncated":\s*true/.test(rawOutput)) return null
   const output = parseOutput(rawOutput)
   if (output == null || typeof output !== "object") return null
   return rowLimitCutOff((output as QueryOutput | SemanticQueryOutput).data)

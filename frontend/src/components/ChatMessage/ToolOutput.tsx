@@ -142,9 +142,10 @@ function RowLimitNotice({
   exportUrl?: string
   workspaceId?: string
 }) {
-  const { canWrite } = useWorkspaceRole(workspaceId)
-  // The server enforces READ_WRITE; read-only members only see the warning.
-  const canExport = !!exportUrl && canWrite
+  const { role } = useWorkspaceRole(workspaceId)
+  // The server enforces READ_WRITE; read-only members only see the warning. Fails
+  // closed while the role is unknown, as DownloadCsvButton does.
+  const canExport = !!exportUrl && role !== null && role !== "read"
   return (
     <div
       role="status"
