@@ -38,6 +38,7 @@ class _Client:
     def __init__(self, responses):
         self.responses = responses
         self.urls = []
+        self.posts = []
 
     async def __aenter__(self):
         return self
@@ -48,6 +49,15 @@ class _Client:
     async def get(self, url, **kwargs):
         self.urls.append(url)
         return self.responses[url]
+
+    async def post(self, url, **kwargs):
+        self.posts.append(url)
+        return _batch_route_missing(url)
+
+
+def _batch_route_missing(url):
+    """Connect before commcare-connect#1588 is deployed: Django's HTML routing 404."""
+    return httpx.Response(404, text="<h1>Not Found</h1>", request=httpx.Request("POST", url))
 
 
 def _json(status, payload, url):

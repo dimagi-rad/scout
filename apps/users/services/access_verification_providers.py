@@ -135,14 +135,93 @@ def _provider_request(snapshot, settings):
     return None if request is None else (request, decode_page)
 
 
+def _is_connect_oauth(snapshot) -> bool:
+    return (
+        canonical_provider(snapshot.observation.provider) == "commcare_connect"
+        and snapshot.observation.credential_type == TenantConnection.OAUTH
+    )
+
+
 def _connect_light_ids(snapshot, external_ids) -> tuple[str, ...] | None:
     """The opportunities to check one by one, or None to use the full listing."""
-    if (
-        canonical_provider(snapshot.observation.provider) != "commcare_connect"
-        or snapshot.observation.credential_type != TenantConnection.OAUTH
-    ):
+    if not _is_connect_oauth(snapshot):
         return None
     return connect_listing.subset_ids(external_ids)
+
+
+def _connect_batch_ids(snapshot, external_ids) -> tuple[str, ...] | None:
+    if not _is_connect_oauth(snapshot):
+        return None
+    return connect_listing.batch_ids(external_ids)
+
+
+def _light_deadline(deadline, clock) -> float:
+    # Keep part of the budget back, or the listing fallback could never finish.
+    return deadline - min(CONNECT_LISTING_RESERVE_SECONDS, (deadline - clock()) / 2)
+
+
+# Not answering the batch route as designed: before commcare-connect#1588 is deployed
+# the route 404s (or 405s), and a 400 means a request it does not accept. Either way
+# the older checks still decide, and none of these may be read as a denial.
+_BATCH_FALLBACK_STATUSES = frozenset({400, 404, 405})
+
+
+async def _verify_connect_batch(
+    client, listing, ids, deadline, clock, *, connection_id, log, unavailable
+):
+    """One request deciding every opportunity in ``ids``; None falls back.
+
+    A ``false`` is an omission, which publication archives as a no-access 404 from
+    the per-opportunity check would have.
+    """
+    try:
+        request = connect_listing.batch_access_request(listing)
+    except UnsafeProviderURL:
+        log("batch_unsafe_url", outcome="indeterminate")
+        return ProviderVerificationResult.indeterminate(_INDETERMINATE)
+    remaining = _light_deadline(deadline, clock) - clock()
+    if remaining <= 0:
+        return unavailable("batch_deadline_before_request")
+    request_timeout = min(PER_REQUEST_TIMEOUT_SECONDS, remaining)
+    try:
+        response = await asyncio.wait_for(
+            client.post(
+                request.url,
+                headers=dict(request.headers),
+                json={"opportunity_ids": [int(external_id) for external_id in ids]},
+                follow_redirects=False,
+                timeout=request_timeout,
+            ),
+            timeout=request_timeout,
+        )
+    except TimeoutError:
+        return unavailable("batch_request_timeout")
+    except httpx.RequestError as exc:
+        # The class name only: str(exc) can carry the request URL.
+        return unavailable(f"batch_request_error:{type(exc).__name__}")
+    if clock() >= deadline:
+        return unavailable("batch_deadline_after_response", status=response.status_code)
+    if response.status_code in _BATCH_FALLBACK_STATUSES:
+        return None
+    status_result = _status_result(response.status_code)
+    if response.status_code == 401:
+        logger.info(
+            "Provider commcare_connect answered verification for connection %s with HTTP 401 (%s)",
+            connection_id,
+            "invalid_token" if _names_invalid_token(response) else "no token error",
+        )
+        return status_result
+    if status_result is not None:
+        log("batch_http_status", status=response.status_code, outcome=status_result.outcome.value)
+        return status_result
+    access = connect_listing.batch_access(response, ids)
+    if access is None:
+        # A changed response shape must cost a slow check, not every user's access.
+        log("batch_unrecognized_answer", status=response.status_code, outcome="fallback")
+        return None
+    return ProviderVerificationResult.complete(
+        [external_id for external_id in ids if access[external_id]], scope=ids
+    )
 
 
 async def _verify_connect_opportunities(
@@ -156,8 +235,7 @@ async def _verify_connect_opportunities(
     have. Once one is seen, a later failure ends the check with what was decided so
     far rather than discarding that revocation.
     """
-    # Keep part of the budget back, or the listing fallback could never finish.
-    light_deadline = deadline - min(CONNECT_LISTING_RESERVE_SECONDS, (deadline - clock()) / 2)
+    light_deadline = _light_deadline(deadline, clock)
     slots = asyncio.Semaphore(CONNECT_LIGHT_CONCURRENCY)
 
     async def fetch(external_id):
@@ -329,6 +407,7 @@ async def verify_provider(
     if request is None:
         return indeterminate("no_request")
     list_request, decode_page = request
+    batch_ids = _connect_batch_ids(snapshot, external_ids)
     light_ids = _connect_light_ids(snapshot, external_ids)
 
     try:
@@ -357,6 +436,19 @@ async def verify_provider(
             raise
         acquired = True
         async with client_factory() as client:
+            if batch_ids is not None:
+                batch_result = await _verify_connect_batch(
+                    client,
+                    list_request,
+                    batch_ids,
+                    deadline,
+                    clock,
+                    connection_id=snapshot.observation.connection_id,
+                    log=log,
+                    unavailable=unavailable,
+                )
+                if batch_result is not None:
+                    return batch_result
             if light_ids is not None:
                 light_result = await _verify_connect_opportunities(
                     client,

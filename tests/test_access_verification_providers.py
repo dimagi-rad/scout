@@ -31,6 +31,7 @@ class _Client:
     def __init__(self, responses):
         self.responses = list(responses)
         self.requests = []
+        self.posts = []
 
     async def __aenter__(self):
         return self
@@ -44,6 +45,15 @@ class _Client:
         if isinstance(response, Exception):
             raise response
         return response
+
+    async def post(self, url, **kwargs):
+        self.posts.append((url, kwargs))
+        return _batch_route_missing(url)
+
+
+def _batch_route_missing(url):
+    """Connect before commcare-connect#1588 is deployed: Django's HTML routing 404."""
+    return httpx.Response(404, text="<h1>Not Found</h1>", request=httpx.Request("POST", url))
 
 
 def _response(status=200, payload=None, *, url="https://provider.example/list/"):
@@ -1018,6 +1028,9 @@ class _GatedClient:
     async def __aexit__(self, *args):
         return None
 
+    async def post(self, url, **kwargs):
+        return _batch_route_missing(url)
+
     async def get(self, url, **kwargs):
         self.urls.append(url)
         self.in_flight += 1
@@ -1155,6 +1168,9 @@ class _HangingAfterFirstClient:
 
     async def __aexit__(self, *args):
         return None
+
+    async def post(self, url, **kwargs):
+        return _batch_route_missing(url)
 
     async def get(self, url, **kwargs):
         self.calls += 1
