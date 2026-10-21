@@ -125,6 +125,9 @@ async def build_agent_graph(
     canvas_write = bool(interactive and conversation_id and write_capable)
 
     # --- Build tools ---
+    # Per run: the graph is built per turn, and each tool loop iteration re-sends
+    # the same attachments. read_attachment shares it, so a file is loaded once.
+    attachment_loader = AttachmentLoader(conversation_id)
     tools = _build_tools(
         workspace,
         user,
@@ -134,6 +137,7 @@ async def build_agent_graph(
         job_id=job_id,
         canvas_write=canvas_write,
         write_capable=write_capable,
+        attachment_loader=attachment_loader,
     )
     logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
@@ -178,9 +182,6 @@ async def build_agent_graph(
 
     base_tool_node = ToolNode(tools)
     tool_node = _make_injecting_tool_node(base_tool_node, injections)
-    # Per run: the graph is built per turn, and each tool loop iteration re-sends
-    # the same attachments.
-    attachment_loader = AttachmentLoader(conversation_id)
 
     async def agent_node(state: AgentState) -> dict[str, Any]:
         """Prepend the system prompt and invoke the LLM.

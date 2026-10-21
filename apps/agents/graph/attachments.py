@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import html
 import re
+import uuid
 from dataclasses import dataclass
 
 import anthropic
@@ -132,7 +133,7 @@ class AttachmentLoader:
 
     async def aload(self, ids: list[str]) -> dict[str, LoadedAttachment | None]:
         missing = [i for i in dict.fromkeys(ids) if i not in self._cache]
-        if missing and self.thread_id:
+        if missing and _is_uuid(self.thread_id):
             async for row in ChatAttachment.objects.filter(
                 id__in=missing, thread_id=self.thread_id
             ).select_related("blob"):
@@ -140,6 +141,17 @@ class AttachmentLoader:
         for attachment_id in missing:
             self._cache.setdefault(attachment_id, None)
         return {i: self._cache[i] for i in ids}
+
+
+def _is_uuid(value) -> bool:
+    # A conversation id that is not a UUID owns no attachments; querying would raise.
+    if value is None:
+        return False
+    try:
+        uuid.UUID(str(value))
+    except ValueError:
+        return False
+    return True
 
 
 def safe_filename(filename: str | None) -> str:
@@ -163,14 +175,24 @@ def _text_block(text: str) -> dict:
 _ATTACHMENT_TAG = re.compile(r"<(/?)(attachment)", re.IGNORECASE)
 
 
-def wrap_attachment(attachment: LoadedAttachment, body: str, total_chars: int) -> str:
+def neutralise_tags(text: str) -> str:
+    """File text with any <attachment> or </attachment> made inert."""
+    return _ATTACHMENT_TAG.sub(r"<\\\1\2", text)
+
+
+def wrap_attachment(
+    attachment: LoadedAttachment, body: str, total_chars: int, *, start: int = 0
+) -> str:
+    """``body`` (characters ``start`` on of a ``total_chars`` file) inside the tags."""
     filename = safe_filename(attachment.filename)
     # The tags mark where user-supplied content ends; a tag inside the file must not
     # end it early or open a second one under another name.
-    body = _ATTACHMENT_TAG.sub(r"<\\\1\2", body)
+    shown = f'range="{start}-{start + len(body)}" ' if start or len(body) < total_chars else ""
+    body = neutralise_tags(body)
     return (
         f'<attachment filename="{filename}" id="{attachment.id}" '
-        f'media_type="{attachment.media_type}" chars="{total_chars}">\n{body}\n</attachment>'
+        f'media_type="{attachment.media_type}" chars="{total_chars}" {shown}'.rstrip()
+        + f">\n{body}\n</attachment>"
     )
 
 
@@ -199,8 +221,7 @@ def _image_omitted(entry: dict) -> dict:
 def _text_omitted(entry: dict) -> dict:
     return _text_block(
         f"[Text file {_label(entry)} is not shown: this request already carries as "
-        "much attached text as it can. Ask the user to attach it again on its own if "
-        "you need it.]"
+        "much attached text as it can. Call read_attachment with that id to read it.]"
     )
 
 
@@ -247,8 +268,13 @@ async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budg
         # A few hundred characters of a large file mislead more than they inform.
         return _text_omitted(entry)
     budget.text_chars -= shown
-    note = f"[Showing the first {shown:,} of {total:,} characters; the rest is not shown.]"
-    return _text_block(wrap_attachment(attachment, f"{text[:shown]}\n{note}", total))
+    note = (
+        f"[Showing the first {shown:,} of {total:,} characters. Call read_attachment with "
+        f'attachment_id="{attachment.id}" and offset={shown} to read on, or with search '
+        "to find something in it.]"
+    )
+    # After the closing tag: inside it, the pointer would read as file content.
+    return _text_block(f"{wrap_attachment(attachment, text[:shown], total)}\n{note}")
 
 
 async def aexpand_attachments(

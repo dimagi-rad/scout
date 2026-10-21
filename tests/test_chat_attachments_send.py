@@ -174,7 +174,8 @@ async def test_chat_post_accepts_an_attachments_only_message(user, workspace, ch
     [message] = await _human_messages(checkpointer, thread_id)
     assert message.content == ""
     assert [a["id"] for a in message_attachments(message)] == [str(attachment.id)]
-    assert (await Thread.objects.aget(id=thread_id)).title == ""
+    # Titled by the first file until a title is generated from it.
+    assert (await Thread.objects.aget(id=thread_id)).title == "r.json"
 
 
 @pytest.mark.asyncio
@@ -554,9 +555,10 @@ async def test_expansion_truncates_long_text(user, workspace, monkeypatch):
     )
 
     [block] = expanded.content
-    assert "x" * 10 + "\n[Showing the first 10 of 120 characters" in block["text"]
+    # The pointer sits after the closing tag, outside the user-supplied span.
+    assert "x" * 10 + "\n</attachment>\n[Showing the first 10 of 120 characters" in block["text"]
     assert "x" * 11 not in block["text"]
-    assert "the rest is not shown" in block["text"]
+    assert f'read_attachment with attachment_id="{long.id}"' in block["text"]
 
 
 @pytest.mark.asyncio
