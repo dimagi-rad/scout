@@ -712,3 +712,17 @@ def test_serialized_parts_hide_what_they_bound():
     serialized = pending_requests.serialize(pending, thread, None)
     assert "bound" not in serialized["parts"][0]
     assert serialized["parts"][0]["attachments"] == [{"id": "a"}]
+
+
+def test_a_huge_parts_list_is_refused_without_scanning_it_all():
+    distinct = [{"type": "file", "url": attachment_url(uuid.uuid4())} for _ in range(30_000)]
+    assert attachment_ids_from_parts(distinct)[1]
+    same = {"type": "file", "url": attachment_url(uuid.uuid4())}
+    ids, error = attachment_ids_from_parts([same] * 30_000)
+    assert ids == [] and error
+
+
+def test_a_repeated_attachment_counts_once():
+    same = {"type": "file", "url": attachment_url(uuid.uuid4())}
+    ids, error = attachment_ids_from_parts([same] * 3)
+    assert error is None and len(ids) == 1

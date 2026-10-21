@@ -39,6 +39,8 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_IMAGE_DIMENSION = 8000
 MAX_TEXT_BYTES = 2 * 1024 * 1024
 MAX_ATTACHMENTS_PER_MESSAGE = 10
+# File parts read per message, repeats included; a client sends each attachment once.
+MAX_FILE_PARTS = 5 * MAX_ATTACHMENTS_PER_MESSAGE
 # Unsent uploads a user may hold at once; GC frees them after UNSENT_TTL.
 MAX_UNSENT_PER_USER = 100
 UNSENT_TTL = timedelta(hours=24)
@@ -316,18 +318,24 @@ def attachment_ids_from_parts(parts) -> tuple[list[str], str | None]:
     Only this server's attachment URLs are accepted: a data: URL or any other link
     would put content the server never validated in front of the model.
     """
-    ids: list[str] = []
+    too_many = f"A message can carry at most {MAX_ATTACHMENTS_PER_MESSAGE} attachments."
+    ids: dict[str, None] = {}
+    file_parts = 0
     for part in parts or []:
         if not isinstance(part, dict) or part.get("type") != "file":
             continue
+        # Bounded as it goes: a body can hold tens of thousands of parts, and this
+        # runs on the event loop.
+        file_parts += 1
+        if file_parts > MAX_FILE_PARTS:
+            return [], too_many
         attachment_id = attachment_id_from_url(part.get("url"))
         if attachment_id is None:
             return [], "File parts must reference an uploaded attachment."
-        if attachment_id not in ids:
-            ids.append(attachment_id)
-    if len(ids) > MAX_ATTACHMENTS_PER_MESSAGE:
-        return [], f"A message can carry at most {MAX_ATTACHMENTS_PER_MESSAGE} attachments."
-    return ids, None
+        ids[attachment_id] = None
+        if len(ids) > MAX_ATTACHMENTS_PER_MESSAGE:
+            return [], too_many
+    return list(ids), None
 
 
 async def aresolve_for_send(ids: list[str], *, user, workspace, thread_id) -> list[dict] | None:
