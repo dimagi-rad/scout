@@ -2,7 +2,7 @@ import { getSubagentToolData, isUnsuccessfulHelperOutcome, messageArtifacts, par
 import { internalChatPath } from "./chatLinks"
 import { Fragment, useMemo, useState, type ComponentPropsWithoutRef } from "react"
 import { Link, useInRouterContext } from "react-router-dom"
-import type { UIMessage } from "ai"
+import type { FileUIPart, UIMessage } from "ai"
 import { isToolUIPart, getToolName } from "ai"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -42,6 +42,7 @@ import type {
 import { MemorySavedChip } from "./MemorySavedChip"
 import { savedMemory } from "./savedMemory"
 import { messageSegments } from "./quotes"
+import { MessageAttachments } from "./MessageAttachments"
 
 function inputSql(input: unknown): string | undefined {
   if (input != null && typeof input === "object" && "sql" in input) {
@@ -963,6 +964,13 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
     blocks.push(item.node)
   })
   flushRun(true)
+
+  // Shown together above the text, whichever order the parts arrived in: a send
+  // puts files first, a reloaded history puts them after the text.
+  const fileParts = message.parts.filter((part): part is FileUIPart => part.type === "file")
+  if (fileParts.length) {
+    blocks.unshift(<MessageAttachments key="attachments" parts={fileParts} alignEnd={isUser} />)
+  }
 
   // No visible output yet: skip the wrapper so it doesn't add a gap in the message list.
   if (blocks.length === 0) return null

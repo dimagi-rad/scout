@@ -1,5 +1,5 @@
 import { Chat, useChat } from "@ai-sdk/react"
-import { DefaultChatTransport, generateId, type UIMessage } from "ai"
+import { DefaultChatTransport, generateId, type FileUIPart, type UIMessage } from "ai"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useLocation } from "react-router-dom"
 import { useStickToBottom } from "./useStickToBottom"
@@ -17,10 +17,12 @@ import { useRefetchOnLoadEnd } from "@/hooks/useRefetchOnLoadEnd"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import type { PendingRequest } from "@/api/jobs"
-import { PART_SEPARATOR, pendingRequestText } from "@/api/pendingRequests"
+import { joinPartTexts, pendingRequestFiles, pendingRequestText } from "@/api/pendingRequests"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
 import { ChatComposer } from "./ChatComposer"
 import { QuoteSelectionAction } from "./QuoteSelectionAction"
+import { ChatDropZone } from "./attachments/ChatDropZone"
+import { useChatAttachments } from "./attachments/useChatAttachments"
 import { splitQuotedMessage } from "@/components/ChatMessage/quotes"
 import { ChatCanvasPanel } from "./ChatCanvasPanel"
 import { ChatThreadHeader, type ThreadPanelMode } from "./ChatThreadHeader"
@@ -74,6 +76,8 @@ interface HeldSend {
   threadId: string
   /** What the user typed with it, which only this message carries. */
   extra?: string
+  /** Files sent with it, which likewise go back to the composer if it is refused. */
+  files: FileUIPart[]
   /** A reply began streaming, so the server took the message: never undo it. */
   streamed: boolean
 }
@@ -161,6 +165,7 @@ export function ChatPanel() {
   const [quotesByThread, setQuotesByThread] = useState<Record<string, string[]>>({})
   const quotes = quotesByThread[threadId] ?? NO_QUOTES
   const [quoteFocusRequest, setQuoteFocusRequest] = useState(0)
+  const attachments = useChatAttachments(activeDomainId, threadId)
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const [threadPanelOpen, setThreadPanelOpen] = useState(false)
   const [threadPanelMode, setThreadPanelMode] = useState<ThreadPanelMode>("files")
@@ -392,9 +397,7 @@ export function ChatPanel() {
     }
     target.messages = target.messages.filter((message) => message.id !== sending.messageId)
     restoreHeldRef.current(sending.threadId)
-    if (sending.extra) {
-      returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra)
-    }
+    returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra, sending.files)
   }
 
   /** The shown thread polls for its generated title; a thread finished out of view does it here. */
@@ -543,8 +546,10 @@ export function ChatPanel() {
     if (sending && (busyTimerRef.current || busyNoticeRef.current)) {
       heldSends.delete(threadId)
       settleSendRef.current(sending.threadId)
-      if (!sending.streamed && sending.extra) {
-        returnToComposerRef.current(sending.workspaceId, sending.threadId, sending.extra)
+      if (!sending.streamed) {
+        returnToComposerRef.current(
+          sending.workspaceId, sending.threadId, sending.extra, sending.files,
+        )
       }
     } else if (sending && !isChatRunning(chat)) {
       // Defensive: a turn that ended in the same commit as the switch would be missed
@@ -940,21 +945,21 @@ export function ChatPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, status, busyError])
 
-  function sendText(text: string) {
+  function sendText(text: string, files: FileUIPart[] = []) {
     // A held send left behind its busy notice is replaced by this turn, which
     // carries the held text itself; only the text typed with it would be lost.
     const stale = heldSends.get(threadId)
     if (stale) {
       heldSends.delete(threadId)
       held.settleSend(stale.threadId)
-      if (!stale.streamed && stale.extra) {
-        returnToComposer(stale.workspaceId, stale.threadId, stale.extra)
+      if (!stale.streamed) {
+        returnToComposer(stale.workspaceId, stale.threadId, stale.extra, stale.files)
       }
     }
     resetOverloadState()
     setStoppedNotice(false)
-    const settle = listSendingThread(text)
-    void sendMessage({ text }).finally(settle)
+    const settle = listSendingThread(text || files[0]?.filename || "")
+    void sendMessage({ text, files }).finally(settle)
   }
 
   /** A new chat's first message goes out: list it now, not when its turn ends (#859). */
@@ -971,10 +976,14 @@ export function ChatPanel() {
   }
 
   /** Send the held request as this turn, with ``extra`` after it. */
-  function sendHeld(pending: PendingRequest, extra?: string) {
-    const text = extra
-      ? `${pendingRequestText(pending)}${PART_SEPARATOR}${extra}`
-      : pendingRequestText(pending)
+  function sendHeld(pending: PendingRequest, extra?: string, files: FileUIPart[] = []) {
+    const text = joinPartTexts([pendingRequestText(pending), extra ?? ""])
+    // The server adds the held attachments itself; sending them too shows them now.
+    const heldFiles = pendingRequestFiles(pending)
+    const sentFiles = [
+      ...heldFiles,
+      ...files.filter((file) => !heldFiles.some((held) => held.url === file.url)),
+    ]
     const messageId = generateId()
     heldSends.set(threadId, {
       messageId,
@@ -983,17 +992,29 @@ export function ChatPanel() {
       workspaceId: activeDomainId,
       threadId,
       extra,
+      files,
       streamed: false,
     })
     resetOverloadState()
     setStoppedNotice(false)
-    const settle = listSendingThread(text)
-    void sendMessage({ id: messageId, role: "user", parts: [{ type: "text", text }] })
+    const settle = listSendingThread(text || sentFiles[0]?.filename || "")
+    void sendMessage({
+      id: messageId,
+      role: "user",
+      parts: [...(text ? [{ type: "text" as const, text }] : []), ...sentFiles],
+    })
       .finally(settle)
   }
 
   /** Puts text the composer had already cleared back, in the chat it was typed in. */
-  function returnToComposer(workspaceId: string | null, sentFrom: string, sent: string) {
+  function returnToComposer(
+    workspaceId: string | null,
+    sentFrom: string,
+    sent: string | undefined,
+    files: FileUIPart[] = [],
+  ) {
+    if (files.length) attachments.restore(workspaceId, sentFrom, files)
+    if (!sent) return
     // Quotes go back to their chips rather than into the input as raw blockquotes.
     const { quotes: returnedQuotes, body: text } = splitQuotedMessage(sent)
     if (returnedQuotes.length) addQuotes(sentFrom, returnedQuotes)
@@ -1031,13 +1052,17 @@ export function ChatPanel() {
       setInput(body)
       return
     }
+    // Files taken for an add that turned into a send go out with it.
+    let carried: FileUIPart[] = []
     if (held.adding) {
       const sentFrom = threadId
-      const outcome = await held.add(text)
+      carried = attachments.take()
+      if (!text.trim() && !carried.length) return
+      const outcome = await held.add(text, carried)
       if (outcome === "send" && contextRef.current.threadId === sentFrom && historyLoadingRef.current) {
         // The request is gone, but a turn still can't start before the history lands.
         setAddFailed(null)
-        returnToComposer(activeDomainId, sentFrom, text)
+        returnToComposer(activeDomainId, sentFrom, text, carried)
         return
       }
       if (outcome === "added") {
@@ -1046,19 +1071,21 @@ export function ChatPanel() {
       }
       if (contextRef.current.threadId !== sentFrom) {
         // The user moved on meanwhile; keep the text in that chat's draft.
-        returnToComposer(activeDomainId, sentFrom, text)
+        returnToComposer(activeDomainId, sentFrom, text, carried)
         return
       }
       if (outcome !== "send") {
-        returnToComposer(activeDomainId, sentFrom, text)
+        returnToComposer(activeDomainId, sentFrom, text, carried)
         setAddFailed(outcome.failed)
         return
       }
     }
     setAddFailed(null)
+    const files = [...carried, ...attachments.take()]
+    if (!text.trim() && !files.length) return
     const unanswered = held.phase === "unanswered" ? held.takeForSend() : null
-    if (unanswered) sendHeld(unanswered, text)
-    else sendText(text)
+    if (unanswered) sendHeld(unanswered, text || undefined, files)
+    else sendText(text, files)
   }
 
   async function handleEditHeld(text: string, baseVersion: number): Promise<EditOutcome> {
@@ -1122,7 +1149,7 @@ export function ChatPanel() {
     && !remoteTurnRunning
   ) {
     return (
-      <div className="flex h-full min-w-0 flex-col">
+      <ChatDropZone onFiles={attachments.add} className="flex h-full min-w-0 flex-col">
         {loadBanners}
         {staleBanner}
         <div className="min-h-0 flex-1">
@@ -1131,6 +1158,7 @@ export function ChatPanel() {
             setInput={setInput}
             onSend={handleSend}
             disabled={isStreaming}
+            attachments={attachments}
           />
         </div>
         {/* ChatEmptyState already says when the data was last synced. */}
@@ -1141,12 +1169,12 @@ export function ChatPanel() {
           justLoaded={loadSummary.justLoaded}
           summaryOnly
         />
-      </div>
+      </ChatDropZone>
     )
   }
 
   return (
-    <div className="flex h-full min-w-0">
+    <ChatDropZone onFiles={attachments.add} className="flex h-full min-w-0">
       <div className="flex min-w-0 flex-1 flex-col">
         <ChatThreadHeader
           title={threadTitle}
@@ -1317,6 +1345,7 @@ export function ChatPanel() {
               setThreadQuotes(threadId, (current) => current.filter((_, i) => i !== index))}
             onQuotesSent={() => setThreadQuotes(threadId, () => NO_QUOTES)}
             focusRequest={quoteFocusRequest}
+            attachments={attachments}
           />
         </div>
       </div>
@@ -1333,6 +1362,6 @@ export function ChatPanel() {
           <ChatCanvasPanel workspaceId={activeDomainId} threadId={threadId} />
         ) : null}
       />
-    </div>
+    </ChatDropZone>
   )
 }

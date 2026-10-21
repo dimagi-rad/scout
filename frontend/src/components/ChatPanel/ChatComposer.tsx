@@ -11,6 +11,12 @@ import { matchSlashCommands, resolveSlashCommand, type SlashCommand } from "./sl
 import { SlashCommandMenu } from "./SlashCommandMenu"
 import { CharCounter } from "./CharCounter"
 import { isComposingKey, isOverLimit, messageLength, useAutoGrow } from "./messageLimit"
+import { AttachButton, AttachmentTray } from "./attachments/AttachmentTray"
+import {
+  attachPastedFiles,
+  attachmentsBlockReason,
+  type ChatAttachments,
+} from "./attachments/useChatAttachments"
 
 interface ChatComposerProps {
   input: string
@@ -34,6 +40,8 @@ interface ChatComposerProps {
   focusRequest?: number
   /** A held request this message is joined onto; the server's limit covers both. */
   heldText?: string
+  /** Files attached to the next message; without it the composer takes text only. */
+  attachments?: ChatAttachments
 }
 
 const NO_QUOTES: string[] = []
@@ -53,6 +61,7 @@ export function ChatComposer({
   onQuotesSent,
   focusRequest = 0,
   heldText,
+  attachments,
 }: ChatComposerProps) {
   const adding = mode === "add"
   const blocked = sendBlocked && !adding
@@ -87,9 +96,17 @@ export function ChatComposer({
   const measured = message && heldText ? `${heldText}${PART_SEPARATOR}${message}` : message
   const length = messageLength(measured)
   const tooLong = isOverLimit(length)
+  const hasFiles = attachments?.ready ?? false
+  const holdReason =
+    (blocked ? sendBlockedReason : null)
+    ?? (tooLong ? "Message is too long" : null)
+    ?? attachmentsBlockReason(attachments)
+    // Quotes are only read back as quotes when a reply follows them.
+    ?? (quotes.length && !trimmed ? "Type a reply to go with the quotes" : null)
+  const canSend = Boolean(trimmed || hasFiles) && !holdReason
 
   function submit() {
-    if (!trimmed || isStreaming || blocked || tooLong) return
+    if (!canSend || isStreaming) return
     setInput("")
     if (quotes.length) onQuotesSent?.()
     onSend(message)
@@ -153,6 +170,13 @@ export function ChatComposer({
           ))}
         </ul>
       )}
+      {attachments && (
+        <AttachmentTray
+          items={attachments.items}
+          notice={attachments.notice}
+          onRemove={attachments.remove}
+        />
+      )}
       <form onSubmit={handleSubmit} className="relative flex items-end gap-2">
         <SlashCommandMenu
           query={slashQuery}
@@ -161,6 +185,7 @@ export function ChatComposer({
           selectedIndex={slashMenuIndex}
           canWrite={canWrite}
         />
+        {attachments && <AttachButton onFiles={attachments.add} className="-mr-1" />}
         <Textarea
           ref={inputRef}
           data-testid="chat-input"
@@ -173,6 +198,7 @@ export function ChatComposer({
             setSlashMenuIndex(0)
           }}
           onKeyDown={handleKeyDown}
+          onPaste={(e) => attachPastedFiles(e, attachments)}
           placeholder={adding ? "Add to your request…" : placeholder}
           className="field-sizing-fixed min-h-9 flex-1 resize-none py-1.5"
         />
@@ -190,12 +216,12 @@ export function ChatComposer({
         ) : (
           <span
             className="flex items-end"
-            title={blocked ? sendBlockedReason : tooLong ? "Message is too long" : undefined}
+            title={holdReason ?? undefined}
           >
             <Button
               type="submit"
               size="icon"
-              disabled={!trimmed || blocked || tooLong}
+              disabled={!canSend}
               aria-label={adding ? "Add to request" : "Send message"}
               data-testid={adding ? "chat-add-to-request" : "chat-send"}
             >
@@ -208,7 +234,12 @@ export function ChatComposer({
           </span>
         )}
       </form>
-      <CharCounter id={counterId} length={length} includesHeld={Boolean(message && heldText)} />
+      <CharCounter
+        id={counterId}
+        length={length}
+        includesHeld={Boolean(message && heldText)}
+        suggestAttach={Boolean(attachments)}
+      />
     </div>
   )
 }

@@ -50,12 +50,19 @@ export function useAutoGrow(ref: RefObject<HTMLTextAreaElement | null>, value: s
     const el = ref.current
     if (!el || typeof ResizeObserver === "undefined") return
     let width = el.clientWidth
+    let frame = 0
+    // Resizing the element inside its own observer callback would loop
+    // ("ResizeObserver loop completed"); the next frame is soon enough.
     const observer = new ResizeObserver(() => {
       if (el.clientWidth === width) return
       width = el.clientWidth
-      fitHeight(el)
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => fitHeight(el))
     })
     observer.observe(el)
-    return () => observer.disconnect()
+    return () => {
+      observer.disconnect()
+      cancelAnimationFrame(frame)
+    }
   }, [ref])
 }

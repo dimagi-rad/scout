@@ -17,7 +17,16 @@ import {
   messageLength,
   useAutoGrow,
 } from "@/components/ChatPanel/messageLimit"
+import { AttachButton, AttachmentTray } from "@/components/ChatPanel/attachments/AttachmentTray"
+import {
+  attachPastedFiles,
+  attachmentsBlockReason,
+  type ChatAttachments,
+} from "@/components/ChatPanel/attachments/useChatAttachments"
 import { getStarterQuestions } from "./starterQuestions"
+
+// Centres a 36px button on the one-line prompt: 50px tall at text-base, 46px at md:text-sm.
+const BUTTON_BOTTOM = "bottom-[7px] md:bottom-[5px]"
 
 interface ChatEmptyPromptProps {
   input: string
@@ -26,6 +35,7 @@ interface ChatEmptyPromptProps {
   disabled?: boolean
   lastSyncedAt?: string | null
   className?: string
+  attachments?: ChatAttachments
 }
 
 export function ChatEmptyPrompt({
@@ -35,6 +45,7 @@ export function ChatEmptyPrompt({
   disabled = false,
   lastSyncedAt = null,
   className,
+  attachments,
 }: ChatEmptyPromptProps) {
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const { canWrite } = useWorkspaceRole()
@@ -45,6 +56,8 @@ export function ChatEmptyPrompt({
   const message = trimmedInput ? resolveSlashCommand(trimmedInput) : ""
   const length = messageLength(message)
   const tooLong = isOverLimit(length)
+  const holdReason = (tooLong ? "Message is too long" : null) ?? attachmentsBlockReason(attachments)
+  const canSend = Boolean(trimmedInput || attachments?.ready) && !holdReason && !disabled
 
   // Slash command menu state — mirrors ChatPanel's active-thread input so
   // slash commands work identically here.
@@ -58,7 +71,7 @@ export function ChatEmptyPrompt({
   }
 
   function submit() {
-    if (!message || disabled || tooLong) return
+    if (!canSend) return
     setInput("")
     onSend(message)
   }
@@ -98,7 +111,14 @@ export function ChatEmptyPrompt({
 
   return (
     <div className={cn("w-full", className)}>
-      <form onSubmit={handleSubmit} className="relative">
+      {attachments && (
+        <AttachmentTray
+          items={attachments.items}
+          notice={attachments.notice}
+          onRemove={attachments.remove}
+        />
+      )}
+      <form onSubmit={handleSubmit} className={cn("relative", attachments?.items.length && "mt-2")}>
         <SlashCommandMenu
           query={slashQuery}
           onSelect={selectSlashCommand}
@@ -117,21 +137,34 @@ export function ChatEmptyPrompt({
             setSlashMenuIndex(0)
           }}
           onKeyDown={handleKeyDown}
+          onPaste={(e) => attachPastedFiles(e, attachments)}
           placeholder="Ask about your data..."
           rows={1}
-          className="field-sizing-fixed min-h-0 resize-none rounded-xl border bg-background px-4 py-3 pr-14 text-base shadow-sm"
+          className={cn(
+            "field-sizing-fixed min-h-0 resize-none rounded-xl border bg-background px-4 py-3 pr-14 text-base shadow-sm",
+            attachments && "pl-12",
+          )}
         />
-        <Button
-          type="submit"
-          size="icon"
-          disabled={disabled || !trimmedInput || tooLong}
-          className="absolute bottom-2 right-3"
-          aria-label="Send message"
-        >
-          <ArrowUp className="h-4 w-4" aria-hidden="true" />
-        </Button>
+        {attachments && (
+          <AttachButton
+            onFiles={attachments.add}
+            disabled={disabled}
+            className={`absolute left-2 ${BUTTON_BOTTOM}`}
+          />
+        )}
+        {/* The title sits on a wrapper: a disabled button shows no tooltip. */}
+        <span className={`absolute right-3 flex ${BUTTON_BOTTOM}`} title={holdReason ?? undefined}>
+          <Button type="submit" size="icon" disabled={!canSend} aria-label="Send message">
+            <ArrowUp className="h-4 w-4" aria-hidden="true" />
+          </Button>
+        </span>
       </form>
-      <CharCounter id={counterId} length={length} className="mt-1" />
+      <CharCounter
+        id={counterId}
+        length={length}
+        suggestAttach={Boolean(attachments)}
+        className="mt-1"
+      />
 
       <p
         className="mt-3 text-center text-xs text-muted-foreground"
@@ -151,6 +184,7 @@ interface ChatEmptyStateProps {
   setInput: (value: string) => void
   onSend: (text: string) => void
   disabled?: boolean
+  attachments?: ChatAttachments
 }
 
 export function ChatEmptyState({
@@ -158,6 +192,7 @@ export function ChatEmptyState({
   setInput,
   onSend,
   disabled = false,
+  attachments,
 }: ChatEmptyStateProps) {
   const workspace = useAppStore((s) =>
     s.domains.find((d) => d.id === s.activeDomainId),
@@ -169,10 +204,13 @@ export function ChatEmptyState({
   const provider = workspace?.tenants[0]?.provider
   const starters = getStarterQuestions(provider)
   const lastSyncedAt = workspace?.last_synced_at ?? null
+  // A starter question goes out with the files attached so far, so it waits for them too.
+  const startersHoldReason = attachmentsBlockReason(attachments)
+  const startersBlocked = disabled || startersHoldReason !== null
 
   function submit(text: string) {
     const trimmed = text.trim()
-    if (!trimmed || disabled) return
+    if (!trimmed || startersBlocked) return
     setInput("")
     onSend(resolveSlashCommand(trimmed))
   }
@@ -191,20 +229,22 @@ export function ChatEmptyState({
 
         <div className="mt-10 grid grid-cols-1 gap-3 md:grid-cols-3">
           {starters.map((question, idx) => (
-            <button
-              key={idx}
-              type="button"
-              onClick={() => submit(question)}
-              disabled={disabled}
-              className="group flex items-start justify-between gap-2 rounded-lg border bg-card p-4 text-left text-sm transition hover:bg-accent disabled:opacity-50"
-              data-testid={`starter-question-${idx}`}
-            >
-              <span>{question}</span>
-              <ArrowRight
-                className="h-4 w-4 shrink-0 text-muted-foreground transition group-hover:text-foreground"
-                aria-hidden
-              />
-            </button>
+            // The title sits on a wrapper: a disabled button shows no tooltip.
+            <span key={idx} className="flex" title={startersHoldReason ?? undefined}>
+              <button
+                type="button"
+                onClick={() => submit(question)}
+                disabled={startersBlocked}
+                className="group flex w-full items-start justify-between gap-2 rounded-lg border bg-card p-4 text-left text-sm transition hover:bg-accent disabled:opacity-50"
+                data-testid={`starter-question-${idx}`}
+              >
+                <span>{question}</span>
+                <ArrowRight
+                  className="h-4 w-4 shrink-0 text-muted-foreground transition group-hover:text-foreground"
+                  aria-hidden
+                />
+              </button>
+            </span>
           ))}
         </div>
 
@@ -242,6 +282,7 @@ export function ChatEmptyState({
           setInput={setInput}
           onSend={onSend}
           disabled={disabled}
+          attachments={attachments}
           lastSyncedAt={lastSyncedAt}
           className={workspace ? "mt-3" : "mt-10"}
         />

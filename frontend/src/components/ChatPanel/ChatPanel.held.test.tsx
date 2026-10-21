@@ -8,6 +8,13 @@ import { WorkspaceJobsProvider } from "@/contexts/WorkspaceJobsContext"
 import { ChatPanel } from "./ChatPanel"
 import { readDraft } from "./draftStorage"
 
+import { uploadChatAttachment } from "@/api/chatAttachments"
+
+vi.mock("@/api/chatAttachments", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/api/chatAttachments")>()),
+  uploadChatAttachment: vi.fn(),
+}))
+
 const WS = "11111111-1111-1111-1111-111111111111"
 const THREAD = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 const QUESTION = "How many visits last week?"
@@ -189,7 +196,22 @@ function mockServer(): Server {
       if (server.partStatus !== 200) {
         return Response.json({ error: "pending_request_conflict" }, { status: server.partStatus })
       }
-      const parts = [...(server.pending?.parts ?? []), { ...part, added_at: "2026-10-02T00:00:01Z" }]
+      // As the server stores it: files become the part's attachments.
+      const { files, ...stored } = part as {
+        id: string
+        text: string
+        files?: { url: string; filename: string; mediaType: string }[]
+      }
+      const attachments = files?.map((file) => ({
+        id: file.url.split("/").at(-2)!,
+        filename: file.filename,
+        media_type: file.mediaType,
+        size: 4,
+      }))
+      const parts = [
+        ...(server.pending?.parts ?? []),
+        { ...stored, ...(attachments ? { attachments } : {}), added_at: "2026-10-02T00:00:01Z" },
+      ]
       server.pending = { ...server.pending!, parts, version: server.pending!.version + 1 }
       return Response.json(server.pending)
     }
@@ -450,6 +472,151 @@ describe("a message sent while the chat's data loads", () => {
     // held + "\n\n" + typed
     expect(screen.getByTestId("chat-char-count")).toHaveTextContent("10,002 / 10,000")
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled()
+  })
+
+  it("sends the files attached with the text it carries (#913)", async () => {
+    const server = mockServer()
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    const url = "/api/chat/attachments/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/"
+    vi.mocked(uploadChatAttachment).mockResolvedValue({
+      id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      filename: "sites.csv",
+      mediaType: "text/csv",
+      size: 4,
+      url,
+    })
+    renderChat()
+    await screen.findByTestId("pending-request-card")
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("chat-attach-input"), {
+        target: { files: [new File(["a,b\n"], "sites.csv", { type: "text/csv" })] },
+      })
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("chat-attachment-chip-0")).toHaveAttribute("data-status", "ready"),
+    )
+    await type(FOLLOW_UP, "Send message")
+
+    await screen.findByText(`echo: ${QUESTION}`)
+    const body = server.chatBodies.at(-1) as { data: object; messages: UIMessage[] }
+    expect(body.data).toMatchObject({ pendingRequestVersion: 1 })
+    expect(body.messages.at(-1)?.parts).toEqual([
+      { type: "text", text: `${QUESTION}\n\n${FOLLOW_UP}` },
+      { type: "file", mediaType: "text/csv", filename: "sites.csv", url },
+    ])
+  })
+
+  it("adds files to the request while its data loads (#913)", async () => {
+    const server = mockServer()
+    renderChat()
+    await waitFor(() => expect(server.messageLoads).toBe(1))
+    await act(async () => {})
+    await type(QUESTION, "Send message")
+    const card = await screen.findByTestId("pending-request-card")
+
+    const url = "/api/chat/attachments/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/"
+    vi.mocked(uploadChatAttachment).mockResolvedValue({
+      id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      filename: "sites.csv",
+      mediaType: "text/csv",
+      size: 4,
+      url,
+    })
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("chat-attach-input"), {
+        target: { files: [new File(["a,b\n"], "sites.csv", { type: "text/csv" })] },
+      })
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("chat-attachment-chip-0")).toHaveAttribute("data-status", "ready"),
+    )
+    // Files alone are enough to add.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("chat-add-to-request"))
+    })
+
+    await waitFor(() => expect(server.partPosts).toHaveLength(1))
+    expect(server.partPosts[0]).toMatchObject({
+      text: "",
+      files: [{ type: "file", mediaType: "text/csv", filename: "sites.csv", url }],
+    })
+    expect(within(card).getByTestId("pending-request-attachment")).toHaveTextContent("sites.csv")
+    expect(screen.queryByTestId("chat-attachment-chip-0")).toBeNull()
+  })
+
+  it("sends the held request's own attachments with it (#913)", async () => {
+    const server = mockServer()
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.pending.parts.push({
+      id: "p2",
+      text: "",
+      added_at: "2026-10-02T00:00:00Z",
+      attachments: [
+        { id: "cccccccc-cccc-cccc-cccc-cccccccccccc", filename: "notes.md", media_type: "text/markdown", size: 3 },
+      ],
+    })
+    server.chatBodies.push({})
+    renderChat()
+    const card = await screen.findByTestId("pending-request-card")
+
+    await act(async () => {
+      fireEvent.click(within(card).getByTestId("pending-request-send-now"))
+    })
+
+    await screen.findByText(`echo: ${QUESTION}`)
+    const body = server.chatBodies.at(-1) as { messages: UIMessage[] }
+    expect(body.messages.at(-1)?.parts).toEqual([
+      { type: "text", text: QUESTION },
+      {
+        type: "file",
+        mediaType: "text/markdown",
+        filename: "notes.md",
+        url: "/api/chat/attachments/cccccccc-cccc-cccc-cccc-cccccccccccc/",
+      },
+    ])
+  })
+
+  it("gives the files back to the composer when a held send is refused (#913)", async () => {
+    const server = mockServer()
+    server.pending = request([{ id: "p1", text: QUESTION }], {
+      thread_id: useAppStore.getState().threadId,
+      thread_job_state: "failed",
+    })
+    server.chatBodies.push({})
+    server.refuseHeldSend = true
+    vi.mocked(uploadChatAttachment).mockResolvedValue({
+      id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      filename: "sites.csv",
+      mediaType: "text/csv",
+      size: 4,
+      url: "/api/chat/attachments/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/",
+    })
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    renderChat()
+    await screen.findByTestId("pending-request-card")
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("chat-attach-input"), {
+        target: { files: [new File(["a,b\n"], "sites.csv", { type: "text/csv" })] },
+      })
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("chat-attachment-chip-0")).toHaveAttribute("data-status", "ready"),
+    )
+
+    await type(FOLLOW_UP, "Send message")
+
+    await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue(FOLLOW_UP))
+    expect(screen.getByTestId("chat-attachment-chip-0")).toHaveTextContent("sites.csv")
+    expect(screen.getByTestId("chat-attachment-chip-0")).toHaveAttribute("data-status", "ready")
+    consoleError.mockRestore()
   })
 
   it("puts the request and the text typed with it back when its send is refused", async () => {

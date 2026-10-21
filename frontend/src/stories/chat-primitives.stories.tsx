@@ -5,6 +5,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 import { ChatMessage } from "@/components/ChatMessage"
 import { ChatComposer } from "@/components/ChatPanel"
 import { CHAR_COUNT_VISIBLE_FROM, MAX_MESSAGE_LENGTH } from "@/components/ChatPanel/messageLimit"
+import type { ChatAttachments } from "@/components/ChatPanel/attachments/useChatAttachments"
 import type { ActiveJob, RecentTermination } from "@/api/jobs"
 
 const queryOutput = {
@@ -480,6 +481,39 @@ export const PromptInputOverLengthLimit: Story = {
     return (
       <div className="w-[720px] rounded-lg border p-4">
         <ChatComposer input={input} setInput={setInput} onSend={() => undefined} />
+      </div>
+    )
+  },
+}
+
+const SCREENSHOT_PREVIEW =
+  "data:image/svg+xml;utf8," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="40"><rect width="64" height="40" fill="#e0e7ff"/><rect x="6" y="6" width="30" height="6" fill="#6366f1"/><rect x="6" y="18" width="52" height="4" fill="#a5b4fc"/><rect x="6" y="26" width="40" height="4" fill="#a5b4fc"/></svg>',
+  )
+
+const storyAttachments: ChatAttachments = {
+  items: [
+    { localId: "a", filename: "dashboard.png", kind: "image", size: 412_000, status: "ready", progress: 1, previewUrl: SCREENSHOT_PREVIEW },
+    { localId: "b", filename: "registry-export-2026-10.json", kind: "text", size: 1_240_000, status: "uploading", progress: 0.45 },
+    { localId: "c", filename: "notes.docx", kind: null, size: 20_000, status: "error", progress: 0, error: "Unsupported type: attach an image, or a JSON, CSV, TSV, TXT or MD file." },
+  ],
+  busy: true,
+  failed: true,
+  ready: true,
+  notice: null,
+  add: () => undefined,
+  remove: () => undefined,
+  take: () => [],
+  restore: () => undefined,
+}
+
+export const PromptInputWithAttachments: Story = {
+  render: function PromptInputWithAttachmentsStory() {
+    const [input, setInput] = useState("Why don't these match?")
+    return (
+      <div className="w-[720px] rounded-lg border p-4">
+        <ChatComposer input={input} setInput={setInput} onSend={() => undefined} attachments={storyAttachments} />
       </div>
     )
   },
