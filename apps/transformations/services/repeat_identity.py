@@ -19,6 +19,7 @@ from sqlglot.errors import SqlglotError
 from apps.common.identifiers import PG_MAX_IDENTIFIER_BYTES, fit_identifier
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.staging_identity import RepeatModelMigrationRequired
+from apps.transformations.services.staging_source import detoasted_source
 from mcp_server.event_time import event_time_sql
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,8 @@ _NAME = re.compile(r"[a-z][a-z0-9_]*")
 # PostgreSQL's column limit (#712); a folded model is still canonical.
 CASE_PROPERTIES_COLUMN = "properties"
 REPEAT_ELEMENT_COLUMN = "repeat_data"
+# sqlglot 30 keys a Select's FROM as "from_" (older releases used "from").
+_FROM_KEY = "from_" if "from_" in exp.Select.arg_types else "from"
 _CAST_TYPES = tuple(
     exp.DataType.build(name, dialect="postgres")
     for name in ("integer", "numeric", "date", "timestamp")
@@ -56,7 +59,62 @@ def _parse(sql: str) -> exp.Select | None:
     if len(statements) != 1 or not isinstance(statements[0], exp.Select):
         return None
     tree = statements[0]
-    return None if any(node.comments for node in tree.walk()) else tree
+    return None if any(node.comments for node in tree.walk()) else _plain_source(tree)
+
+
+def _plain_source(tree: exp.Select) -> exp.Select:
+    """Read a detoasted staging source (#918) as the plain table scan it wraps.
+
+    Only a wrapper that ``detoasted_source`` reproduces exactly is unwrapped, so old
+    and new generated SQL share one source identity. The inner column list is not
+    checked against the table: a missing or extra plain column fails at build time.
+    """
+    source = tree.args.get(_FROM_KEY)
+    subquery = source.this if source else None
+    if not isinstance(subquery, exp.Subquery) or tree.args.get("where") or tree.args.get("joins"):
+        return tree
+    inner = subquery.this
+    inner_from = inner.args.get(_FROM_KEY) if isinstance(inner, exp.Select) else None
+    if inner_from is None or not isinstance(inner_from.this, exp.Table):
+        return tree
+    *columns, json_column = inner.expressions or [None]
+    extract = json_column.this if isinstance(json_column, exp.Alias) else None
+    if (
+        not columns
+        or not isinstance(extract, exp.JSONBExtract)
+        or not all(_bare_column(column) for column in [*columns, extract.this])
+    ):
+        return tree
+    where = inner.args.get("where")
+    table = inner_from.this.name
+    try:
+        rebuilt = sqlglot.parse_one(
+            "SELECT 1 "
+            + detoasted_source(
+                table,
+                [column.name for column in columns],
+                json_column.alias_or_name,
+                where=where.this.sql(dialect="postgres") if where else None,
+            ),
+            read="postgres",
+        )
+    except SqlglotError:
+        return tree
+    if rebuilt.args.get(_FROM_KEY) != source:
+        return tree
+    plain = tree.copy()
+    plain.set(_FROM_KEY, exp.From(this=exp.to_table(table)))
+    plain.set("where", where.copy() if where else None)
+    return plain
+
+
+def _bare_column(node: exp.Expression) -> bool:
+    return (
+        isinstance(node, exp.Column)
+        and not node.table
+        and isinstance(node.this, exp.Identifier)
+        and not node.this.args.get("quoted")
+    )
 
 
 def _without_projection(tree: exp.Select) -> exp.Select:

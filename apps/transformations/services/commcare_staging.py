@@ -26,6 +26,7 @@ from apps.transformations.services.repeat_identity import (
     rename_legacy_repeats,
 )
 from apps.transformations.services.staging_identity import StagingModelMigrationRequired
+from apps.transformations.services.staging_source import detoasted_source
 from apps.users.models import Tenant
 from mcp_server.event_time import event_time_sql
 
@@ -61,6 +62,10 @@ _CASE_CORE_COLUMNS = [
     (event_time_sql("last_modified"), "last_modified"),
     ("closed", None),
 ]
+# The raw columns the outer projection reads through detoasted_source. Each core
+# alias must name its raw column; test_staging_source builds every model to check.
+_CASE_RAW_COLUMNS = [alias or expr for expr, alias in _CASE_CORE_COLUMNS]
+_FORM_RAW_COLUMNS = ["form_id", "xmlns", "received_on", "app_id"]
 
 
 def slugify_model_name(name: str) -> str:
@@ -123,9 +128,11 @@ def _slug_or_digest(
         return fit_identifier("unnamed", unique_key=identity, always_hash=True)
 
 
-# Coupled to _generate_form_asset's fixed tail (unchanged since #106); it only
-# feeds the rename warning, so a missed match loses a log line, never data.
-_FORM_XMLNS = re.compile(r"\nFROM raw_forms\nWHERE xmlns = '((?:[^']|'')*)'\Z")
+# Coupled to _generate_form_asset's fixed tail, plain (#106) or detoasted (#918); it
+# only feeds the rename warning, so a missed match loses a log line, never data.
+_FORM_XMLNS = re.compile(
+    r"\n *FROM raw_forms\n *WHERE xmlns = '((?:[^']|'')*)'(?:\n *OFFSET 0\n\) AS raw_forms)?\Z"
+)
 
 
 def _form_xmlns(sql: str) -> str | None:
@@ -439,8 +446,14 @@ def _generate_case_type_asset(
     select_parts.extend(column.select_sql() for column in kept)
 
     lines.append(",\n".join(select_parts))
-    lines.append("FROM raw_cases")
-    lines.append(f"WHERE case_type = '{_sql_escape(case_type_name)}'")
+    lines.append(
+        detoasted_source(
+            "raw_cases",
+            _CASE_RAW_COLUMNS,
+            CASE_PROPERTIES_COLUMN,
+            where=f"case_type = '{_sql_escape(case_type_name)}'",
+        )
+    )
 
     return TransformationAsset(
         name=model_name,
@@ -499,8 +512,14 @@ def _generate_form_asset(
     select_parts.extend(column.select_sql() for column in kept)
 
     lines.append(",\n".join(select_parts))
-    lines.append("FROM raw_forms")
-    lines.append(f"WHERE xmlns = '{_sql_escape(form_xmlns)}'")
+    lines.append(
+        detoasted_source(
+            "raw_forms",
+            _FORM_RAW_COLUMNS,
+            "form_data",
+            where=f"xmlns = '{_sql_escape(form_xmlns)}'",
+        )
+    )
 
     return TransformationAsset(
         name=model_name,

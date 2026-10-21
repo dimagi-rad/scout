@@ -116,7 +116,7 @@ def test_duplicate_forms_build_under_stable_fitted_names(monkeypatch):
                     )
                 )
                 ((xmlns,),) = cursor.fetchall()
-                assert built[model].endswith(f"WHERE xmlns = '{xmlns}'")
+                assert f"\n    WHERE xmlns = '{xmlns}'\n" in built[model]
 
             # Postgres would silently truncate an overlong view name; creating each
             # fitted name and reading it back proves none collapsed.

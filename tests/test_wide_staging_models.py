@@ -274,7 +274,12 @@ def test_small_visit_model_is_unchanged(connect_tenant):
         "    NULLIF(form_json #>> ARRAY['data','muac']::text[], '')::numeric AS \"muac\",\n"
         "    form_json #>> ARRAY['data','status']::text[] AS \"status_2\",\n"
         "    form_json #>> ARRAY['data','label']::text[] AS \"label\"\n"
-        "FROM raw_visits"
+        "FROM (\n"
+        "    SELECT visit_id, opportunity_id, username, entity_id, status, deliver_unit_id, "
+        "form_json #> '{}' AS form_json\n"
+        "    FROM raw_visits\n"
+        "    OFFSET 0\n"
+        ") AS raw_visits"
     )
 
 
