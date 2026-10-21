@@ -12,3 +12,8 @@ export function downloadBlob(filename: string, blob: Blob): void {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 }
+
+export function filenameFromHeaders(headers: Headers, fallback: string): string {
+  const match = headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)
+  return match?.[1] ?? fallback
+}
