@@ -384,7 +384,7 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
     try:
         await amark_held([i for i in attachment_ids if i not in dropped], user=user, thread=thread)
     except Exception:
-        logger.warning("Could not mark attachments of thread %s sent", thread.id, exc_info=True)
+        logger.warning("Could not mark attachments of thread %s held", thread.id, exc_info=True)
     return JsonResponse(pending)
 
 

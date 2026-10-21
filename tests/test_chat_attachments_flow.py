@@ -1,5 +1,6 @@
 """Attachments end to end: agent_node, the held path, and binding races (#913)."""
 
+import asyncio
 import json
 import uuid
 from types import SimpleNamespace
@@ -407,3 +408,76 @@ async def test_marking_a_claim_sent_never_fails_the_send(monkeypatch):
     )
     monkeypatch.setattr(pending_requests, "amark_sent", AsyncMock(side_effect=RuntimeError("db")))
     await pending_requests.amark_claim_sent(claimed, SimpleNamespace(id="t", user_id=1))
+
+
+def _held_post_body(attachment, thread_id, workspace):
+    return json.dumps(
+        {
+            "messages": [
+                {
+                    "id": "m1",
+                    "role": "user",
+                    "parts": [
+                        {
+                            "type": "file",
+                            "mediaType": "image/png",
+                            "url": attachment_url(attachment.id),
+                        }
+                    ],
+                }
+            ],
+            "workspaceId": str(workspace.id),
+            "threadId": thread_id,
+        }
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_send_cancelled_after_its_hold_commits_keeps_the_attachment(user, workspace):
+    # A closed tab cancels the view after ahold_message has stored the part.
+    attachment = await _attachment(user, workspace)
+    thread_id = str(uuid.uuid4())
+    client = AsyncClient()
+    await client.alogin(email=user.email, password="testpass123")
+    with (
+        patch("apps.chat.views.aworkspace_schema_status", AsyncMock(return_value="loading")),
+        patch("apps.chat.views.athread_awaits_load", AsyncMock(return_value=False)),
+        patch("apps.chat.views.aworkspace_own_build_pending", AsyncMock(return_value=True)),
+        patch("apps.chat.views.astart_chat_load", AsyncMock(return_value=object())),
+        patch("apps.chat.views._held_response", side_effect=asyncio.CancelledError),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await client.post(
+            "/api/chat/",
+            data=_held_post_body(attachment, thread_id, workspace),
+            content_type="application/json",
+        )
+
+    assert await PendingRequest.objects.filter(thread_id=thread_id).aexists()
+    await attachment.arefresh_from_db()
+    assert str(attachment.thread_id) == thread_id
+    assert attachment.held_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_added_held_part_is_marked_held_in_its_own_commit(user, workspace):
+    thread = await Thread.objects.acreate(user=user, workspace=workspace)
+    attachment = await _attachment(user, workspace)
+    await PendingRequest.objects.acreate(
+        thread=thread, parts=[pending_requests._new_part("p1", "q")]
+    )
+    newly = await abind_to_thread(
+        [str(attachment.id)], user=user, workspace=workspace, thread=thread
+    )
+
+    await pending_requests.aadd_part(
+        thread.id, part_id="p2", text="", attachments=[_entry(attachment)], bound=newly
+    )
+    # As if the request were cancelled before its own post-commit mark ran.
+    await aunbind(newly, thread=thread)
+
+    await attachment.arefresh_from_db()
+    assert attachment.thread_id == thread.id
+    assert attachment.held_at is not None

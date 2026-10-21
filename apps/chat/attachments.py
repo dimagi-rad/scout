@@ -445,6 +445,19 @@ def unbind_unsent_sync(ids, *, thread_id) -> None:
         ).update(thread=None)
 
 
+def mark_held_sync(ids, *, thread_id) -> None:
+    """``amark_held`` inside the transaction that stores the held part.
+
+    In the same commit, so a request cancelled right after it (a closed tab) cannot
+    unbind what the stored part carries.
+    """
+    ids = list(ids)
+    if ids:
+        ChatAttachment.objects.filter(id__in=ids, thread_id=thread_id).update(
+            held_at=timezone.now()
+        )
+
+
 def release_held_sync(ids, *, thread_id) -> None:
     """Release attachments a dropped held part bound, inside the caller's transaction.
 

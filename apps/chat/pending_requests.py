@@ -31,6 +31,7 @@ from langchain_core.messages import HumanMessage
 from apps.chat.attachments import (
     MAX_ATTACHMENTS_PER_MESSAGE,
     amark_sent,
+    mark_held_sync,
     merge_attachments,
     release_held_sync,
     with_attachments,
@@ -293,6 +294,7 @@ def ahold_message(
         if pending is None:
             parts = [_new_part(part_id, text, attachments, bound)]
             _check_parts(parts)
+            mark_held_sync([e["id"] for e in attachments], thread_id=thread_id)
             pending = PendingRequest.objects.create(
                 thread_id=thread_id, parts=parts, thread_job=job
             )
@@ -301,6 +303,7 @@ def ahold_message(
         elif not any(part["id"] == part_id for part in pending.parts):
             parts = [*pending.parts, _new_part(part_id, text, attachments, bound)]
             _check_parts(parts)
+            mark_held_sync([e["id"] for e in attachments], thread_id=thread_id)
             pending.parts = parts
             pending.version += 1
             # A workspace-load hold leaves a load of the chat's own in charge while
@@ -328,6 +331,7 @@ def aadd_part(thread_id, *, part_id: str, text: str, attachments=(), bound=()) -
         if not any(part["id"] == part_id for part in pending.parts):
             parts = [*pending.parts, _new_part(part_id, text, attachments, bound)]
             _check_parts(parts)
+            mark_held_sync([e["id"] for e in attachments], thread_id=thread_id)
             pending.parts = parts
             pending.version += 1
             pending.flush_attempts = 0
