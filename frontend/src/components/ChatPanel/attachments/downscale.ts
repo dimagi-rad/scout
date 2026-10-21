@@ -21,12 +21,19 @@ function encode(canvas: HTMLCanvasElement, type: string): Promise<Blob | null> {
  * Shrinks an image to IMAGE_MAX_EDGE_PX on its long edge, the most the model reads
  * at full detail, so screenshots upload fast and stay under the size limit. A PNG
  * stays a PNG (sharp text) unless it is still large, then becomes WebP, or JPEG
- * where the browser can't encode WebP (Safari's toBlob falls back to PNG).
+ * where the browser can't encode WebP (Safari's toBlob falls back to PNG). A WebP
+ * the browser can't re-encode becomes JPEG when it is opaque.
  * GIFs pass through untouched: a canvas would keep only the first frame.
  */
+function hasTransparency(context: CanvasRenderingContext2D, canvas: HTMLCanvasElement): boolean {
+  const { data } = context.getImageData(0, 0, canvas.width, canvas.height)
+  for (let i = 3; i < data.length; i += 4) if (data[i] < 255) return true
+  return false
+}
+
 export async function downscaleImage(file: File): Promise<File> {
   if (file.type === "image/gif") return file
-  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" })
+  const bitmap = await createImageBitmap(file)
   try {
     const longEdge = Math.max(bitmap.width, bitmap.height)
     const tooHeavy = file.type === "image/png" ? file.size > PNG_KEEP_MAX_BYTES : file.size > MAX_IMAGE_BYTES
@@ -39,18 +46,21 @@ export async function downscaleImage(file: File): Promise<File> {
     if (!context) return file
     context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
 
+    const toJpeg = () => {
+      // JPEG has no alpha: transparent pixels would turn black.
+      context.globalCompositeOperation = "destination-over"
+      context.fillStyle = "#fff"
+      context.fillRect(0, 0, canvas.width, canvas.height)
+      return encode(canvas, "image/jpeg")
+    }
+
     let blob = await encode(canvas, file.type)
-    if (blob && file.type === "image/png" && blob.size > PNG_KEEP_MAX_BYTES) {
+    // An encoder the browser lacks (Safari: WebP) silently gives a PNG instead.
+    if (blob && blob.type !== file.type && !hasTransparency(context, canvas)) {
+      blob = await toJpeg()
+    } else if (blob && file.type === "image/png" && blob.size > PNG_KEEP_MAX_BYTES) {
       const webp = await encode(canvas, "image/webp")
-      if (webp?.type === "image/webp") {
-        blob = webp
-      } else {
-        // JPEG has no alpha: transparent pixels would turn black.
-        context.globalCompositeOperation = "destination-over"
-        context.fillStyle = "#fff"
-        context.fillRect(0, 0, canvas.width, canvas.height)
-        blob = await encode(canvas, "image/jpeg")
-      }
+      blob = webp?.type === "image/webp" ? webp : await toJpeg()
     }
     if (!blob || (scale === 1 && blob.size >= file.size)) return file
     return new File([blob], renamed(file.name, blob.type), { type: blob.type })
