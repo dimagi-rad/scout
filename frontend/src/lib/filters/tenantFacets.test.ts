@@ -5,11 +5,13 @@ import type { UserTenant } from "@/api/auth"
 import { applyFacets, availableFacets, computeFacetOptions } from "./facets"
 import {
   NONE,
+  OCS_ACTIVE_DAYS,
   TENANT_FACETS,
   UNKNOWN,
   connectStatus,
   connectType,
   formatIdSample,
+  ocsStatus,
   parseTenantIdList,
   tenantMatchesSearch,
   normalizeTenantSearch,
@@ -260,5 +262,45 @@ describe("OCS facets", () => {
     expect(team.appliesTo?.({ provider: ["ocs"] }, [withTeam, connectRow])).toBe(true)
     expect(team.appliesTo?.({ provider: ["commcare_connect"] }, [withTeam, connectRow])).toBe(false)
     expect(team.appliesTo?.({}, [withTeam, noTeam])).toBe(true)
+  })
+
+  it("offers Status only once discovery has recorded activity", () => {
+    const status = TENANT_FACETS.find((f) => f.key === "ocs_status")!
+    expect(status.isAvailable?.([withTeam, noTeam])).toBe(false)
+    expect(status.isAvailable?.([noTeam, tenant("d", "ocs", { last_activity_at: null })])).toBe(
+      true,
+    )
+  })
+})
+
+describe("ocsStatus", () => {
+  const NOW = Date.parse("2026-10-20T12:00:00Z")
+  const DAY = 86_400_000
+
+  const checked = new Date(NOW - 3_600_000).toISOString()
+  const staleCheck = new Date(NOW - 2 * DAY).toISOString()
+  const recent = new Date(NOW - (OCS_ACTIVE_DAYS - 1) * DAY).toISOString()
+  const old = new Date(NOW - (OCS_ACTIVE_DAYS + 1) * DAY).toISOString()
+
+  it("is active with activity inside the window, inactive outside it or with none", () => {
+    const at = (last: string | null) => ({ last_activity_at: last, activity_checked_at: checked })
+    expect(ocsStatus(tenant("a", "ocs", at(recent)), NOW)).toBe("active")
+    expect(ocsStatus(tenant("b", "ocs", at(old)), NOW)).toBe("inactive")
+    expect(ocsStatus(tenant("c", "ocs", at(null)), NOW)).toBe("inactive")
+  })
+
+  it("trusts no activity only from a recent check, since API-key rows are read once", () => {
+    const at = (last: string | null) => ({ last_activity_at: last, activity_checked_at: staleCheck })
+    expect(ocsStatus(tenant("a", "ocs", at(recent)), NOW)).toBe("active")
+    expect(ocsStatus(tenant("b", "ocs", at(old)), NOW)).toBe(UNKNOWN)
+    expect(ocsStatus(tenant("c", "ocs", { last_activity_at: null }), NOW)).toBe(UNKNOWN)
+  })
+
+  it("is unknown before discovery looked, and does not apply to other providers", () => {
+    expect(ocsStatus(tenant("a", "ocs", {}), NOW)).toBe(UNKNOWN)
+    expect(ocsStatus(tenant("b", "ocs", { last_activity_at: "soon" }), NOW)).toBe(UNKNOWN)
+    expect(ocsStatus(tenant("c", "commcare_connect", { last_activity_at: null }), NOW)).toBe(
+      undefined,
+    )
   })
 })

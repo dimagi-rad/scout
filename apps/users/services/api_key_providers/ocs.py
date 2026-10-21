@@ -34,14 +34,14 @@ _UNSAFE_NEXT = "OCS returned an untrusted pagination link"
 _UNEXPECTED = "OCS returned an unexpected experiment list"
 
 
-async def _list_experiments(api_key: str) -> list[TenantDescriptor]:
+async def _list_experiments(api_key: str, *, path: str) -> list[TenantDescriptor]:
     """Every experiment the key can see, across all pages.
 
     Raises CredentialVerificationError on auth failure, an unexpected status or
     list, an unreachable server, or a list that does not finish.
     """
     base_url = getattr(settings, "OCS_URL", OCS_DEFAULT_URL)
-    request = ocs_listing.list_request(base_url, TenantConnection.API_KEY, api_key)
+    request = ocs_listing.list_request(base_url, TenantConnection.API_KEY, api_key, path=path)
     try:
         async with httpx.AsyncClient() as client:
             return await list_tenants(
@@ -100,7 +100,7 @@ class OCSStrategy(CredentialProviderStrategy):
 
     @classmethod
     async def verify_and_discover(cls, fields: dict[str, str]) -> list[TenantDescriptor]:
-        experiments = await _list_experiments(fields["api_key"])
+        experiments = await _list_experiments(fields["api_key"], path=ocs_listing.DISCOVERY_PATH)
         if not experiments:
             raise CredentialVerificationError(
                 "OCS API key is valid but has no experiments accessible"
@@ -109,7 +109,7 @@ class OCSStrategy(CredentialProviderStrategy):
 
     @classmethod
     async def verify_for_tenant(cls, fields: dict[str, str], external_id: str) -> None:
-        experiments = await _list_experiments(fields["api_key"])
+        experiments = await _list_experiments(fields["api_key"], path=ocs_listing.VERIFICATION_PATH)
         for experiment in experiments:
             if experiment.external_id == external_id:
                 return

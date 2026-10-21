@@ -530,10 +530,16 @@ describe("provider-specific filters", () => {
     id: `m-${id}`, tenant_uuid: `tenant-${id}`, provider: "ocs",
     tenant_id: id, tenant_name: name, last_selected_at: null, attributes,
   })
+  const recent = new Date(Date.now() - 2 * 86_400_000).toISOString()
   const mixed = [
     connect("c1", "Kenya Live", { is_active: true, organization: "dimagi" }),
-    ocs("o1", "Helper Bot", { team: "t-a", team_name: "Team A" }),
-    ocs("o2", "Old Bot", { team: "t-b", team_name: "Team B" }),
+    ocs("o1", "Helper Bot", { team: "t-a", team_name: "Team A", last_activity_at: recent }),
+    ocs("o2", "Old Bot", {
+      team: "t-b",
+      team_name: "Team B",
+      last_activity_at: null,
+      activity_checked_at: new Date().toISOString(),
+    }),
   ]
 
   async function open() {
@@ -561,6 +567,18 @@ describe("provider-specific filters", () => {
     await userEvent.click(await screen.findByTestId(`${F}-facet-ocs_team-option-t-a`))
 
     expect(shownAvailable()).toEqual(["o1"])
+  })
+
+  it("filters OCS chatbots by recent activity", async () => {
+    await open()
+    await userEvent.click(screen.getByTestId(`${F}-facet-provider`))
+    await userEvent.click(await screen.findByTestId(`${F}-facet-provider-option-ocs`))
+    await userEvent.keyboard("{Escape}")
+
+    await userEvent.click(screen.getByTestId(`${F}-facet-ocs_status`))
+    await userEvent.click(await screen.findByTestId(`${F}-facet-ocs_status-option-inactive`))
+
+    expect(shownAvailable()).toEqual(["o2"])
   })
 
   it("clears a Connect filter that picking OCS had hidden", async () => {

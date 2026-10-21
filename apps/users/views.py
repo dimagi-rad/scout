@@ -216,6 +216,9 @@ def _persist_api_key_connection(
                     **({"description": desc.description} if desc.description else {}),
                 },
             )
+            if desc.attributes is not None and tenant.provider_attributes != desc.attributes:
+                tenant.provider_attributes = dict(desc.attributes)
+                tenant.save(update_fields=["provider_attributes", "updated_at"])
             # all_objects: re-adding an API key after its memberships were archived
             # must reuse the tombstone, not create a duplicate (unique(user,tenant)).
             tm, _ = TenantMembership.all_objects.get_or_create(user=user, tenant=tenant)

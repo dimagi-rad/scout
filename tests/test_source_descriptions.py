@@ -147,6 +147,27 @@ async def test_tenant_list_gives_an_ocs_chatbot_its_members_team(user, mocker):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_tenant_list_gives_an_ocs_chatbot_its_last_activity(user, mocker):
+    mocker.patch("apps.users.views._arefresh_all_identities", AsyncMock())
+    bot = await Tenant.objects.acreate(
+        provider="ocs",
+        external_id="bot",
+        canonical_name="Bot",
+        provider_attributes={"last_activity_at": "2026-10-19T14:02:11Z"},
+    )
+    membership = TenantMembership(user=user, tenant=bot)
+    membership.team_slug = "maternal"
+    await membership.asave()
+    client = AsyncClient()
+    await client.aforce_login(user)
+
+    (row,) = (await client.get("/api/auth/tenants/")).json()
+
+    assert row["attributes"]["last_activity_at"] == "2026-10-19T14:02:11Z"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_tenant_list_includes_the_description(user, tenant, mocker):
     mocker.patch("apps.users.views._arefresh_all_identities", AsyncMock())
     await Tenant.objects.filter(id=tenant.id).aupdate(description="A CommCare project")

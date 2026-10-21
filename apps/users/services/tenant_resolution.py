@@ -410,7 +410,7 @@ async def resolve_ocs_chatbots(
 ) -> list[TenantMembership]:
     """Fetch the user's OCS chatbots (experiments) and full-sync TenantMembership records.
 
-    OCS tokens are **team-scoped** — a successful ``/api/experiments/`` fetch returns
+    OCS tokens are **team-scoped** — a successful ``/api/v2/chatbots/`` fetch returns
     only the team the user selected during OAuth consent. Archival is therefore
     restricted to that team's memberships (``archive_team_slug``); memberships from
     other teams the user previously authorized are left untouched. Under all-of
@@ -461,6 +461,12 @@ async def resolve_ocs_chatbots(
             external_id=exp.external_id,
             defaults={
                 "canonical_name": exp.canonical_name,
+                # A row without a usable value keeps the stored one, as API-key onboarding does.
+                **(
+                    {"provider_attributes": dict(exp.attributes)}
+                    if exp.attributes is not None
+                    else {}
+                ),
                 **({"description": exp.description} if exp.description else {}),
             },
         )
@@ -573,7 +579,9 @@ async def _fetch_all_domains(access_token: str, server: CommCareServer) -> list[
 
 
 async def _fetch_ocs_experiments(access_token: str, base_url: str) -> list[TenantDescriptor]:
-    request = ocs_listing.list_request(base_url, TenantConnection.OAUTH, access_token)
+    request = ocs_listing.list_request(
+        base_url, TenantConnection.OAUTH, access_token, path=ocs_listing.DISCOVERY_PATH
+    )
     return await _fetch_tenant_list(
         "OCS",
         "experiments",

@@ -355,6 +355,69 @@ async def test_api_key_add_creates_one_connection_with_team(user, mocker):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_api_key_add_records_each_chatbots_last_activity(user, mocker):
+    known = await Tenant.objects.acreate(
+        provider="ocs",
+        external_id="exp-1",
+        canonical_name="Bot 1",
+        provider_attributes={"last_activity_at": "2026-01-01T00:00:00Z"},
+    )
+    mocker.patch(
+        "apps.users.services.api_key_providers.ocs.OCSStrategy.verify_and_discover",
+        AsyncMock(
+            return_value=[
+                TenantDescriptor("exp-1", "Bot 1", {"last_activity_at": "2026-10-19T14:02:11Z"}),
+                TenantDescriptor("exp-2", "Bot 2", {"last_activity_at": None}),
+            ]
+        ),
+    )
+    mocker.patch(
+        "apps.users.views.adetect_team_from_api_key", AsyncMock(return_value=("acme", "Acme"))
+    )
+
+    client = await _login(user)
+    resp = await client.post(
+        "/api/auth/connections/",
+        data=json.dumps({"provider": "ocs", "fields": {"api_key": "k"}}),
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 201
+    await known.arefresh_from_db()
+    assert known.provider_attributes == {"last_activity_at": "2026-10-19T14:02:11Z"}
+    new = await Tenant.objects.aget(provider="ocs", external_id="exp-2")
+    assert new.provider_attributes == {"last_activity_at": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_api_key_add_keeps_stored_activity_for_a_row_without_one(user, mocker):
+    stored = {"last_activity_at": "2026-10-01T00:00:00Z", "activity_checked_at": "2026-10-01"}
+    known = await Tenant.objects.acreate(
+        provider="ocs", external_id="exp-1", canonical_name="Bot 1", provider_attributes=stored
+    )
+    mocker.patch(
+        "apps.users.services.api_key_providers.ocs.OCSStrategy.verify_and_discover",
+        AsyncMock(return_value=[TenantDescriptor("exp-1", "Bot 1")]),
+    )
+    mocker.patch(
+        "apps.users.views.adetect_team_from_api_key", AsyncMock(return_value=("acme", "Acme"))
+    )
+
+    client = await _login(user)
+    resp = await client.post(
+        "/api/auth/connections/",
+        data=json.dumps({"provider": "ocs", "fields": {"api_key": "k"}}),
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 201
+    await known.arefresh_from_db()
+    assert known.provider_attributes == stored
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_api_key_add_requires_team_name_when_undetectable(user, mocker):
 
     mocker.patch(

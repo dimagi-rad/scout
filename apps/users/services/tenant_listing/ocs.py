@@ -1,14 +1,17 @@
-"""Open Chat Studio's experiment list (DRF pagination), for an OAuth team or an API key."""
+"""Open Chat Studio's chatbot list (DRF pagination), for an OAuth team or an API key."""
 
 from __future__ import annotations
 
 from typing import Any
+
+from django.utils import timezone
 
 from apps.users.models import TenantConnection
 from apps.users.services.tenant_listing.rows import descriptor
 from apps.users.services.tenant_listing.types import (
     MalformedTenantList,
     ProviderRequest,
+    TenantDescriptor,
     TenantListPage,
 )
 
@@ -17,10 +20,20 @@ from apps.users.services.tenant_listing.types import (
 # 10s, so stay well under the max rather than risk a page that cannot finish (#918).
 LIST_PAGE_SIZE = 500
 
+# Both list the team's working chatbots, from the same queryset upstream (v2's
+# working_chatbots() is v1's filter); were they to diverge, verification would archive
+# what discovery adds. Only v2 reports last_activity_at
+# (open-chat-studio#4843), at the cost of a per-row subquery over each chatbot's
+# sessions, so callers that need only ids (access verification, key rotation) stay on v1.
+DISCOVERY_PATH = "/api/v2/chatbots/"
+VERIFICATION_PATH = "/api/experiments/"
 
-def list_request(base_url: str, credential_type: str, credential: str) -> ProviderRequest | None:
+
+def list_request(
+    base_url: str, credential_type: str, credential: str, *, path: str = VERIFICATION_PATH
+) -> ProviderRequest | None:
     """The first-page request, or None for a credential type OCS does not take."""
-    url = f"{base_url.rstrip('/')}/api/experiments/?page_size={LIST_PAGE_SIZE}"
+    url = f"{base_url.rstrip('/')}{path}?page_size={LIST_PAGE_SIZE}"
     if credential_type == TenantConnection.OAUTH:
         return ProviderRequest(url, {"Authorization": f"Bearer {credential}"})
     if credential_type == TenantConnection.API_KEY:
@@ -30,9 +43,25 @@ def list_request(base_url: str, credential_type: str, credential: str) -> Provid
 
 def decode_page(payload: Any) -> TenantListPage:
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
-        raise MalformedTenantList("OCS page has no experiment list")
+        raise MalformedTenantList("OCS page has no chatbot list")
     next_url = payload.get("next")
     if next_url is not None and (not isinstance(next_url, str) or not next_url):
         raise MalformedTenantList("OCS next link is not a URL")
-    tenants = tuple(descriptor(row, id_key="id", name_key="name") for row in payload["results"])
+    tenants = tuple(_chatbot(row) for row in payload["results"])
     return TenantListPage(tenants, next_url, next_declared="next" in payload)
+
+
+def _chatbot(row: Any) -> TenantDescriptor:
+    tenant = descriptor(row, id_key="id", name_key="name")
+    # A v1 row has no activity; a malformed one is a display hint lost, not a bad list.
+    if "last_activity_at" not in row:
+        return tenant
+    activity = row["last_activity_at"]
+    if activity is not None and not isinstance(activity, str):
+        return tenant
+    # API-key tenants are never re-listed after onboarding, so the client needs to
+    # know how old "no activity" is before calling a chatbot inactive.
+    checked_at = timezone.now().isoformat()
+    return tenant._replace(
+        attributes={"last_activity_at": activity, "activity_checked_at": checked_at}
+    )

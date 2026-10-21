@@ -5,9 +5,10 @@ import { localIsoDate } from "@/lib/localDate"
 import type { FacetDef, FacetSelection } from "./facets"
 
 export const CONNECT_PROVIDER = "commcare_connect"
-// No Active filter for OCS yet: OCS reports no archived flag or last activity.
-// Add one once it does (open-chat-studio upstream change, #917).
 export const OCS_PROVIDER = "ocs"
+// OCS reports when a participant last messaged a chatbot (open-chat-studio#4843)
+// and leaves "active" to the client.
+export const OCS_ACTIVE_DAYS = 30
 export const UNKNOWN = "unknown"
 // A colon cannot occur in an org slug or a program id, so this never collides with one.
 export const NONE = ":none"
@@ -54,6 +55,30 @@ function ocsAttributes(t: UserTenant): Record<string, unknown> | undefined {
   return attrs !== null && typeof attrs === "object" && !Array.isArray(attrs) ? attrs : {}
 }
 
+// OAuth discovery re-reads the list hourly; an API-key tenant is read once, at onboarding.
+const DAY_MS = 86_400_000
+const OCS_CHECK_FRESH_MS = DAY_MS
+
+/**
+ * "active" when a participant messaged the chatbot within OCS_ACTIVE_DAYS,
+ * "inactive" when longer ago or never as of a recent check, otherwise unknown.
+ */
+export function ocsStatus(t: UserTenant, now = Date.now()): string | undefined {
+  const attrs = ocsAttributes(t)
+  if (!attrs) return undefined
+  if (!("last_activity_at" in attrs)) return UNKNOWN
+  const last = attrs.last_activity_at
+  if (last !== null) {
+    const time = typeof last === "string" ? Date.parse(last) : Number.NaN
+    if (Number.isNaN(time)) return UNKNOWN
+    if (now - time <= OCS_ACTIVE_DAYS * DAY_MS) return "active"
+  }
+  // No recent activity is only news if the check itself is recent.
+  const checked =
+    typeof attrs.activity_checked_at === "string" ? Date.parse(attrs.activity_checked_at) : Number.NaN
+  return now - checked <= OCS_CHECK_FRESH_MS ? "inactive" : UNKNOWN
+}
+
 export function connectType(t: UserTenant): string | undefined {
   const attrs = connectAttributes(t)
   if (!attrs) return undefined
@@ -95,6 +120,11 @@ const STATUS_LABELS: Record<string, string> = {
   [UNKNOWN]: "Unknown",
 }
 const TYPE_LABELS: Record<string, string> = { real: "Real", test: "Test", [UNKNOWN]: "Unknown" }
+const OCS_STATUS_LABELS: Record<string, string> = {
+  active: `Active (used in last ${OCS_ACTIVE_DAYS} days)`,
+  inactive: `Inactive (unused for ${OCS_ACTIVE_DAYS} days)`,
+  [UNKNOWN]: "Unknown",
+}
 
 // Provider-specific facets show while their provider is selected, or no provider is.
 function appliesToConnect(selection: FacetSelection): boolean {
@@ -160,6 +190,17 @@ export const TENANT_FACETS: readonly FacetDef<UserTenant>[] = [
     ...labelled("program", "program_name"),
     isAvailable: hasConnectAttributes,
     appliesTo: appliesToConnect,
+  },
+  {
+    key: "ocs_status",
+    label: "Status",
+    group: "Open Chat Studio",
+    getValue: (t) => ocsStatus(t),
+    optionLabel: (value) => OCS_STATUS_LABELS[value] ?? value,
+    valueOrder: ["active", "inactive", UNKNOWN],
+    // Every row reads Unknown until a discovery has read the v2 list.
+    isAvailable: (items) => items.some((t) => "last_activity_at" in (ocsAttributes(t) ?? {})),
+    appliesTo: appliesToOcs,
   },
   {
     key: "ocs_team",
