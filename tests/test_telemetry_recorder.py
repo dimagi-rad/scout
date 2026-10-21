@@ -295,4 +295,5 @@ def test_prune_schedule_and_name_are_pinned():
     assert scheduled == {
         "apps.telemetry.tasks.prune_telemetry": "23 3 * * *",
         "apps.telemetry.tasks.snapshot_daily_metrics": "20 0 * * *",
+        "apps.telemetry.tasks.storage_headroom": "*/15 * * * *",
     }

@@ -1,5 +1,6 @@
 import type { SourceFreshnessDetail, WorkspaceFreshness } from "@/api/workspaces"
 import { formatRelativeTime } from "@/lib/relativeTime"
+import { IMPORT_EXPLAINER } from "@/lib/importCopy"
 
 import { LoadSummary } from "./LoadSummary"
 
@@ -9,14 +10,14 @@ interface Props {
   onSummaryOpenChange?: (open: boolean) => void
   /** The summary opened itself because a load just finished. */
   justLoaded?: boolean
-  /** Only the What's loaded link: the layout already says how fresh the data is. */
+  /** Only the What's imported link: the layout already says how fresh the data is. */
   summaryOnly?: boolean
 }
 
 function freshnessLabel(source: SourceFreshnessDetail): string {
-  if (!source.last_fetched_at) return "not loaded yet"
+  if (!source.last_fetched_at) return "not imported yet"
   // Loaded, but outside what the workspace queries (e.g. no live multi-source view).
-  if (!source.serving) return "loaded but not in use"
+  if (!source.serving) return "imported, but not used by this workspace"
   return `data as of ${formatRelativeTime(source.last_fetched_at)}`
 }
 
@@ -51,11 +52,18 @@ export function SourceFreshness({
         className="flex flex-wrap gap-x-4 gap-y-0.5 px-4 pb-1 text-xs text-muted-foreground"
         data-testid="source-freshness"
       >
-        {!summaryOnly && sources.map((source) => (
-          <li key={source.tenant_id} data-testid={`source-freshness-${source.tenant_id}`}>
-            {source.name}: {freshnessLabel(source)}
-          </li>
-        ))}
+        {!summaryOnly && (
+          <>
+            <li className="font-medium" title={IMPORT_EXPLAINER}>
+              {sources.length === 1 ? "Data source:" : `${sources.length} data sources:`}
+            </li>
+            {sources.map((source) => (
+              <li key={source.tenant_id} data-testid={`source-freshness-${source.tenant_id}`}>
+                {source.name}: {freshnessLabel(source)}
+              </li>
+            ))}
+          </>
+        )}
         {hasSummary && onSummaryOpenChange && (
           <li>
             <button
@@ -65,7 +73,7 @@ export function SourceFreshness({
               aria-expanded={summaryOpen}
               data-testid="source-freshness-details"
             >
-              {summaryOpen ? "Hide details" : "What's loaded"}
+              {summaryOpen ? "Hide details" : "What's imported"}
             </button>
           </li>
         )}

@@ -237,6 +237,19 @@ def _persist_api_key_connection(
     return rows, conn.id
 
 
+def _attributes(tm: TenantMembership) -> dict:
+    """The tenant's filter hints, plus the OCS team this member reaches it through.
+
+    The team is recorded on the member's membership, not the tenant, so it is the
+    team this member's connection reaches the chatbot through.
+    """
+    attributes = dict(tm.tenant.provider_attributes or {})
+    if tm.tenant.provider == "ocs" and tm.team_slug:
+        attributes["team"] = tm.team_slug
+        attributes["team_name"] = tm.team_name or tm.team_slug
+    return attributes
+
+
 @require_http_methods(["GET"])
 @async_login_required
 async def tenant_list_view(request):
@@ -265,7 +278,7 @@ async def tenant_list_view(request):
                 "tenant_id": tm.tenant.external_id,
                 "tenant_uuid": str(tm.tenant.id),
                 "tenant_name": tm.tenant.canonical_name,
-                "attributes": tm.tenant.provider_attributes,
+                "attributes": _attributes(tm),
                 "description": tm.tenant.description,
                 "last_selected_at": (
                     tm.last_selected_at.isoformat() if tm.last_selected_at else None

@@ -17,14 +17,14 @@ describe("SourceFreshness", () => {
     expect(screen.getByTestId("source-freshness-Alpha")).toHaveTextContent(
       "Alpha: data as of 1 hour ago",
     )
-    expect(screen.getByTestId("source-freshness-Beta")).toHaveTextContent("Beta: not loaded yet")
+    expect(screen.getByTestId("source-freshness-Beta")).toHaveTextContent("Beta: not imported yet")
   })
 
   it("gives no age for data the workspace does not query", () => {
     render(<SourceFreshness freshness={freshness([freshSource("Alpha", 1, { serving: false })])} />)
 
     expect(screen.getByTestId("source-freshness-Alpha")).toHaveTextContent(
-      "Alpha: loaded but not in use",
+      "Alpha: imported, but not used by this workspace",
     )
   })
 
@@ -69,7 +69,7 @@ describe("SourceFreshness", () => {
       /forms\s*1,234\s*Jan 2, 2025 – Oct 1, 2026/,
     )
     expect(screen.getByTestId("load-summary-table-Alpha-cases")).toHaveTextContent("failed")
-    expect(screen.getByTestId("load-summary-source-Beta")).toHaveTextContent("Not loaded yet.")
+    expect(screen.getByTestId("load-summary-source-Beta")).toHaveTextContent("Not imported yet.")
     expect(screen.getByTestId("load-summary-source-Gamma")).toHaveTextContent(
       "no per-table detail",
     )

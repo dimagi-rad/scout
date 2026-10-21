@@ -754,7 +754,7 @@ def test_pipeline_failure_cleanup_cannot_drop_candidate_that_became_active(
         result = _run_refresh(job_id, args)
 
     candidate.refresh_from_db()
-    assert result["error"] == "Materialization failed"
+    assert result["error"] == "Import failed"
     assert candidate.state == SchemaState.ACTIVE
     teardown.assert_not_called()
 

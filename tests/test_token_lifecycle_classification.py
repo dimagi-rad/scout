@@ -82,6 +82,10 @@ class TestSyncRefreshLogLevels:
             ),
         )
         mocker.patch("apps.users.services.token_refresh._record_refresh_failure")
+        mocker.patch(
+            "apps.users.services.token_refresh._adopt_rotated_token",
+            return_value=(None, False),
+        )
 
     @pytest.mark.parametrize(
         ("error_code", "body_marker"),

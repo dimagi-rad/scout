@@ -18,7 +18,7 @@ def deps(c: Context) -> None:
 @task
 def worker(c: Context) -> None:
     """Start the Procrastinate worker (standalone, without honcho)."""
-    c.run("uv run python manage.py procrastinate worker", pty=True)
+    c.run("uv run python manage.py procrastinate worker --concurrency 3", pty=True)
 
 
 @task

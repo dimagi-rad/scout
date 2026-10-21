@@ -171,7 +171,7 @@ async def refresh_tenant_schema(
             retirement.drop_claimed_refresh_schema_and_fail(new_schema, context.job.id), new_schema
         )
         return {
-            "error": "Another load of this source is still running. Retry the refresh later.",
+            "error": "Another import of this source is still running. Retry the refresh later.",
             "retry_required": True,
         }
     if outcome.get("status") != "active":
@@ -264,7 +264,7 @@ async def _run_claimed_refresh(context, new_schema, membership) -> dict:
     except Exception:
         logger.exception("Materialization failed for schema '%s'", new_schema.schema_name)
         await drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
-        return {"error": "Materialization failed"}
+        return {"error": "Import failed"}
     except BaseException:
         await drain(_end_refresh_load(new_schema, job_id, generation), new_schema)
         raise

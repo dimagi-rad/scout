@@ -11,8 +11,10 @@ from pathlib import Path
 import environ
 import sentry_sdk
 
+from apps.common.db_pool import pooled_database
 from apps.common.db_urls import enforce_django_db_tls
 from config.sentry import before_send, ignore_noisy_loggers
+from config.task_threads import isolate_job_thread
 from config.task_tracing import trace_job
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -142,11 +144,37 @@ DATABASES = {
     ),
 }
 
+# Per-process Django connection pool (#934); 0 leaves it off. Only the web deploy
+# enables it: a pooled connection goes back only on close(), and the worker's and
+# MCP's executor threads keep theirs between jobs, so there it would pin slots.
+# Size it against the RDS connection budget alongside the checkpointer pools.
+DJANGO_DB_POOL_MAX_SIZE = env.int("DJANGO_DB_POOL_MAX_SIZE", default=0)
+if DJANGO_DB_POOL_MAX_SIZE:
+    DATABASES["default"] = pooled_database(
+        DATABASES["default"],
+        min_size=env.int("DJANGO_DB_POOL_MIN_SIZE", default=1),
+        max_size=DJANGO_DB_POOL_MAX_SIZE,
+        timeout=env.float("DJANGO_DB_POOL_TIMEOUT_S", default=3.0),
+    )
+
 # Separate from the application DB to allow future migration to Snowflake etc.
 MANAGED_DATABASE_URL = env("MANAGED_DATABASE_URL", default="")
 
+# Source loads a process runs beyond each job's first, shared by its jobs (#927). Each
+# holds a source-load thread and about two DB connections for the whole load.
+MATERIALIZATION_SHARED_LOAD_SLOTS = env.int("MATERIALIZATION_SHARED_LOAD_SLOTS", default=2)
+
 # In-app usage and performance events (#862); off stops every write, never a request.
 TELEMETRY_ENABLED = env.bool("TELEMETRY_ENABLED", default=True)
+
+# Host disk headroom alerts from the worker's storage check (apps/telemetry/storage.py).
+# Below CRITICAL_FREE_GIB the deploy guard (HOST_MIN_FREE_GB in deploy.yml) refuses
+# to deploy, and it warns below twice that; keep these in step with it.
+STORAGE_DISK_PATH = env("STORAGE_DISK_PATH", default="/")
+STORAGE_DISK_WARNING_FREE_PERCENT = env.float("STORAGE_DISK_WARNING_FREE_PERCENT", default=20.0)
+STORAGE_DISK_CRITICAL_FREE_PERCENT = env.float("STORAGE_DISK_CRITICAL_FREE_PERCENT", default=10.0)
+STORAGE_DISK_WARNING_FREE_GIB = env.float("STORAGE_DISK_WARNING_FREE_GIB", default=16.0)
+STORAGE_DISK_CRITICAL_FREE_GIB = env.float("STORAGE_DISK_CRITICAL_FREE_GIB", default=8.0)
 
 # Cube semantic-query runtime. Leave empty to disable live Cube calls in tests
 # and local setups that have not started the cube service yet.
@@ -375,8 +403,9 @@ if SENTRY_DSN:
     )
     ignore_noisy_loggers()
 
-# Every worker job runs inside a Sentry transaction (a no-op without SENTRY_DSN).
-PROCRASTINATE_WORKER_DEFAULTS = {"worker_middleware": [trace_job]}
+# Every worker job gets its own thread-sensitive thread (config/task_threads.py) and
+# runs inside a Sentry transaction (a no-op without SENTRY_DSN).
+PROCRASTINATE_WORKER_DEFAULTS = {"worker_middleware": [isolate_job_thread, trace_job]}
 
 # Task Badger background-task tracking (optional — leave TASKBADGER_API_KEY blank to disable)
 TASKBADGER_API_KEY = env("TASKBADGER_API_KEY", default="")
@@ -411,6 +440,11 @@ OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
 # An OCS that predates open-chat-studio#4685 rejects the unknown `teams` scope with
 # invalid_scope, failing every OCS sign-in; turn this off when pointing at one.
 OCS_REQUEST_TEAMS_SCOPE = env.bool("OCS_REQUEST_TEAMS_SCOPE", default=True)
+# OCS session-detail fetches (the messages N+1, #918): concurrent per load, and in
+# total per process. The worker runs several loads at once and OCS has no API
+# throttling of its own, so the process cap is what bounds the load on it.
+OCS_DETAIL_FETCH_CONCURRENCY = env.int("OCS_DETAIL_FETCH_CONCURRENCY", default=8)
+OCS_DETAIL_FETCH_PROCESS_LIMIT = env.int("OCS_DETAIL_FETCH_PROCESS_LIMIT", default=10)
 
 
 # The default cache backs chat rate limiting, DRF throttles, and per-user

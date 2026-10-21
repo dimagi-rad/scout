@@ -128,7 +128,7 @@ export function DatasetBrowserPage() {
       <CenteredState
         icon={<Database className="h-12 w-12" />}
         title="No datasets yet"
-        body="Start a chat to load workspace data and build the semantic catalog."
+        body="Start a chat to import workspace data and build the semantic catalog."
       />
     )
   }
@@ -503,9 +503,9 @@ function DatasetDetail({
           {dataset.row_count != null && (
             <Badge
               variant="secondary"
-              title="Recorded by the most recent data load, not a live count query."
+              title="Recorded by the most recent import, not a live count query."
             >
-              {dataset.row_count.toLocaleString()} rows from last data load
+              {dataset.row_count.toLocaleString()} rows from last import
             </Badge>
           )}
         </div>

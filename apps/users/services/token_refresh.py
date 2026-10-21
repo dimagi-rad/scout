@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -1014,6 +1015,33 @@ async def refresh_oauth_token_result(
             )
             response.raise_for_status()
     except httpx.HTTPStatusError as e:
+        if _is_invalid_grant(e.response):
+            # A concurrent refresh may have spent this copy's grant first (#927).
+            try:
+                adopted, advanced = await sync_to_async(_adopt_rotated_token)(
+                    social_token,
+                    preflight,
+                    deadline=_phase_deadline(None, db_timeout, clock),
+                    clock=clock,
+                )
+            except TokenRefreshError:
+                # A failed read must not erase the provider's verdict below.
+                logger.warning("Could not check for a concurrently refreshed token", exc_info=True)
+                adopted, advanced = None, False
+            if adopted is not None:
+                logger.info("Adopted a concurrently refreshed OAuth token")
+                return adopted
+            if advanced:
+                # The copy now holds the stored, live grant; it cannot advance again.
+                return await refresh_oauth_token_result(
+                    social_token,
+                    token_url,
+                    request_timeout=request_timeout,
+                    db_timeout=db_timeout,
+                    deadline=deadline,
+                    clock=clock,
+                    record_failure=record_failure,
+                )
         # Keep provider response bodies out of logs.
         status = e.response.status_code
         verdict = classify_http_failure(
@@ -1142,6 +1170,88 @@ async def refresh_oauth_token(
     return result.snapshot.access_token
 
 
+_sync_refresh_locks: dict[int, threading.Lock] = {}
+_sync_refresh_locks_guard = threading.Lock()
+
+
+def _sync_refresh_lock(token_id) -> threading.Lock:
+    with _sync_refresh_locks_guard:
+        return _sync_refresh_locks.setdefault(token_id, threading.Lock())
+
+
+def _sync_refresh_lock_wait(timeout, db_timeout, deadline, clock) -> float:
+    """How long to wait for another refresh of the same token; -1 blocks."""
+    if deadline is not None:
+        return max(0.0, deadline - clock())
+    if db_timeout is None:
+        return -1
+    # The holder's worst case, twice for its one retry with a stored grant: its post,
+    # preflight, adoption read, re-preflight, re-read after a refusal, each persist
+    # attempt and the failure marker, every database phase re-armed.
+    phases = 5 + len(SPENT_GRANT_PERSIST_RETRY_DELAYS) + 1 + 1
+    return 2 * (timeout + phases * db_timeout)
+
+
+def _adopt_rotated_token(
+    social_token, preflight: _TokenPreflight, *, deadline, clock
+) -> tuple[TokenRefreshResult | None, bool]:
+    """Take the token another refresh stored after this copy was read.
+
+    Refresh tokens rotate, so posting this copy's spent one is refused and reads as
+    a revoked sign-in. Sources sharing a connection load at once (#927), each with
+    its own copy. Returns the result to serve, if any, and whether the copy now
+    holds the stored token: an expired one is refreshed with its own live grant.
+    Only a row that still matches the identity preflight validated is taken.
+    """
+    try:
+        with transaction.atomic(), preserve_transaction_timeouts():
+            _configure_transaction_deadline(deadline, clock)
+            # Locked so an in-flight persist of the winning refresh commits first.
+            current = (
+                SocialToken.objects.select_for_update(of=("self",))
+                .select_related("account")
+                .filter(pk=preflight.token_id)
+                .first()
+            )
+            observed_ids = [fence.connection_id for fence in preflight.connection_fences]
+            _configure_transaction_deadline(deadline, clock)
+            connections = list(
+                TenantConnection.objects.filter(
+                    Q(
+                        social_account_id=preflight.account_id,
+                        credential_type=TenantConnection.OAUTH,
+                    )
+                    | Q(pk__in=observed_ids)
+                ).order_by("pk")
+            )
+    except (DatabaseError, _RefreshDeadlineExceeded) as exc:
+        if _is_deadline_error(exc):
+            raise TokenRefreshDeadlineExceeded(
+                "Timed out waiting on the database before refreshing OAuth credentials."
+            ) from exc
+        raise TokenRefreshUnavailable("Failed to read OAuth refresh state.") from exc
+    if (
+        current is None
+        or not current.token_secret
+        or not _identity_matches(preflight, current, connections)
+        or (current.token, current.token_secret)
+        == (preflight.access_token, preflight.refresh_token)
+        # Its own refresh was already refused: serving it would hand out a dead grant.
+        or any(
+            connection.oauth_refresh_failure_fingerprint == credential_fingerprint(current)
+            for connection in connections
+        )
+    ):
+        return None, False
+    snapshot = _persisted_snapshot(current)
+    _apply_persisted_snapshot(social_token, snapshot)
+    if current.expires_at is not None and current.expires_at <= timezone.now():
+        return None, True
+    return TokenRefreshResult(
+        TokenRefreshStatus.SUPERSEDED, snapshot, credential_advanced=True
+    ), True
+
+
 def refresh_oauth_token_result_sync(
     social_token,
     token_url: str,
@@ -1162,16 +1272,61 @@ def refresh_oauth_token_result_sync(
     always the owner's to reconnect. ``record_failure=False`` exists for a manager
     renewing someone else's token (1d4b2748); add it here if a caller like that appears.
     """
-    try:
-        preflight = _preflight_token(
-            social_token, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
+    # One refresh per token at a time in this process; a waiter takes what it stored.
+    lock = _sync_refresh_lock(social_token.pk)
+    if not lock.acquire(timeout=_sync_refresh_lock_wait(timeout, db_timeout, deadline, clock)):
+        raise TokenRefreshDeadlineExceeded(
+            "Timed out waiting for another refresh of these OAuth credentials."
         )
+    try:
+        return _refresh_oauth_token_sync(
+            social_token,
+            token_url,
+            timeout=timeout,
+            db_timeout=db_timeout,
+            deadline=deadline,
+            clock=clock,
+        )
+    finally:
+        lock.release()
+
+
+def _sync_preflight(social_token, *, deadline, clock) -> _TokenPreflight:
+    try:
+        return _preflight_token(social_token, deadline=deadline, clock=clock)
     except (DatabaseError, _RefreshDeadlineExceeded) as exc:
         if _is_deadline_error(exc):
             raise TokenRefreshDeadlineExceeded(
                 "Timed out waiting on the database before refreshing OAuth credentials."
             ) from exc
         raise TokenRefreshUnavailable("Failed to read OAuth refresh state.") from exc
+
+
+def _refresh_oauth_token_sync(
+    social_token, token_url: str, *, timeout, db_timeout, deadline, clock
+) -> TokenRefreshResult:
+    preflight = _sync_preflight(
+        social_token, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
+    )
+    try:
+        adopted, advanced = _adopt_rotated_token(
+            social_token,
+            preflight,
+            deadline=_phase_deadline(deadline, db_timeout, clock),
+            clock=clock,
+        )
+    except TokenRefreshError:
+        # The refresh below is self-validating; a failed read must not pre-empt it.
+        logger.warning("Could not check for a concurrently refreshed token", exc_info=True)
+        adopted, advanced = None, False
+    if adopted is not None:
+        logger.info("Adopted a concurrently refreshed OAuth token (sync)")
+        return adopted
+    if advanced:
+        # The copy now holds the stored grant; the refresh below must be checked against it.
+        preflight = _sync_preflight(
+            social_token, deadline=_phase_deadline(deadline, db_timeout, clock), clock=clock
+        )
     fingerprint = credential_fingerprint(social_token)
     if social_token.app is None:
         raise TokenRefreshError("OAuth application is missing; reconnect this account.")
@@ -1188,6 +1343,32 @@ def refresh_oauth_token_result_sync(
         )
         response.raise_for_status()
     except requests.HTTPError as e:
+        if e.response is not None and _is_invalid_grant(e.response):
+            # Spent between the adoption read above and the post (#927), or that read
+            # failed; check again, as the async refresh does.
+            try:
+                adopted, advanced = _adopt_rotated_token(
+                    social_token,
+                    preflight,
+                    deadline=_phase_deadline(None, db_timeout, clock),
+                    clock=clock,
+                )
+            except TokenRefreshError:
+                logger.warning("Could not check for a concurrently refreshed token", exc_info=True)
+                adopted, advanced = None, False
+            if adopted is not None:
+                logger.info("Adopted a concurrently refreshed OAuth token (sync)")
+                return adopted
+            if advanced:
+                # Not the public entry point: this thread already holds the token's lock.
+                return _refresh_oauth_token_sync(
+                    social_token,
+                    token_url,
+                    timeout=timeout,
+                    db_timeout=db_timeout,
+                    deadline=deadline,
+                    clock=clock,
+                )
         # Keep provider response bodies out of logs.
         status = e.response.status_code if e.response is not None else None
         verdict = classify_http_failure(

@@ -522,3 +522,76 @@ it("shows each available source's own description", async () => {
   )
   expect(screen.queryByTestId("available-source-description-tenant-b")).toBeNull()
 })
+
+describe("provider-specific filters", () => {
+  beforeEach(() => localStorage.clear())
+
+  const ocs = (id: string, name: string, attributes: Record<string, unknown>) => ({
+    id: `m-${id}`, tenant_uuid: `tenant-${id}`, provider: "ocs",
+    tenant_id: id, tenant_name: name, last_selected_at: null, attributes,
+  })
+  const mixed = [
+    connect("c1", "Kenya Live", { is_active: true, organization: "dimagi" }),
+    ocs("o1", "Helper Bot", { team: "t-a", team_name: "Team A" }),
+    ocs("o2", "Old Bot", { team: "t-b", team_name: "Team B" }),
+  ]
+
+  async function open() {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    vi.mocked(getUserTenantsCached).mockResolvedValue(mixed)
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+    await screen.findByTestId(`${F}-count`)
+  }
+
+  it("swaps the Connect filters for team and chatbot once OCS is selected", async () => {
+    await open()
+    expect(screen.getByTestId(`${F}-facet-organization`)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId(`${F}-facet-provider`))
+    await userEvent.click(await screen.findByTestId(`${F}-facet-provider-option-ocs`))
+    await userEvent.keyboard("{Escape}")
+
+    expect(screen.queryByTestId(`${F}-facet-organization`)).toBeNull()
+    expect(screen.queryByTestId(`${F}-facet-status`)).toBeNull()
+    expect(screen.getByTestId(`${F}-facet-ocs_team`)).toBeInTheDocument()
+    expect(screen.getByTestId(`${F}-facet-ocs_chatbot`)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId(`${F}-facet-ocs_team`))
+    await userEvent.click(await screen.findByTestId(`${F}-facet-ocs_team-option-t-a`))
+
+    expect(shownAvailable()).toEqual(["o1"])
+  })
+
+  it("clears a Connect filter that picking OCS had hidden", async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ provider: ["ocs"], organization: ["dimagi"] }),
+    )
+    await open()
+    expect(screen.queryByTestId(`${F}-facet-organization`)).toBeNull()
+
+    await userEvent.click(screen.getByTestId(`${F}-clear`))
+
+    expect(shownAvailable()).toEqual(["o1", "c1", "o2"])
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}")).toEqual({})
+  })
+
+  it("offers the OCS filters without a provider pick when every source is OCS", async () => {
+    vi.mocked(workspaceApi.getTenants).mockResolvedValue([])
+    vi.mocked(getUserTenantsCached).mockResolvedValue(mixed.filter((t) => t.provider === "ocs"))
+    render(<TenantsTab workspaceId="ws-1" isManager onWorkspaceDeleted={vi.fn()} />)
+    await userEvent.click(await screen.findByTestId("add-tenant-btn"))
+    await screen.findByTestId(`${F}-count`)
+
+    expect(screen.queryByTestId(`${F}-facet-provider`)).toBeNull()
+    expect(screen.getByTestId(`${F}-facet-ocs_team`)).toBeInTheDocument()
+  })
+
+  it("hides the OCS filters until OCS is picked from a mixed list", async () => {
+    await open()
+
+    expect(screen.queryByTestId(`${F}-facet-ocs_team`)).toBeNull()
+    expect(screen.getByTestId(`${F}-facet-organization`)).toBeInTheDocument()
+  })
+})

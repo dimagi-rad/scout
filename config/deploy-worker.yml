@@ -18,7 +18,12 @@ servers:
       - <%= ENV.fetch('SCOUT_EC2_IP') %>
     options:
       network: "scout_shared"
-    cmd: "python manage.py procrastinate worker"
+    # Three jobs at once (#918). Each data job holds up to two advisory-lock
+    # sessions plus its own ORM-thread, data-thread and managed-DB connections.
+    # The managed pool cap (mcp_server/services/pool.py _MAX_POOLS) must cover the
+    # worker loop, one async_to_sync loop per job and one spare, so raise both
+    # together (tests/test_worker_concurrency_deploy.py).
+    cmd: "python manage.py procrastinate worker --concurrency 3"
     proxy: false
 
 registry:

@@ -74,6 +74,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
     WorkspaceViewSchema,
+    readable_view_schema_error,
 )
 from apps.workspaces.services.access_freshness import (
     CREDENTIAL_MISSING,
@@ -2111,7 +2112,8 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 tc["result"] = error_response(
                     SCHEMA_BUILD_FAILED,
                     "The workspace view schema failed to build.",
-                    detail=failed_vs.last_error or "View schema build failed.",
+                    detail=readable_view_schema_error(failed_vs.last_error)
+                    or "View schema build failed.",
                 )
                 return tc["result"]
             tc["result"] = not_serving

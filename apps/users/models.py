@@ -104,6 +104,12 @@ PROVIDER_CHOICES = [
     ("commcare_connect", "CommCare Connect"),
     ("ocs", "Open Chat Studio"),
 ]
+_PROVIDER_LABELS = dict(PROVIDER_CHOICES)
+
+
+def provider_label(provider: str) -> str:
+    return _PROVIDER_LABELS.get(provider, provider or "the provider")
+
 
 # Providers whose OAuth token authorises one *scope* (an OCS team) rather than the
 # whole account, so a user may legitimately hold several connections for it. The

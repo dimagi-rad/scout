@@ -12,7 +12,6 @@ from apps.common.errors import ExpectedStateError, UpstreamRefreshFailed, Upstre
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.token_refresh import (
     TokenRefreshError,
-    TokenRefreshRejected,
     refresh_oauth_token,
     refresh_oauth_token_sync,
 )
@@ -143,10 +142,14 @@ async def test_old_refresh_denial_does_not_revoke_replacement(
     await SocialToken.objects.filter(pk=token.pk).aupdate(
         token="replacement", token_secret="replacement-refresh"
     )
-    with pytest.raises(TokenRefreshError) as caught:
-        await invoke(mode, token, httpx_mock, requests_mock, payload={"error": "invalid_grant"})
-    assert caught.type is TokenRefreshRejected
-    assert caught.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
+    # The stale copy is served the stored replacement (#927): the worker's sync
+    # refresh takes it before posting; the async one after its old grant is refused.
+    value = await invoke(mode, token, httpx_mock, requests_mock, payload={"error": "invalid_grant"})
+    assert value == "replacement"
+    if mode == "sync":
+        assert requests_mock.call_count == 0
+    else:
+        assert len(httpx_mock.get_requests()) == 1
     assert await TenantMembership.objects.filter(pk=member.pk).aexists()
     await connection.arefresh_from_db()
     assert connection.upstream_denial_code == ""

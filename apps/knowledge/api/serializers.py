@@ -5,28 +5,104 @@ from rest_framework import serializers
 from apps.common.utils import creator_display_name
 from apps.knowledge.models import KnowledgeEntry
 
+# Responses carry only this much of a reference document, which can be megabytes;
+# the detail GET (``full_content`` in the context) returns all of it.
+REFERENCE_PREVIEW_CHARS = 500
+
+
+def _shown_content(obj: KnowledgeEntry, full: bool) -> str:
+    # The list view defers ``content`` and annotates the preview as ``listed_content``.
+    listed = getattr(obj, "listed_content", None)
+    if listed is not None:
+        return listed
+    if full or obj.kind != KnowledgeEntry.Kind.REFERENCE:
+        return obj.content
+    return obj.content[:REFERENCE_PREVIEW_CHARS]
+
+
+class _ContentField(serializers.CharField):
+    def __init__(self, **kwargs):
+        # Untrimmed so an echoed preview compares exactly; validate() trims note content.
+        super().__init__(trim_whitespace=False, **kwargs)
+
+    def get_attribute(self, instance):
+        return _shown_content(instance, self.context.get("full_content", False))
+
 
 class KnowledgeEntrySerializer(serializers.ModelSerializer):
     type = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
+    content = _ContentField()
+    size = serializers.SerializerMethodField()
+    content_truncated = serializers.SerializerMethodField()
 
     class Meta:
         model = KnowledgeEntry
         fields = [
             "id",
             "type",
+            "kind",
             "title",
+            "description",
+            "source_format",
             "content",
+            "content_truncated",
+            "size",
             "tags",
             "created_by_name",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "type", "created_by_name", "created_at", "updated_at"]
+        # Only the upload and import paths create reference documents; they validate
+        # the file, which a plain create would skip.
+        read_only_fields = [
+            "id",
+            "type",
+            "kind",
+            "source_format",
+            "size",
+            "content_truncated",
+            "created_by_name",
+            "created_at",
+            "updated_at",
+        ]
+
+    def validate(self, attrs):
+        instance = self.instance
+        if (
+            instance is not None
+            and instance.kind == KnowledgeEntry.Kind.REFERENCE
+            and "content" in attrs
+        ):
+            # Clients are served a preview, so any content they send back may be a
+            # truncated copy: an unchanged echo is a no-op and anything else is refused,
+            # never written over the stored document.
+            if attrs["content"] not in (instance.content, _shown_content(instance, full=False)):
+                raise serializers.ValidationError(
+                    {
+                        "content": (
+                            "A reference document's content can't be edited. "
+                            "Upload a new version instead."
+                        )
+                    }
+                )
+            del attrs["content"]
+        if "content" in attrs:
+            attrs["content"] = attrs["content"].strip()
+            if not attrs["content"]:
+                raise serializers.ValidationError({"content": "This field may not be blank."})
+        return attrs
 
     def get_type(self, obj) -> str:
         return "entry"
 
     def get_created_by_name(self, obj):
-
         return creator_display_name(obj.created_by)
+
+    def get_size(self, obj) -> int:
+        size = getattr(obj, "content_size", None)
+        return size if size is not None else len(obj.content)
+
+    def get_content_truncated(self, obj) -> bool:
+        shown = _shown_content(obj, self.context.get("full_content", False))
+        return len(shown) < self.get_size(obj)

@@ -33,7 +33,14 @@ export function useFacetedList<T>({
   const knownKeys = useMemo(() => facets.map((f) => f.key), [facets])
   const [stored, setStored] = usePersistentFacetSelection(storageKey, knownKeys)
 
-  const visibleFacets = useMemo(() => availableFacets(facets, items), [facets, items])
+  const offeredFacets = useMemo(() => availableFacets(facets, items), [facets, items])
+  const visibleFacets = useMemo(() => {
+    // A facet's applicability reads the others' selection (e.g. the provider), so
+    // that selection is resolved first, without the conditional facets.
+    const unconditional = offeredFacets.filter((f) => !f.appliesTo)
+    const base = effectiveSelection(stored, unconditional, items)
+    return offeredFacets.filter((f) => !f.appliesTo || f.appliesTo(base, items))
+  }, [offeredFacets, items, stored])
   const selection = useMemo(
     () => effectiveSelection(stored, visibleFacets, items),
     [stored, visibleFacets, items],
@@ -53,10 +60,11 @@ export function useFacetedList<T>({
   const absentStored = useCallback(
     (key: string) => {
       if (listIsComplete) return []
-      const present = new Set((options[key] ?? []).map((o) => o.value))
+      const def = facets.find((f) => f.key === key)
+      const present = new Set(items.map((item) => def?.getValue(item)))
       return (stored[key] ?? []).filter((v) => !present.has(v))
     },
-    [listIsComplete, options, stored],
+    [listIsComplete, facets, items, stored],
   )
   const setFacet = useCallback(
     (key: string, values: readonly string[], replace = false) => {
@@ -64,13 +72,15 @@ export function useFacetedList<T>({
     },
     [stored, setStored, absentStored],
   )
-  // Only facets on offer: one hidden for this data (e.g. Connect facets while the API
-  // sends no attributes) keeps its stored selection for when it shows again.
+  // Facets this data offers, including ones hidden only by the selection (Connect
+  // facets while OCS is picked), which would otherwise return once the provider is
+  // cleared. One the data lacks (e.g. Connect facets while the API sends no
+  // attributes) keeps its stored selection for when it shows again.
   const clearFacets = useCallback(() => {
     const next: Record<string, readonly string[]> = { ...stored }
-    for (const facet of visibleFacets) next[facet.key] = absentStored(facet.key)
+    for (const facet of offeredFacets) next[facet.key] = absentStored(facet.key)
     setStored(next)
-  }, [stored, setStored, visibleFacets, absentStored])
+  }, [stored, setStored, offeredFacets, absentStored])
 
   return {
     facets: visibleFacets,

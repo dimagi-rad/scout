@@ -8,6 +8,7 @@ from asgiref.sync import sync_to_async
 from django.db import connection
 from django.http import JsonResponse
 from procrastinate.contrib.django.models import ProcrastinateJob
+from psycopg_pool import PoolTimeout
 
 from apps.common.capacity import (
     RETRY_AFTER_SECONDS,
@@ -43,6 +44,17 @@ async def _check_queue() -> None:
     await ProcrastinateJob.objects.values_list("id", flat=True).afirst()
 
 
+def _caused_by_pool_timeout(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, PoolTimeout):
+            return True
+        seen.add(id(current))
+        current = current.__cause__
+    return False
+
+
 async def health_check(request):
     """Readiness check: 200 only when every dependency probe succeeds, else 503
     with a per-check breakdown. A static 200 let a container with a dead DB or
@@ -54,12 +66,19 @@ async def health_check(request):
     """
     checks: dict[str, str] = {}
     capacity_failures = {}
+    pool_checkout_timed_out = False
 
     for name, probe in (("database", _check_database), ("queue", _check_queue)):
+        if name == "queue" and pool_checkout_timed_out:
+            # Same pooled connection: probing again would only wait out the pool
+            # timeout a second time, past the 4s container probe.
+            checks[name] = "skipped"
+            continue
         try:
             await probe()
             checks[name] = "ok"
         except Exception as exc:  # readiness must catch every failure mode
+            pool_checkout_timed_out = name == "database" and _caused_by_pool_timeout(exc)
             capacity = classify_capacity_error(exc)
             if capacity is not None:
                 checks[name] = "busy"

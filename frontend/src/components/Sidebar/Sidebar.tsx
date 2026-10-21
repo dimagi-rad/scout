@@ -15,6 +15,7 @@ import {
 } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
+import { importingLabel, importingSourceLabel } from "@/lib/importCopy"
 import { workspacePath } from "@/lib/workspacePath"
 import { isWorkspaceArtifactPath } from "@/lib/artifactPath"
 import { NavItem } from "./NavItem"
@@ -468,8 +469,8 @@ export function Sidebar() {
                       data-testid={`sidebar-thread-job-${thread.id}`}
                       title={
                         job.progress?.source
-                          ? `Loading ${job.progress.source}${job.progress.rows_loaded ? ` — ${job.progress.rows_loaded.toLocaleString()} rows` : ""}`
-                          : (job.progress?.message ?? "Materializing...")
+                          ? `${importingSourceLabel(job.progress.source, job.provider)}${job.progress.rows_loaded ? ` (${job.progress.rows_loaded.toLocaleString()} rows)` : ""}`
+                          : (job.progress?.message ?? importingLabel(job.provider))
                       }
                     >
                       <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />

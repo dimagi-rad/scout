@@ -49,8 +49,8 @@ export function MaterializationFailure({
 
   const Icon = isCancelled ? XCircle : AlertTriangle
   const headerText = isCancelled
-    ? "Materialization cancelled"
-    : "Materialization failed"
+    ? "Import cancelled"
+    : "Import failed"
   let retryLabel = "Retry"
   if (retry.state === "pending") retryLabel = "Retrying..."
   else if (retry.failure) retryLabel = retry.failure.retryable ? "Retry failed" : "Can't retry"
@@ -100,7 +100,7 @@ export function MaterializationFailure({
                   : "text-red-600 hover:bg-red-500/10 border border-red-500/30"
             }`}
             data-testid="materialization-retry-btn"
-            title={retry.failure?.message ?? "Retry materialization"}
+            title={retry.failure?.message ?? "Retry import"}
           >
             <RotateCw
               className={`w-3 h-3 ${retry.state === "pending" ? "animate-spin" : ""}`}

@@ -7,25 +7,19 @@ string suitable for inclusion in the agent's system prompt.
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 from apps.knowledge.models import AgentLearning, KnowledgeEntry, TableKnowledge
+from apps.knowledge.services.reference_documents import aformat_reference_documents_for_prompt
+from apps.knowledge.services.sql_redaction import SQL_FENCE_RE as _SQL_FENCE_RE
+from apps.knowledge.services.sql_redaction import SQL_REDACTION as _SQL_REDACTION
+from apps.knowledge.services.sql_redaction import SQL_STATEMENT_LINE_RE as _SQL_STATEMENT_LINE_RE
+from apps.knowledge.services.sql_redaction import (
+    sanitize_prompt_content as _sanitize_prompt_content,
+)
 
 if TYPE_CHECKING:
     from apps.workspaces.models import Workspace
-
-_SQL_FENCE_RE = re.compile(r"```sql\b.*?```", re.IGNORECASE | re.DOTALL)
-_SQL_STATEMENT_LINE_RE = re.compile(
-    r"(?im)^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)\b.*$"
-)
-_SQL_REDACTION = "[SQL example removed; use semantic_query members instead.]"
-
-
-def _sanitize_prompt_content(value: str) -> str:
-    """Remove legacy SQL snippets before knowledge is injected into prompts."""
-    value = _SQL_FENCE_RE.sub(_SQL_REDACTION, value)
-    return _SQL_STATEMENT_LINE_RE.sub(_SQL_REDACTION, value)
 
 
 WORKSPACE_MEMORY_HEADING = (
@@ -177,7 +171,16 @@ class KnowledgeRetriever:
         is unchanged, learnings claim at most half the budget before the other
         sections are fitted and then take back what they leave unused, each table's column
         notes are capped, and each section is cut at a line boundary where possible.
+
+        Reference documents (#913) sit outside the budget: their bodies stay out
+        of the prompt, and only a compact, capped listing of them (title, size and
+        a one-line description) follows the budgeted knowledge.
         """
+        knowledge = await self._retrieve_budgeted()
+        references = await aformat_reference_documents_for_prompt(self.workspace)
+        return _SECTION_SEPARATOR.join(part for part in (knowledge, references) if part)
+
+    async def _retrieve_budgeted(self) -> str:
         table_rows = await self._table_rows()
         sections = {
             "entries": await self._format_knowledge_entries(),
@@ -218,7 +221,9 @@ class KnowledgeRetriever:
 
     async def _format_knowledge_entries(self) -> str:
         """Format knowledge entries as markdown sections."""
-        entries = KnowledgeEntry.objects.filter(workspace=self.workspace).order_by("title", "pk")
+        entries = KnowledgeEntry.objects.filter(
+            workspace=self.workspace, kind=KnowledgeEntry.Kind.NOTE
+        ).order_by("title", "pk")
 
         if not await entries.aexists():
             return ""

@@ -221,6 +221,53 @@ hidden source maps, uploads them to Sentry tagged with the release (git SHA), th
 deletes them from `dist/` so they don't ship to browsers. The auth token is passed as a
 BuildKit secret (`--secret id=sentry_auth_token`) and never lands in an image layer.
 
+### Storage headroom alerts
+
+Every 15 minutes the worker runs `apps.telemetry.tasks.storage_headroom`. It
+reports through Sentry because the CloudWatch alarm topic has no subscribers,
+and before it nothing watched the host disk (see [Host disk full](#host-disk-full)).
+
+- **Host disk.** `shutil.disk_usage("/")` inside the worker container. The
+  container root is an overlay2 mount, which reports the free space of the
+  filesystem that holds Docker's data root on the host. That is the filesystem
+  that image pulls fill and the deploy guard checks. It sends a Sentry
+  **warning**, `Host disk low: …`, below 20% or 16 GiB free, and an **error**
+  below 10% or 8 GiB free, whichever comes first. The GiB floors are the deploy
+  guard's limits: below 8 GiB (`HOST_MIN_FREE_GB`) a deploy is refused unless its
+  prune step frees enough space, and the guard warns below 16 GiB. Change them
+  together. At the defaults the two kinds of threshold cross at an 80 GiB volume:
+  below that the GiB floors fire first, so on the 50 GB host the warning starts
+  at 16 GiB free and the error at 8 GiB. To alert earlier on this host, raise the
+  percent settings, not the floors.
+  Each severity is one issue under a fixed fingerprint
+  (`storage-headroom / host-disk / warning|critical`). Each run while the disk is
+  low adds an event to that issue; it does not open a new one. Going from
+  warning to critical opens a new issue, so the first-seen alert fires again.
+  A low disk after someone resolved the issue reopens it as a regression, which
+  pages only if the Sentry alert rule also covers regressions.
+- **Platform database.** `pg_database_size(current_database())`, logged at INFO
+  in `/scout/worker` (`Storage headroom: platform DB …`) for trends such as chat
+  attachments. It sends no alert: RDS free storage is visible only in CloudWatch
+  (`scout-rds-low-storage`). In production the tenant data shares this
+  database (`MANAGED_DATABASE_URL` is `DATABASE_URL`), so the size includes
+  every workspace's loaded data. It takes no table locks. Per-table sizes are
+  not logged: sizing a table waits behind any load or teardown holding it
+  `ACCESS EXCLUSIVE`, and later DDL then queues behind the check.
+
+The worker reads these from its environment. Kamal passes only the variables
+listed in `config/deploy-worker.yml`, so to change one, add it under `env.clear`
+there and redeploy the worker.
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `STORAGE_DISK_PATH` | `/` | Path whose filesystem is checked. |
+| `STORAGE_DISK_WARNING_FREE_PERCENT` | `20` | Sentry warning below this percent free. |
+| `STORAGE_DISK_CRITICAL_FREE_PERCENT` | `10` | Sentry error below this percent free. |
+| `STORAGE_DISK_WARNING_FREE_GIB` | `16` | Sentry warning below this many GiB free. Keep at twice `HOST_MIN_FREE_GB`. |
+| `STORAGE_DISK_CRITICAL_FREE_GIB` | `8` | Sentry error below this many GiB free. Keep equal to `HOST_MIN_FREE_GB`. |
+
+If the worker stops, the check stops too. There is no Sentry Cron monitor for it.
+
 ## Retired staging environment
 
 A staging stack used to run co-located on the production host (`-d staging`
@@ -573,7 +620,10 @@ pending drain receipt (see [Migration-safe backend handoff](#migration-safe-back
    role keeps `retain_containers: 3`. A single prune failure is a warning; if every
    `kamal prune` fails (for example a stale Kamal lock), the step fails.
 2. `Check host disk space` — fails the deploy with a clear error when Docker's
-   filesystem has less than `HOST_MIN_FREE_GB` (8 GB) free, and warns below twice that.
+   filesystem has less than `HOST_MIN_FREE_GB` (8 GiB) free, and warns below twice that.
+
+Between deploys, the worker's storage check sends a Sentry alert when the disk
+runs low (see [Storage headroom alerts](#storage-headroom-alerts)).
 
 A failed production deploy on `main` opens (or comments on) a single GitHub issue
 labelled `deploy-failure` and mentions whoever pushed; the next successful deploy

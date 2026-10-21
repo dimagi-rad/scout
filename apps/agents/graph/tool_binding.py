@@ -35,7 +35,9 @@ from apps.agents.tools.memory_tool import (
     create_workspace_memory_tool,
 )
 from apps.agents.tools.recipe_tool import create_recipe_tool
+from apps.agents.tools.reference_document_tool import create_reference_document_tool
 from apps.chat.constants import SYSTEM_RESUME_MARKER
+from apps.knowledge.services.reference_documents import READ_REFERENCE_DOCUMENT_TOOL_NAME
 from apps.memory.services import has_personal_memory
 
 if TYPE_CHECKING:
@@ -65,6 +67,8 @@ MCP_TOOL_NAMES = frozenset(
         "cancel_materialization",
     }
 )
+# Results re-serialised as compact JSON and held to the tool-result byte budget.
+COMPACTED_TOOL_NAMES = MCP_TOOL_NAMES | {READ_REFERENCE_DOCUMENT_TOOL_NAME}
 
 LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager", "canvas_manager"})
 ARTIFACT_READ_TOOL_NAMES = frozenset({"artifact_graph_overview", "get_artifact_semantic_queries"})
@@ -217,7 +221,7 @@ def _make_injecting_tool_node(
         try:
             result = compact_tool_results(
                 await base_tool_node.ainvoke({"messages": messages}, config=config),
-                MCP_TOOL_NAMES,
+                COMPACTED_TOOL_NAMES,
             )
             if (
                 "persistable_msg" in locals()
@@ -260,6 +264,7 @@ def _build_tools(
     if not interactive:
         excluded.add("run_materialization")
     tools = [t for t in mcp_tools if getattr(t, "name", None) not in excluded]
+    tools.append(create_reference_document_tool(workspace))
     from apps.agents.tools.artifact_manager_agent import (  # noqa: PLC0415 — cycle
         create_artifact_manager_tool,
     )

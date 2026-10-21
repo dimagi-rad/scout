@@ -84,6 +84,21 @@ def _audit(*args, stderr=None) -> str:
 
 
 @pytest.mark.django_db
+def test_reference_documents_are_not_audited(workspace, knowledge):
+    KnowledgeEntry.objects.create(
+        workspace=workspace,
+        title="Registry",
+        content="Uses `cases.old_status`.",
+        kind=KnowledgeEntry.Kind.REFERENCE,
+    )
+
+    [report] = json.loads(_audit("--json"))
+
+    assert report["checked"] == 4
+    assert "Registry" not in {row["label"] for row in report["drifted"]}
+
+
+@pytest.mark.django_db
 def test_json_reports_only_drifted_rows(workspace, knowledge):
     [report] = json.loads(_audit("--json"))
 

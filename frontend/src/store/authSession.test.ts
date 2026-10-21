@@ -44,7 +44,10 @@ function seedPrivateState(store: ReturnType<typeof createAppStore>, suffix = "a"
     datasetStatus: "loaded", datasetError: id,
     selectedDataset: { name: id } as AppStore["selectedDataset"],
     selectedDatasetStatus: "loaded", selectedDatasetError: id,
-    knowledgeItems: [{ id, type: "entry", title: id, content: id, tags: [], created_at: "", updated_at: "" }],
+    knowledgeItems: [{
+      id, type: "entry", kind: "note", title: id, description: "", source_format: "", content: id,
+      content_truncated: false, size: id.length, tags: [], created_at: "", updated_at: "",
+    }],
     knowledgeStatus: "loaded", knowledgeError: id, knowledgeSearch: id,
     knowledgePagination: { count: 1 } as unknown as AppStore["knowledgePagination"],
     recipes: [{ id, name: id } as AppStore["recipes"][number]], recipeStatus: "loaded", recipeError: id,

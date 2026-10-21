@@ -25,6 +25,7 @@ from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.api.jobs_views import _termination_to_dict
 from apps.workspaces.models import (
     VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+    VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER,
     MaterializationRun,
     SchemaState,
     TenantSchema,
@@ -1481,7 +1482,7 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun(current_state):
     if current_state == SchemaState.ACTIVE:
         assert "re-running materialization will fix this" in lower
     else:
-        assert "re-running materialization rebuilds them" in lower
+        assert "re-running the import rebuilds them" in lower
     assert "account credentials" not in lower
     assert "ask someone with access" not in lower
     # The WRONG advice from the generic-build-failure branch must NOT appear.
@@ -1491,10 +1492,38 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun(current_state):
     # error_summary tells the truthful, recoverable story.
     assert result["terminal_state"] == ThreadJob.State.FAILED
     await tj.arefresh_from_db()
-    assert "re-running materialization" in tj.error_summary.lower()
+    assert "re-running the import" in tj.error_summary.lower()
+    assert VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER not in tj.error_summary
     assert "account credentials" not in tj.error_summary.lower()
     assert tj.failure_phase == ThreadJob.FailurePhase.MATERIALIZATION
     assert _termination_to_dict(tj, [], viewer_can_write=True)["retry_available"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_with_an_unfinished_source_keeps_the_cascade_marker_from_the_user():
+    """A partial run takes the mixed-failure summary, which quotes the view error."""
+    tj = await _make_multi_tenant_job(
+        email="vscp@b.c",
+        ws_name="W-vscp",
+        pj_id=20013,
+        view_schema_state=SchemaState.FAILED,
+        last_error=VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+    )
+    await MaterializationRun.objects.filter(tenant_schema__schema_name="W_vscp_s2").aupdate(
+        state=MaterializationRun.RunState.LOADING
+    )
+
+    with patch(
+        "apps.chat.services.continuation.build_agent_for_resume",
+        AsyncMock(return_value=FakeAgent()),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["terminal_state"] == ThreadJob.State.FAILED
+    await tj.arefresh_from_db()
+    assert VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER not in tj.error_summary
+    assert "was torn down" in tj.error_summary
 
 
 @pytest.mark.asyncio
@@ -1709,8 +1738,8 @@ async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state, rea
     assert "none of its data is in these results" not in tj.error_summary
     assert ("Settings → Connections" in tj.error_summary) is not reachable
     if view_state == SchemaState.ACTIVE:
-        assert tj.error_summary.startswith("Materialization did not refresh all data.")
-    assert "re-running materialization will not help" not in tj.error_summary
+        assert tj.error_summary.startswith("The import did not refresh all data.")
+    assert "re-running the import will not help" not in tj.error_summary
     assert "  " not in tj.error_summary
     assert tj.error_summary == tj.error_summary.strip()
 

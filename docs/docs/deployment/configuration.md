@@ -46,6 +46,8 @@ OAuth client IDs and secrets live in allauth social application records. `manage
 | `CONNECT_API_URL` | `https://connect.dimagi.com` | CommCare Connect API and OAuth host. |
 | `OCS_URL` | `https://www.openchatstudio.com` | Open Chat Studio API and OAuth host. |
 | `OCS_REQUEST_TEAMS_SCOPE` | `true` | Request the OCS `teams` scope, which lists a user's teams so they can connect them all at once. Set to `false` for an OCS that predates it, which otherwise rejects every OCS sign-in with `invalid_scope`. |
+| `OCS_DETAIL_FETCH_CONCURRENCY` | `8` | Concurrent OCS session-detail requests per messages load (capped at 10 and at the process limit). |
+| `OCS_DETAIL_FETCH_PROCESS_LIMIT` | `10` | Concurrent OCS session-detail requests across every load in one process. The worker runs several loads at once, so this is what bounds the load on your OCS. |
 
 ### CommCare HQ on EU
 
@@ -78,6 +80,7 @@ The managed database stores materialized data. Each tenant (a CommCare domain, C
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MANAGED_DATABASE_URL` | (empty) | PostgreSQL connection URL for materialized data. Only the development settings fill it in when it is unset, pointing it at the main app database; tenant schemas still keep the data separate. |
+| `MATERIALIZATION_SHARED_LOAD_SLOTS` | `2` | Sources a process loads at once beyond each job's first, shared by all its jobs. Each load holds a thread and about two database connections for its whole run, so the worker can hold its job count plus this many. Count them against the database's connection limit. `0` loads each job's sources one at a time. |
 
 ### Database TLS
 
@@ -105,6 +108,10 @@ These are staged-rollout switches.
 | `THREAD_TITLE_LLM_MODEL` | `claude-haiku-4-5-20251001` | Claude model that writes the short chat thread title after a thread's first successful turn. Runs in the background worker. |
 | `LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE` | `1` (`0` in development) | Minimum size of each process's connection pool for conversation checkpoints. |
 | `LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE` | `20` (`4` in development) | Maximum size of that pool. The pool is per process, so multiply by the number of API and worker processes when sizing PostgreSQL `max_connections`. |
+| `DJANGO_DB_POOL_MAX_SIZE` | `0` (off) | Size of each process's pool of Django database connections. The production API sets `10` per uvicorn worker. Set it only for the API: the worker and MCP server keep connections on their executor threads, which would hold pool slots for good. A chat turn holds one slot for its whole stream. Count this toward PostgreSQL `max_connections` with the checkpointer pool. |
+| `DJANGO_DB_POOL_MIN_SIZE` | `1` | Connections each pool keeps open while idle. |
+| `DJANGO_DB_POOL_TIMEOUT_S` | `3` | Seconds a request waits for a free pooled connection. A full pool then answers with the retryable "busy" response. Keep it under the 4-second container health probe. |
+| Worker `--concurrency` | `3` in the shipped commands | Background jobs run at once. Each running job can hold up to two advisory-lock sessions and a few more connections, and `_MAX_POOLS` in `mcp_server/services/pool.py` must be at least concurrency + 2, so raise both together and recheck `max_connections`. |
 | `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_BASE_URL` | (empty) | Langfuse tracing for agent runs. Leave blank to disable. |
 | `TELEMETRY_ENABLED` | `True` | In-app usage and performance events (#862), stored in the platform database: ids, durations, counts, outcomes and tool names, never message or query text. Raw events are deleted after 400 days by a nightly task. Set it to `False` to stop every write; requests and chat turns behave the same either way. |
 
@@ -118,6 +125,16 @@ The development settings always print email to the console. Elsewhere the base s
 | `AWS_SES_REGION` | `us-east-1` | SES region, used by the production settings. |
 | `AWS_SES_ACCESS_KEY_ID`, `AWS_SES_SECRET_ACCESS_KEY` | (empty) | Explicit SES credentials. When unset, boto3's default credential chain is used. |
 | `DEFAULT_FROM_EMAIL` | `Scout <noreply@scout.dimagi.com>` | Sender address. |
+
+### Storage headroom
+
+Every 15 minutes the worker checks free space on the host filesystem and sends a Sentry warning or error when it runs low. Without `SENTRY_DSN` it only logs the readings at INFO. It sends the error on whichever threshold free space crosses first: the percentage or the GiB floor. The same applies to the warning. In the Kamal deployment the worker receives only the variables listed in `config/deploy-worker.yml`, so add these under `env.clear` there to change them.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STORAGE_DISK_PATH` | `/` | Path whose filesystem the worker's 15-minute storage check reads. In a container, `/` reports the filesystem that holds Docker's data root. |
+| `STORAGE_DISK_WARNING_FREE_PERCENT`, `STORAGE_DISK_WARNING_FREE_GIB` | `20`, `16` | The storage check sends a Sentry warning when free space is below either one. |
+| `STORAGE_DISK_CRITICAL_FREE_PERCENT`, `STORAGE_DISK_CRITICAL_FREE_GIB` | `10`, `8` | The storage check sends a Sentry error when free space is below either one. The GiB defaults match the deploy workflow's disk guard (`HOST_MIN_FREE_GB`). |
 
 ### Error monitoring (Sentry)
 

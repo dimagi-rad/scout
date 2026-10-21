@@ -7,17 +7,19 @@ workspace's ``W`` while holding it; sibling rebuilds are deferred tasks.
 
 A ``T`` region must not fan out into work that takes ``W``: child tasks inherit
 the held-tenant context, and ``W`` is refused whenever it shows tenant keys.
-Threads that may enter a lock region must be started with ``run_data_thread``,
-which is what lets them reuse their task's locks. The guard against other thread
-starts is best-effort: it catches context-copying ones (``asyncio.to_thread``,
-``sync_to_async``) but cannot see a plain ``threading.Thread``.
+A child shares its parent's locks only when started with
+``create_task_sharing_data_locks``. Threads that may enter a lock region must be
+started with ``run_data_thread`` (or ``run_data_thread_on`` for another executor),
+which is what lets them reuse their task's locks. The guard against other thread starts is best-effort: it catches
+context-copying ones (``asyncio.to_thread``, ``sync_to_async``) but cannot see a
+plain ``threading.Thread``.
 """
 
 import asyncio
 import hashlib
 import threading
 from contextlib import asynccontextmanager, contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from functools import wraps
 
 import psycopg
@@ -39,7 +41,8 @@ class DataLockTimeout(Exception):
 _EXPAND_TENANTS = "Cannot expand held tenant locks; collect every tenant before acquiring"
 _WORKSPACE_AFTER_TENANT = "Cannot acquire a workspace lock while tenant locks are held"
 _UNBRIDGED_THREAD = (
-    "A thread entered its task's data-lock region without run_data_thread; it would wait "
+    "A thread entered its task's data-lock region without run_data_thread or "
+    "run_data_thread_on; it would wait "
     "on locks its own task holds"
 )
 
@@ -63,7 +66,30 @@ async def run_data_thread(function, /, *args, **kwargs):
     Cancelling ``to_thread`` only cancels its waiter, not the running thread.
     Drain a shielded thread before propagating cancellation so another repair
     cannot overlap its still-running load or Cube publication.
+
+    Await these one at a time within a job when they can reach the managed pool:
+    its cap (``mcp_server.services.pool._MAX_POOLS``) is sized on one such data
+    thread, and so one ``async_to_sync`` loop, per worker job. A job's source
+    loads run concurrently (#927) because pipelines never open a managed pool.
     """
+    return await _run_drained(asyncio.to_thread, function, args, kwargs)
+
+
+async def run_data_thread_on(executor, function, /, *args, **kwargs):
+    """``run_data_thread`` on ``executor`` instead of the loop's default one.
+
+    Source loads use this to run several at once, so ``function`` must not reach
+    the managed pool, whose cap counts one pool-reaching data thread per job.
+    """
+    loop = asyncio.get_running_loop()
+
+    def start(invoke):
+        return loop.run_in_executor(executor, copy_context().run, invoke)
+
+    return await _run_drained(start, function, args, kwargs)
+
+
+async def _run_drained(start, function, args, kwargs):
     owner = asyncio.current_task()
 
     def invoke():
@@ -73,7 +99,7 @@ async def run_data_thread(function, /, *args, **kwargs):
         finally:
             _data_thread_owner.reset(token)
 
-    work = asyncio.create_task(asyncio.to_thread(invoke))
+    work = asyncio.ensure_future(start(invoke))
     try:
         return await asyncio.shield(work)
     except asyncio.CancelledError:
@@ -105,6 +131,30 @@ async def to_thread_fresh_db(func, /, *args, **kwargs):
         return func(*args, **kwargs)
 
     return await run_data_thread(_guarded)
+
+
+def create_task_sharing_data_locks(task_group: asyncio.TaskGroup, function, /, *args):
+    """Start ``function(*args)`` in ``task_group`` as a co-owner of this task's W and T.
+
+    Ownership is per task so a child never borrows its parent's locks by accident;
+    this is the deliberate exception. It is safe only because the group exits
+    inside the caller's lock regions, so the locks outlive every child. T keeps
+    out other writers, not siblings: give each child a distinct tenant.
+    """
+    parent = asyncio.current_task()
+    workspace_owner, workspace_keys = _held_workspaces.get()
+    tenant_owner, tenant_keys = _held_tenants.get()
+
+    async def co_owner():
+        child = asyncio.current_task()
+        # The child runs in a copy of the parent's context, so these sets stay its own.
+        if workspace_owner is parent:
+            _held_workspaces.set((child, workspace_keys))
+        if tenant_owner is parent:
+            _held_tenants.set((child, tenant_keys))
+        return await function(*args)
+
+    return task_group.create_task(co_owner())
 
 
 def _lock_key(value) -> int:

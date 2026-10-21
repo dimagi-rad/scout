@@ -859,7 +859,7 @@ async def test_active_jobs_exposes_rows_total_for_percentage():
             "step": 3,
             "total_steps": 9,
             "source": "visits",
-            "message": "Loading visits from commcare_connect API...",
+            "message": "Importing visits from CommCare Connect...",
             "rows_loaded": 25000,
             "rows_total": 50000,
         },
@@ -881,6 +881,83 @@ async def test_active_jobs_exposes_rows_total_for_percentage():
     assert p["source"] == "visits"
     # Progress dicts written before the unit field existed default to "rows".
     assert p["unit"] == "rows"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("phase_published", [False, True])
+async def test_active_jobs_shows_a_loading_source_over_a_later_finished_one(phase_published):
+    """Sources of one job load concurrently (#927): a later-started source that
+    already finished must not replace the progress of one still loading. Once a
+    post-load phase is published, a run left active (a crashed attempt's) must
+    not hide it."""
+    user = await User.objects.acreate_user(email="concurrent@rows.test", password="x")
+    ws = await Workspace.objects.acreate(name="WConcurrent", created_by=user)
+    await WorkspaceMembership.objects.acreate(
+        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
+    )
+    schemas = []
+    for index in range(2):
+        tenant = await Tenant.objects.acreate(
+            external_id=f"ccc-opp-concurrent-{index}",
+            provider="commcare_connect",
+            canonical_name=f"Connect {index}",
+        )
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+        await TenantMembership.objects.acreate(
+            user=user, tenant=tenant, connection=await ausable_connection(user, tenant.provider)
+        )
+        schemas.append(
+            await TenantSchema.objects.acreate(tenant=tenant, schema_name=f"s_concurrent_{index}")
+        )
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=7790,
+        tool_call_id="tc-concurrent",
+    )
+    loading = await MaterializationRun.objects.acreate(
+        tenant_schema=schemas[0],
+        pipeline="connect_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=7790,
+        progress={"source": "visits", "rows_loaded": 100, "rows_total": 400},
+    )
+    finished = await MaterializationRun.objects.acreate(
+        tenant_schema=schemas[1],
+        pipeline="connect_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        procrastinate_job_id=7790,
+        completed_at=timezone.now(),
+        progress={
+            "source": "payments",
+            "rows_loaded": 50,
+            "rows_total": 50,
+            **(
+                {"phase": "building_model", "phase_message": "Preparing the model"}
+                if phase_published
+                else {}
+            ),
+        },
+    )
+    # started_at is auto_now_add; the finished run is the later-started one.
+    await MaterializationRun.objects.filter(id=finished.id).aupdate(
+        started_at=loading.started_at + timedelta(seconds=1)
+    )
+
+    client = AsyncClient()
+    await client.alogin(email="concurrent@rows.test", password="x")
+    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+
+    assert resp.status_code == 200
+    progress = resp.json()["jobs"][0]["progress"]
+    if phase_published:
+        assert progress["phase"] == "building_model"
+        assert progress["message"] == "Preparing the model"
+    else:
+        assert progress["source"] == "visits"
+        assert progress["percent"] == 25
 
 
 @pytest.mark.asyncio
@@ -920,7 +997,7 @@ async def test_active_jobs_passes_through_progress_unit():
             "step": 4,
             "total_steps": 7,
             "source": "messages",
-            "message": "Loading messages from ocs API...",
+            "message": "Importing messages from Open Chat Studio...",
             "rows_loaded": 120,
             "rows_total": 480,
             "unit": "sessions",

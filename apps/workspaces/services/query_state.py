@@ -13,6 +13,7 @@ from apps.workspaces.models import (
     TenantSchema,
     WorkspaceTenant,
     WorkspaceViewSchema,
+    readable_view_schema_error,
 )
 from apps.workspaces.services.load_activity import active_runs_for_workspaces
 from apps.workspaces.services.status import SYNCED_RUN_STATES, serving_excluded_tenant_ids
@@ -203,7 +204,11 @@ async def workspace_query_surface(workspace) -> dict[str, Any]:
                 if view_only
                 else "The workspace data is no longer available. Restore it to use this artifact again."
             ),
-            **({"detail": view.last_error[:500]} if view and view.last_error else {}),
+            **(
+                {"detail": readable_view_schema_error(view.last_error)[:500]}
+                if view and view.last_error
+                else {}
+            ),
         }
     if semantic_status in {"unknown", "unavailable"}:
         snapshot = await included_tenant_snapshot_state(workspace, coverage)
@@ -212,7 +217,7 @@ async def workspace_query_surface(workspace) -> dict[str, Any]:
                 **base,
                 "status": "recovering",
                 "recovery_action": None,
-                "message": "Waiting for source data to finish loading before rebuilding the data model.",
+                "message": "Waiting for source data to finish importing before rebuilding the data model.",
             }
         needs_reload = snapshot == "unsafe"
         return {
@@ -220,7 +225,7 @@ async def workspace_query_surface(workspace) -> dict[str, Any]:
             "status": "needs_materialization" if needs_reload else "needs_semantic_rebuild",
             "recovery_action": "materialization" if needs_reload else "semantic_rebuild",
             "message": (
-                "The previous data load did not complete successfully. Restore data before rebuilding its model."
+                "The previous import did not complete successfully. Restore data before rebuilding its model."
                 if needs_reload
                 else "Workspace data is available, but its data model needs rebuilding."
             ),
