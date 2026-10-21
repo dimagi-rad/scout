@@ -42,7 +42,6 @@ class LoadedAttachment:
     id: str
     filename: str
     media_type: str
-    rejected: bool = False
     # Exactly one is set: an image's bytes, or a text file's decoded text.
     image: bytes | None = None
     text: str | None = None
@@ -54,7 +53,6 @@ def _loaded(row: ChatAttachment) -> LoadedAttachment:
         "id": str(row.id),
         "filename": row.filename,
         "media_type": row.media_type,
-        "rejected": row.rejected_at is not None,
     }
     if row.media_type.startswith("image/"):
         return LoadedAttachment(**common, image=content)
@@ -76,20 +74,41 @@ class AttachmentLoader:
         # Images the API refused this run, and those the latest expansion sent.
         self.rejected_images: set[str] = set()
         self.sent_images: set[str] = set()
+        self._rejection_checked: set[str] = set()
 
     async def areject_images(self, exc: BaseException, messages: list) -> bool:
-        """Mark the image the API refused as unusable, here and for later turns.
+        """Mark the image the API refused as unusable; False when none was sent.
 
-        The error names the block (``messages.N.content.M.image…``); when that cannot
-        be mapped to an attachment, every image the request carried is marked.
-        False when the request carried no image to blame.
+        The error names the block (``messages.N.content.M.image…``). The attachment
+        it resolves to is marked for good, so later turns skip it up front. When it
+        cannot be resolved, every image the request carried is left out for this run
+        only: persisting a guess would hide good images for ever.
         """
-        ids = self._named_image(exc, messages) or set(self.sent_images)
+        named = self._named_image(exc, messages)
+        ids = named or set(self.sent_images)
         if not ids:
             return False
         self.rejected_images |= ids
-        await ChatAttachment.objects.filter(id__in=list(ids)).aupdate(rejected_at=timezone.now())
+        if named:
+            await ChatAttachment.objects.filter(id__in=list(named)).aupdate(
+                rejected_at=timezone.now()
+            )
         return True
+
+    async def aload_rejections(self, ids) -> None:
+        """Note which of ``ids`` an earlier turn found the API refuses, without their bytes."""
+        unchecked = [i for i in dict.fromkeys(ids) if i not in self._rejection_checked]
+        if not unchecked or not self.thread_id:
+            return
+        self._rejection_checked.update(unchecked)
+        self.rejected_images.update(
+            [
+                str(attachment_id)
+                async for attachment_id in ChatAttachment.objects.filter(
+                    id__in=unchecked, thread_id=self.thread_id, rejected_at__isnull=False
+                ).values_list("id", flat=True)
+            ]
+        )
 
     def _named_image(self, exc: BaseException, messages: list) -> set[str]:
         match = _IMAGE_BLOCK_PATH.search(str(exc))
@@ -162,6 +181,13 @@ class _Budget:
         self.images = MAX_IMAGES_PER_REQUEST
 
 
+def _image_refused(entry: dict) -> dict:
+    return _text_block(
+        f"[Image {_label(entry)} could not be processed by the model. If it matters, "
+        "ask the user to attach it again, for example as a fresh PNG or JPEG screenshot.]"
+    )
+
+
 def _image_omitted(entry: dict) -> dict:
     return _text_block(
         f"[Image {_label(entry)} is not shown: this request already carries as many "
@@ -183,13 +209,14 @@ async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budg
     # file past the text budget is never loaded. A text file within it is loaded
     # whole, even when only its head is shown.
     is_image = str(entry.get("media_type", "")).startswith("image/")
+    # Before any budget: a refused image spends none, and its bytes are never loaded.
+    if is_image and entry["id"] in loader.rejected_images:
+        return _image_refused(entry)
     known_size = entry.get("size") if isinstance(entry.get("size"), int) else 0
     if is_image and (budget.images <= 0 or known_size > budget.image_bytes):
         return _image_omitted(entry)
     if not is_image and budget.text_chars < MIN_SHOWN_TEXT_CHARS:
         return _text_omitted(entry)
-    if is_image and entry["id"] in loader.rejected_images:
-        return _text_block(f"[Image {_label(entry)} could not be processed.]")
 
     attachment = (await loader.aload([entry["id"]]))[entry["id"]]
     if attachment is None:
@@ -200,8 +227,6 @@ async def _attachment_block(entry: dict, loader: AttachmentLoader, budget: _Budg
             return _image_omitted(entry)
         budget.images -= 1
         budget.image_bytes -= size
-        if attachment.rejected:
-            return _text_block(f"[Image {_label(entry)} could not be processed.]")
         loader.sent_images.add(attachment.id)
         return {
             "type": "image",
@@ -242,6 +267,14 @@ async def aexpand_attachments(
     loader.sent_images = set()
     if not carrying:
         return messages
+    await loader.aload_rejections(
+        [
+            e["id"]
+            for _, entries in carrying
+            for e in entries
+            if str(e.get("media_type", "")).startswith("image/")
+        ]
+    )
     budget = _Budget()
     expanded = list(messages)
     for index, entries in reversed(carrying):

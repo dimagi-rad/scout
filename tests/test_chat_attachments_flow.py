@@ -10,8 +10,11 @@ import httpx
 import pytest
 from asgiref.sync import sync_to_async
 from django.test import AsyncClient
+from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
 
+from apps.agents.graph import attachments as expansion
+from apps.agents.graph.attachments import AttachmentLoader, aexpand_attachments
 from apps.agents.graph.base import build_agent_graph
 from apps.chat.attachments import (
     SCOUT_ATTACHMENTS_KWARG,
@@ -122,10 +125,7 @@ async def test_agent_node_retries_without_an_image_the_api_refused(user, workspa
     first, second = calls
     assert _blocks(first)[0]["type"] == "image"
     note, text = _blocks(second)
-    assert note == {
-        "type": "text",
-        "text": f'[Image "shot.png" (id {image.id}) could not be processed.]',
-    }
+    assert note == _note(image)
     assert text["text"] == "what is this?"
     assert messages[-1].content == "I can't see it"
 
@@ -227,7 +227,11 @@ async def test_a_held_message_keeps_its_attachments_bound_and_sent(user, workspa
 def _note(attachment):
     return {
         "type": "text",
-        "text": f'[Image "shot.png" (id {attachment.id}) could not be processed.]',
+        "text": (
+            f'[Image "shot.png" (id {attachment.id}) could not be processed by the model. '
+            "If it matters, ask the user to attach it again, for example as a fresh PNG "
+            "or JPEG screenshot.]"
+        ),
     }
 
 
@@ -285,3 +289,45 @@ async def test_an_unmappable_image_rejection_stubs_every_image(user, workspace):
 
     stub_a, stub_b, _text = _blocks(calls[1])
     assert (stub_a, stub_b) == (_note(first), _note(second))
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_an_unresolved_rejection_is_kept_for_the_run_only(user, workspace, monkeypatch):
+    # As if langchain-anthropic no longer exposed its formatter.
+    monkeypatch.setattr(expansion, "_format_messages", None)
+    thread = await Thread.objects.acreate(user=user, workspace=workspace)
+    first = await _attachment(user, workspace, thread, content=images.png(5, 5))
+    second = await _attachment(user, workspace, thread, content=images.png(6, 6))
+    message = HumanMessage(
+        content="compare",
+        additional_kwargs={SCOUT_ATTACHMENTS_KWARG: [_entry(first), _entry(second)]},
+    )
+
+    calls, _messages = await _run_agent(
+        thread, message, side_effect=[_image_rejection(), AIMessage(content="ok")]
+    )
+
+    assert _blocks(calls[1])[:2] == [_note(first), _note(second)]
+    assert not await ChatAttachment.objects.filter(rejected_at__isnull=False).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_refused_image_spends_no_budget_and_is_never_loaded(user, workspace, monkeypatch):
+    monkeypatch.setattr(expansion, "MAX_IMAGES_PER_REQUEST", 1)
+    thread = await Thread.objects.acreate(user=user, workspace=workspace)
+    refused = await _attachment(user, workspace, thread, content=images.png(5, 5))
+    await ChatAttachment.objects.filter(pk=refused.pk).aupdate(rejected_at=timezone.now())
+    good = await _attachment(user, workspace, thread, content=images.png(6, 6))
+    message = HumanMessage(
+        content="", additional_kwargs={SCOUT_ATTACHMENTS_KWARG: [_entry(refused), _entry(good)]}
+    )
+    loader = AttachmentLoader(str(thread.id))
+
+    [expanded] = await aexpand_attachments([message], loader)
+
+    note, image = expanded.content
+    assert note == _note(refused)
+    assert image["type"] == "image"
+    assert str(refused.id) not in loader._cache
