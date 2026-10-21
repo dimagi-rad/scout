@@ -53,6 +53,7 @@ from apps.workspaces.services.refresh_requests import (
     settle_finished_refresh_candidates,
 )
 from apps.workspaces.services.schema_manager import SchemaManager, SchemaStillReferenced
+from apps.workspaces.services.tenant_coverage import coverage_lists_tenant
 from apps.workspaces.task_dispatch import (
     adefer_rebuild_workspace_view_schema,
     adefer_teardown_schema,
@@ -749,8 +750,8 @@ async def _reconcile_dependent_view_schemas_after_teardown(schema) -> None:
     """Reconcile dependent multi-tenant view schemas after ``schema`` is dropped.
 
     If the tenant has another ACTIVE schema (refresh path), rebuild the views
-    against it; if none survives (pure TTL expiry), flip them FAILED so the catalog
-    reports the truth instead of serving an empty view.
+    that left the tenant out; if none survives (pure TTL expiry), flip them FAILED
+    so the catalog reports the truth instead of serving an empty view.
 
     ``exclude(id=schema.id)`` matters: a direct caller may pass an ACTIVE row, so
     excluding it makes the "another ACTIVE schema?" check correct either way.
@@ -764,7 +765,13 @@ async def _reconcile_dependent_view_schemas_after_teardown(schema) -> None:
         .aexists()
     )
     if tenant_has_surviving_active_schema:
-        await publication.rebuild_dependent_view_schemas([schema.tenant_id])
+        # The RESTRICT drop just proved no view reads the old schema, so a view
+        # schema that includes the tenant already reads a current one. Rebuilding
+        # those changed nothing: one 11-source refresh queued 11 rebuilds that held
+        # every worker slot for 15 minutes (#918).
+        await publication.rebuild_dependent_view_schemas(
+            [schema.tenant_id], skip_serving_tenant_id=schema.tenant_id
+        )
     else:
         # Log the count so a cascade that silently degrades N workspaces is
         # visible (arch #257, finding 08#9).
@@ -797,8 +804,8 @@ async def _fail_dependent_view_schemas(tenant_id) -> int:
     # here, since re-materializing the torn-down tenant IS the fix.
     # Older builds have no coverage record; conservatively retain their legacy
     # invalidation. Explicitly excluded sources have no views to cascade-drop.
-    excluded = Q(tenant_coverage__contains={"excluded_tenants": [{"tenant_id": str(tenant_id)}]})
-    included = Q(tenant_coverage__contains={"included_tenants": [{"tenant_id": str(tenant_id)}]})
+    excluded = Q(tenant_coverage__contains=coverage_lists_tenant("excluded_tenants", tenant_id))
+    included = Q(tenant_coverage__contains=coverage_lists_tenant("included_tenants", tenant_id))
     return (
         await WorkspaceViewSchema.objects.filter(
             workspace_id__in=dependent_workspace_ids,

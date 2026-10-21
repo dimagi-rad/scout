@@ -37,6 +37,7 @@ from apps.workspaces.services.schema_manager import (
     SchemaManager,
     ViewSchemaRetired,
 )
+from apps.workspaces.services.tenant_coverage import coverage_lists_tenant
 from apps.workspaces.task_dispatch import (
     adefer_rebuild_workspace_semantic_model,
     adefer_rebuild_workspace_view_schema,
@@ -94,7 +95,9 @@ def _dependent_view_schema_workspaces(tenant_ids, exclude_workspace_id=None):
     )
 
 
-async def rebuild_dependent_view_schemas(tenant_ids, *, exclude_workspace_id=None) -> None:
+async def rebuild_dependent_view_schemas(
+    tenant_ids, *, exclude_workspace_id=None, skip_serving_tenant_id=None
+) -> None:
     """Defer a view-schema rebuild for every multi-tenant workspace whose
     namespaced views were (or will be) cascade-dropped by a (re-)materialization
     or refresh of one of ``tenant_ids``.
@@ -105,12 +108,25 @@ async def rebuild_dependent_view_schemas(tenant_ids, *, exclude_workspace_id=Non
     is needed. Best-effort: a failure to defer one rebuild must not block the
     caller, so each defer is individually guarded and the dispatched task owns its
     own failure handling.
+
+    ``skip_serving_tenant_id`` leaves out workspaces whose ACTIVE view schema
+    already includes that tenant; only a caller that knows those views read a
+    current schema of the tenant may pass it. The skip is per workspace, so it
+    must be the only tenant rebuilt.
     """
-    async for ws_id in (
-        _dependent_view_schema_workspaces(tenant_ids, exclude_workspace_id)
-        .values_list("id", flat=True)
-        .aiterator()
-    ):
+    if skip_serving_tenant_id is not None and [str(t) for t in tenant_ids] != [
+        str(skip_serving_tenant_id)
+    ]:
+        raise ValueError("skip_serving_tenant_id must be the only tenant rebuilt")
+    workspaces = _dependent_view_schema_workspaces(tenant_ids, exclude_workspace_id)
+    if skip_serving_tenant_id is not None:
+        workspaces = workspaces.exclude(
+            view_schema__state=SchemaState.ACTIVE,
+            view_schema__tenant_coverage__contains=coverage_lists_tenant(
+                "included_tenants", skip_serving_tenant_id
+            ),
+        )
+    async for ws_id in workspaces.values_list("id", flat=True).aiterator():
         try:
             await adefer_rebuild_workspace_view_schema(workspace_id=str(ws_id))
         except Exception:

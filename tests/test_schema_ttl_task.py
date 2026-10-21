@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -452,6 +453,116 @@ async def test_teardown_schema_rebuilds_dependent_views_when_surviving_active_sc
     # Data is intact (new schema ACTIVE) → views are rebuildable, NOT failed.
     assert vs_b.state == SchemaState.ACTIVE
     mock_rebuild.assert_awaited_once_with(workspace_id=str(ws_b.id))
+
+
+@pytest.mark.parametrize(
+    ("view_state", "coverage_key", "rebuilds"),
+    [
+        (SchemaState.ACTIVE, "included_tenants", False),
+        (SchemaState.ACTIVE, "excluded_tenants", True),
+        (SchemaState.FAILED, "included_tenants", True),
+    ],
+)
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_teardown_rebuilds_only_views_not_serving_the_tenant(
+    tenant, user, view_state, coverage_key, rebuilds
+):
+    """#918: the RESTRICT drop proves no view reads the old schema, so an ACTIVE view
+    schema that includes the tenant already reads the new one and is left alone."""
+    old_schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="t_serving_old", state=SchemaState.TEARDOWN
+    )
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="t_serving_new_r1", state=SchemaState.ACTIVE
+    )
+    extra = await Tenant.objects.acreate(
+        provider="commcare", external_id="serving-extra", canonical_name="Serving Extra"
+    )
+    ws = await Workspace.objects.acreate(name="Serving", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=extra)
+    other_key = {"included_tenants", "excluded_tenants"} - {coverage_key}
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=ws,
+        schema_name="ws_serving",
+        state=view_state,
+        tenant_coverage={
+            coverage_key: [{"tenant_id": str(tenant.id)}, {"tenant_id": str(extra.id)}],
+            other_key.pop(): [],
+        },
+    )
+
+    with (
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch(
+            "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
+            new_callable=AsyncMock,
+        ) as mock_rebuild,
+    ):
+        MockManager.return_value.retire_tenant_schema.return_value = None
+        await teardown_schema(schema_id=str(old_schema.id))
+
+    if rebuilds:
+        mock_rebuild.assert_awaited_once_with(workspace_id=str(ws.id))
+    else:
+        mock_rebuild.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_teardown_skip_is_per_workspace(tenant, user):
+    """Skipping a serving sibling still rebuilds one whose coverage predates the record."""
+    old_schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="t_mixed_old", state=SchemaState.TEARDOWN
+    )
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="t_mixed_new_r1", state=SchemaState.ACTIVE
+    )
+    extra = await Tenant.objects.acreate(
+        provider="commcare", external_id="mixed-extra", canonical_name="Mixed Extra"
+    )
+    coverages = {
+        "serving": {
+            "included_tenants": [{"tenant_id": str(tenant.id)}, {"tenant_id": str(extra.id)}],
+            "excluded_tenants": [],
+        },
+        "legacy": {},
+    }
+    workspaces = {}
+    for name, coverage in coverages.items():
+        ws = await Workspace.objects.acreate(name=f"Mixed {name}", created_by=user)
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=extra)
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=ws,
+            schema_name=f"ws_mixed_{name}",
+            state=SchemaState.ACTIVE,
+            tenant_coverage=coverage,
+        )
+        workspaces[name] = ws
+
+    with (
+        patch("apps.workspaces.services.retirement.SchemaManager") as MockManager,
+        patch(
+            "apps.workspaces.services.publication.adefer_rebuild_workspace_view_schema",
+            new_callable=AsyncMock,
+        ) as mock_rebuild,
+    ):
+        MockManager.return_value.retire_tenant_schema.return_value = None
+        await teardown_schema(schema_id=str(old_schema.id))
+
+    mock_rebuild.assert_awaited_once_with(workspace_id=str(workspaces["legacy"].id))
+
+
+@pytest.mark.asyncio
+async def test_skip_serving_tenant_refuses_a_multi_tenant_rebuild():
+    """The skip drops whole workspaces, so it cannot also stand for other tenants."""
+    with pytest.raises(ValueError, match="only tenant"):
+        serving = uuid.uuid4()
+        await rebuild_dependent_view_schemas(
+            [serving, uuid.uuid4()], skip_serving_tenant_id=serving
+        )
 
 
 @pytest.mark.parametrize("retiring_state", [SchemaState.TEARDOWN, SchemaState.EXPIRED])

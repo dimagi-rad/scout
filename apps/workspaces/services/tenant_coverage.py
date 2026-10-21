@@ -10,6 +10,11 @@ def coverage_entry(tenant) -> dict[str, str]:
     }
 
 
+def coverage_lists_tenant(key: str, tenant_id) -> dict:
+    """A jsonb ``@>`` pattern matching coverage whose *key* list holds the tenant."""
+    return {key: [{"tenant_id": str(tenant_id)}]}
+
+
 def parse_coverage(value) -> dict | None:
     if not isinstance(value, dict):
         return None
