@@ -17,6 +17,8 @@ from apps.users.models import TenantConnection
 from apps.users.services.access_verification_providers import (
     CONNECT_LIGHT_CONCURRENCY,
     ProcessNetworkLimiter,
+    _default_client_factory,
+    _new_shared_client,
     verify_provider,
 )
 from apps.users.services.access_verification_types import (
@@ -1188,3 +1190,33 @@ async def test_connect_decisive_answer_does_not_wait_for_a_hung_sibling(settings
     assert result.outcome == VerificationOutcome.CREDENTIAL_REJECTED
     # Nothing is left running against the client once the check has returned.
     assert client.cancelled == 2
+
+
+def test_default_client_is_shared_within_a_loop_and_closed_with_it():
+    async def borrow_twice():
+        async with _default_client_factory() as first:
+            pass
+        async with _default_client_factory() as second:
+            pass
+        return first, second
+
+    first, second = asyncio.run(borrow_twice())
+    other, _ = asyncio.run(borrow_twice())
+
+    assert first is second
+    assert other is not first
+    assert first.is_closed
+    assert other.is_closed
+
+
+def test_shared_client_never_keeps_a_providers_cookies():
+    client = _new_shared_client()
+    response = httpx.Response(
+        200,
+        headers={"set-cookie": "sessionid=someone-else; Path=/"},
+        request=httpx.Request("GET", "https://provider.example/list/"),
+    )
+
+    client.cookies.extract_cookies(response)
+
+    assert len(client.cookies) == 0
