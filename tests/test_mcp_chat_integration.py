@@ -550,6 +550,54 @@ class TestSSEStreamFormat:
         assert f"{total} chars total" in tool_output["output"]
 
     @pytest.mark.asyncio
+    async def test_query_output_above_cap_is_cut_to_parseable_json(self):
+        """A wide 500-row result keeps its card live, so the row-limit notice and
+        the full-result download render without a reload (#969)."""
+        mock_agent = AsyncMock()
+        rows = [["x" * 300, i] for i in range(500)]
+        content = json.dumps(
+            {
+                "success": True,
+                "data": {
+                    "columns": ["note", "n"],
+                    "rows": rows,
+                    "row_count": 500,
+                    "truncated": True,
+                    "row_limit": 500,
+                },
+            },
+            indent=2,
+        )
+        assert len(content) > TOOL_OUTPUT_MAX_CHARS
+
+        async def fake_events(*args, **kwargs):
+            yield {
+                "event": "on_tool_end",
+                "run_id": "run-789",
+                "name": "query",
+                "data": {
+                    "output": ToolMessage(content=content, tool_call_id="call-789", name="query"),
+                },
+            }
+
+        mock_agent.astream_events = fake_events
+
+        events = []
+        async for chunk in langgraph_to_ui_stream(mock_agent, {}, {}):
+            for line in chunk.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+        output = next(e for e in events if e["type"] == "tool-output-available")["output"]
+        assert len(output) <= TOOL_OUTPUT_MAX_CHARS
+        data = json.loads(output)["data"]
+        assert data["row_limit"] == 500
+        assert data["truncated"] is True
+        assert 0 < len(data["rows"]) < 500
+        assert data["truncation"]["original_row_count"] == 500
+
+    @pytest.mark.asyncio
     async def test_tool_output_under_cap_is_untouched(self):
         """Realistic payloads stay byte-for-byte intact so the rich card parses
         them LIVE (arch #246, 13#4)."""
