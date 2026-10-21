@@ -24,14 +24,16 @@ async def test_resolve_ocs_chatbots_creates_tenants(user):
         {
             "id": "exp-uuid-1",
             "name": "Onboarding Bot",
-            "url": "https://example/api/experiments/exp-uuid-1/",
+            "url": "https://example/api/v2/chatbots/exp-uuid-1/",
             "version_number": 1,
+            "last_activity_at": "2026-10-19T14:02:11.512Z",
         },
         {
             "id": "exp-uuid-2",
             "name": "Survey Bot",
-            "url": "https://example/api/experiments/exp-uuid-2/",
+            "url": "https://example/api/v2/chatbots/exp-uuid-2/",
             "version_number": 2,
+            "last_activity_at": None,
         },
     ]
 
@@ -58,6 +60,10 @@ async def test_resolve_ocs_chatbots_creates_tenants(user):
     tenants = [t async for t in Tenant.objects.filter(provider="ocs").order_by("external_id")]
     assert [t.external_id for t in tenants] == ["exp-uuid-1", "exp-uuid-2"]
     assert [t.canonical_name for t in tenants] == ["Onboarding Bot", "Survey Bot"]
+    assert [t.provider_attributes for t in tenants] == [
+        {"last_activity_at": "2026-10-19T14:02:11.512Z"},
+        {"last_activity_at": None},
+    ]
 
     # Both chatbots share the single OCS OAuth connection
     conns = [c async for c in TenantConnection.objects.filter(user=user, provider="ocs")]
@@ -197,8 +203,8 @@ async def _discover(user, pages):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_ocs_discovery_follows_same_origin_next(user, ocs_account):
-    first = "https://ocs.example.com/api/experiments/?page_size=500"
-    second = "https://ocs.example.com/api/experiments/?cursor=2"
+    first = "https://ocs.example.com/api/v2/chatbots/?page_size=500"
+    second = "https://ocs.example.com/api/v2/chatbots/?cursor=2"
     pages = {
         first: {"results": [{"id": "e1", "name": "One"}], "next": second},
         second: {"results": [{"id": "e2", "name": "Two"}], "next": None},
@@ -213,13 +219,13 @@ async def test_ocs_discovery_follows_same_origin_next(user, ocs_account):
 @pytest.mark.parametrize(
     "next_url",
     [
-        "https://evil.example.net/api/experiments/",
-        "http://evil.example.net/api/experiments/?cursor=2",
-        "https://ocs.example.com:8443/api/experiments/",
+        "https://evil.example.net/api/v2/chatbots/",
+        "http://evil.example.net/api/v2/chatbots/?cursor=2",
+        "https://ocs.example.com:8443/api/v2/chatbots/",
     ],
 )
 async def test_ocs_discovery_rejects_foreign_next(user, ocs_account, next_url):
-    first = "https://ocs.example.com/api/experiments/?page_size=500"
+    first = "https://ocs.example.com/api/v2/chatbots/?page_size=500"
     pages = {first: {"results": [{"id": "e1", "name": "One"}], "next": next_url}}
     result, seen = await _discover(user, pages)
     assert isinstance(result, TenantResolutionError)
@@ -229,7 +235,7 @@ async def test_ocs_discovery_rejects_foreign_next(user, ocs_account, next_url):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_ocs_discovery_detects_next_cycle(user, ocs_account):
-    first = "https://ocs.example.com/api/experiments/?page_size=500"
+    first = "https://ocs.example.com/api/v2/chatbots/?page_size=500"
     pages = {first: {"results": [{"id": "e1", "name": "One"}], "next": first}}
     result, seen = await _discover(user, pages)
     assert isinstance(result, TenantResolutionError)

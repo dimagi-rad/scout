@@ -461,6 +461,7 @@ async def resolve_ocs_chatbots(
             external_id=exp.external_id,
             defaults={
                 "canonical_name": exp.canonical_name,
+                "provider_attributes": dict(exp.attributes or {}),
                 **({"description": exp.description} if exp.description else {}),
             },
         )
@@ -573,7 +574,9 @@ async def _fetch_all_domains(access_token: str, server: CommCareServer) -> list[
 
 
 async def _fetch_ocs_experiments(access_token: str, base_url: str) -> list[TenantDescriptor]:
-    request = ocs_listing.list_request(base_url, TenantConnection.OAUTH, access_token)
+    request = ocs_listing.list_request(
+        base_url, TenantConnection.OAUTH, access_token, path=ocs_listing.DISCOVERY_PATH
+    )
     return await _fetch_tenant_list(
         "OCS",
         "experiments",

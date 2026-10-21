@@ -2,6 +2,7 @@ import pytest
 
 from apps.users.services.api_key_providers import CredentialVerificationError, TenantDescriptor
 from apps.users.services.api_key_providers.ocs import OCSStrategy
+from apps.users.services.tenant_listing import ocs as ocs_listing
 
 
 def test_form_fields_api_key_and_optional_team_name():
@@ -26,7 +27,7 @@ async def test_verify_and_discover_single_page(httpx_mock, settings):
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/?page_size=500",
+        url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
         json={
             "results": [
                 {"id": "exp-1", "name": "Bot One"},
@@ -46,20 +47,48 @@ async def test_verify_and_discover_single_page(httpx_mock, settings):
 
 
 @pytest.mark.asyncio
+async def test_verify_and_discover_keeps_each_chatbots_last_activity(httpx_mock, settings):
+    settings.OCS_URL = "https://ocs.example.com"
+    httpx_mock.add_response(
+        method="GET",
+        url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
+        json={
+            "results": [
+                {"id": "exp-1", "name": "Live", "last_activity_at": "2026-10-19T14:02:11Z"},
+                {"id": "exp-2", "name": "Never used", "last_activity_at": None},
+                {"id": "exp-3", "name": "Malformed", "last_activity_at": 42},
+            ],
+            "next": None,
+        },
+    )
+    descriptors = await OCSStrategy.verify_and_discover({"api_key": "k"})
+    assert [d.attributes for d in descriptors] == [
+        {"last_activity_at": "2026-10-19T14:02:11Z"},
+        {"last_activity_at": None},
+        None,
+    ]
+
+
+def test_verification_stays_on_the_v1_list():
+    request = ocs_listing.list_request("https://ocs.example.com", "api_key", "k")
+    assert request.url == "https://ocs.example.com/api/experiments/?page_size=500"
+
+
+@pytest.mark.asyncio
 async def test_verify_and_discover_paginates(httpx_mock, settings):
 
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/?page_size=500",
+        url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
         json={
             "results": [{"id": "exp-1", "name": "Bot One"}],
-            "next": "https://ocs.example.com/api/experiments/?cursor=xyz",
+            "next": "https://ocs.example.com/api/v2/chatbots/?cursor=xyz",
         },
     )
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/?cursor=xyz",
+        url="https://ocs.example.com/api/v2/chatbots/?cursor=xyz",
         json={"results": [{"id": "exp-2", "name": "Bot Two"}], "next": None},
     )
     descriptors = await OCSStrategy.verify_and_discover({"api_key": "k"})
@@ -72,7 +101,7 @@ async def test_verify_and_discover_unauthorized(httpx_mock, settings):
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/?page_size=500",
+        url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
         status_code=401,
     )
     with pytest.raises(CredentialVerificationError):
@@ -86,7 +115,7 @@ async def test_verify_and_discover_empty_list_raises(httpx_mock, settings):
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/?page_size=500",
+        url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
         json={"results": [], "next": None},
         status_code=200,
     )
@@ -100,7 +129,7 @@ async def test_verify_for_tenant_passes_when_experiment_present(httpx_mock, sett
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/?page_size=500",
+        url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
         json={"results": [{"id": "exp-1", "name": "Bot"}], "next": None},
     )
     await OCSStrategy.verify_for_tenant({"api_key": "k"}, external_id="exp-1")
@@ -112,7 +141,7 @@ async def test_verify_for_tenant_fails_when_experiment_missing(httpx_mock, setti
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/?page_size=500",
+        url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
         json={"results": [{"id": "exp-other", "name": "Other"}], "next": None},
     )
     with pytest.raises(CredentialVerificationError, match="exp-1"):
@@ -123,15 +152,15 @@ async def test_verify_for_tenant_fails_when_experiment_missing(httpx_mock, setti
 @pytest.mark.parametrize(
     "next_url",
     [
-        "https://evil.example.net/api/experiments/",
-        "https://ocs.example.com:8443/api/experiments/?cursor=xyz",
+        "https://evil.example.net/api/v2/chatbots/",
+        "https://ocs.example.com:8443/api/v2/chatbots/?cursor=xyz",
     ],
 )
 async def test_verify_and_discover_rejects_foreign_next(httpx_mock, settings, next_url):
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/?page_size=500",
+        url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
         json={"results": [{"id": "exp-1", "name": "Bot One"}], "next": next_url},
     )
     with pytest.raises(CredentialVerificationError):
@@ -146,10 +175,10 @@ async def test_verify_and_discover_detects_next_cycle(httpx_mock, settings):
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/?page_size=500",
+        url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
         json={
             "results": [{"id": "exp-1", "name": "Bot One"}],
-            "next": "https://ocs.example.com/api/experiments/?page_size=500",
+            "next": "https://ocs.example.com/api/v2/chatbots/?page_size=500",
         },
     )
     with pytest.raises(CredentialVerificationError):
@@ -162,12 +191,12 @@ async def test_verify_and_discover_follows_relative_next(httpx_mock, settings):
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/?page_size=500",
+        url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
         json={"results": [{"id": "exp-1", "name": "One"}], "next": "?cursor=xyz"},
     )
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/experiments/?cursor=xyz",
+        url="https://ocs.example.com/api/v2/chatbots/?cursor=xyz",
         json={"results": [{"id": "exp-2", "name": "Two"}], "next": None},
     )
     descriptors = await OCSStrategy.verify_and_discover({"api_key": "k"})

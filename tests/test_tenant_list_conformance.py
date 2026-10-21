@@ -46,7 +46,11 @@ from apps.users.services.api_key_providers.base import (
 from apps.users.services.api_key_providers.commcare import CommCareStrategy
 from apps.users.services.api_key_providers.ocs import OCSStrategy
 from apps.users.services.tenant_listing import connect as connect_listing
-from apps.users.services.tenant_listing.ocs import LIST_PAGE_SIZE
+from apps.users.services.tenant_listing.ocs import (
+    DISCOVERY_PATH,
+    LIST_PAGE_SIZE,
+    VERIFICATION_PATH,
+)
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -193,11 +197,15 @@ def origin(path: EntryPath) -> str:
     return OCS_ORIGIN if path.family == "ocs" else CONNECT_ORIGIN
 
 
+def ocs_list_path(path: EntryPath) -> str:
+    return VERIFICATION_PATH if path.kind == "verification" else DISCOVERY_PATH
+
+
 def listing_url(path: EntryPath) -> str:
     if path.family == "commcare":
         return COMMCARE_SERVERS[path.server].user_domains_url
     if path.family == "ocs":
-        return f"{OCS_ORIGIN}/api/experiments/?page_size={LIST_PAGE_SIZE}"
+        return f"{OCS_ORIGIN}{ocs_list_path(path)}?page_size={LIST_PAGE_SIZE}"
     return CONNECT_LISTING
 
 
@@ -213,12 +221,20 @@ def page_two_url(path: EntryPath) -> str:
 _FIXTURE_STEM = {"commcare": "user_domains", "ocs": "experiments"}
 
 
+def listing_page(path: EntryPath, number: int) -> dict:
+    page = saved(f"{path.family}_{_FIXTURE_STEM[path.family]}_page_{number}")
+    if path.family != "ocs":
+        return page
+    # The saved pages are v1's; discovery reads the same list from v2.
+    return json.loads(json.dumps(page).replace(VERIFICATION_PATH, ocs_list_path(path)))
+
+
 def first_page(path: EntryPath) -> dict:
-    return saved(f"{path.family}_{_FIXTURE_STEM[path.family]}_page_1")
+    return listing_page(path, 1)
 
 
 def second_page(path: EntryPath) -> dict:
-    return saved(f"{path.family}_{_FIXTURE_STEM[path.family]}_page_2")
+    return listing_page(path, 2)
 
 
 def with_next(path: EntryPath, payload: dict, next_value) -> dict:

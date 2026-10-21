@@ -41,7 +41,9 @@ async def _list_experiments(api_key: str) -> list[TenantDescriptor]:
     list, an unreachable server, or a list that does not finish.
     """
     base_url = getattr(settings, "OCS_URL", OCS_DEFAULT_URL)
-    request = ocs_listing.list_request(base_url, TenantConnection.API_KEY, api_key)
+    request = ocs_listing.list_request(
+        base_url, TenantConnection.API_KEY, api_key, path=ocs_listing.DISCOVERY_PATH
+    )
     try:
         async with httpx.AsyncClient() as client:
             return await list_tenants(
