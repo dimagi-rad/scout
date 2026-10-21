@@ -45,6 +45,7 @@ from apps.semantic.services.query import (
 from mcp_server.context import load_workspace_context
 from mcp_server.envelope import CAPACITY_EXHAUSTED, CONNECTION_ERROR, QUERY_TIMEOUT
 from mcp_server.services.query import execute_query
+from mcp_server.services.sql_validator import SQLValidator
 
 audit_logger = logging.getLogger("scout.export.audit")
 
@@ -100,6 +101,27 @@ def semantic_export_spec(args: dict[str, Any]) -> dict[str, Any]:
     return spec
 
 
+def sql_export_text(sql: str, *, chat_row_limit: int, schema: str) -> str:
+    """The agent's SQL with a LIMIT of exactly the chat cap lifted to the export cap.
+
+    That LIMIT is the agent asking for all it may see, as with semantic_export_spec;
+    any other LIMIT is kept. Unparseable SQL passes through for execute_query to refuse.
+    """
+    validator = SQLValidator(schema=schema, allowed_schemas=[], max_limit=chat_row_limit)
+    try:
+        statement = validator.validate(sql)
+        if validator.limit_value(statement) != chat_row_limit:
+            return sql
+        statement.set("limit", None)
+        return statement.sql(dialect=validator.dialect)
+    except Exception:
+        return sql
+
+
+def log_safe(value: str) -> str:
+    return value.replace("\r", "\\r").replace("\n", "\\n")
+
+
 class DataUnavailable(Exception):
     """The workspace has no schema to read, so the call cannot be re-run."""
 
@@ -114,12 +136,17 @@ async def run_full_result(workspace, call: ExportableCall, *, user_id: str) -> d
             except ValueError as exc:
                 # DataNotLoaded included: expired data, or a workspace with no sources left.
                 raise DataUnavailable(str(exc)) from exc
+            sql = sql_export_text(
+                str(call.args.get("sql") or ""),
+                chat_row_limit=ctx.max_rows_per_query,
+                schema=ctx.schema_name,
+            )
             ctx = replace(
                 ctx,
                 max_rows_per_query=EXPORT_ROW_LIMIT,
                 max_query_timeout_seconds=SQL_EXPORT_STATEMENT_TIMEOUT_SECONDS,
             )
-            return await execute_query(ctx, str(call.args.get("sql") or ""))
+            return await execute_query(ctx, sql)
         return await run_semantic_query(
             workspace,
             semantic_export_spec(call.args),
@@ -129,20 +156,25 @@ async def run_full_result(workspace, call: ExportableCall, *, user_id: str) -> d
 
 
 def sql_error_response(error: Any) -> JsonResponse:
-    """Map an MCP error envelope's error to the export's HTTP answer."""
+    """Map an MCP error envelope's error to the export's HTTP answer.
+
+    Fixed messages: the envelope's carries database error text.
+    """
     code = error.get("code") if isinstance(error, dict) else None
-    message = (error.get("message") if isinstance(error, dict) else None) or (
-        "The export query failed."
-    )
     if code == CAPACITY_EXHAUSTED:
         # execute_query has already raised the capacity alert.
         return busy_response()
     if code == QUERY_TIMEOUT:
         return JsonResponse({"error": EXPORT_TIMEOUT_MESSAGE}, status=504)
     if code == CONNECTION_ERROR:
-        return JsonResponse({"error": message}, status=503)
+        return JsonResponse(
+            {"error": "The database is unavailable. Try again shortly."}, status=503
+        )
     # The query ran in chat, so a refusal now means the data changed under it.
-    return JsonResponse({"error": message}, status=502)
+    return JsonResponse(
+        {"error": "This query no longer runs against the current data. Ask Scout to rerun it."},
+        status=502,
+    )
 
 
 def _audit_query(call: ExportableCall) -> str:
@@ -174,7 +206,7 @@ async def csv_response(
         user.id,
         thread.workspace_id,
         thread.id,
-        tool_call_id,
+        log_safe(tool_call_id),
         call.name,
         len(rows),
         truncated,

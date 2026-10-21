@@ -539,7 +539,7 @@ async def thread_tool_call_export_view(request, workspace_id, thread_id, tool_ca
                 "Chat query export timed out after %ss: thread=%s tool_call=%r",
                 EXPORT_TIMEOUT_SECONDS,
                 thread.id,
-                tool_call_id,
+                query_export.log_safe(tool_call_id),
             )
             return JsonResponse({"error": EXPORT_TIMEOUT_MESSAGE}, status=504)
         except query_export.DataUnavailable:

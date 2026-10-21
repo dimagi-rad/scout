@@ -16,12 +16,16 @@ from apps.artifacts.tests.test_artifact_data_export import (
     _workspace,
 )
 from apps.chat.models import Thread
-from apps.chat.query_export import DATA_UNAVAILABLE_MESSAGE, semantic_export_spec
+from apps.chat.query_export import (
+    DATA_UNAVAILABLE_MESSAGE,
+    semantic_export_spec,
+    sql_export_text,
+)
 from apps.common.errors import DataNotLoaded
 from apps.semantic.services.query import MAX_SEMANTIC_LIMIT
 from apps.workspaces.models import WorkspaceRole
 from mcp_server.context import QueryContext
-from mcp_server.envelope import CAPACITY_EXHAUSTED, QUERY_TIMEOUT, error_response
+from mcp_server.envelope import CAPACITY_EXHAUSTED, QUERY_TIMEOUT, VALIDATION_ERROR, error_response
 
 MESSAGES = "apps.chat.thread_views._load_checkpoint_messages"
 CONTEXT = "apps.chat.query_export.load_workspace_context"
@@ -272,3 +276,30 @@ def test_semantic_export_drops_a_replayed_clock():
         {"query_context": {"timezone": "UTC", "now": "2020-01-01T00:00:00Z"}}
     )
     assert spec["query_context"] == {"timezone": "UTC"}
+
+
+@pytest.mark.parametrize(
+    ("sql", "exported"),
+    [
+        ("SELECT a FROM t LIMIT 500", "SELECT a FROM t"),
+        ("SELECT a FROM t LIMIT 10", "SELECT a FROM t LIMIT 10"),
+        ("SELECT a FROM t", "SELECT a FROM t"),
+        ("not sql at all", "not sql at all"),
+    ],
+)
+def test_sql_export_lifts_only_a_limit_of_the_chat_cap(sql, exported):
+    assert sql_export_text(sql, chat_row_limit=500, schema="t_schema") == exported
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_a_refused_rerun_does_not_echo_database_text(workspace, thread, writer_client):
+    refused = error_response(VALIDATION_ERROR, 'column "secret_col" does not exist')
+    with (
+        patch(MESSAGES, new=AsyncMock(return_value=_history())),
+        patch(CONTEXT, new=AsyncMock(return_value=_context())),
+        patch(EXECUTE, new=AsyncMock(return_value=refused)),
+    ):
+        response = await writer_client.post(_url(workspace, thread))
+    assert response.status_code == 502
+    assert "secret_col" not in response.json()["error"]
