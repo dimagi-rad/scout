@@ -7,13 +7,15 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.mail import send_mail
 
+from apps.users.models import TenantConnection
 from apps.users.services.source_descriptions import aprobe_connection_chatbots
 from config.procrastinate import app
 
 logger = logging.getLogger(__name__)
 
 # Descriptions change rarely; re-probing every chatbot on each discovery would
-# spend the token's OCS rate limit that its data loads also draw on.
+# spend the token's OCS rate limit that its data loads also draw on. Under the
+# day after which the Status filter stops trusting an API-key chatbot's activity.
 OCS_PROBE_COOLDOWN_SECONDS = 6 * 3600
 
 
@@ -38,7 +40,7 @@ async def send_email(subject, message, recipient_list, from_email=None, html_mes
 
 @app.task
 async def probe_ocs_chatbots(connection_id: str) -> None:
-    """Record each chatbot's description for one OCS connection."""
+    """Record each chatbot's description (and an API key's activity) for one OCS connection."""
     base_url = getattr(settings, "OCS_URL", "https://www.openchatstudio.com")
     await aprobe_connection_chatbots(connection_id, base_url)
 
@@ -61,3 +63,20 @@ async def aschedule_ocs_probe(connection_id) -> None:
             raise
     except Exception:
         logger.warning("Could not queue the OCS chatbot probe", exc_info=True)
+
+
+@app.periodic(cron="29 * * * *")
+@app.task(queueing_lock="schedule_ocs_api_key_probes")
+async def schedule_ocs_api_key_probes(timestamp: int = 0) -> None:
+    """Queue the probe for every OCS API key, which nothing else re-lists (#971).
+
+    Hourly against the probe's cooldown, so a key's activity is at most about
+    seven hours old however long its users stay away.
+    """
+    connections = TenantConnection.objects.filter(
+        provider="ocs",
+        credential_type=TenantConnection.API_KEY,
+        memberships__archived_at__isnull=True,
+    ).distinct()
+    async for connection_id in connections.values_list("id", flat=True):
+        await aschedule_ocs_probe(connection_id)
