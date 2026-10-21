@@ -30,6 +30,8 @@ _NAME = re.compile(r"[a-z][a-z0-9_]*")
 # PostgreSQL's column limit (#712); a folded model is still canonical.
 CASE_PROPERTIES_COLUMN = "properties"
 REPEAT_ELEMENT_COLUMN = "repeat_data"
+# sqlglot 30 keys a Select's FROM as "from_" (older releases used "from").
+_FROM_KEY = "from_" if "from_" in exp.Select.arg_types else "from"
 _CAST_TYPES = tuple(
     exp.DataType.build(name, dialect="postgres")
     for name in ("integer", "numeric", "date", "timestamp")
@@ -67,12 +69,12 @@ def _plain_source(tree: exp.Select) -> exp.Select:
     and new generated SQL share one source identity. The inner column list is not
     checked against the table: a missing or extra plain column fails at build time.
     """
-    source = tree.args.get("from_")
+    source = tree.args.get(_FROM_KEY)
     subquery = source.this if source else None
     if not isinstance(subquery, exp.Subquery) or tree.args.get("where") or tree.args.get("joins"):
         return tree
     inner = subquery.this
-    inner_from = inner.args.get("from_") if isinstance(inner, exp.Select) else None
+    inner_from = inner.args.get(_FROM_KEY) if isinstance(inner, exp.Select) else None
     if inner_from is None or not isinstance(inner_from.this, exp.Table):
         return tree
     *columns, json_column = inner.expressions or [None]
@@ -98,10 +100,10 @@ def _plain_source(tree: exp.Select) -> exp.Select:
         )
     except SqlglotError:
         return tree
-    if rebuilt.args.get("from_") != source:
+    if rebuilt.args.get(_FROM_KEY) != source:
         return tree
     plain = tree.copy()
-    plain.set("from_", exp.From(this=exp.to_table(table)))
+    plain.set(_FROM_KEY, exp.From(this=exp.to_table(table)))
     plain.set("where", where.copy() if where else None)
     return plain
 
