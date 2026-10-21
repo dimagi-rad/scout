@@ -17,7 +17,9 @@ const DRAG_IDLE_MS = 4_000
  *
  * - The drag is noticed on window. A full-window overlay then takes every drag
  *   event, so no element (an artifact iframe included) can swallow the drop, and
- *   crossing elements underneath can't make it flicker.
+ *   crossing elements underneath can't make it flicker. A drag that enters the
+ *   window straight onto an iframe is the iframe's document's to see, not ours,
+ *   until it crosses onto this page.
  * - The overlay goes on leaving the window, on drop or dragend, at the next
  *   pointer move (none fire during a drag), or when dragover stops arriving. A
  *   dragleave from a node that unmounted mid-drag can't keep it up.
@@ -127,9 +129,11 @@ export function ChatDropZone({
       {children}
       {dragging
         && createPortal(
-          // Takes pointer events on purpose: over an iframe, the drop must land here.
           <div
             className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-2 bg-background/80 p-4 text-primary backdrop-blur-sm"
+            // Set here, not inherited: a modal Radix dialog (the artifact panel) puts
+            // pointer-events: none on body, and over its iframe the drop must land here.
+            style={{ pointerEvents: "auto" }}
             data-testid="chat-drop-overlay"
           >
             <div className="pointer-events-none flex size-full flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-primary">

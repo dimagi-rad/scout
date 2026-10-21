@@ -7,6 +7,7 @@ import { ChatMessage } from "@/components/ChatMessage"
 import { ChatComposer, QuoteSelectionAction } from "@/components/ChatPanel"
 import { ChatThreadHeader } from "@/components/ChatPanel/ChatThreadHeader"
 import { TopBarProvider } from "@/components/TopBar"
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { ChatDropZone } from "@/components/ChatPanel/attachments/ChatDropZone"
 import { useChatAttachments } from "@/components/ChatPanel/attachments/useChatAttachments"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
@@ -323,8 +324,8 @@ export const ChatWithAttachments: Story = {
 }
 
 /**
- * The chat inside the app's frame: the top bar, a sidebar and an artifact panel (an
- * iframe) all take a dropped file too, as the user drags onto whatever is nearest.
+ * The chat inside the app's frame: the top bar, a sidebar and the open artifact dialog
+ * (an iframe) all take a dropped file too, as the user drags onto whatever is nearest.
  */
 export const ChatWithAttachmentsInAppFrame: Story = {
   render: () => (
@@ -343,13 +344,23 @@ export const ChatWithAttachmentsInAppFrame: Story = {
             </main>
           </TopBarProvider>
         </div>
-        <div className="w-80 shrink-0 border-l" data-testid="artifact-modal">
-          <iframe
-            title="Artifact"
-            className="size-full"
-            srcDoc="<body style='font:14px sans-serif;padding:16px'>Artifact iframe</body>"
-          />
-        </div>
+        {/* Like ArtifactPanel: a modal Radix dialog, which sets pointer-events: none on body. */}
+        <Dialog open>
+          <DialogContent
+            className="top-[52%] h-[70vh] max-w-xl p-0"
+            showCloseButton={false}
+            data-testid="artifact-modal"
+          >
+            <DialogTitle className="sr-only">Artifact preview</DialogTitle>
+            <DialogDescription className="sr-only">An artifact in a sandboxed iframe</DialogDescription>
+            <iframe
+              title="Artifact"
+              sandbox="allow-scripts"
+              className="size-full"
+              srcDoc="<body style='font:14px sans-serif;padding:16px'>Artifact iframe</body>"
+            />
+          </DialogContent>
+        </Dialog>
       </div>
     </MemoryRouter>
   ),

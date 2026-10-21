@@ -10,6 +10,7 @@ import { useAppStore } from "@/store/store"
 import { ChatComposer } from "./ChatComposer"
 import { ChatPanel } from "./ChatPanel"
 import { TopBarProvider } from "@/components/TopBar"
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import type { ChatAttachments } from "./attachments/useChatAttachments"
 
 vi.mock("@/contexts/WorkspaceJobsContext", () => ({
@@ -104,9 +105,15 @@ function AppShell({ children }: { children: ReactNode }) {
           <main>{children}</main>
         </TopBarProvider>
       </div>
-      <div data-testid="artifact-modal">
-        <iframe title="artifact" />
-      </div>
+      {/* The real artifact panel is a modal Radix dialog, which sets pointer-events:
+          none on body while open. */}
+      <Dialog open>
+        <DialogContent data-testid="artifact-modal" showCloseButton={false}>
+          <DialogTitle>Artifact</DialogTitle>
+          <DialogDescription>Artifact preview</DialogDescription>
+          <iframe title="artifact" />
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -262,9 +269,11 @@ describe("ChatPanel attachments (#913)", () => {
 
     fireEvent.dragEnter(target, fileDrag([file]))
     const overlay = screen.getByTestId("chat-drop-overlay")
-    // Full window, and it takes the pointer, so no iframe under it can swallow the drop.
+    // Full window, and it takes the pointer even under the modal's
+    // body { pointer-events: none }, so the artifact iframe can't swallow the drop.
     expect(overlay).toHaveClass("fixed", "inset-0")
-    expect(overlay).not.toHaveClass("pointer-events-none")
+    expect(document.body.style.pointerEvents).toBe("none")
+    expect(getComputedStyle(overlay).pointerEvents).toBe("auto")
     const over = createEvent.dragOver(target, fileDrag([file]))
     fireEvent(target, over)
     expect(over.defaultPrevented).toBe(true)
