@@ -53,7 +53,7 @@ from apps.semantic.services.catalog import (
     serialize_dataset,
 )
 from apps.semantic.services.column_policy import is_listed
-from apps.semantic.services.query import run_semantic_query
+from apps.semantic.services.query import run_semantic_query, semantic_tool_spec
 from apps.transformations.services.lineage import aget_lineage_chain
 from apps.users.models import TenantMembership, User
 from apps.workspaces.access import (
@@ -1203,25 +1203,21 @@ async def semantic_query(
             tc["result"] = error_response(NOT_FOUND, f"Workspace '{workspace_id}' not found")
             return tc["result"]
 
-        # Replayed tool results must not pin a later chat turn to an old clock.
-        # Artifact rendering has its own shared-clock API, not this chat tool.
-        if isinstance(query_context, dict):
-            query_context = {
-                key: value for key, value in query_context.items() if key == "timezone"
-            }
         result = await run_semantic_query(
             workspace,
-            {
-                "measures": measures or [],
-                "dimensions": dimensions or [],
-                "time_dimension": time_dimension or None,
-                "granularity": granularity or None,
-                "filters": filters or [],
-                "order_by": order_by or [],
-                "limit": limit,
-                **({"date_range": date_range} if date_range is not None else {}),
-                **({"query_context": query_context} if query_context is not None else {}),
-            },
+            semantic_tool_spec(
+                {
+                    "measures": measures,
+                    "dimensions": dimensions,
+                    "time_dimension": time_dimension,
+                    "granularity": granularity,
+                    "filters": filters,
+                    "order_by": order_by,
+                    "limit": limit,
+                    "date_range": date_range,
+                    "query_context": query_context,
+                }
+            ),
             user_id=user_id,
         )
         if not result.get("success", True) or result.get("error"):
