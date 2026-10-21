@@ -792,6 +792,10 @@ def connect_opportunity_url(external_id: str) -> str:
     return f"{CONNECT_ORIGIN}/export/opportunity/{external_id}/"
 
 
+# Unrouted, it answers like Connect before commcare-connect#1588 is deployed.
+CONNECT_BATCH = f"{CONNECT_ORIGIN}/export/opportunity_access/"
+
+
 @pytest.mark.parametrize(("path", "variant"), cases(CONNECT_PATHS))
 async def test_connect_listing_is_read_whole(path, variant, upstream):
     upstream.routes[CONNECT_LISTING] = json_answer(saved("connect_opp_org_program_list"))
@@ -846,7 +850,16 @@ async def test_connect_few_opportunities_are_checked_one_by_one(upstream):
     outcome = await run(CONNECT_VERIFICATION, upstream, external_ids={"101"})
 
     assert (outcome.ids, outcome.scope) == ({"101"}, {"101"})
-    assert upstream.requests == [connect_opportunity_url("101")]
+    assert upstream.requests == [CONNECT_BATCH, connect_opportunity_url("101")]
+
+
+async def test_connect_batch_answer_decides_without_other_requests(upstream):
+    upstream.routes[CONNECT_BATCH] = json_answer({"opportunities": {"101": True, "555": False}})
+
+    outcome = await run(CONNECT_VERIFICATION, upstream, external_ids={"101", "555"})
+
+    assert (outcome.ids, outcome.scope) == ({"101"}, {"101", "555"})
+    assert upstream.requests == [CONNECT_BATCH]
 
 
 async def test_connect_no_access_answer_is_an_omission_within_the_scope(upstream):
@@ -868,7 +881,7 @@ async def test_connect_routing_404_falls_back_to_the_whole_listing(upstream):
     outcome = await run(CONNECT_VERIFICATION, upstream, external_ids={"101"})
 
     assert (outcome.ids, outcome.scope) == (CONNECT_IDS, None)
-    assert upstream.requests == [connect_opportunity_url("101"), CONNECT_LISTING]
+    assert upstream.requests == [CONNECT_BATCH, connect_opportunity_url("101"), CONNECT_LISTING]
 
 
 async def test_connect_many_opportunities_use_the_whole_listing(upstream):
@@ -878,7 +891,7 @@ async def test_connect_many_opportunities_use_the_whole_listing(upstream):
     outcome = await run(CONNECT_VERIFICATION, upstream, external_ids=wanted)
 
     assert (outcome.ids, outcome.scope) == (CONNECT_IDS, None)
-    assert upstream.requests == [CONNECT_LISTING]
+    assert upstream.requests == [CONNECT_BATCH, CONNECT_LISTING]
 
 
 async def test_connect_rejected_token_outranks_the_scoped_check(upstream):

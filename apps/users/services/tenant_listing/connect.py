@@ -26,6 +26,8 @@ from mcp_server.loaders._urls import ProviderURLPolicy
 # above the largest Connect workspace (11 in prod on 2026-10-09). The frontend warns
 # above it: keep CONNECT_QUICK_CHECK_LIMIT in frontend/src/lib/connectAccessCheck.ts in step.
 MAX_SUBSET = 25
+# OPPORTUNITY_ACCESS_CHECK_MAX_IDS in Connect's data_export/const.py (commcare-connect#1588).
+BATCH_MAX_IDS = 500
 
 _PAGINATION_KEYS = frozenset(
     {
@@ -151,7 +153,7 @@ def _attributes(
     return attributes
 
 
-def subset_ids(external_ids) -> tuple[str, ...] | None:
+def subset_ids(external_ids, *, limit=MAX_SUBSET) -> tuple[str, ...] | None:
     """The opportunity ids to check one by one, or None to use the full listing.
 
     ``/export/opp_org_program_list/`` exports every opportunity with a per-row
@@ -159,7 +161,7 @@ def subset_ids(external_ids) -> tuple[str, ...] | None:
     exhausts the interactive budget. ``/export/opportunity/<id>/`` answers the
     question for one opportunity cheaply.
     """
-    if not external_ids or len(external_ids) > MAX_SUBSET:
+    if not external_ids or len(external_ids) > limit:
         return None
     ids = tuple(sorted(external_ids))
     # Connect routes ``<int:opp_id>``; any other id 404s at routing, which must
@@ -170,6 +172,43 @@ def subset_ids(external_ids) -> tuple[str, ...] | None:
     ):
         return None
     return ids
+
+
+def batch_ids(external_ids) -> tuple[str, ...] | None:
+    """The opportunity ids for one batch access check, or None to skip it.
+
+    Connect answers 400 for anything but 1 to ``BATCH_MAX_IDS`` integers of at least 1.
+    """
+    ids = subset_ids(external_ids, limit=BATCH_MAX_IDS)
+    if ids is None or "0" in ids:
+        return None
+    return ids
+
+
+def batch_access_request(listing: ProviderRequest) -> ProviderRequest:
+    """``POST /export/opportunity_access/`` beside ``listing``; raises UnsafeProviderURL."""
+    url = ProviderURLPolicy(listing.url).resolve("../opportunity_access/", relative_to=listing.url)
+    return ProviderRequest(url, listing.headers)
+
+
+def batch_access(response: httpx.Response, ids: tuple[str, ...]) -> dict[str, bool] | None:
+    """``{id: may_export}`` for exactly ``ids``, or None for an answer not in that shape.
+
+    ``false`` covers both an opportunity the user may not export and one that does
+    not exist, as ``/export/opportunity/<id>/`` answers both with the same 404.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    access = payload.get("opportunities") if isinstance(payload, dict) else None
+    if (
+        not isinstance(access, dict)
+        or set(access) != set(ids)
+        or not all(isinstance(value, bool) for value in access.values())
+    ):
+        return None
+    return access
 
 
 def verify_subset_request(listing: ProviderRequest, external_id: str) -> ProviderRequest:

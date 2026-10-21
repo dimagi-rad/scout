@@ -45,6 +45,9 @@ MAX_ROWS = 10_000
 CONNECT_LISTING_RESERVE_SECONDS = 5.0
 # Concurrent per-opportunity requests within one connection's check.
 CONNECT_LIGHT_CONCURRENCY = 8
+# One indexed query on Connect's side; a route that stalls instead (an edge holding
+# the POST) must leave the listing, the only fallback above 25 ids, its ~10s.
+CONNECT_BATCH_TIMEOUT_SECONDS = 3.0
 
 
 class ProcessNetworkLimiter:
@@ -192,14 +195,83 @@ def _provider_request(snapshot, settings):
     return None if request is None else (request, decode_page)
 
 
+def _is_connect_oauth(snapshot) -> bool:
+    return (
+        canonical_provider(snapshot.observation.provider) == "commcare_connect"
+        and snapshot.observation.credential_type == TenantConnection.OAUTH
+    )
+
+
 def _connect_light_ids(snapshot, external_ids) -> tuple[str, ...] | None:
     """The opportunities to check one by one, or None to use the full listing."""
-    if (
-        canonical_provider(snapshot.observation.provider) != "commcare_connect"
-        or snapshot.observation.credential_type != TenantConnection.OAUTH
-    ):
+    if not _is_connect_oauth(snapshot):
         return None
     return connect_listing.subset_ids(external_ids)
+
+
+def _connect_batch_ids(snapshot, external_ids) -> tuple[str, ...] | None:
+    if not _is_connect_oauth(snapshot):
+        return None
+    return connect_listing.batch_ids(external_ids)
+
+
+def _light_deadline(deadline, clock) -> float:
+    # Keep part of the budget back, or the listing fallback could never finish.
+    return deadline - min(CONNECT_LISTING_RESERVE_SECONDS, (deadline - clock()) / 2)
+
+
+async def _verify_connect_batch(client, listing, ids, deadline, clock, *, log):
+    """One request deciding every opportunity in ``ids``, or None to fall back.
+
+    Only a well-formed 2xx decides. Anything else, a 401 included, falls back to the
+    older checks, which reach the same answer one request later: whatever an edge or
+    proxy says for this route must never archive memberships on its own. A ``false``
+    is an omission, which publication archives as a no-access 404 would have.
+    """
+    try:
+        request = connect_listing.batch_access_request(listing)
+    except UnsafeProviderURL:
+        log("batch_unsafe_url", outcome="fallback")
+        return None
+    remaining = _light_deadline(deadline, clock) - clock()
+    if remaining <= 0:
+        log("batch_deadline_before_request", outcome="fallback")
+        return None
+    request_timeout = min(CONNECT_BATCH_TIMEOUT_SECONDS, remaining)
+    try:
+        response = await asyncio.wait_for(
+            client.post(
+                request.url,
+                headers=dict(request.headers),
+                json={"opportunity_ids": [int(external_id) for external_id in ids]},
+                follow_redirects=False,
+                timeout=request_timeout,
+            ),
+            timeout=request_timeout,
+        )
+    except TimeoutError:
+        log("batch_request_timeout", outcome="fallback")
+        return None
+    except httpx.RequestError as exc:
+        # The class name only: str(exc) can carry the request URL.
+        log(f"batch_request_error:{type(exc).__name__}", outcome="fallback")
+        return None
+    if response.status_code == 404:
+        # Silent: the route 404s until commcare-connect#1588 is deployed.
+        return None
+    if not 200 <= response.status_code < 300:
+        log("batch_http_status", status=response.status_code, outcome="fallback")
+        return None
+    access = connect_listing.batch_access(response, ids)
+    if access is None:
+        log("batch_unrecognized_answer", status=response.status_code, outcome="fallback")
+        return None
+    if clock() >= deadline:
+        log("batch_deadline_after_response", status=response.status_code, outcome="fallback")
+        return None
+    return ProviderVerificationResult.complete(
+        [external_id for external_id in ids if access[external_id]], scope=ids
+    )
 
 
 async def _verify_connect_opportunities(
@@ -213,8 +285,7 @@ async def _verify_connect_opportunities(
     have. Once one is seen, a later failure ends the check with what was decided so
     far rather than discarding that revocation.
     """
-    # Keep part of the budget back, or the listing fallback could never finish.
-    light_deadline = deadline - min(CONNECT_LISTING_RESERVE_SECONDS, (deadline - clock()) / 2)
+    light_deadline = _light_deadline(deadline, clock)
     slots = asyncio.Semaphore(CONNECT_LIGHT_CONCURRENCY)
 
     async def fetch(external_id):
@@ -386,6 +457,7 @@ async def verify_provider(
     if request is None:
         return indeterminate("no_request")
     list_request, decode_page = request
+    batch_ids = _connect_batch_ids(snapshot, external_ids)
     light_ids = _connect_light_ids(snapshot, external_ids)
 
     try:
@@ -414,6 +486,17 @@ async def verify_provider(
             raise
         acquired = True
         async with client_factory() as client:
+            if batch_ids is not None:
+                batch_result = await _verify_connect_batch(
+                    client,
+                    list_request,
+                    batch_ids,
+                    deadline,
+                    clock,
+                    log=log,
+                )
+                if batch_result is not None:
+                    return batch_result
             if light_ids is not None:
                 light_result = await _verify_connect_opportunities(
                     client,
