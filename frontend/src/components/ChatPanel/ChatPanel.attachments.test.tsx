@@ -333,7 +333,7 @@ describe("ChatPanel attachments (#913)", () => {
       fireEvent.dragEnter(screen.getByTestId("top-bar"), fileDrag([screenshot()]))
       expect(screen.getByTestId("chat-drop-overlay")).toBeInTheDocument()
       act(() => {
-        vi.advanceTimersByTime(1_100)
+        vi.advanceTimersByTime(4_100)
       })
       expect(screen.queryByTestId("chat-drop-overlay")).toBeNull()
     } finally {

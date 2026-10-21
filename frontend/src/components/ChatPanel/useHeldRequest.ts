@@ -219,7 +219,7 @@ export function useHeldRequest(workspaceId: string | null, threadId: string): He
         // A 400 the server explains says what to do; it is not transient.
         return {
           failed: isExplainedRefusal(error)
-            ? `${(error as ApiError).message.replace(/[.\s]+$/, "")}. It's back in the message box.`
+            ? `${(error as ApiError).message.replace(/[.…\s]+$/, "")}. It's back in the message box.`
             : ADD_FAILED_MESSAGE,
         }
       }

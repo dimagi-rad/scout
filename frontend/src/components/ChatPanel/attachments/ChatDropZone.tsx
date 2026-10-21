@@ -5,9 +5,10 @@ import { Upload } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { carriesFiles } from "./rules"
 
-// dragover repeats while a drag hovers (every 350ms ±200ms by spec), so one this
-// late means the drag ended somewhere we heard nothing from.
-const DRAG_IDLE_MS = 1_000
+// Only a backstop for a drag that ended outside the window unheard: drop, dragend
+// and pointer moves cover the rest. Generous, as some platforms send dragover
+// only while the pointer moves, and a user may hold still while aiming.
+const DRAG_IDLE_MS = 4_000
 
 /**
  * While a chat is open the whole window takes dropped files: the app's top bar,
@@ -24,16 +25,16 @@ const DRAG_IDLE_MS = 1_000
  *   dragged from the page itself is left alone.
  * - A file dropped while the overlay is not up is still taken here rather than
  *   opened by the browser.
+ *
+ * So while this is mounted, no other drop target in the page can receive files.
  */
 export function ChatDropZone({
   onFiles,
-  disabled = false,
   className,
   children,
 }: {
   /** ``folders``: dropped folders, which arrive as File objects but can't be read. */
   onFiles: (files: File[], folders?: File[]) => void
-  disabled?: boolean
   className?: string
   children: ReactNode
 }) {
@@ -42,9 +43,9 @@ export function ChatDropZone({
   // A drag that began on this page (an image in a reply, say) is never an upload.
   const internalDrag = useRef(false)
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const latest = useRef({ onFiles, disabled })
+  const latest = useRef(onFiles)
   useLayoutEffect(() => {
-    latest.current = { onFiles, disabled }
+    latest.current = onFiles
   })
 
   useEffect(() => {
@@ -56,7 +57,7 @@ export function ChatDropZone({
       setDragging(on)
     }
     const takes = (e: DragEvent) =>
-      !internalDrag.current && !latest.current.disabled && carriesFiles(e.dataTransfer)
+      !internalDrag.current && carriesFiles(e.dataTransfer)
 
     const onDragStart = () => {
       internalDrag.current = true
@@ -97,7 +98,7 @@ export function ChatDropZone({
       show(false)
       if (!taken) return
       const { files, folders } = splitFolders(e.dataTransfer)
-      if (files.length || folders.length) latest.current.onFiles(files, folders)
+      if (files.length || folders.length) latest.current(files, folders)
     }
 
     window.addEventListener("dragstart", onDragStart)

@@ -25,12 +25,6 @@ function encode(canvas: HTMLCanvasElement, type: string): Promise<Blob | null> {
  * the browser can't re-encode becomes JPEG when it is opaque.
  * GIFs pass through untouched: a canvas would keep only the first frame.
  */
-function hasTransparency(context: CanvasRenderingContext2D, canvas: HTMLCanvasElement): boolean {
-  const { data } = context.getImageData(0, 0, canvas.width, canvas.height)
-  for (let i = 3; i < data.length; i += 4) if (data[i] < 255) return true
-  return false
-}
-
 export async function downscaleImage(file: File): Promise<File> {
   if (file.type === "image/gif") return file
   const bitmap = await createImageBitmap(file)
@@ -56,7 +50,7 @@ export async function downscaleImage(file: File): Promise<File> {
 
     let blob = await encode(canvas, file.type)
     // An encoder the browser lacks (Safari: WebP) silently gives a PNG instead.
-    if (blob && blob.type !== file.type && !hasTransparency(context, canvas)) {
+    if (blob && blob.type !== file.type && !hasTransparency(context, canvas.width, canvas.height)) {
       blob = await toJpeg()
     } else if (blob && file.type === "image/png" && blob.size > PNG_KEEP_MAX_BYTES) {
       const webp = await encode(canvas, "image/webp")
@@ -67,4 +61,10 @@ export async function downscaleImage(file: File): Promise<File> {
   } finally {
     bitmap.close()
   }
+}
+
+function hasTransparency(context: CanvasRenderingContext2D, width: number, height: number): boolean {
+  const { data } = context.getImageData(0, 0, width, height)
+  for (let i = 3; i < data.length; i += 4) if (data[i] < 255) return true
+  return false
 }
