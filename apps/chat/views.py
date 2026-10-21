@@ -49,7 +49,7 @@ from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.resume_stream import LiveTurnWriter
 from apps.chat.stream import _sse, langgraph_to_ui_stream
 from apps.chat.tasks import aschedule_thread_title
-from apps.chat.titles import afill_turn_title, short_thread_title
+from apps.chat.titles import afill_turn_title, short_thread_title, title_text
 from apps.chat.turn_lease import TurnLease, aacquire_turn_lease
 from apps.common.capacity import BUSY_ERROR, RETRY_AFTER_SECONDS, classify_capacity_error
 from apps.common.http import parse_json_object
@@ -318,7 +318,9 @@ async def _chat_view(request, bound: dict):
     # The Thread row is the only authorization for this checkpointer key, so a
     # failed upsert must propagate rather than fall through to the agent.
     try:
-        thread = await _upsert_thread(thread_id, user, user_content, workspace=workspace)
+        thread = await _upsert_thread(
+            thread_id, user, title_text(user_content, attachments), workspace=workspace
+        )
     except ForeignThreadError as e:
         return _foreign_thread_response(e.thread, user, workspace)
     newly_bound = await abind_to_thread(
