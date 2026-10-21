@@ -244,6 +244,32 @@ async def test_older_checks_still_reject_a_dead_credential(settings):
 
 
 @pytest.mark.asyncio
+async def test_batch_answer_landing_past_the_deadline_is_logged(settings, caplog):
+    caplog.set_level(logging.WARNING)
+    now = [0.0]
+
+    class SlowBatch(_Client):
+        async def post(self, url, **kwargs):
+            now[0] = 100.0
+            return await super().post(url, **kwargs)
+
+    settings.CONNECT_API_URL = BASE
+    result = await verify_provider(
+        _snapshot(),
+        client_factory=lambda: SlowBatch(_batch({"7": True})),
+        settings=settings,
+        limiter=asyncio.Semaphore(1),
+        external_ids=frozenset({"7"}),
+        clock=lambda: now[0],
+    )
+
+    assert result.outcome == VerificationOutcome.UNAVAILABLE
+    assert any(
+        "cause=batch_deadline_after_response" in record.getMessage() for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_undeployed_route_falls_back_without_logging(settings, caplog):
     caplog.set_level(logging.WARNING)
     client = _Client(

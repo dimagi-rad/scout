@@ -175,6 +175,7 @@ async def _verify_connect_batch(client, listing, ids, deadline, clock, *, log):
         return None
     remaining = _light_deadline(deadline, clock) - clock()
     if remaining <= 0:
+        log("batch_deadline_before_request", outcome="fallback")
         return None
     request_timeout = min(PER_REQUEST_TIMEOUT_SECONDS, remaining)
     try:
@@ -206,6 +207,7 @@ async def _verify_connect_batch(client, listing, ids, deadline, clock, *, log):
         log("batch_unrecognized_answer", status=response.status_code, outcome="fallback")
         return None
     if clock() >= deadline:
+        log("batch_deadline_after_response", status=response.status_code, outcome="fallback")
         return None
     return ProviderVerificationResult.complete(
         [external_id for external_id in ids if access[external_id]], scope=ids
