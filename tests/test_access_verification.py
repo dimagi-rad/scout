@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialToken
+from django.contrib.auth import get_user_model
 from django.db import connection, transaction
 from django.utils import timezone
 
@@ -434,18 +435,15 @@ def test_archived_membership_cannot_consume_fresh_proof(
 
 
 @pytest.mark.django_db(transaction=True)
-def test_freshness_clock_is_sampled_after_lock_wait(
-    user, tenant, verification_connection, monkeypatch
-):
+def test_freshness_is_rechecked_after_lock_wait(user, tenant, verification_connection):
     conn, _membership = verification_connection
     base = timezone.now()
     first = claim_verification(user.id, conn.id, {tenant.id}, now=base)
     publish_verification(first, VerificationResult.complete({tenant.id}), now=base)
-    release = HeldRow()
-    monkeypatch.setattr(
-        "apps.users.services.access_verification.timezone.now",
-        lambda: base + (timedelta(minutes=5) if release.is_set() else timedelta(minutes=4)),
+    UpstreamAccessProof.objects.filter(connection=conn).update(
+        verified_at=base - timedelta(minutes=6)
     )
+    release = HeldRow()
 
     # The executor is outermost so the lock is released before it waits on the waiter.
     with (
@@ -455,10 +453,114 @@ def test_freshness_clock_is_sampled_after_lock_wait(
         waiter = executor.submit(claim_verification, user.id, conn.id, {tenant.id})
         release.wait_until_blocking()
         assert not waiter.done()
+        # A check that finished while this claim waited must spare it a second one.
+        UpstreamAccessProof.objects.filter(connection=conn).update(verified_at=timezone.now())
         release.set()
         result = waiter.result(timeout=10)
 
-    assert result.status == ClaimStatus.CLAIMED
+    assert result.status == ClaimStatus.FRESH
+    assert VerificationControl.objects.get(connection=conn).lease_token is None
+
+
+def _refresh_locks(user_id, connection_id):
+    """The rows a token refresh holds for its whole transaction (token_refresh)."""
+
+    def lock():
+        get_user_model().objects.select_for_update().get(pk=user_id)
+        conn = TenantConnection.objects.select_for_update().get(pk=connection_id)
+        SocialToken.objects.select_for_update().get(account_id=conn.social_account_id)
+
+    return lock
+
+
+@pytest.mark.django_db(transaction=True)
+def test_fresh_claim_does_not_wait_on_a_running_refresh(user):
+    tenant = Tenant.objects.create(provider="ocs", external_id="fresh", canonical_name="Fresh")
+    conn, _membership = _ocs_connection(user, tenant)
+    first = claim_verification(user.id, conn.id, {tenant.id})
+    publish_verification(first, VerificationResult.complete({tenant.id}))
+    clock = ManualClock()
+
+    with row_locked(_refresh_locks(user.id, conn.id), release_after=LOCK_SAFETY_SECONDS) as release:
+        claim = claim_verification(
+            user.id, conn.id, {tenant.id}, deadline=clock() + 0.1, clock=clock
+        )
+        held_at_return = not release.is_set()
+
+    assert claim.status == ClaimStatus.FRESH
+    assert held_at_return
+
+
+@pytest.mark.django_db(transaction=True)
+def test_lease_waiter_polls_without_waiting_on_a_running_refresh(user):
+    tenant = Tenant.objects.create(provider="ocs", external_id="waiter", canonical_name="Waiter")
+    conn, _membership = _ocs_connection(user, tenant)
+    winner = claim_verification(user.id, conn.id, {tenant.id})
+    clock = ManualClock()
+
+    with row_locked(_refresh_locks(user.id, conn.id), release_after=LOCK_SAFETY_SECONDS) as release:
+        waiter = claim_verification(
+            user.id, conn.id, {tenant.id}, deadline=clock() + 0.1, clock=clock
+        )
+        held_at_return = not release.is_set()
+
+    assert winner.status == ClaimStatus.CLAIMED
+    assert waiter.status == ClaimStatus.IN_PROGRESS
+    assert waiter.lease_token == winner.lease_token
+    assert held_at_return
+
+
+@pytest.mark.django_db(transaction=True)
+def test_claim_without_a_live_lease_still_waits_on_a_running_refresh(user):
+    tenant = Tenant.objects.create(provider="ocs", external_id="stale", canonical_name="Stale")
+    conn, _membership = _ocs_connection(user, tenant)
+    clock = ManualClock()
+
+    with row_locked(_refresh_locks(user.id, conn.id), release_after=LOCK_SAFETY_SECONDS) as release:
+        claim = claim_verification(
+            user.id, conn.id, {tenant.id}, deadline=clock() + 0.1, clock=clock
+        )
+        held_at_return = not release.is_set()
+
+    assert claim.status == ClaimStatus.DEADLINE
+    assert held_at_return
+    assert not VerificationControl.objects.filter(connection=conn).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_refresh_during_a_lease_moves_waiters_onto_the_new_token(user):
+    tenant = Tenant.objects.create(provider="ocs", external_id="rotate", canonical_name="Rotate")
+    conn, _membership = _ocs_connection(user, tenant)
+    old = claim_verification(user.id, conn.id, {tenant.id})
+    publish_verification(old, VerificationResult.complete({tenant.id}))
+    winner = claim_verification(user.id, conn.id, {tenant.id}, fresh_max_age=timedelta(0))
+    assert winner.status == ClaimStatus.CLAIMED
+
+    token = SocialToken.objects.get(account_id=conn.social_account_id)
+    token.token = "rotated-secret"
+    token.token_secret = "rotated-refresh"
+    token.save()
+
+    # The proof was for the old token: a lock-free read must not answer FRESH on it.
+    waiter = claim_verification(user.id, conn.id, {tenant.id})
+    assert waiter.status == ClaimStatus.IN_PROGRESS
+    assert waiter.observation.credential_fingerprint != old.observation.credential_fingerprint
+
+    rebased = rebase_verification_claim(
+        winner,
+        _PersistedToken(
+            token_id=token.id,
+            account_id=token.account_id,
+            app_id=token.app_id,
+            access_token=token.token,
+            refresh_token=token.token_secret,
+        ),
+    )
+    assert rebased.observation == waiter.observation
+    published = publish_verification(rebased, VerificationResult.complete({tenant.id}))
+
+    assert published == PublicationStatus.PUBLISHED
+    assert claim_verification(user.id, conn.id, {tenant.id}).status == ClaimStatus.FRESH
 
 
 @pytest.mark.django_db(transaction=True)
