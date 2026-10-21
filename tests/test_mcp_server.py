@@ -305,11 +305,20 @@ class TestExecuteQuery:
 
     @pytest.mark.asyncio
     @patch(POOLED_EXEC)
-    async def test_a_limit_within_the_cap_runs_unprobed(self, mock_exec, project_context):
-        mock_exec.return_value = {"columns": ["id"], "rows": [[1]] * 500, "row_count": 500}
-        result = await execute_query(project_context, "SELECT id FROM users LIMIT 500")
-        assert "LIMIT 500" in mock_exec.call_args.args[1].upper()
+    async def test_a_limit_below_the_cap_runs_unprobed(self, mock_exec, project_context):
+        mock_exec.return_value = {"columns": ["id"], "rows": [[1]] * 499, "row_count": 499}
+        result = await execute_query(project_context, "SELECT id FROM users LIMIT 499")
+        assert "LIMIT 499" in mock_exec.call_args.args[1].upper()
         assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    @patch(POOLED_EXEC)
+    async def test_a_limit_of_exactly_the_cap_is_probed(self, mock_exec, project_context):
+        mock_exec.return_value = {"columns": ["id"], "rows": [[1]] * 501, "row_count": 501}
+        result = await execute_query(project_context, "SELECT id FROM users LIMIT 500")
+        assert "LIMIT 501" in mock_exec.call_args.args[1].upper()
+        assert result["truncated"] is True
+        assert result["row_count"] == 500
 
     @pytest.mark.asyncio
     @patch(POOLED_EXEC)

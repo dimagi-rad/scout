@@ -112,12 +112,16 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
     tables_accessed = validator.get_tables_accessed(statement)
 
     requested_limit = validator.limit_value(statement)
-    capped = requested_limit is None or requested_limit > validator.max_limit
+    # A LIMIT of exactly the cap is how an agent asks for all it may see, so it is probed too.
+    capped = requested_limit is None or requested_limit >= validator.max_limit
     # One row past the cap tells a cut-off result from one that fits exactly. The
     # reported SQL keeps the cap, which is what the agent and the user can rely on.
     probe = replace(validator, max_limit=validator.max_limit + 1) if capped else validator
     try:
         sql_executed = validator.inject_limit(statement.copy()).sql(dialect=validator.dialect)
+        if requested_limit == validator.max_limit:
+            # inject_limit only lowers a literal LIMIT, so lift this one to the probe's.
+            statement.set("limit", None)
         sql_run = probe.inject_limit(statement).sql(dialect=validator.dialect)
     except Exception:
         # SQLGlot can parse syntax that its PostgreSQL generator cannot render.
