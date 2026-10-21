@@ -753,9 +753,10 @@ When a result is cut off at the row limit, say so plainly and never present it a
 the complete result. Prefer filters or aggregations so the answer fits.
 """)
         if interactive and write_capable:
-            stable_sections.append("""When the user needs every row, tell them the full result (up to 50,000 rows) can
-be downloaded as CSV from the query's result card, rather than paging through it
-in chat.
+            stable_sections.append("""When a result was cut off at the row limit and the user needs every row, tell
+them the full result (up to 50,000 rows) can be downloaded as CSV from that
+query's result card, rather than paging through it in chat. The download re-runs
+the query as written, so a smaller limit you set yourself still applies.
 """)
 
     if interactive and canvas_write and write_capable:
