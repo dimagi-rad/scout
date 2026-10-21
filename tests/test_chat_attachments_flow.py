@@ -393,3 +393,17 @@ async def test_releasing_a_held_part_frees_what_only_it_carried(user, workspace)
     await attachment.arefresh_from_db()
     assert attachment.thread_id is None
     assert attachment.held_at is None
+
+
+@pytest.mark.asyncio
+async def test_marking_a_claim_sent_never_fails_the_send(monkeypatch):
+    claimed = pending_requests.ClaimedRequest(
+        thread_id="t",
+        request_id=uuid.uuid4(),
+        version=1,
+        text="q",
+        token=uuid.uuid4(),
+        attachments=({"id": "a"},),
+    )
+    monkeypatch.setattr(pending_requests, "amark_sent", AsyncMock(side_effect=RuntimeError("db")))
+    await pending_requests.amark_claim_sent(claimed, SimpleNamespace(id="t", user_id=1))

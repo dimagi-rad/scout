@@ -117,10 +117,20 @@ class _StaleClaim:
 
 async def amark_claim_sent(claimed: ClaimedRequest, thread: Thread) -> None:
     """Before a claimed request goes to the agent: its attachments may now be in the
-    checkpoint, so releasing its parts must never unbind them."""
-    await amark_sent(
-        [entry["id"] for entry in claimed.attachments], user=thread.user_id, thread=thread
-    )
+    checkpoint, so releasing its parts must never unbind them.
+
+    Never raises: a missed mark only risks a later release, and must not fail the send.
+    """
+    try:
+        await amark_sent(
+            [entry["id"] for entry in claimed.attachments], user=thread.user_id, thread=thread
+        )
+    except Exception:
+        logger.warning(
+            "Could not mark the held request's attachments sent on thread %s",
+            thread.id,
+            exc_info=True,
+        )
 
 
 def held_human_message(claimed: ClaimedRequest) -> HumanMessage:
