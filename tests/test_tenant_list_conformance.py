@@ -198,7 +198,7 @@ def origin(path: EntryPath) -> str:
 
 
 def ocs_list_path(path: EntryPath) -> str:
-    return VERIFICATION_PATH if path.kind == "verification" else DISCOVERY_PATH
+    return VERIFICATION_PATH if path.kind == "verification" or path.rotation else DISCOVERY_PATH
 
 
 def listing_url(path: EntryPath) -> str:

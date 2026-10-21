@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.utils import timezone
+
 from apps.users.models import TenantConnection
 from apps.users.services.tenant_listing.rows import descriptor
 from apps.users.services.tenant_listing.types import (
@@ -20,7 +22,7 @@ LIST_PAGE_SIZE = 500
 
 # Both list the team's working chatbots. Only v2 reports last_activity_at
 # (open-chat-studio#4843), at the cost of a per-row subquery over each chatbot's
-# sessions, so access verification, which needs only ids within 10s, stays on v1.
+# sessions, so callers that need only ids (access verification, key rotation) stay on v1.
 DISCOVERY_PATH = "/api/v2/chatbots/"
 VERIFICATION_PATH = "/api/experiments/"
 
@@ -55,4 +57,9 @@ def _chatbot(row: Any) -> TenantDescriptor:
     activity = row["last_activity_at"]
     if activity is not None and not isinstance(activity, str):
         return tenant
-    return tenant._replace(attributes={"last_activity_at": activity})
+    # API-key tenants are never re-listed after onboarding, so the client needs to
+    # know how old "no activity" is before calling a chatbot inactive.
+    checked_at = timezone.now().isoformat()
+    return tenant._replace(
+        attributes={"last_activity_at": activity, "activity_checked_at": checked_at}
+    )

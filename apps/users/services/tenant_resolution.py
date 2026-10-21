@@ -410,7 +410,7 @@ async def resolve_ocs_chatbots(
 ) -> list[TenantMembership]:
     """Fetch the user's OCS chatbots (experiments) and full-sync TenantMembership records.
 
-    OCS tokens are **team-scoped** — a successful ``/api/experiments/`` fetch returns
+    OCS tokens are **team-scoped** — a successful ``/api/v2/chatbots/`` fetch returns
     only the team the user selected during OAuth consent. Archival is therefore
     restricted to that team's memberships (``archive_team_slug``); memberships from
     other teams the user previously authorized are left untouched. Under all-of
@@ -461,7 +461,8 @@ async def resolve_ocs_chatbots(
             external_id=exp.external_id,
             defaults={
                 "canonical_name": exp.canonical_name,
-                "provider_attributes": dict(exp.attributes or {}),
+                # A row without a usable value keeps the stored one, as API-key onboarding does.
+                **({"provider_attributes": dict(exp.attributes)} if exp.attributes else {}),
                 **({"description": exp.description} if exp.description else {}),
             },
         )

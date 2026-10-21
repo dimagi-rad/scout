@@ -60,10 +60,11 @@ async def test_resolve_ocs_chatbots_creates_tenants(user):
     tenants = [t async for t in Tenant.objects.filter(provider="ocs").order_by("external_id")]
     assert [t.external_id for t in tenants] == ["exp-uuid-1", "exp-uuid-2"]
     assert [t.canonical_name for t in tenants] == ["Onboarding Bot", "Survey Bot"]
-    assert [t.provider_attributes for t in tenants] == [
-        {"last_activity_at": "2026-10-19T14:02:11.512Z"},
-        {"last_activity_at": None},
+    assert [t.provider_attributes["last_activity_at"] for t in tenants] == [
+        "2026-10-19T14:02:11.512Z",
+        None,
     ]
+    assert all("activity_checked_at" in t.provider_attributes for t in tenants)
 
     # Both chatbots share the single OCS OAuth connection
     conns = [c async for c in TenantConnection.objects.filter(user=user, provider="ocs")]
@@ -79,6 +80,29 @@ async def test_resolve_ocs_chatbots_creates_tenants(user):
     # TenantMembership count
     tm_count = await TenantMembership.objects.filter(user=user, tenant__provider="ocs").acount()
     assert tm_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resolve_ocs_chatbots_keeps_stored_activity_for_a_malformed_row(user):
+    account = await SocialAccount.objects.acreate(user=user, provider="ocs", uid="u1#team-a")
+    await SocialToken.objects.acreate(account=account, token="access-tok")
+    stored = {"last_activity_at": "2026-10-01T00:00:00Z", "activity_checked_at": "2026-10-01"}
+    await Tenant.objects.acreate(
+        provider="ocs", external_id="exp-1", canonical_name="Bot", provider_attributes=stored
+    )
+    response = AsyncMock(status_code=200, is_success=True)
+    response.json = lambda: {
+        "results": [{"id": "exp-1", "name": "Bot", "last_activity_at": 42}],
+        "next": None,
+    }
+
+    with patch("httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value.get = AsyncMock(return_value=response)
+        await resolve_ocs_chatbots(user, "access-tok")
+
+    tenant = await Tenant.objects.aget(provider="ocs", external_id="exp-1")
+    assert tenant.provider_attributes == stored
 
 
 @pytest.mark.asyncio

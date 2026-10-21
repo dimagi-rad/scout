@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from apps.users.services.api_key_providers import CredentialVerificationError, TenantDescriptor
@@ -47,8 +49,10 @@ async def test_verify_and_discover_single_page(httpx_mock, settings):
 
 
 @pytest.mark.asyncio
-async def test_verify_and_discover_keeps_each_chatbots_last_activity(httpx_mock, settings):
+async def test_verify_and_discover_keeps_each_chatbots_last_activity(httpx_mock, settings, mocker):
     settings.OCS_URL = "https://ocs.example.com"
+    checked = datetime(2026, 10, 21, 12, tzinfo=UTC)
+    mocker.patch("apps.users.services.tenant_listing.ocs.timezone.now", return_value=checked)
     httpx_mock.add_response(
         method="GET",
         url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
@@ -63,8 +67,8 @@ async def test_verify_and_discover_keeps_each_chatbots_last_activity(httpx_mock,
     )
     descriptors = await OCSStrategy.verify_and_discover({"api_key": "k"})
     assert [d.attributes for d in descriptors] == [
-        {"last_activity_at": "2026-10-19T14:02:11Z"},
-        {"last_activity_at": None},
+        {"last_activity_at": "2026-10-19T14:02:11Z", "activity_checked_at": checked.isoformat()},
+        {"last_activity_at": None, "activity_checked_at": checked.isoformat()},
         None,
     ]
 
@@ -129,7 +133,7 @@ async def test_verify_for_tenant_passes_when_experiment_present(httpx_mock, sett
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
+        url="https://ocs.example.com/api/experiments/?page_size=500",
         json={"results": [{"id": "exp-1", "name": "Bot"}], "next": None},
     )
     await OCSStrategy.verify_for_tenant({"api_key": "k"}, external_id="exp-1")
@@ -141,7 +145,7 @@ async def test_verify_for_tenant_fails_when_experiment_missing(httpx_mock, setti
     settings.OCS_URL = "https://ocs.example.com"
     httpx_mock.add_response(
         method="GET",
-        url="https://ocs.example.com/api/v2/chatbots/?page_size=500",
+        url="https://ocs.example.com/api/experiments/?page_size=500",
         json={"results": [{"id": "exp-other", "name": "Other"}], "next": None},
     )
     with pytest.raises(CredentialVerificationError, match="exp-1"):
