@@ -45,6 +45,7 @@ from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     SUBAGENT_TOOL_NAMES,
 )
+from apps.agents.tool_results import compact_json, fit_to_budget
 from apps.common.capacity import (
     BUSY_ERROR,
     BUSY_MESSAGE,
@@ -64,6 +65,7 @@ logger = logging.getLogger(__name__)
 # the <pre> view rather than silently rendering a broken card.
 TOOL_OUTPUT_MAX_CHARS = 100_000
 TOOL_OUTPUT_TRUNCATION_MARKER = "\n\n... (truncated, {total} chars total)"
+FULL_RESULT_CARD_TOOLS = frozenset({"query", "semantic_query"})
 
 # Anthropic error.type values that indicate a transient, retryable capacity
 # problem (overload / rate limit) rather than a bug on our side.
@@ -173,6 +175,23 @@ def _redact_tool_input(raw_input: Any) -> dict:
         for k, v in raw_input.items()
         if k not in _HIDDEN_TOOL_PARAMS and _is_json_serializable(v)
     }
+
+
+def _tool_output_for_card(tool_name: str, content: str) -> str:
+    """A query result over the cap is cut to fit as JSON, not as a raw prefix.
+
+    Its card must still parse: the row-limit notice and the full-result download
+    read the payload's own fields (#969).
+    """
+    if tool_name in FULL_RESULT_CARD_TOOLS and len(content) > TOOL_OUTPUT_MAX_CHARS:
+        try:
+            payload = json.loads(content)
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            # Bytes bound characters, so the cut text stays under the character cap.
+            return compact_json(fit_to_budget(payload, TOOL_OUTPUT_MAX_CHARS))
+    return _truncate_tool_output(content)
 
 
 def _truncate_tool_output(content: str) -> str:
@@ -601,7 +620,7 @@ async def langgraph_to_ui_stream(
                     {
                         "type": "tool-output-available",
                         "toolCallId": tool_call_id,
-                        "output": _truncate_tool_output(content),
+                        "output": _tool_output_for_card(tool_name, content),
                     }
                 )
 

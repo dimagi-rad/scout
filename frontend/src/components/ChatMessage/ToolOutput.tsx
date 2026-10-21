@@ -1,7 +1,11 @@
-import { AlertTriangle, CheckCircle, XCircle, Clock, Database, Hash, Download } from "lucide-react"
+import { useState } from "react"
+import { AlertTriangle, CheckCircle, XCircle, Clock, Database, Hash, Download, Loader2 } from "lucide-react"
+import { api } from "@/api/client"
 import { useAppStore } from "@/store/store"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
 import { csvFilename, downloadCsv, toCsv } from "@/lib/csv"
+import { downloadBlob, filenameFromHeaders } from "@/lib/download"
+import { rowLimitCutOff } from "./rowLimit"
 import { SqlBlock } from "@/components/SqlBlock"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
@@ -75,6 +79,98 @@ function DownloadCsvButton({
   )
 }
 
+// Re-runs the tool call on the server (#969), so the full result never passes
+// through the model; the export has its own, larger cap.
+function FullResultDownloadButton({ exportUrl }: { exportUrl: string }) {
+  const [downloading, setDownloading] = useState(false)
+  const [notice, setNotice] = useState<{ tone: "info" | "error"; text: string } | null>(null)
+
+  async function download() {
+    setDownloading(true)
+    setNotice(null)
+    try {
+      const { blob, headers } = await api.download(exportUrl, {})
+      downloadBlob(filenameFromHeaders(headers, "scout-query.csv"), blob)
+      if (headers.get("X-Scout-Export-Truncated") === "true") {
+        const limit = Number(headers.get("X-Scout-Export-Row-Limit") ?? 0)
+        setNotice({
+          tone: "info",
+          text: `Only the first ${limit.toLocaleString()} rows were downloaded. Add filters to narrow it.`,
+        })
+      }
+    } catch (e) {
+      setNotice({ tone: "error", text: e instanceof Error ? e.message : "Download failed." })
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        data-testid="query-result-download-full"
+        onClick={() => void download()}
+        disabled={downloading}
+        className="inline-flex items-center gap-1 rounded border border-amber-500/40 bg-background px-2 py-1 text-xs font-medium text-foreground hover:bg-muted/40 transition-colors disabled:opacity-60"
+      >
+        {downloading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+        {downloading ? "Preparing download…" : "Download full result (CSV)"}
+      </button>
+      {notice && (
+        <span
+          role={notice.tone === "error" ? "alert" : "status"}
+          className={notice.tone === "error" ? "basis-full text-destructive" : "basis-full text-muted-foreground"}
+          data-testid="query-result-download-full-notice"
+        >
+          {notice.text}
+        </span>
+      )}
+    </>
+  )
+}
+
+// Replaces the warning lines on a cut-off result: those are written for the agent.
+function RowLimitNotice({
+  shown,
+  rowLimit,
+  exportUrl,
+  workspaceId,
+}: {
+  shown: number
+  rowLimit: number
+  exportUrl?: string
+  workspaceId?: string
+}) {
+  const { role } = useWorkspaceRole(workspaceId)
+  // The server enforces READ_WRITE; read-only members only see the warning. Fails
+  // closed while the role is unknown, as DownloadCsvButton does.
+  const canExport = !!exportUrl && role !== null && role !== "read"
+  return (
+    <div
+      role="status"
+      data-testid="query-result-row-limit"
+      className="flex flex-wrap items-center gap-2 rounded border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-700 dark:text-amber-300"
+    >
+      <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+      <span className="flex-1 min-w-48">
+        Showing the first {shown.toLocaleString()} rows. The result reached the{" "}
+        {rowLimit.toLocaleString()}-row chat limit, so it may not be complete.
+      </span>
+      {canExport && <FullResultDownloadButton exportUrl={exportUrl} />}
+    </div>
+  )
+}
+
+function Warnings({ warnings }: { warnings?: string[] }) {
+  return warnings?.map((w, i) => (
+    <div key={i} className="flex items-start gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+      <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
+      {w}
+    </div>
+  ))
+}
+
 // MCP error-envelope error object (mcp_server/envelope.py).
 export interface ToolError {
   code: string
@@ -104,6 +200,8 @@ export interface QueryOutput {
     rows: unknown[][]
     row_count: number
     truncated?: boolean
+    row_limit?: number
+    truncation?: { original_row_count?: number }
     sql_executed?: string
     tables_accessed?: string[]
   }
@@ -119,10 +217,13 @@ export function QueryToolOutput({
   output,
   sql,
   workspaceId,
+  exportUrl,
 }: {
   output: QueryOutput
   sql?: string
   workspaceId?: string
+  /** Full-result export for this tool call; absent where the server cannot find the call. */
+  exportUrl?: string
 }) {
   if (!output.success || !output.data) {
     return (
@@ -135,6 +236,7 @@ export function QueryToolOutput({
 
   const { columns, rows, row_count, truncated, sql_executed, tables_accessed } = output.data
   const displaySql = sql_executed || sql
+  const cutOff = rowLimitCutOff(output.data)
 
   const downloadButton = (
     <DownloadCsvButton columns={columns} rows={rows} truncated={truncated} workspaceId={workspaceId} />
@@ -220,12 +322,11 @@ export function QueryToolOutput({
         )}
       </div>
 
-      {output.warnings?.map((w, i) => (
-        <div key={i} className="flex items-start gap-1.5 text-xs text-amber-600 dark:text-amber-400">
-          <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
-          {w}
-        </div>
-      ))}
+      {cutOff != null ? (
+        <RowLimitNotice shown={rows.length} rowLimit={cutOff} exportUrl={exportUrl} workspaceId={workspaceId} />
+      ) : (
+        <Warnings warnings={output.warnings} />
+      )}
 
       {displaySql ? (
         <Tabs defaultValue="results">
@@ -270,6 +371,8 @@ export interface SemanticQueryOutput {
     rows: unknown[][]
     row_count: number
     truncated?: boolean
+    row_limit?: number
+    truncation?: { original_row_count?: number }
     semantic_query?: Record<string, unknown>
     members?: string[]
   }
@@ -282,15 +385,18 @@ export interface SemanticQueryOutput {
 export function SemanticQueryToolOutput({
   output,
   workspaceId,
+  exportUrl,
 }: {
   output: SemanticQueryOutput
   workspaceId?: string
+  exportUrl?: string
 }) {
   if (!output.success || !output.data) {
     return <ToolErrorRow error={output.error} fallback="Semantic query failed" />
   }
 
   const { columns, rows, row_count, truncated, semantic_query, members } = output.data
+  const cutOff = rowLimitCutOff(output.data)
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
@@ -300,6 +406,12 @@ export function SemanticQueryToolOutput({
         {output.timing_ms != null && <Badge variant="muted">{output.timing_ms}ms</Badge>}
         {truncated && <Badge variant="warning">truncated</Badge>}
       </div>
+
+      {cutOff != null ? (
+        <RowLimitNotice shown={rows.length} rowLimit={cutOff} exportUrl={exportUrl} workspaceId={workspaceId} />
+      ) : (
+        <Warnings warnings={output.warnings} />
+      )}
 
       {semantic_query && (
         <div className="rounded bg-muted/40 border border-border/50 px-3 py-2 overflow-x-auto">

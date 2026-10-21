@@ -6,13 +6,13 @@ Database access is mocked at the Django ORM / psycopg boundary.
 """
 
 import logging
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import psycopg
 import psycopg.errors
 import pytest
 
-from mcp_server import envelope
+from mcp_server import envelope, server
 from mcp_server.context import QueryContext
 from mcp_server.envelope import (
     AUTH_TOKEN_EXPIRED,
@@ -264,25 +264,61 @@ class TestExecuteQuery:
 
     @pytest.mark.asyncio
     @patch(POOLED_EXEC)
-    async def test_truncation_detected(self, mock_exec, project_context):
-        """When row_count equals max_limit, truncated should be True."""
+    async def test_a_row_past_the_cap_reports_truncation_and_is_dropped(
+        self, mock_exec, project_context
+    ):
+        mock_exec.return_value = {
+            "columns": ["id"],
+            "rows": [[i] for i in range(501)],
+            "row_count": 501,
+        }
+        result = await execute_query(project_context, "SELECT id FROM users")
+
+        assert "LIMIT 501" in mock_exec.call_args.args[1].upper()
+        assert "LIMIT 500" in result["sql_executed"].upper()
+        assert result["truncated"] is True
+        assert result["row_count"] == 500
+        assert result["rows"][-1] == [499]
+        assert result["row_limit"] == 500
+
+    @pytest.mark.asyncio
+    @patch(POOLED_EXEC)
+    async def test_a_result_of_exactly_the_cap_is_complete(self, mock_exec, project_context):
         mock_exec.return_value = {
             "columns": ["id"],
             "rows": [[i] for i in range(500)],
             "row_count": 500,
         }
         result = await execute_query(project_context, "SELECT id FROM users")
-        assert result["truncated"] is True
+        assert result["truncated"] is False
+        assert result["row_count"] == 500
 
     @pytest.mark.asyncio
     @patch(POOLED_EXEC)
-    async def test_limit_above_cap_is_lowered_and_reported_truncated(
+    async def test_limit_above_cap_is_lowered_and_truncates_only_when_rows_remain(
         self, mock_exec, project_context
     ):
-        mock_exec.return_value = {"columns": ["id"], "rows": [], "row_count": 0}
+        mock_exec.return_value = {"columns": ["id"], "rows": [[1]] * 300, "row_count": 300}
         result = await execute_query(project_context, "SELECT id FROM users LIMIT 5000")
         assert "LIMIT 500" in result["sql_executed"].upper()
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    @patch(POOLED_EXEC)
+    async def test_a_limit_below_the_cap_runs_unprobed(self, mock_exec, project_context):
+        mock_exec.return_value = {"columns": ["id"], "rows": [[1]] * 499, "row_count": 499}
+        result = await execute_query(project_context, "SELECT id FROM users LIMIT 499")
+        assert "LIMIT 499" in mock_exec.call_args.args[1].upper()
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    @patch(POOLED_EXEC)
+    async def test_a_limit_of_exactly_the_cap_is_probed(self, mock_exec, project_context):
+        mock_exec.return_value = {"columns": ["id"], "rows": [[1]] * 501, "row_count": 501}
+        result = await execute_query(project_context, "SELECT id FROM users LIMIT 500")
+        assert "LIMIT 501" in mock_exec.call_args.args[1].upper()
         assert result["truncated"] is True
+        assert result["row_count"] == 500
 
     @pytest.mark.asyncio
     @patch(POOLED_EXEC)
@@ -399,3 +435,52 @@ class TestCommCareCaseLoaderAuth:
         )
         with pytest.raises(CommCareAuthError):
             loader.load()
+
+
+@pytest.mark.django_db(transaction=True)
+class TestRowLimitWarning:
+    """A result cut off at the row cap tells the agent so (#969)."""
+
+    @pytest.mark.asyncio
+    async def test_a_cut_off_sql_result_is_flagged_incomplete(self, project_context):
+        cut = {
+            "columns": ["id"],
+            "rows": [[1]],
+            "row_count": 1,
+            "truncated": True,
+            "row_limit": 500,
+            "sql_executed": "SELECT id FROM users LIMIT 500",
+            "tables_accessed": ["users"],
+        }
+        with (
+            patch.object(server, "load_workspace_context", AsyncMock(return_value=project_context)),
+            patch.object(server, "execute_query", AsyncMock(return_value=cut)),
+        ):
+            result = await server.query("SELECT id FROM users", workspace_id="ws")
+
+        assert result["data"]["row_limit"] == project_context.max_rows_per_query
+        assert result["data"]["truncated"] is True
+        assert "Only the first 500 rows" in result["warnings"][0]
+        assert "do not present these rows as complete" in result["warnings"][0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("row_count", "expected"),
+        [(500, "Only the first 500 rows"), (20, "requested limit of 20 rows")],
+    )
+    async def test_semantic_results_tell_the_cap_from_the_agents_own_limit(
+        self, row_count, expected
+    ):
+        result = {"columns": ["n"], "rows": [[1]] * row_count, "row_count": row_count}
+        with (
+            patch.object(server, "_resolve_accessible_workspace", AsyncMock()),
+            patch.object(
+                server,
+                "run_semantic_query",
+                AsyncMock(return_value={**result, "truncated": True}),
+            ),
+        ):
+            envelope = await server.semantic_query(measures=["visits.count"], workspace_id="ws")
+
+        assert envelope["data"]["row_limit"] == 500
+        assert expected in envelope["warnings"][0]

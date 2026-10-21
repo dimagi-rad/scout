@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useWorkspaceRole } from "@/hooks/useWorkspaceRole"
+import { downloadBlob, filenameFromHeaders } from "@/lib/download"
 
 export interface ArtifactDataDownloadTarget {
   artifactId: string
@@ -28,22 +29,6 @@ interface ExportDataset {
 interface ExportListing {
   datasets: ExportDataset[]
   row_limit: number
-}
-
-function filenameFrom(headers: Headers, fallback: string): string {
-  const match = headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)
-  return match?.[1] ?? fallback
-}
-
-function saveBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement("a")
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
 }
 
 export function ArtifactDataDownload({ artifactId, workspaceId, runtime }: ArtifactDataDownloadTarget) {
@@ -84,7 +69,7 @@ export function ArtifactDataDownload({ artifactId, workspaceId, runtime }: Artif
       const url = `${base}csv/?${dataset.source}=${encodeURIComponent(dataset.name)}`
       // Always a POST: the endpoint takes no GET, so a cross-site page cannot trigger it.
       const { blob, headers } = await api.download(url, runtime ?? {})
-      saveBlob(blob, filenameFrom(headers, `${dataset.name}.csv`))
+      downloadBlob(filenameFromHeaders(headers, `${dataset.name}.csv`), blob)
       if (headers.get("X-Scout-Export-Truncated") === "true") {
         const limit = Number(headers.get("X-Scout-Export-Row-Limit") ?? listing?.row_limit ?? 0)
         setNotice({

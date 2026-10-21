@@ -73,6 +73,30 @@ def raise_if_capacity_exhausted(result: dict[str, Any]) -> None:
         raise CapacityExhausted(CapacityResource.CUBE, result["error"].get("message", ""))
 
 
+def semantic_tool_spec(args: dict[str, Any]) -> dict[str, Any]:
+    """The query spec the chat ``semantic_query`` tool runs for its arguments.
+
+    Shared with the full-result export (#969), so a download re-runs the same query.
+    """
+    query_context = args.get("query_context")
+    # Replayed tool results must not pin a later chat turn to an old clock.
+    # Artifact rendering has its own shared-clock API, not this chat tool.
+    if isinstance(query_context, dict):
+        query_context = {key: value for key, value in query_context.items() if key == "timezone"}
+    date_range = args.get("date_range")
+    return {
+        "measures": args.get("measures") or [],
+        "dimensions": args.get("dimensions") or [],
+        "time_dimension": args.get("time_dimension") or None,
+        "granularity": args.get("granularity") or None,
+        "filters": args.get("filters") or [],
+        "order_by": args.get("order_by") or [],
+        "limit": args.get("limit", 100),
+        **({"date_range": date_range} if date_range is not None else {}),
+        **({"query_context": query_context} if query_context is not None else {}),
+    }
+
+
 def run_semantic_query_sync(workspace, query_spec: dict[str, Any]) -> dict[str, Any]:
     return async_to_sync(run_semantic_query)(workspace, query_spec)
 

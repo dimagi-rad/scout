@@ -40,6 +40,7 @@ import type {
   GetMetadataOutput,
 } from "./ToolOutput"
 import { MemorySavedChip } from "./MemorySavedChip"
+import { rowLimitCutOff } from "./rowLimit"
 import { savedMemory } from "./savedMemory"
 import { messageSegments } from "./quotes"
 import { MessageAttachments } from "./MessageAttachments"
@@ -57,15 +58,29 @@ function renderToolOutput(
   rawOutput: unknown,
   input?: unknown,
   workspaceId?: string,
+  exportUrl?: string,
 ): React.ReactNode | null {
   const output = parseOutput(rawOutput)
   if (output == null || typeof output !== "object") return null
 
   switch (toolName) {
     case "query":
-      return <QueryToolOutput output={output as QueryOutput} sql={inputSql(input)} workspaceId={workspaceId} />
+      return (
+        <QueryToolOutput
+          output={output as QueryOutput}
+          sql={inputSql(input)}
+          workspaceId={workspaceId}
+          exportUrl={exportUrl}
+        />
+      )
     case "semantic_query":
-      return <SemanticQueryToolOutput output={output as SemanticQueryOutput} workspaceId={workspaceId} />
+      return (
+        <SemanticQueryToolOutput
+          output={output as SemanticQueryOutput}
+          workspaceId={workspaceId}
+          exportUrl={exportUrl}
+        />
+      )
     case "semantic_catalog":
     case "describe_dataset":
       return <SemanticCatalogToolOutput output={output as SemanticCatalogOutput} />
@@ -78,6 +93,15 @@ function renderToolOutput(
     default:
       return null
   }
+}
+
+function toolRowLimitCutOff(toolName: string, rawOutput: unknown): number | null {
+  if (toolName !== "query" && toolName !== "semantic_query") return null
+  // Every render of a message reaches here, so skip parsing a result that was never cut.
+  if (typeof rawOutput === "string" && !/"truncated":\s*true/.test(rawOutput)) return null
+  const output = parseOutput(rawOutput)
+  if (output == null || typeof output !== "object") return null
+  return rowLimitCutOff((output as QueryOutput | SemanticQueryOutput).data)
 }
 
 interface ChatMessageProps {
@@ -519,10 +543,16 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   const expanded = effectiveOverride ?? autoExpanded
   const toggleExpanded = () => setOverride({ key: expansionKey, value: !expanded })
 
+  // A nested call ran inside a helper agent, whose calls the thread's checkpoint does not hold.
+  const exportUrl =
+    !isNested && workspaceId && threadId && part.toolCallId
+      ? `/api/workspaces/${workspaceId}/threads/${threadId}/tool-calls/${encodeURIComponent(part.toolCallId)}/export/csv/`
+      : undefined
   const richOutput =
     hasOutput && part.output != null && !isErrored && !isSubagentCard
-      ? renderToolOutput(toolName, part.output, part.input, workspaceId)
+      ? renderToolOutput(toolName, part.output, part.input, workspaceId, exportUrl)
       : null
+  const cutOff = richOutput ? toolRowLimitCutOff(toolName, part.output) : null
   // Fallback text for the <pre> view: an output-error part carries its message
   // in errorText (no `output`); otherwise show the raw output when no rich card
   // matched. Either way, the <pre> renders the FULL text — the historical
@@ -590,6 +620,14 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
             {displayToolName(toolName)}
             {isLoading && "..."}
           </span>
+          {cutOff != null && (
+            <span
+              className="rounded-sm bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+              data-testid="tool-call-row-limit"
+            >
+              first {cutOff.toLocaleString()} rows only
+            </span>
+          )}
           {hasChildren && !isNested && !isSubagentCard && (
             <span className="ml-auto rounded-sm bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
               {childParts.length} {childParts.length === 1 ? "call" : "calls"}
@@ -873,7 +911,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
       />
     ))
 
-  type RenderedPart = { node: React.ReactNode; step: boolean; label?: string; pending?: boolean; failed?: boolean }
+  type RenderedPart = { node: React.ReactNode; step: boolean; label?: string; pending?: boolean; failed?: boolean; cutOff?: boolean }
   const rendered: RenderedPart[] = message.parts.map((part, i): RenderedPart => {
     if (part.type === "text") {
       if (!part.text.trim()) return { node: null, step: false }
@@ -931,6 +969,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
         label: displayToolName(toolName),
         pending: toolPart.state === "input-streaming" || toolPart.state === "input-available",
         failed: toolPart.state === "output-error",
+        cutOff: toolPart.state === "output-available" && toolRowLimitCutOff(toolName, toolPart.output) != null,
       }
     }
 
@@ -986,11 +1025,13 @@ function ChatStepsGroup({
   steps,
   isLive,
 }: {
-  steps: { node: React.ReactNode; label?: string; pending?: boolean; failed?: boolean }[]
+  steps: { node: React.ReactNode; label?: string; pending?: boolean; failed?: boolean; cutOff?: boolean }[]
   isLive: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const failedCount = steps.filter((s) => s.failed).length
+  // Steps start folded, so a cut-off result must say so here or it reads as complete (#969).
+  const cutOffCount = steps.filter((s) => s.cutOff).length
   const current = isLive ? [...steps].reverse().find((s) => s.pending) : undefined
 
   return (
@@ -1010,6 +1051,11 @@ function ChatStepsGroup({
         <Wrench className="w-3 h-3 shrink-0" />
         <span>{steps.length} {steps.length === 1 ? "step" : "steps"}</span>
         {failedCount > 0 && <span className="text-destructive">· {failedCount} failed</span>}
+        {cutOffCount > 0 && (
+          <span className="text-amber-600 dark:text-amber-400" data-testid="chat-steps-row-limit">
+            · {cutOffCount === 1 ? "1 result" : `${cutOffCount} results`} cut off at the row limit
+          </span>
+        )}
         {current && !expanded && (
           <span className="truncate" data-testid="chat-steps-current">· {current.label}...</span>
         )}

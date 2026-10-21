@@ -558,6 +558,25 @@ describe("ChatMessage collapsed steps", () => {
       parts: [toolPart("t1"), toolPart("t2", state), { type: "text", text: "The answer is 1." }],
     }) as unknown as UIMessage
 
+  it("flags a result cut off at the row limit on the folded steps and its card (#969)", () => {
+    const cut = {
+      ...toolPart("t1"),
+      output: JSON.stringify({
+        success: true,
+        data: { columns: ["a"], rows: [[1]], row_count: 1, truncated: true, row_limit: 1 },
+      }),
+    }
+    const msg = { id: "m", role: "assistant", parts: [cut, toolPart("t2")] } as unknown as UIMessage
+    useAppStore.setState({ activeDomainId: "ws1", domains: [{ id: "ws1", role: "read_write" }] } as never)
+    baseRender(<ChatMessage message={msg} isActiveMessage={false} workspaceId="ws1" threadId="th1" />)
+
+    expect(screen.getByTestId("chat-steps-row-limit")).toHaveTextContent("1 result cut off at the row limit")
+    fireEvent.click(screen.getByTestId("chat-steps-toggle"))
+    expect(screen.getByTestId("tool-call-row-limit")).toHaveTextContent("first 1 rows only")
+    fireEvent.click(screen.getAllByTestId("tool-call-query")[0])
+    expect(screen.getByTestId("query-result-download-full")).toBeInTheDocument()
+  })
+
   it("hides tool calls behind a step count but keeps the answer visible", () => {
     baseRender(<ChatMessage message={message()} isActiveMessage={false} />)
     expect(screen.getByTestId("chat-steps-toggle")).toHaveTextContent("2 steps")

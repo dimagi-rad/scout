@@ -749,7 +749,14 @@ Dataset editing vocabulary:
 - Maximum rows per query: 500
 - Query timeout: 30 seconds
 
-When results are truncated, suggest adding filters or using aggregations to reduce the result size.
+When a result is cut off at the row limit, say so plainly and never present it as
+the complete result. Prefer filters or aggregations so the answer fits.
+""")
+        if interactive and write_capable:
+            stable_sections.append("""When a result was cut off at the row limit and the user needs every row, tell
+them the full result (up to 50,000 rows) can be downloaded as CSV from that
+query's result card, rather than paging through it in chat. The download re-runs
+the query as written, so a smaller limit you set yourself still applies.
 """)
 
     if interactive and canvas_write and write_capable:

@@ -7,7 +7,13 @@ from django.db.models import BooleanField, ExpressionWrapper, Q
 from django.db.models.functions import Now
 from django.http import JsonResponse
 
-from apps.chat import pending_requests, resume_stream
+from apps.artifacts.services.data_export import (
+    EXPORT_TIMEOUT_MESSAGE,
+    EXPORT_TIMEOUT_SECONDS,
+    acquire_export_lease,
+    export_error_response,
+)
+from apps.chat import pending_requests, query_export, resume_stream
 from apps.chat.artifact_links import (
     backfill_thread_artifact_links,
     latest_version_links,
@@ -29,7 +35,10 @@ from apps.chat.helpers import (
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import Thread, ThreadArtifact
 from apps.chat.titles import afill_blank_titles, afirst_user_message, short_thread_title
+from apps.common.capacity import busy_response, reraise_if_capacity
 from apps.common.http import parse_json_object
+from apps.semantic.services.query import raise_if_capacity_exhausted
+from apps.workspaces.models import WorkspaceRole
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -104,7 +113,12 @@ async def _list_threads(user, *, workspace_id):
 
 
 async def _load_thread_messages(thread_id) -> list[dict]:
-    """Load messages from checkpointer and convert to UI format.
+    """Load messages from checkpointer and convert to UI format."""
+    return langchain_messages_to_ui(await _load_checkpoint_messages(thread_id))
+
+
+async def _load_checkpoint_messages(thread_id) -> list:
+    """Load the thread's LangChain messages from the checkpointer.
 
     Raises ``CheckpointerUnavailable`` on a checkpointer/DB error so the caller
     can return a non-200 error: an empty list is reserved for a thread that is
@@ -123,8 +137,7 @@ async def _load_thread_messages(thread_id) -> list[dict]:
         return []
 
     checkpoint = checkpoint_tuple.checkpoint
-    lc_messages = (checkpoint.get("channel_values") or {}).get("messages", [])
-    return langchain_messages_to_ui(lc_messages)
+    return (checkpoint.get("channel_values") or {}).get("messages", [])
 
 
 @async_login_required
@@ -477,3 +490,81 @@ async def thread_resume_stream_view(request, workspace_id, thread_id):
         return JsonResponse({"error": "after must be an integer"}, status=400)
     chunks = await resume_stream.aread_after(thread.id, after)
     return JsonResponse({"chunks": chunks, "more": len(chunks) >= resume_stream.READ_LIMIT})
+
+
+@async_login_required
+async def thread_tool_call_export_view(request, workspace_id, thread_id, tool_call_id):
+    """
+    POST /api/workspaces/<workspace_id>/threads/<thread_id>/tool-calls/<tool_call_id>/export/csv/
+
+    Streams the full result of one chat ``query``/``semantic_query`` call as CSV,
+    capped at EXPORT_ROW_LIMIT rows (#969). Bulk download takes READ_WRITE, as the
+    artifact data export does. POST only, for CSRF: the session cookie is SameSite=None.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    user = request._authenticated_user
+    workspace, err = await aresolve_workspace(
+        user, workspace_id, minimum_role=WorkspaceRole.READ_WRITE
+    )
+    if err:
+        return err
+    thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
+    if thread is None:
+        return JsonResponse({"error": "Thread not found"}, status=404)
+    try:
+        messages = await _load_checkpoint_messages(thread_id)
+    except CheckpointerUnavailable:
+        return JsonResponse(
+            {"error": "Conversation history is temporarily unavailable. Please try again."},
+            status=503,
+        )
+    call = query_export.find_exportable_call(messages, tool_call_id)
+    if call is None or not query_export.is_tool_call_id(tool_call_id):
+        return JsonResponse({"error": "Query not found in this conversation."}, status=404)
+
+    lease = await acquire_export_lease(workspace.id)
+    if lease is None:
+        return busy_response()
+    handed_off = False
+    try:
+        try:
+            try:
+                result = await query_export.run_full_result(workspace, call, user_id=str(user.id))
+            finally:
+                await lease.arelease_lock()
+        except TimeoutError:
+            logger.warning(
+                "Chat query export timed out after %ss: thread=%s tool_call=%r",
+                EXPORT_TIMEOUT_SECONDS,
+                thread.id,
+                query_export.log_safe(tool_call_id),
+            )
+            return JsonResponse({"error": EXPORT_TIMEOUT_MESSAGE}, status=504)
+        except query_export.DataUnavailable:
+            return JsonResponse({"error": query_export.DATA_UNAVAILABLE_MESSAGE}, status=409)
+        except Exception as exc:
+            reraise_if_capacity(exc)
+            logger.exception("Chat query export failed: thread=%s", thread.id)
+            return JsonResponse({"error": "The export query failed."}, status=500)
+        if call.name == query_export.SQL_TOOL:
+            if result.get("success") is False:
+                return query_export.sql_error_response(result.get("error"))
+        else:
+            raise_if_capacity_exhausted(result)
+            if result.get("error"):
+                return export_error_response(result["error"])
+        response = await query_export.csv_response(
+            user=user,
+            thread=thread,
+            tool_call_id=tool_call_id,
+            call=call,
+            result=result,
+            lease=lease,
+        )
+        handed_off = True
+        return response
+    finally:
+        if not handed_off:
+            lease.release()
