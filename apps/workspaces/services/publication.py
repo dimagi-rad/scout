@@ -37,6 +37,7 @@ from apps.workspaces.services.schema_manager import (
     SchemaManager,
     ViewSchemaRetired,
 )
+from apps.workspaces.services.tenant_coverage import coverage_lists_tenant
 from apps.workspaces.task_dispatch import (
     adefer_rebuild_workspace_semantic_model,
     adefer_rebuild_workspace_view_schema,
@@ -110,15 +111,20 @@ async def rebuild_dependent_view_schemas(
 
     ``skip_serving_tenant_id`` leaves out workspaces whose ACTIVE view schema
     already includes that tenant; only a caller that knows those views read a
-    current schema of the tenant may pass it.
+    current schema of the tenant may pass it. The skip is per workspace, so it
+    must be the only tenant rebuilt.
     """
+    if skip_serving_tenant_id is not None and [str(t) for t in tenant_ids] != [
+        str(skip_serving_tenant_id)
+    ]:
+        raise ValueError("skip_serving_tenant_id must be the only tenant rebuilt")
     workspaces = _dependent_view_schema_workspaces(tenant_ids, exclude_workspace_id)
     if skip_serving_tenant_id is not None:
         workspaces = workspaces.exclude(
             view_schema__state=SchemaState.ACTIVE,
-            view_schema__tenant_coverage__contains={
-                "included_tenants": [{"tenant_id": str(skip_serving_tenant_id)}]
-            },
+            view_schema__tenant_coverage__contains=coverage_lists_tenant(
+                "included_tenants", skip_serving_tenant_id
+            ),
         )
     async for ws_id in workspaces.values_list("id", flat=True).aiterator():
         try:

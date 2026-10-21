@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -552,6 +553,16 @@ async def test_refresh_teardown_skip_is_per_workspace(tenant, user):
         await teardown_schema(schema_id=str(old_schema.id))
 
     mock_rebuild.assert_awaited_once_with(workspace_id=str(workspaces["legacy"].id))
+
+
+@pytest.mark.asyncio
+async def test_skip_serving_tenant_refuses_a_multi_tenant_rebuild():
+    """The skip drops whole workspaces, so it cannot also stand for other tenants."""
+    with pytest.raises(ValueError, match="only tenant"):
+        serving = uuid.uuid4()
+        await rebuild_dependent_view_schemas(
+            [serving, uuid.uuid4()], skip_serving_tenant_id=serving
+        )
 
 
 @pytest.mark.parametrize("retiring_state", [SchemaState.TEARDOWN, SchemaState.EXPIRED])

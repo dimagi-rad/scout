@@ -53,6 +53,7 @@ from apps.workspaces.services.refresh_requests import (
     settle_finished_refresh_candidates,
 )
 from apps.workspaces.services.schema_manager import SchemaManager, SchemaStillReferenced
+from apps.workspaces.services.tenant_coverage import coverage_lists_tenant
 from apps.workspaces.task_dispatch import (
     adefer_rebuild_workspace_view_schema,
     adefer_teardown_schema,
@@ -803,8 +804,8 @@ async def _fail_dependent_view_schemas(tenant_id) -> int:
     # here, since re-materializing the torn-down tenant IS the fix.
     # Older builds have no coverage record; conservatively retain their legacy
     # invalidation. Explicitly excluded sources have no views to cascade-drop.
-    excluded = Q(tenant_coverage__contains={"excluded_tenants": [{"tenant_id": str(tenant_id)}]})
-    included = Q(tenant_coverage__contains={"included_tenants": [{"tenant_id": str(tenant_id)}]})
+    excluded = Q(tenant_coverage__contains=coverage_lists_tenant("excluded_tenants", tenant_id))
+    included = Q(tenant_coverage__contains=coverage_lists_tenant("included_tenants", tenant_id))
     return (
         await WorkspaceViewSchema.objects.filter(
             workspace_id__in=dependent_workspace_ids,
