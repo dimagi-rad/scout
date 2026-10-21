@@ -521,7 +521,7 @@ async def thread_tool_call_export_view(request, workspace_id, thread_id, tool_ca
             status=503,
         )
     call = query_export.find_exportable_call(messages, tool_call_id)
-    if call is None:
+    if call is None or not query_export.is_tool_call_id(tool_call_id):
         return JsonResponse({"error": "Query not found in this conversation."}, status=404)
 
     lease = await acquire_export_lease(workspace.id)
@@ -542,8 +542,8 @@ async def thread_tool_call_export_view(request, workspace_id, thread_id, tool_ca
                 tool_call_id,
             )
             return JsonResponse({"error": EXPORT_TIMEOUT_MESSAGE}, status=504)
-        except query_export.DataUnavailable as exc:
-            return JsonResponse({"error": str(exc)}, status=409)
+        except query_export.DataUnavailable:
+            return JsonResponse({"error": query_export.DATA_UNAVAILABLE_MESSAGE}, status=409)
         except Exception as exc:
             reraise_if_capacity(exc)
             logger.exception("Chat query export failed: thread=%s", thread.id)

@@ -16,7 +16,7 @@ from apps.artifacts.tests.test_artifact_data_export import (
     _workspace,
 )
 from apps.chat.models import Thread
-from apps.chat.query_export import semantic_export_spec
+from apps.chat.query_export import DATA_UNAVAILABLE_MESSAGE, semantic_export_spec
 from apps.common.errors import DataNotLoaded
 from apps.semantic.services.query import MAX_SEMANTIC_LIMIT
 from apps.workspaces.models import WorkspaceRole
@@ -221,7 +221,8 @@ async def test_a_workspace_whose_data_expired_answers_conflict(workspace, thread
     ):
         response = await writer_client.post(_url(workspace, thread))
     assert response.status_code == 409
-    assert response.json()["error"] == "No active data schema."
+    # A fixed message: the loader's own text names workspace ids and settings.
+    assert response.json()["error"] == DATA_UNAVAILABLE_MESSAGE
     execute.assert_not_awaited()
 
 

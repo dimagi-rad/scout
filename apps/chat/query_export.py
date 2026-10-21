@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -45,7 +46,6 @@ from mcp_server.context import load_workspace_context
 from mcp_server.envelope import CAPACITY_EXHAUSTED, CONNECTION_ERROR, QUERY_TIMEOUT
 from mcp_server.services.query import execute_query
 
-logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("scout.export.audit")
 
 SQL_TOOL = "query"
@@ -53,6 +53,13 @@ SEMANTIC_TOOL = "semantic_query"
 EXPORTABLE_TOOLS = frozenset({SQL_TOOL, SEMANTIC_TOOL})
 # The chat tool's 30s fits 500 rows; the whole result can take longer to read.
 SQL_EXPORT_STATEMENT_TIMEOUT_SECONDS = 60
+DATA_UNAVAILABLE_MESSAGE = "This workspace's data is not loaded. Refresh it and try again."
+# Model-issued ids (toolu_…, call_…). Checked before the id reaches a log line.
+_TOOL_CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def is_tool_call_id(value: str) -> bool:
+    return _TOOL_CALL_ID.fullmatch(value) is not None
 
 
 @dataclass(frozen=True)
