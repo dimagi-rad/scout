@@ -240,18 +240,6 @@ def _persist_api_key_connection(
     return rows, conn.id
 
 
-async def _aschedule_api_key_probes(user) -> None:
-    """Queue the probe for each OCS API key, which nothing else re-lists (#971).
-
-    The probe's cooldown keeps this to one run per key per cooldown, however
-    often the list is polled.
-    """
-    async for connection_id in TenantConnection.objects.filter(
-        user=user, provider="ocs", credential_type=TenantConnection.API_KEY
-    ).values_list("id", flat=True):
-        await aschedule_ocs_probe(connection_id)
-
-
 def _attributes(tm: TenantMembership) -> dict:
     """The tenant's filter hints, plus the OCS team this member reaches it through.
 
@@ -277,7 +265,6 @@ async def tenant_list_view(request):
     user = request._authenticated_user
 
     await _arefresh_all_identities(user, force=request.GET.get("refresh") == "1")
-    await _aschedule_api_key_probes(user)
 
     memberships = []
     # Not Meta.ordering: -last_selected_at sorts never-selected (NULL) rows first (#357).

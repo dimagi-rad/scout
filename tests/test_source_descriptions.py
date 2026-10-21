@@ -282,28 +282,48 @@ async def test_a_failed_activity_list_still_records_descriptions(user, ocs_sessi
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_tenant_list_queues_a_probe_for_each_ocs_api_key(user, mocker):
-    mocker.patch("apps.users.views._arefresh_all_identities", AsyncMock())
-    schedule = mocker.patch("apps.users.views.aschedule_ocs_probe", AsyncMock())
-    conn, _bot = await _api_key_bot(user)
-    await TenantConnection.objects.acreate(
-        user=user,
-        provider="ocs",
-        credential_type=TenantConnection.OAUTH,
-        scope_key="team",
+async def test_a_freshly_listed_key_skips_the_activity_list(user, ocs_sessions):
+    checked_at = timezone.now().isoformat()
+    conn, _bot = await _api_key_bot(
+        user, provider_attributes={"last_activity_at": None, "activity_checked_at": checked_at}
     )
-    await TenantConnection.objects.acreate(
+    ocs_sessions["bot"] = _Response(200, {"results": []})
+
+    await aprobe_connection_chatbots(str(conn.id), "https://ocs.example.com")
+
+    (call,) = ocs_sessions.client.get.await_args_list
+    assert call.args[0] == "https://ocs.example.com/api/sessions/"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_hourly_sweep_queues_a_probe_for_each_live_ocs_api_key(user, other_user, mocker):
+    schedule = mocker.patch("apps.users.tasks.aschedule_ocs_probe", AsyncMock())
+    mine, _bot = await _api_key_bot(user)
+    theirs, _their_bot = await _api_key_bot(other_user, external_id="their-bot")
+    archived, _archived_bot = await _api_key_bot(user, external_id="gone")
+    await TenantMembership.all_objects.filter(connection=archived).aupdate(
+        archived_at=timezone.now()
+    )
+    oauth = await TenantConnection.objects.acreate(
+        user=user, provider="ocs", credential_type=TenantConnection.OAUTH, scope_key="team"
+    )
+    commcare = await TenantConnection.objects.acreate(
         user=user,
         provider="commcare",
         credential_type=TenantConnection.API_KEY,
         encrypted_credential=encrypt_credential("other-key"),
     )
-    client = AsyncClient()
-    await client.aforce_login(user)
+    for conn in (oauth, commcare):
+        tenant = await Tenant.objects.acreate(
+            provider=conn.provider, external_id=f"via-{conn.id}", canonical_name="T"
+        )
+        await TenantMembership.objects.acreate(user=user, tenant=tenant, connection=conn)
 
-    await client.get("/api/auth/tenants/")
+    await users_tasks.schedule_ocs_api_key_probes()
 
-    schedule.assert_awaited_once_with(conn.id)
+    queued = sorted(str(call.args[0]) for call in schedule.await_args_list)
+    assert queued == sorted([str(mine.id), str(theirs.id)])
 
 
 @pytest.mark.asyncio
@@ -362,6 +382,11 @@ async def test_connection_probe_never_renews_a_near_expiry_oauth_token(user, ocs
     await aprobe_connection_chatbots(str(conn.id), "https://ocs.example.com")
 
     assert ocs_sessions.client.get.await_args.kwargs["headers"] == {"Authorization": "Bearer t"}
+    # OAuth discovery already re-lists the team; the probe must not spend v2 on it.
+    assert all(
+        call.args[0] == "https://ocs.example.com/api/sessions/"
+        for call in ocs_sessions.client.get.await_args_list
+    )
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.credential_resolver import (
@@ -45,6 +46,7 @@ _OCS_PROBE_TIMEOUT_SECONDS = 10.0
 _OCS_LIST_BUDGET_SECONDS = 60.0
 _OCS_LIST_MAX_PAGES = 100
 _OCS_LIST_TIMEOUT_SECONDS = 30.0
+_OCS_ACTIVITY_FRESH = timedelta(hours=1)
 # Enough for every request of one probe to go out on a token that is still valid.
 _TOKEN_MARGIN = timedelta(seconds=_OCS_PROBE_BUDGET_SECONDS + _OCS_PROBE_TIMEOUT_SECONDS)
 
@@ -160,16 +162,27 @@ async def arecord_ocs_descriptions(
         logger.warning("Could not record OCS chatbot descriptions", exc_info=True)
 
 
-async def arecord_ocs_activity(base_url: str, api_key: str, tenant_ids: Mapping[str, Any]) -> None:
+def _activity_is_fresh(tenant: Tenant, now) -> bool:
+    checked = (tenant.provider_attributes or {}).get("activity_checked_at")
+    checked_at = parse_datetime(checked) if isinstance(checked, str) else None
+    return checked_at is not None and now - checked_at < _OCS_ACTIVITY_FRESH
+
+
+async def arecord_ocs_activity(base_url: str, api_key: str, tenants: Iterable[Tenant]) -> None:
     """Refresh each reached chatbot's last activity from OCS's v2 list; never raises.
 
-    ``tenant_ids`` maps a chatbot's external id to its Tenant pk; a chatbot the
-    list adds is left to the next onboarding, and one it omits keeps what it had.
+    A chatbot the list adds is left to the next onboarding, and one it omits
+    keeps what it had.
     """
+    by_external_id = {tenant.external_id: tenant for tenant in tenants}
     request = ocs_listing.list_request(
         base_url, TenantConnection.API_KEY, api_key, path=ocs_listing.DISCOVERY_PATH
     )
     try:
+        now = timezone.now()
+        # Onboarding has just listed them, and v2 is a slow page on the key's rate limit.
+        if all(_activity_is_fresh(tenant, now) for tenant in by_external_id.values()):
+            return
         async with httpx.AsyncClient() as client:
             listed = await list_tenants(
                 client,
@@ -179,13 +192,16 @@ async def arecord_ocs_activity(base_url: str, api_key: str, tenant_ids: Mapping[
                 max_pages=_OCS_LIST_MAX_PAGES,
                 request_timeout=_OCS_LIST_TIMEOUT_SECONDS,
             )
+        refreshed = []
         for chatbot in listed:
-            tenant_id = tenant_ids.get(chatbot.external_id)
-            if tenant_id is None or chatbot.attributes is None:
+            tenant = by_external_id.get(chatbot.external_id)
+            if tenant is None or chatbot.attributes is None:
                 continue
-            await Tenant.objects.filter(id=tenant_id).aupdate(
-                provider_attributes=dict(chatbot.attributes), updated_at=timezone.now()
-            )
+            tenant.provider_attributes = dict(chatbot.attributes)
+            # bulk_update skips auto_now.
+            tenant.updated_at = timezone.now()
+            refreshed.append(tenant)
+        await Tenant.objects.abulk_update(refreshed, ["provider_attributes", "updated_at"])
     except Exception:
         logger.warning("Could not refresh OCS chatbot activity", exc_info=True)
 
@@ -234,9 +250,7 @@ async def aprobe_connection_chatbots(connection_id: str, base_url: str) -> None:
         return
     if memberships[0].connection.credential_type == TenantConnection.API_KEY:
         await arecord_ocs_activity(
-            base_url,
-            headers["X-api-key"],
-            {tm.tenant.external_id: tm.tenant_id for tm in memberships},
+            base_url, headers["X-api-key"], [tm.tenant for tm in memberships]
         )
     # Undescribed chatbots first, so a budget that runs out spends itself on news;
     # shuffled within that, so chatbots that never yield one cannot hold the front.
