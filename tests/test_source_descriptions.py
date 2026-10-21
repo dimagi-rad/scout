@@ -281,6 +281,32 @@ async def test_a_failed_activity_list_still_records_descriptions(user, ocs_sessi
 
 
 @pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_tenant_list_queues_a_probe_for_each_ocs_api_key(user, mocker):
+    mocker.patch("apps.users.views._arefresh_all_identities", AsyncMock())
+    schedule = mocker.patch("apps.users.views.aschedule_ocs_probe", AsyncMock())
+    conn, _bot = await _api_key_bot(user)
+    await TenantConnection.objects.acreate(
+        user=user,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+        scope_key="team",
+    )
+    await TenantConnection.objects.acreate(
+        user=user,
+        provider="commcare",
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential("other-key"),
+    )
+    client = AsyncClient()
+    await client.aforce_login(user)
+
+    await client.get("/api/auth/tenants/")
+
+    schedule.assert_awaited_once_with(conn.id)
+
+
+@pytest.mark.asyncio
 async def test_probe_gives_up_at_its_budget(ocs_sessions, monkeypatch):
     monkeypatch.setattr(source_descriptions, "_OCS_PROBE_BUDGET_SECONDS", 0.05)
     hang = asyncio.Event()
