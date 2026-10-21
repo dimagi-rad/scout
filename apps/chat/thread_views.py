@@ -15,7 +15,7 @@ from apps.chat.artifact_links import (
 )
 from apps.chat.attachments import (
     abind_to_thread,
-    amark_sent,
+    amark_held,
     aresolve_for_send,
     attachment_ids_from_parts,
     aunbind,
@@ -332,8 +332,14 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
         or len(part_id) > pending_requests.MAX_PART_ID_LENGTH
     ):
         return JsonResponse({"error": "id must be a non-empty string"}, status=400)
-    if not isinstance(files, list):
-        return JsonResponse({"error": "files must be a list"}, status=400)
+    # Every entry must be a file part: one without its type would be skipped silently.
+    if not isinstance(files, list) or not all(
+        isinstance(f, dict) and f.get("type") == "file" for f in files
+    ):
+        return JsonResponse(
+            {"error": "files must be a list of file parts", "reason": "attachment_invalid"},
+            status=400,
+        )
     attachment_ids, error = attachment_ids_from_parts(files)
     if error:
         return JsonResponse({"error": error, "reason": "attachment_invalid"}, status=400)
@@ -376,7 +382,7 @@ async def thread_pending_request_parts_view(request, workspace_id, thread_id):
     dropped = set(uncarried(newly_bound, pending))
     await _unbind_quietly(list(dropped), thread)
     try:
-        await amark_sent([i for i in attachment_ids if i not in dropped], user=user, thread=thread)
+        await amark_held([i for i in attachment_ids if i not in dropped], user=user, thread=thread)
     except Exception:
         logger.warning("Could not mark attachments of thread %s sent", thread.id, exc_info=True)
     return JsonResponse(pending)

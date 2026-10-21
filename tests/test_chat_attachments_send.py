@@ -726,3 +726,22 @@ def test_a_repeated_attachment_counts_once():
     same = {"type": "file", "url": attachment_url(uuid.uuid4())}
     ids, error = attachment_ids_from_parts([same] * 3)
     assert error is None and len(ids) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_parts_endpoint_refuses_a_file_without_its_type(user, workspace):
+    thread = await Thread.objects.acreate(user=user, workspace=workspace)
+    await PendingRequest.objects.acreate(
+        thread=thread, parts=[pending_requests._new_part("p1", "q")]
+    )
+    client = await _client(user)
+    resp = await client.post(
+        f"/api/workspaces/{workspace.id}/threads/{thread.id}/pending-request/parts/",
+        data=json.dumps(
+            {"id": "p2", "text": "x", "files": [{"url": attachment_url(uuid.uuid4())}]}
+        ),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert resp.json()["reason"] == "attachment_invalid"
