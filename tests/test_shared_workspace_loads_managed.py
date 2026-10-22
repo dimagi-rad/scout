@@ -91,7 +91,9 @@ async def test_siblings_read_last_good_through_a_shared_load_until_they_rebuild(
     old_shared = await TenantSchema.objects.aget(tenant=tenants["s"], state=SchemaState.ACTIVE)
     during_load = []
 
-    def fetch(membership, credential, pipeline, job_id, target_schema=None, _lists=None):
+    def fetch(
+        membership, credential, pipeline, job_id, target_schema=None, connect_opportunity_lists=None
+    ):
         owned_names.append(target_schema.schema_name)
         if membership.tenant_id == tenants["s"].id:
             during_load.append(

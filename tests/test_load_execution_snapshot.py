@@ -54,7 +54,7 @@ def test_pipeline_uses_snapshot_across_registry_and_asset_edits(tenant, mutate_r
     source_names = []
     phases = []
 
-    def discover(_membership, _credential, config):
+    def discover(_membership, _credential, config, _connect_opportunity_lists=None):
         versions.append(config.version)
         TransformationAsset.objects.filter(pk=asset.pk).update(sql_content="select 2")
         TransformationAsset.objects.filter(pk=system_asset.pk).update(sql_content="select 20")
