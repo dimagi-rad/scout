@@ -215,18 +215,26 @@ def test_changed_relationship_updates_only_that_row(refresh, workspace):
 def test_refresh_locks_the_rows_it_diffs(refresh, workspace):
     """A canvas commit skips the model lock, so the rows themselves must be held."""
     refresh(_tables(_columns()))
+    SemanticRelationship.objects.create(
+        workspace=workspace,
+        name="hand_authored",
+        from_dataset=SemanticDataset.objects.get(workspace=workspace, name="raw_visits"),
+        to_dataset=SemanticDataset.objects.get(workspace=workspace, name="raw_users"),
+        relationship_type="many_to_one",
+    )
 
     with CaptureQueriesContext(connection) as ctx:
         refresh(_tables(_columns()))
 
-    for table in (
-        "semantic_semanticfield",
-        "semantic_semanticdataset",
-        "semantic_semanticrelationship",
+    locks = [
+        query["sql"]
+        for query in ctx.captured_queries
+        if query["sql"].startswith("SELECT") and query["sql"].endswith("FOR UPDATE")
+    ]
+    for table, scope in (
+        ("semantic_semanticfield", '"semantic_semanticfield"."dataset_id" IN'),
+        ("semantic_semanticdataset", '"semantic_semanticdataset"."name" IN'),
+        # Hand-authored relationships are never written, so they stay unlocked.
+        ("semantic_semanticrelationship", 'NOT ("semantic_semanticrelationship"."name" IN'),
     ):
-        assert any(
-            query["sql"].startswith("SELECT")
-            and f'FROM "{table}"' in query["sql"]
-            and query["sql"].endswith("FOR UPDATE")
-            for query in ctx.captured_queries
-        ), table
+        assert any(f'FROM "{table}"' in sql and scope in sql for sql in locks), table

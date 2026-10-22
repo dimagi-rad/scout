@@ -817,16 +817,19 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
         )
 
     active_names: set[str] = set()
-    relationships_by_name = {
-        relationship.name: relationship
-        for relationship in SemanticRelationship.objects.select_for_update().filter(
-            workspace=workspace
-        )
-    }
     curated_names = {
         name
-        for name, relationship in relationships_by_name.items()
-        if not (relationship.metadata or {}).get("generated")
+        for name, metadata in SemanticRelationship.objects.filter(workspace=workspace).values_list(
+            "name", "metadata"
+        )
+        if not (metadata or {}).get("generated")
+    }
+    # Curated rows are never written here, so only the generated ones are locked.
+    relationships_by_name = {
+        relationship.name: relationship
+        for relationship in SemanticRelationship.objects.select_for_update()
+        .filter(workspace=workspace)
+        .exclude(name__in=curated_names)
     }
     relationship_writer = _RowWriter(SemanticRelationship)
     for pipeline in get_registry().list():
@@ -987,6 +990,7 @@ def _sync_fields(
     *,
     provider: str = "",
 ) -> None:
+    """Sync one dataset's fields now; its field rows stay locked until the caller commits."""
     with transaction.atomic():
         field_sync = _FieldSync([dataset])
         _derive_fields(field_sync, dataset, columns, annotation, provider=provider)
