@@ -146,28 +146,48 @@ def test_changed_column_updates_only_its_field(refresh, workspace):
     assert field.updated_at > before[field.pk]["updated_at"]
 
 
-def test_new_column_inserts_and_removed_column_hides(refresh, workspace):
+def test_new_column_inserts_and_dropped_fields_follow_the_old_sweep(refresh, workspace):
+    """Hide exactly what ``exclude(metadata__source="canvas")`` hid, NULL logic included."""
     refresh(_tables(_columns()))
+    visits = SemanticDataset.objects.get(workspace=workspace, name="raw_visits")
+    for name, metadata in (
+        ("legacy_no_source", {}),
+        ("legacy_canvas", {"source": "canvas"}),
+        ("legacy_import", {"source": "import"}),
+        ("legacy_json_null", {"source": None}),
+    ):
+        SemanticField.objects.create(
+            dataset=visits,
+            name=name,
+            field_type=SemanticField.FieldType.DIMENSION,
+            expression=name,
+            metadata=metadata,
+        )
+    stale = {"col_3", "sum_col_3", "avg_col_3"} | {
+        name for name in visits.fields.values_list("name", flat=True) if name.startswith("legacy_")
+    }
+    old_sweep = set(
+        visits.fields.filter(name__in=stale)
+        .exclude(metadata__source="canvas")
+        .values_list("name", flat=True)
+    )
     before = _snapshot(SemanticField, dataset__workspace=workspace)
 
     refresh(_tables(_columns(drop={"col_3"}, extra=[{"name": "added", "type": "text"}])))
 
-    visits = SemanticDataset.objects.get(workspace=workspace, name="raw_visits")
     by_name = {field.name: field for field in visits.fields.all()}
     assert by_name["added"].is_visible
     assert by_name["added"].expression == "added"
     hidden = {name for name, field in by_name.items() if not field.is_visible}
-    assert hidden == {"col_3", "sum_col_3", "avg_col_3"}
-    for name in hidden:
+    # Fields with no ``source`` (dropped columns included) stay visible, as on main.
+    assert hidden == old_sweep == {"legacy_import", "legacy_json_null"}
+    for name in stale:
         # A plain hide, as before: it does not count as an edit of the field.
         assert by_name[name].updated_at == before[by_name[name].pk]["updated_at"]
 
-    refresh(_tables(_columns()))
-    by_name = {field.name: field for field in visits.fields.all()}
-    assert all(by_name[name].is_visible for name in hidden)
 
-
-def test_curated_field_keeps_its_curation(refresh, workspace):
+@pytest.mark.parametrize("source", ["canvas", "import", None])
+def test_curated_field_keeps_its_curation(refresh, workspace, source):
     refresh(_tables(_columns()))
     field = SemanticField.objects.get(dataset__workspace=workspace, name="col_2")
     field.label = "Curated label"
@@ -176,7 +196,7 @@ def test_curated_field_keeps_its_curation(refresh, workspace):
         **field.metadata,
         "curated_fields": ["description", "format", "label"],
         "format": "percent",
-        "source": "canvas",
+        **({"source": source} if source else {}),
     }
     field.save()
     curated = _snapshot(SemanticField, pk=field.pk)[field.pk]
@@ -186,12 +206,13 @@ def test_curated_field_keeps_its_curation(refresh, workspace):
 
     refresh(_tables(_columns({"col_2": {"description": "From the warehouse", "type": "date"}})))
     field.refresh_from_db()
+    assert field.is_visible
     assert field.label == "Curated label"
     assert field.description == "Curated description"
     assert field.data_type == "date"
     assert field.metadata["curated_fields"] == ["description", "format", "label"]
     assert field.metadata["format"] == "percent"
-    assert field.metadata["source"] == "canvas"
+    assert field.metadata.get("source") == source
 
 
 def test_changed_relationship_updates_only_that_row(refresh, workspace):

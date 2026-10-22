@@ -937,6 +937,18 @@ def _relationship_key_type(data_type: str) -> str | None:
     return None
 
 
+def _stale_sweep_hides(field: SemanticField) -> bool:
+    """Whether the replaced ``exclude(metadata__source="canvas")`` sweep hid ``field``.
+
+    Mirrors its SQL exactly, three-valued logic included: with no ``source``
+    key, ``metadata -> 'source'`` is NULL and the row was never hidden, so a
+    column-derived field outlives its column. That gap is tracked separately;
+    a refresh must not start mass-hiding those fields as a side effect here.
+    """
+    metadata = field.metadata
+    return isinstance(metadata, dict) and "source" in metadata and metadata["source"] != "canvas"
+
+
 class _FieldSync:
     """Field writes for one or more datasets, diffed against their stored rows."""
 
@@ -966,14 +978,8 @@ class _FieldSync:
             self._hidden.pop(field.pk, None)
 
     def hide_stale(self, dataset: SemanticDataset, active_names: set[str]) -> None:
-        # Canvas-created fields are user-authored, not column-derived: they never
-        # appear in active_names and must not be hidden by the refresh.
         for name, field in self._rows.get(dataset.pk, {}).items():
-            if (
-                name in active_names
-                or not field.is_visible
-                or (field.metadata or {}).get("source") == "canvas"
-            ):
+            if name in active_names or not field.is_visible or not _stale_sweep_hides(field):
                 continue
             field.is_visible = False
             if not self._writer.include_in_pending_write(field, "is_visible"):
