@@ -1342,6 +1342,39 @@ def test_canvas_commit_does_not_wait_for_a_catalog_refresh(
         holder.result(timeout=5)
 
 
+@pytest.mark.django_db(transaction=True)
+def test_canvas_commit_reports_a_refresh_holding_its_row(canvas, user):
+    """The refresh locks the rows it diffs; a commit must not stall behind it."""
+    apply_operations(
+        canvas, [{"op": "set", "target": "dataset/raw_visits/label", "value": "Visit label"}]
+    )
+    dataset_id = canvas.changes.get().object_uuid
+    locked = Event()
+    release = Event()
+
+    def hold_row_lock():
+        try:
+            with transaction.atomic():
+                SemanticDataset.objects.select_for_update().get(pk=dataset_id)
+                locked.set()
+                assert release.wait(5)
+        finally:
+            connections["default"].close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        holder = executor.submit(hold_row_lock)
+        try:
+            assert locked.wait(5)
+            result = commit_canvas(canvas, user)
+        finally:
+            release.set()
+        holder.result(timeout=5)
+
+    assert result["blocked"] is True
+    assert result["blocking_diagnostics"][0]["code"] == "CATALOG_CHANGED"
+    assert canvas.changes.get().fields == {"label": "Visit label"}
+
+
 def test_canvas_commit_blocks_model_deactivation_after_validation(
     canvas, pending_dataset_op, user, monkeypatch
 ):

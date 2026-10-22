@@ -274,7 +274,16 @@ def _locked_base(canvas, change):
         ObjectType.FIELD: SemanticField,
         ObjectType.RELATIONSHIP: SemanticRelationship,
     }[SemanticCanvasChange.ObjectType(change.object_type)]
-    obj = model_class.objects.select_for_update().filter(id=change.object_uuid).first()
+    try:
+        # NOWAIT: a catalog refresh holds the rows it diffs until it commits;
+        # report CATALOG_CHANGED rather than stall behind it or deadlock.
+        obj = (
+            model_class.objects.select_for_update(nowait=True).filter(id=change.object_uuid).first()
+        )
+    except OperationalError as exc:
+        if getattr(exc.__cause__, "sqlstate", None) == "55P03":
+            raise _CatalogChanged from exc
+        raise
     if obj is None or (change.base_fingerprint and obj.updated_at != change.base_fingerprint):
         raise _CommitConflict([_conflict_entry(canvas, change)])
     return obj
