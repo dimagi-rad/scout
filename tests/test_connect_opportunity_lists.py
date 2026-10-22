@@ -1,13 +1,21 @@
 """The Connect opportunity list is fetched once per job per credential (#918)."""
 
 import threading
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import requests_mock as rm
+from django.conf import settings
 
 from apps.common.errors import ConnectAccessDeniedError
+from apps.users.adapters import encrypt_credential
+from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.workspaces.models import WorkspaceTenant
+from apps.workspaces.services import materialize
 from mcp_server.loaders.connect_metadata import ConnectMetadataLoader, ConnectOpportunityLists
 from mcp_server.services import materializer
+from tests.pipeline_doubles import completed_pipeline_run
+from tests.tenant_access import USABLE_TEST_SECRET, grant_tenant_access, record_fresh_proof
 
 BASE = "https://connect.example.com"
 LIST_URL = f"{BASE}/export/opp_org_program_list/"
@@ -19,6 +27,11 @@ OPPORTUNITY_LIST = {
         {"id": 815, "name": "CHC Nutrition 2", "visit_count": 300},
     ],
 }
+
+
+@pytest.fixture(autouse=True)
+def _no_candidate_ddl(no_candidate_ddl):
+    """Shared stub: see tests.pipeline_doubles.no_candidate_ddl."""
 
 
 def _loader(opportunity_id, *, token="tok", lists=None, key=None):
@@ -144,3 +157,81 @@ def test_concurrent_loads_wait_for_the_first_fetch():
 
     assert len(calls) == 1
     assert results == [OPPORTUNITY_LIST] * 3
+
+
+def _connect_pipeline():
+    pipeline = MagicMock()
+    pipeline.provider = "commcare_connect"
+    pipeline.name = "connect_sync"
+    pipeline.has_metadata_discovery = True
+    registry = MagicMock()
+    registry.list.return_value = [pipeline]
+    registry.get.return_value = pipeline
+    return registry
+
+
+@pytest.fixture
+def connect_sources(user, workspace):
+    """Three Connect sources; the third signs in through a second connection."""
+    tenants = [
+        Tenant.objects.create(
+            provider="commcare_connect", external_id=str(opp), canonical_name=f"Opp {opp}"
+        )
+        for opp in (901, 902, 903)
+    ]
+    for tenant in tenants:
+        WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
+        grant_tenant_access(user, tenant)
+    other = TenantConnection.objects.create(
+        user=user,
+        provider="commcare_connect",
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential(USABLE_TEST_SECRET),
+    )
+    TenantMembership.objects.filter(user=user, tenant=tenants[2]).update(connection=other)
+    record_fresh_proof(other, tenants[2])
+    return tenants
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_job_fetches_the_list_once_per_credential(user, workspace, connect_sources):
+    base = settings.CONNECT_API_URL.rstrip("/")
+
+    async def credential_for(tm):
+        return {"type": "api_key", "value": f"connection-{tm.connection_id}"}
+
+    def fake_run_pipeline(
+        tm, credential, pipeline, *, target_schema, procrastinate_job_id, **kwargs
+    ):
+        if tm.tenant.provider == "commcare_connect":
+            materializer._run_discover_phase(
+                tm, credential, pipeline, kwargs["connect_opportunity_lists"]
+            )
+        return completed_pipeline_run(tm, credential, pipeline, procrastinate_job_id, target_schema)
+
+    with (
+        rm.Mocker(real_http=False) as m,
+        patch(
+            "apps.workspaces.services.materialize.aresolve_credential", side_effect=credential_for
+        ),
+        patch(
+            "apps.workspaces.services.materialize.get_registry", return_value=_connect_pipeline()
+        ),
+        patch("apps.workspaces.services.materialize.run_pipeline", side_effect=fake_run_pipeline),
+        patch("apps.workspaces.services.materialize.build_and_promote_cube_schema"),
+        patch("apps.workspaces.services.publication.rebuild_dependent_view_schemas", AsyncMock()),
+    ):
+        m.get(f"{base}/export/opp_org_program_list/", json=OPPORTUNITY_LIST)
+        for opp in (901, 902, 903):
+            m.get(f"{base}/export/opportunity/{opp}/", json={"id": opp})
+            m.get(f"{base}/export/opportunity/{opp}/app_structure/", json={})
+        await materialize.materialize_workspace_core(str(workspace.id), str(user.id), job_id=1)
+
+    list_auth = sorted(
+        r.headers["Authorization"] for r in _list_calls(m, f"{base}/export/opp_org_program_list/")
+    )
+    detail_calls = [r for r in m.request_history if r.path.endswith(("/901/", "/902/", "/903/"))]
+    assert len(detail_calls) == 3
+    assert len(list_auth) == 2
+    assert len(set(list_auth)) == 2
