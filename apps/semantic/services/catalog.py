@@ -436,16 +436,19 @@ def _assign_changes(row: models.Model, values: dict[str, Any]) -> list[str]:
     changed = []
     for key, value in values.items():
         field = row._meta.get_field(key)
+        attr = key
         if field.is_relation:
             current = getattr(row, field.attname)
             new = getattr(value, "pk", value)
+            if not isinstance(value, models.Model):
+                attr = field.attname
         elif isinstance(field, models.JSONField):
             current = getattr(row, key)
             value = new = json.loads(json.dumps(value))
         else:
             current, new = getattr(row, key), value
         if current != new:
-            setattr(row, key, value)
+            setattr(row, attr, value)
             changed.append(key)
     return changed
 
