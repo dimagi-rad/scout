@@ -438,7 +438,7 @@ def _assign_changes(row: models.Model, values: dict[str, Any]) -> list[str]:
         field = row._meta.get_field(key)
         if field.is_relation:
             current = getattr(row, field.attname)
-            new = value.pk if value is not None else None
+            new = getattr(value, "pk", value)
         elif isinstance(field, models.JSONField):
             current = getattr(row, key)
             value = new = json.loads(json.dumps(value))
@@ -474,8 +474,8 @@ class _RowWriter:
             self._update_fields.update(changed)
         return existing
 
-    def pending(self, row, field_name: str) -> bool:
-        """Whether ``row`` is already being written; if so, also write ``field_name``."""
+    def include_in_pending_write(self, row, field_name: str) -> bool:
+        """Add ``field_name`` to ``row``'s pending write; False when none is pending."""
         if row.pk in self._creates:
             return True
         if row.pk in self._updates:
@@ -576,13 +576,7 @@ def ensure_semantic_model(workspace) -> SemanticModel:
             )
             datasets_by_name[dataset_name] = dataset
             existing_physical_dataset_ids.add(str(dataset.id))
-            _sync_fields(
-                dataset,
-                table.columns,
-                annotation,
-                provider=table.provider,
-                field_sync=field_sync,
-            )
+            _derive_fields(field_sync, dataset, table.columns, annotation, provider=table.provider)
         dataset_writer.flush()
         field_sync.flush()
 
@@ -965,7 +959,7 @@ class _FieldSync:
             ):
                 continue
             field.is_visible = False
-            if not self._writer.pending(field, "is_visible"):
+            if not self._writer.include_in_pending_write(field, "is_visible"):
                 self._hidden[field.pk] = field
 
     def flush(self) -> None:
@@ -983,14 +977,21 @@ def _sync_fields(
     annotation,
     *,
     provider: str = "",
-    field_sync: _FieldSync | None = None,
 ) -> None:
-    """Derive ``dataset``'s fields from its columns; ``field_sync`` defers the writes."""
-    if field_sync is None:
-        field_sync = _FieldSync([dataset])
-        _sync_fields(dataset, columns, annotation, provider=provider, field_sync=field_sync)
-        field_sync.flush()
-        return
+    field_sync = _FieldSync([dataset])
+    _derive_fields(field_sync, dataset, columns, annotation, provider=provider)
+    field_sync.flush()
+
+
+def _derive_fields(
+    field_sync: _FieldSync,
+    dataset: SemanticDataset,
+    columns: list[dict[str, Any]],
+    annotation,
+    *,
+    provider: str = "",
+) -> None:
+    """Queue ``dataset``'s column-derived fields on ``field_sync``."""
     column_notes = annotation.column_notes if annotation else {}
     active_names: set[str] = set()
 

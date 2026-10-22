@@ -1,5 +1,6 @@
 """A catalog refresh writes only the rows whose derived values changed (#918)."""
 
+import dataclasses
 from unittest.mock import MagicMock
 
 import pytest
@@ -74,7 +75,8 @@ def refresh(monkeypatch, workspace):
     registry.list.return_value = [pipeline]
     monkeypatch.setattr(catalog_service, "get_registry", lambda: registry)
 
-    def run(tables):
+    def run(tables, relationships=(VISITS_TO_USERS,)):
+        pipeline.relationships = list(relationships)
         monkeypatch.setattr(
             catalog_service, "load_physical_tables", lambda _workspace: ("schema", tables)
         )
@@ -190,3 +192,21 @@ def test_curated_field_keeps_its_curation(refresh, workspace):
     assert field.metadata["curated_fields"] == ["description", "format", "label"]
     assert field.metadata["format"] == "percent"
     assert field.metadata["source"] == "canvas"
+
+
+def test_changed_relationship_updates_only_that_row(refresh, workspace):
+    refresh(_tables(_columns()))
+    before = SemanticRelationship.objects.get(workspace=workspace)
+
+    with CaptureQueriesContext(connection) as ctx:
+        refresh(
+            _tables(_columns()),
+            [dataclasses.replace(VISITS_TO_USERS, description="Each visit's user")],
+        )
+
+    assert len(_writes(ctx.captured_queries, "semantic_semanticrelationship")) == 1
+    after = SemanticRelationship.objects.get(workspace=workspace)
+    assert after.pk == before.pk
+    assert after.metadata == {**before.metadata, "description": "Each visit's user"}
+    assert after.join_expression == before.join_expression
+    assert after.updated_at > before.updated_at
