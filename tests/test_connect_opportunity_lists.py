@@ -13,6 +13,7 @@ from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.workspaces.models import WorkspaceTenant
 from apps.workspaces.services import materialize
 from mcp_server.loaders.connect_metadata import ConnectMetadataLoader, ConnectOpportunityLists
+from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
 from mcp_server.services import materializer
 from tests.pipeline_doubles import completed_pipeline_run
 from tests.tenant_access import USABLE_TEST_SECRET, grant_tenant_access, record_fresh_proof
@@ -235,3 +236,33 @@ async def test_a_job_fetches_the_list_once_per_credential(user, workspace, conne
     assert len(detail_calls) == 3
     assert len(list_auth) == 2
     assert len(set(list_auth)) == 2
+
+
+class _StopAfterDiscovery(Exception):
+    pass
+
+
+def test_run_pipeline_hands_the_job_lists_to_discovery():
+    pipeline = PipelineConfig(
+        name="connect_sync",
+        description="",
+        version="1.0",
+        provider="commcare_connect",
+        sources=[SourceConfig(name="visits")],
+    )
+    lists = ConnectOpportunityLists()
+    tm = MagicMock()
+    tm.tenant.external_id = "814"
+    with (
+        patch("mcp_server.services.materializer.SchemaManager"),
+        patch("mcp_server.services.materializer.MaterializationRun") as run_cls,
+        patch(
+            "mcp_server.services.materializer._run_discover_phase",
+            side_effect=_StopAfterDiscovery,
+        ) as discover,
+    ):
+        run_cls.objects.create.return_value.id = "run-1"
+        with pytest.raises(_StopAfterDiscovery):
+            materializer.run_pipeline(tm, {}, pipeline, connect_opportunity_lists=lists)
+
+    assert discover.call_args.args[3] is lists
