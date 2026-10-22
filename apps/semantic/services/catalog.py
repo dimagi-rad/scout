@@ -443,8 +443,10 @@ def _assign_changes(row: models.Model, values: dict[str, Any]) -> list[str]:
             if not isinstance(value, models.Model):
                 attr = field.attname
         elif isinstance(field, models.JSONField):
-            current = getattr(row, key)
-            value = new = json.loads(json.dumps(value))
+            value = json.loads(json.dumps(value))
+            # Canonical text, not ==: True == 1 == 1.0 in Python, not in jsonb.
+            current = json.dumps(getattr(row, key), sort_keys=True)
+            new = json.dumps(value, sort_keys=True)
         else:
             current, new = getattr(row, key), value
         if current != new:

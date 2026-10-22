@@ -215,6 +215,20 @@ def test_curated_field_keeps_its_curation(refresh, workspace, source):
     assert field.metadata.get("source") == source
 
 
+def test_json_change_between_equal_python_values_is_written(refresh, workspace):
+    """1 == 1.0 == True in Python, but jsonb stores each differently."""
+    refresh(_tables(_columns()))
+    field = SemanticField.objects.get(dataset__workspace=workspace, name="col_1")
+    stored = dict(field.metadata)
+    assert stored["nullable"] is None
+    SemanticField.objects.filter(pk=field.pk).update(metadata={**stored, "nullable": 1})
+
+    refresh(_tables(_columns({"col_1": {"nullable": True}})))
+
+    field.refresh_from_db()
+    assert field.metadata["nullable"] is True
+
+
 def test_changed_relationship_updates_only_that_row(refresh, workspace):
     refresh(_tables(_columns()))
     before = SemanticRelationship.objects.get(workspace=workspace)
