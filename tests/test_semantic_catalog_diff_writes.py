@@ -210,3 +210,23 @@ def test_changed_relationship_updates_only_that_row(refresh, workspace):
     assert after.metadata == {**before.metadata, "description": "Each visit's user"}
     assert after.join_expression == before.join_expression
     assert after.updated_at > before.updated_at
+
+
+def test_refresh_locks_the_rows_it_diffs(refresh, workspace):
+    """A canvas commit skips the model lock, so the rows themselves must be held."""
+    refresh(_tables(_columns()))
+
+    with CaptureQueriesContext(connection) as ctx:
+        refresh(_tables(_columns()))
+
+    for table in (
+        "semantic_semanticfield",
+        "semantic_semanticdataset",
+        "semantic_semanticrelationship",
+    ):
+        assert any(
+            query["sql"].startswith("SELECT")
+            and f'FROM "{table}"' in query["sql"]
+            and query["sql"].endswith("FOR UPDATE")
+            for query in ctx.captured_queries
+        ), table

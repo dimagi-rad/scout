@@ -523,9 +523,11 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                 workspace=workspace, table_name__in=[table.name for table in tables]
             )
         }
+        # Row locks, as update_or_create took: a canvas commit (which skips the
+        # model lock) must not land between this read and the bulk write.
         datasets_by_name = {
             dataset.name: dataset
-            for dataset in SemanticDataset.objects.filter(
+            for dataset in SemanticDataset.objects.select_for_update().filter(
                 workspace=workspace,
                 name__in={semantic_name(table.name, fallback="dataset") for table in tables},
             )
@@ -688,9 +690,11 @@ def _sync_custom_datasets(
             )
             continue
 
-        existing_custom = SemanticDataset.objects.filter(
-            workspace=workspace, name=custom.name
-        ).first()
+        existing_custom = (
+            SemanticDataset.objects.select_for_update()
+            .filter(workspace=workspace, name=custom.name)
+            .first()
+        )
         defaults = _apply_curation(
             existing_custom,
             {
@@ -815,7 +819,9 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
     active_names: set[str] = set()
     relationships_by_name = {
         relationship.name: relationship
-        for relationship in SemanticRelationship.objects.filter(workspace=workspace)
+        for relationship in SemanticRelationship.objects.select_for_update().filter(
+            workspace=workspace
+        )
     }
     curated_names = {
         name
@@ -927,11 +933,14 @@ class _FieldSync:
     """Field writes for one or more datasets, diffed against their stored rows."""
 
     def __init__(self, datasets) -> None:
+        """Load and lock the datasets' fields; callers must be inside a transaction."""
         self._writer = _RowWriter(SemanticField)
         self._rows: dict[Any, dict[str, SemanticField]] = {dataset.pk: {} for dataset in datasets}
         self._hidden: dict[Any, SemanticField] = {}
         if self._rows:
-            for field in SemanticField.objects.filter(dataset_id__in=list(self._rows)):
+            for field in SemanticField.objects.select_for_update().filter(
+                dataset_id__in=list(self._rows)
+            ):
                 self._rows[field.dataset_id][field.name] = field
 
     def upsert(self, dataset: SemanticDataset, field_name: str, defaults: dict[str, Any]) -> None:
@@ -978,9 +987,10 @@ def _sync_fields(
     *,
     provider: str = "",
 ) -> None:
-    field_sync = _FieldSync([dataset])
-    _derive_fields(field_sync, dataset, columns, annotation, provider=provider)
-    field_sync.flush()
+    with transaction.atomic():
+        field_sync = _FieldSync([dataset])
+        _derive_fields(field_sync, dataset, columns, annotation, provider=provider)
+        field_sync.flush()
 
 
 def _derive_fields(
