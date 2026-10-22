@@ -132,7 +132,9 @@ async def test_adding_an_unloaded_source_loads_it_and_republishes_the_views(owne
 
     fetched = []
 
-    def fetch(membership, credential, pipeline, job_id, target_schema=None):
+    def fetch(
+        membership, credential, pipeline, job_id, target_schema=None, connect_opportunity_lists=None
+    ):
         owned_names.append(target_schema.schema_name)
         fetched.append(membership.tenant_id)
         write_sentinel(target_schema.schema_name, "new1")

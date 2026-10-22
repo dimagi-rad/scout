@@ -59,7 +59,15 @@ class _Pipeline:
         self.configs: list = []
         self.fail_times = fail_times
 
-    def __call__(self, membership, credential, pipeline, job_id, target_schema=None):
+    def __call__(
+        self,
+        membership,
+        credential,
+        pipeline,
+        job_id,
+        target_schema=None,
+        connect_opportunity_lists=None,
+    ):
         self.calls.append((membership.tenant_id, target_schema.id if target_schema else None))
         if self.fail_times:
             self.fail_times -= 1

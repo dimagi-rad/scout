@@ -78,7 +78,7 @@ from mcp_server.loaders.connect_assessments import ConnectAssessmentLoader
 from mcp_server.loaders.connect_completed_modules import ConnectCompletedModuleLoader
 from mcp_server.loaders.connect_completed_works import ConnectCompletedWorkLoader
 from mcp_server.loaders.connect_invoices import ConnectInvoiceLoader
-from mcp_server.loaders.connect_metadata import ConnectMetadataLoader
+from mcp_server.loaders.connect_metadata import ConnectMetadataLoader, ConnectOpportunityLists
 from mcp_server.loaders.connect_payments import ConnectPaymentLoader
 from mcp_server.loaders.connect_users import ConnectUserLoader
 from mcp_server.loaders.connect_visits import ConnectVisitLoader
@@ -118,6 +118,7 @@ def run_pipeline(
     procrastinate_job_id: int | None = None,
     target_schema: TenantSchema | None = None,
     defer_schema_promotion: bool = False,
+    connect_opportunity_lists: ConnectOpportunityLists | None = None,
 ) -> dict:
     """Run a three-phase materialization pipeline.
 
@@ -144,6 +145,8 @@ def run_pipeline(
         defer_schema_promotion: Keep an explicit target in its current state so
             the refresh worker can publish it with its request-owned CAS. Normal
             materialization keeps the default immediate promotion behavior.
+        connect_opportunity_lists: The job's shared Connect opportunity lists, so
+            its Connect sources fetch the user-global list once per credential.
 
     Returns a summary dict with run_id, status, and per-source row counts.
     """
@@ -260,7 +263,9 @@ def run_pipeline(
 
     try:
         report(f"Finding what to import from {provider_label(pipeline.provider)}…")
-        discovered_metadata = _run_discover_phase(tenant_membership, credential, pipeline)
+        discovered_metadata = _run_discover_phase(
+            tenant_membership, credential, pipeline, connect_opportunity_lists
+        )
 
         # Connect's keyset-paginated exports return no total; reuse the counts
         # discovery already carries as progress denominators.
@@ -665,7 +670,10 @@ def run_pipeline(
 
 
 def _run_discover_phase(
-    tenant_membership: Any, credential: dict[str, str], pipeline: PipelineConfig
+    tenant_membership: Any,
+    credential: dict[str, str],
+    pipeline: PipelineConfig,
+    connect_opportunity_lists: ConnectOpportunityLists | None = None,
 ) -> dict | None:
     """Fetch provider metadata, upsert into TenantMetadata, and return it.
 
@@ -680,6 +688,9 @@ def _run_discover_phase(
         loader = ConnectMetadataLoader(
             opportunity_id=int(tenant_membership.tenant.external_id),
             credential=credential,
+            opportunity_lists=connect_opportunity_lists,
+            # The list is per credential, and a connection holds exactly one.
+            credential_key=tenant_membership.connection_id,
         )
     elif pipeline.provider == "ocs":
         loader = OCSMetadataLoader(

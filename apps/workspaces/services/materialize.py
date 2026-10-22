@@ -120,6 +120,7 @@ from apps.workspaces.task_dispatch import (
     adefer_resume_thread,
 )
 from mcp_server.loaders.connect_base import ConnectExportError
+from mcp_server.loaders.connect_metadata import ConnectOpportunityLists
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.materializer import (
     MaterializationCancelled,
@@ -599,6 +600,8 @@ async def materialize_workspace_core(
 
     lanes = _LoadLanes()
     loads_cancelled = False
+    # Job-scoped: every membership here is the acting user's, and nothing outlives the job.
+    connect_opportunity_lists = ConnectOpportunityLists()
 
     def load_finished(load: asyncio.Task) -> None:
         nonlocal loads_cancelled
@@ -787,6 +790,7 @@ async def materialize_workspace_core(
                         pipeline_config,
                         pipeline_name,
                         job_id,
+                        connect_opportunity_lists,
                     )
                 except BaseException:
                     release()
@@ -1206,6 +1210,7 @@ def _run_pipeline_with_progress(
     pipeline_config,
     job_id: int,
     target_schema=None,
+    connect_opportunity_lists: ConnectOpportunityLists | None = None,
 ) -> dict:
     """Synchronous entry point invoked under ``asyncio.to_thread``.
 
@@ -1241,6 +1246,7 @@ def _run_pipeline_with_progress(
         procrastinate_job_id=job_id,
         target_schema=target_schema,
         defer_schema_promotion=target_schema is not None,
+        connect_opportunity_lists=connect_opportunity_lists,
     )
 
 
@@ -1257,12 +1263,20 @@ def _on_load_thread(function, *args):
 
 
 async def _load_tenant(
-    workspace, tm, credential: dict, pipeline_config, pipeline_name: str, job_id: int | None
+    workspace,
+    tm,
+    credential: dict,
+    pipeline_config,
+    pipeline_name: str,
+    job_id: int | None,
+    connect_opportunity_lists: ConnectOpportunityLists | None = None,
 ) -> dict:
     """Load one source and report it as a ``tenant_results`` entry; never raises."""
     tenant_id = tm.tenant.external_id
     try:
-        result = await _load_workspace_candidate(workspace, tm, credential, pipeline_config, job_id)
+        result = await _load_workspace_candidate(
+            workspace, tm, credential, pipeline_config, job_id, connect_opportunity_lists
+        )
     except MaterializationCancelled:
         return {
             "tenant": tenant_id,
@@ -1314,7 +1328,12 @@ async def _load_tenant(
 
 
 async def _load_workspace_candidate(
-    workspace, tm, credential: dict, pipeline_config, job_id: int | None
+    workspace,
+    tm,
+    credential: dict,
+    pipeline_config,
+    job_id: int | None,
+    connect_opportunity_lists: ConnectOpportunityLists | None = None,
 ) -> dict:
     """Load one tenant into a candidate and promote it; the caller holds W and T.
 
@@ -1397,6 +1416,7 @@ async def _load_workspace_candidate(
             pipeline_config,
             job_id,
             candidate,
+            connect_opportunity_lists,
         )
         promotion = await _to_thread_fresh_db(
             retirement.promote_and_queue_retirement,
