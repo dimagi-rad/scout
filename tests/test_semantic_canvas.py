@@ -1342,6 +1342,60 @@ def test_canvas_commit_does_not_wait_for_a_catalog_refresh(
         holder.result(timeout=5)
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "op",
+    [
+        {"op": "set", "target": "dataset/raw_visits/label", "value": "Visit label"},
+        {
+            "op": "create",
+            "object_type": "field",
+            "value": {
+                "dataset": "raw_visits",
+                "name": "distinct_workers",
+                "field_type": "measure",
+                "measure_type": "count_distinct",
+                "expression": "username",
+            },
+        },
+    ],
+    ids=["update", "create"],
+)
+def test_canvas_commit_reports_a_refresh_holding_its_dataset(
+    canvas, semantic_model, user, monkeypatch, op
+):
+    """The refresh locks the rows it diffs; a commit must not stall behind it."""
+    monkeypatch.setattr(canvas_commit_module, "build_and_promote_cube_schema", Mock())
+    apply_operations(canvas, [op], user)
+    drafted = list(canvas.changes.values_list("change_type", "fields"))
+    dataset_id = _visits(semantic_model).pk
+    locked = Event()
+    release = Event()
+
+    def hold_refresh_lock():
+        try:
+            with transaction.atomic():
+                SemanticDataset.objects.select_for_update().get(pk=dataset_id)
+                locked.set()
+                assert release.wait(5)
+        finally:
+            connections["default"].close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        holder = executor.submit(hold_refresh_lock)
+        try:
+            assert locked.wait(5)
+            result = commit_canvas(canvas, user)
+        finally:
+            release.set()
+        holder.result(timeout=5)
+
+    assert result["blocked"] is True
+    assert result["blocking_diagnostics"][0]["code"] == "CATALOG_CHANGED"
+    assert list(canvas.changes.values_list("change_type", "fields")) == drafted
+    assert not SemanticField.objects.filter(name="distinct_workers").exists()
+
+
 def test_canvas_commit_blocks_model_deactivation_after_validation(
     canvas, pending_dataset_op, user, monkeypatch
 ):

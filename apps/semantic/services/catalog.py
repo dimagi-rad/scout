@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
 
 from asgiref.sync import async_to_sync
-from django.db import transaction
+from django.db import models, transaction
+from django.utils import timezone
 
 from apps.common.capacity import reraise_if_capacity
 from apps.common.error_codes import ErrorCode
@@ -422,6 +424,92 @@ def _apply_curation(existing, defaults: dict[str, Any]) -> dict[str, Any]:
     return defaults
 
 
+_BULK_BATCH_SIZE = 500
+
+
+def _assign_changes(row: models.Model, values: dict[str, Any]) -> list[str]:
+    """Set each differing value on ``row`` and return the names that changed.
+
+    JSON values are compared in their stored form (tuples come back as lists),
+    and relations by id so the comparison never fetches the related row.
+    """
+    changed = []
+    for key, value in values.items():
+        field = row._meta.get_field(key)
+        attr = key
+        if field.is_relation:
+            current = getattr(row, field.attname)
+            new = getattr(value, "pk", value)
+            if not isinstance(value, models.Model):
+                attr = field.attname
+        elif isinstance(field, models.JSONField):
+            value = json.loads(json.dumps(value))
+            # Canonical text, not ==: True == 1 == 1.0 in Python, not in jsonb.
+            current = json.dumps(getattr(row, key), sort_keys=True)
+            new = json.dumps(value, sort_keys=True)
+        else:
+            current, new = getattr(row, key), value
+        if current != new:
+            setattr(row, attr, value)
+            changed.append(key)
+    return changed
+
+
+class _RowWriter:
+    """Collect inserts and changed rows of one model, then write them in bulk.
+
+    A catalog refresh rewrites thousands of rows that are almost all unchanged;
+    a per-row ``update_or_create`` cost two round trips each (#918).
+    """
+
+    def __init__(self, model_class: type[models.Model]) -> None:
+        self._model_class = model_class
+        self._creates: dict[Any, models.Model] = {}
+        self._updates: dict[Any, models.Model] = {}
+        self._update_fields: set[str] = set()
+
+    def upsert(self, existing, values: dict[str, Any], **lookup):
+        if existing is None:
+            row = self._model_class(**lookup, **values)
+            self._creates[row.pk] = row
+            return row
+        changed = _assign_changes(existing, values)
+        if changed and existing.pk not in self._creates:
+            self._updates[existing.pk] = existing
+            self._update_fields.update(changed)
+        return existing
+
+    def include_in_pending_write(self, row, field_name: str) -> bool:
+        """Add ``field_name`` to ``row``'s pending write; False when none is pending."""
+        if row.pk in self._creates:
+            return True
+        if row.pk in self._updates:
+            self._update_fields.add(field_name)
+            return True
+        return False
+
+    def flush(self) -> None:
+        self._model_class.objects.bulk_create(
+            list(self._creates.values()), batch_size=_BULK_BATCH_SIZE
+        )
+        if self._updates:
+            # bulk_update skips auto_now; canvas conflict detection fingerprints
+            # rows by updated_at, so a changed row must still move it.
+            now = timezone.now()
+            for row in self._updates.values():
+                row.updated_at = now
+            # One column list for every row: safe only because each row's other
+            # values come from the same locked read.
+            self._model_class.objects.bulk_update(
+                list(self._updates.values()),
+                [*sorted(self._update_fields), "updated_at"],
+                batch_size=_BULK_BATCH_SIZE,
+            )
+        self._creates.clear()
+        self._updates.clear()
+        self._update_fields.clear()
+
+
 def ensure_semantic_model(workspace) -> SemanticModel:
     """Create or refresh the default semantic catalog from active physical tables."""
     schema_name, tables = load_physical_tables(workspace)
@@ -436,15 +524,27 @@ def ensure_semantic_model(workspace) -> SemanticModel:
             defaults={"name": f"{workspace.name} Semantic Model"},
         )
         existing_physical_dataset_ids: set[str] = set()
+        annotations = {
+            annotation.table_name: annotation
+            for annotation in TableKnowledge.objects.filter(
+                workspace=workspace, table_name__in=[table.name for table in tables]
+            )
+        }
+        # Row locks, as update_or_create took: a canvas commit (which skips the
+        # model lock) must not land between this read and the bulk write.
+        datasets_by_name = {
+            dataset.name: dataset
+            for dataset in SemanticDataset.objects.select_for_update().filter(
+                workspace=workspace,
+                name__in={semantic_name(table.name, fallback="dataset") for table in tables},
+            )
+        }
+        dataset_writer = _RowWriter(SemanticDataset)
+        field_sync = _FieldSync(datasets_by_name.values())
         for table in tables:
             dataset_name = semantic_name(table.name, fallback="dataset")
-            annotation = TableKnowledge.objects.filter(
-                workspace=workspace,
-                table_name=table.name,
-            ).first()
-            existing_dataset = SemanticDataset.objects.filter(
-                workspace=workspace, name=dataset_name
-            ).first()
+            annotation = annotations.get(table.name)
+            existing_dataset = datasets_by_name.get(dataset_name)
             defaults = _apply_curation(
                 existing_dataset,
                 {
@@ -480,13 +580,14 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                     },
                 },
             )
-            dataset, _ = SemanticDataset.objects.update_or_create(
-                workspace=workspace,
-                name=dataset_name,
-                defaults=defaults,
+            dataset = dataset_writer.upsert(
+                existing_dataset, defaults, workspace=workspace, name=dataset_name
             )
+            datasets_by_name[dataset_name] = dataset
             existing_physical_dataset_ids.add(str(dataset.id))
-            _sync_fields(dataset, table.columns, annotation, provider=table.provider)
+            _derive_fields(field_sync, dataset, table.columns, annotation, provider=table.provider)
+        dataset_writer.flush()
+        field_sync.flush()
 
         SemanticDataset.objects.filter(
             workspace=workspace,
@@ -596,9 +697,11 @@ def _sync_custom_datasets(
             )
             continue
 
-        existing_custom = SemanticDataset.objects.filter(
-            workspace=workspace, name=custom.name
-        ).first()
+        existing_custom = (
+            SemanticDataset.objects.select_for_update()
+            .filter(workspace=workspace, name=custom.name)
+            .first()
+        )
         defaults = _apply_curation(
             existing_custom,
             {
@@ -618,11 +721,11 @@ def _sync_custom_datasets(
                 },
             },
         )
-        dataset, _ = SemanticDataset.objects.update_or_create(
-            workspace=workspace,
-            name=custom.name,
-            defaults=defaults,
+        dataset_writer = _RowWriter(SemanticDataset)
+        dataset = dataset_writer.upsert(
+            existing_custom, defaults, workspace=workspace, name=custom.name
         )
+        dataset_writer.flush()
         _sync_fields(dataset, columns, None)
         # ERROR is a failed validation, not an intentional DRAFT/hidden model.
         # Revalidate after a missing physical dependency becomes available again.
@@ -728,6 +831,14 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
         )
         if not (metadata or {}).get("generated")
     }
+    # Curated rows are never written here, so only the generated ones are locked.
+    relationships_by_name = {
+        relationship.name: relationship
+        for relationship in SemanticRelationship.objects.select_for_update()
+        .filter(workspace=workspace)
+        .exclude(name__in=curated_names)
+    }
+    relationship_writer = _RowWriter(SemanticRelationship)
     for pipeline in get_registry().list():
         for rel in pipeline.relationships:
             for from_dataset, to_dataset in _relationship_endpoints(rel, datasets_by_table):
@@ -777,10 +888,9 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
                         for source, _ in pairs
                         if _relationship_key_type(source.data_type) == "string"
                     )
-                SemanticRelationship.objects.update_or_create(
-                    workspace=workspace,
-                    name=name,
-                    defaults={
+                relationships_by_name[name] = relationship_writer.upsert(
+                    relationships_by_name.get(name),
+                    {
                         "from_dataset": from_dataset,
                         "to_dataset": to_dataset,
                         "relationship_type": rel.relationship_type,
@@ -799,8 +909,11 @@ def _sync_relationships(model: SemanticModel, workspace) -> list[dict[str, Any]]
                             "require_unique_target": rel.require_unique_target,
                         },
                     },
+                    workspace=workspace,
+                    name=name,
                 )
                 active_names.add(name)
+    relationship_writer.flush()
 
     SemanticRelationship.objects.filter(
         workspace=workspace,
@@ -826,6 +939,63 @@ def _relationship_key_type(data_type: str) -> str | None:
     return None
 
 
+def _stale_sweep_hides(field: SemanticField) -> bool:
+    """Whether the replaced ``exclude(metadata__source="canvas")`` sweep hid ``field``.
+
+    Mirrors its SQL exactly, three-valued logic included: with no ``source``
+    key, ``metadata -> 'source'`` is NULL and the row was never hidden, so a
+    column-derived field outlives its column. That gap is tracked separately;
+    a refresh must not start mass-hiding those fields as a side effect here.
+    """
+    metadata = field.metadata
+    return isinstance(metadata, dict) and "source" in metadata and metadata["source"] != "canvas"
+
+
+class _FieldSync:
+    """Field writes for one or more datasets, diffed against their stored rows."""
+
+    def __init__(self, datasets) -> None:
+        """Load and lock the datasets' fields; callers must be inside a transaction."""
+        self._writer = _RowWriter(SemanticField)
+        self._rows: dict[Any, dict[str, SemanticField]] = {dataset.pk: {} for dataset in datasets}
+        self._hidden: dict[Any, SemanticField] = {}
+        if self._rows:
+            for field in SemanticField.objects.select_for_update().filter(
+                dataset_id__in=list(self._rows)
+            ):
+                self._rows[field.dataset_id][field.name] = field
+
+    def upsert(self, dataset: SemanticDataset, field_name: str, defaults: dict[str, Any]) -> None:
+        rows = self._rows.setdefault(dataset.pk, {})
+        existing = rows.get(field_name)
+        field = self._writer.upsert(
+            existing,
+            _apply_curation(existing, defaults),
+            dataset=dataset,
+            name=field_name,
+        )
+        rows[field_name] = field
+        # A curated is_visible keeps an earlier hide; anything else re-shows it.
+        if field.is_visible:
+            self._hidden.pop(field.pk, None)
+
+    def hide_stale(self, dataset: SemanticDataset, active_names: set[str]) -> None:
+        for name, field in self._rows.get(dataset.pk, {}).items():
+            if name in active_names or not field.is_visible or not _stale_sweep_hides(field):
+                continue
+            field.is_visible = False
+            if not self._writer.include_in_pending_write(field, "is_visible"):
+                self._hidden[field.pk] = field
+
+    def flush(self) -> None:
+        self._writer.flush()
+        if self._hidden:
+            # A plain UPDATE, like the stale-field sweep it replaces: hiding a
+            # field does not move its updated_at.
+            SemanticField.objects.filter(pk__in=list(self._hidden)).update(is_visible=False)
+            self._hidden.clear()
+
+
 def _sync_fields(
     dataset: SemanticDataset,
     columns: list[dict[str, Any]],
@@ -833,19 +1003,28 @@ def _sync_fields(
     *,
     provider: str = "",
 ) -> None:
+    """Sync one dataset's fields now; its field rows stay locked until the caller commits."""
+    with transaction.atomic():
+        field_sync = _FieldSync([dataset])
+        _derive_fields(field_sync, dataset, columns, annotation, provider=provider)
+        field_sync.flush()
+
+
+def _derive_fields(
+    field_sync: _FieldSync,
+    dataset: SemanticDataset,
+    columns: list[dict[str, Any]],
+    annotation,
+    *,
+    provider: str = "",
+) -> None:
+    """Queue ``dataset``'s column-derived fields on ``field_sync``."""
     column_notes = annotation.column_notes if annotation else {}
     active_names: set[str] = set()
-    existing_by_name = {field.name: field for field in dataset.fields.all()}
 
-    def upsert_field(field_name: str, defaults: dict[str, Any]):
-        curated_defaults = _apply_curation(existing_by_name.get(field_name), defaults)
-        field, _ = SemanticField.objects.update_or_create(
-            dataset=dataset,
-            name=field_name,
-            defaults=curated_defaults,
-        )
+    def upsert_field(field_name: str, defaults: dict[str, Any]) -> None:
+        field_sync.upsert(dataset, field_name, defaults)
         active_names.add(field_name)
-        return field
 
     upsert_field(
         "count",
@@ -945,11 +1124,7 @@ def _sync_fields(
                     },
                 )
 
-    # Canvas-created fields are user-authored, not column-derived: they never
-    # appear in active_names and must not be hidden by the refresh.
-    SemanticField.objects.filter(dataset=dataset).exclude(name__in=active_names).exclude(
-        metadata__source="canvas"
-    ).update(is_visible=False)
+    field_sync.hide_stale(dataset, active_names)
 
 
 def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
