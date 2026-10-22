@@ -42,7 +42,10 @@ class ConnectOpportunityLists:
         """Return the list remembered for ``key``, fetching it on first use.
 
         A raised error is not remembered, so the next load under ``key`` fetches
-        again, as it did before the list was shared.
+        again, as it did before the list was shared. During a token-refresh
+        outage, each queued load therefore waits out its own failed refresh;
+        that load would fail on its next request anyway, and re-raising one
+        load's exception in another would report the wrong source.
         """
         with self._lock:
             key_lock = self._key_locks.setdefault(key, threading.Lock())
