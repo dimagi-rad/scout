@@ -13,9 +13,10 @@ rolls back committed semantic rows — the previous ACTIVE schema keeps serving
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from typing import Any
 
-from django.db import OperationalError, transaction
+from django.db import OperationalError, connection, transaction
 from django.utils import timezone
 
 from apps.semantic.canvas import history
@@ -203,12 +204,8 @@ def _commit_transaction(
         if custom_drafts:
             # Only SQL probes need to exclude a concurrent physical catalog refresh.
             models = models.select_for_update(nowait=True)
-        try:
+        with _lock_refused_as_catalog_changed():
             model = models.get(pk=canvas.semantic_model_id)
-        except OperationalError as exc:
-            if getattr(exc.__cause__, "sqlstate", None) == "55P03":
-                raise _CatalogChanged from exc
-            raise
         for change in custom_drafts:
             validation = change.fields.get("_validation") or {}
             if model.status != SemanticModel.Status.ACTIVE or validation.get(
@@ -267,6 +264,35 @@ def _history_type(object_type: str) -> str:
     return history.DATASET if object_type == ObjectType.CUSTOM_DATASET else object_type
 
 
+@contextmanager
+def _lock_refused_as_catalog_changed():
+    """Turn a refused NOWAIT lock into CATALOG_CHANGED.
+
+    A catalog refresh holds the model and the rows it diffs until it commits;
+    a commit reports that rather than stall behind it or deadlock with it.
+    """
+    try:
+        yield
+    except OperationalError as exc:
+        if getattr(exc.__cause__, "sqlstate", None) == "55P03":
+            raise _CatalogChanged from exc
+        raise
+
+
+def _key_share_datasets(*datasets: SemanticDataset) -> None:
+    """Take, without waiting, the lock a child row's FK check would wait for.
+
+    Inserting a field or relationship key-share locks its dataset rows, which
+    a refresh holds FOR UPDATE; taking it NOWAIT first fails fast instead.
+    """
+    table = connection.ops.quote_name(SemanticDataset._meta.db_table)
+    with _lock_refused_as_catalog_changed(), connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT 1 FROM {table} WHERE id = ANY(%s) FOR KEY SHARE NOWAIT",  # noqa: S608
+            [[dataset.pk for dataset in datasets]],
+        )
+
+
 def _locked_base(canvas, change):
     """Re-fetch the base row FOR UPDATE and re-check the fingerprint (TOCTOU)."""
     model_class = {
@@ -274,16 +300,10 @@ def _locked_base(canvas, change):
         ObjectType.FIELD: SemanticField,
         ObjectType.RELATIONSHIP: SemanticRelationship,
     }[SemanticCanvasChange.ObjectType(change.object_type)]
-    try:
-        # NOWAIT: a catalog refresh holds the rows it diffs until it commits;
-        # report CATALOG_CHANGED rather than stall behind it or deadlock.
+    with _lock_refused_as_catalog_changed():
         obj = (
             model_class.objects.select_for_update(nowait=True).filter(id=change.object_uuid).first()
         )
-    except OperationalError as exc:
-        if getattr(exc.__cause__, "sqlstate", None) == "55P03":
-            raise _CatalogChanged from exc
-        raise
     if obj is None or (change.base_fingerprint and obj.updated_at != change.base_fingerprint):
         raise _CommitConflict([_conflict_entry(canvas, change)])
     return obj
@@ -359,6 +379,7 @@ def _commit_create(canvas, model, workspace, change, user):
 def _create_field(model, change, user):
     fields = change.fields
     dataset = model.datasets.get(id=fields["dataset_uuid"])
+    _key_share_datasets(dataset)
     expression = fields.get("expression") or ("*" if fields.get("measure_type") == "count" else "")
     metadata = {"source": CANVAS_SOURCE}
     if user is not None and getattr(user, "id", None):
@@ -386,6 +407,7 @@ def _create_relationship(model, workspace, change, user):
     fields = change.fields
     from_dataset = model.datasets.get(id=fields["from_dataset_uuid"])
     to_dataset = model.datasets.get(id=fields["to_dataset_uuid"])
+    _key_share_datasets(from_dataset, to_dataset)
     join_expression = (
         f"{{{from_dataset.name}.{fields['from_field']}}} = "
         f"{{{to_dataset.name}.{fields['to_field']}}}"
