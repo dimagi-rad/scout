@@ -496,6 +496,8 @@ class _RowWriter:
             now = timezone.now()
             for row in self._updates.values():
                 row.updated_at = now
+            # One column list for every row: safe only because each row's other
+            # values come from the same locked read.
             self._model_class.objects.bulk_update(
                 list(self._updates.values()),
                 [*sorted(self._update_fields), "updated_at"],
